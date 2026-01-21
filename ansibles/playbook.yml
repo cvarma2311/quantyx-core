@@ -1,0 +1,12 @@
+- hosts: all
+  become: yes
+  vars:
+    project_dir: "/opt/quantyx"
+    venv_dir: "{{ project_dir }}/.venv"
+  roles:
+    - git
+    - python
+    - postgres
+    - nodejs
+    - dbt
+    - app_deps

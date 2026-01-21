@@ -1,0 +1,45 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Environment & Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# dbt
+target/
+dbt_packages/
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# OS
+Thumbs.db
+
+# Node (if UI exists)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Docker
+*.tar
+docker-compose.override.yml
+
+# Data artifacts
+*.csv
+*.parquet
+*.avro
+*.jsonl

@@ -1,0 +1,10 @@
+- name: Install PostgreSQL
+  ansible.builtin.package:
+    name: "{{ 'postgresql' if ansible_os_family == 'Debian' else 'postgresql@14' }}"
+    state: present
+
+- name: Install PostgreSQL contrib
+  ansible.builtin.package:
+    name: postgresql-contrib
+    state: present
+  when: ansible_os_family == 'Debian'

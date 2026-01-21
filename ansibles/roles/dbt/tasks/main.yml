@@ -1,0 +1,5 @@
+- name: Install dbt-postgres
+  ansible.builtin.pip:
+    name: dbt-postgres
+    virtualenv: "{{ venv_dir }}"
+  become: no

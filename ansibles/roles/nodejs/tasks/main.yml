@@ -1,0 +1,4 @@
+- name: Install Node.js
+  ansible.builtin.package:
+    name: "{{ 'nodejs' if ansible_os_family == 'Debian' else 'node' }}"
+    state: present

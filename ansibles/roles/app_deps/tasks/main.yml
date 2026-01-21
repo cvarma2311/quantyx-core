@@ -1,0 +1,13 @@
+- name: Copy requirements.txt
+  ansible.builtin.copy:
+    src: requirements.txt
+    dest: "{{ project_dir }}/requirements.txt"
+    owner: "{{ ansible_user_id }}"
+    group: "{{ ansible_user_id }}"
+    mode: '0644'
+
+- name: Install Python dependencies
+  ansible.builtin.pip:
+    requirements: "{{ project_dir }}/requirements.txt"
+    virtualenv: "{{ venv_dir }}"
+  become: no

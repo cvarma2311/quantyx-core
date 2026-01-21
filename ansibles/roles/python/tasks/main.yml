@@ -1,0 +1,24 @@
+- name: Install Python 3.11
+  ansible.builtin.package:
+    name: "{{ 'python3.11' if ansible_os_family == 'Debian' else 'python@3.11' }}"
+    state: present
+
+- name: Install Python 3.11 venv
+  ansible.builtin.package:
+    name: python3.11-venv
+    state: present
+  when: ansible_os_family == 'Debian'
+
+- name: Create project directory
+  ansible.builtin.file:
+    path: "{{ project_dir }}"
+    state: directory
+    owner: "{{ ansible_user_id }}"
+    group: "{{ ansible_user_id }}"
+    mode: '0755'
+
+- name: Create virtual environment
+  ansible.builtin.command: "python3.11 -m venv {{ venv_dir }}"
+  args:
+    creates: "{{ venv_dir }}"
+  become: no
