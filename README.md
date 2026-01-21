@@ -1,1 +1,1 @@
-# quantyx-core
+# quantyx-core-services
