@@ -1,12 +1,22 @@
+- name: Install 'packaging' library for Ansible's pip module
+  ansible.builtin.command: "{{ ansible_facts.python.executable }} -m pip install --break-system-packages packaging"
+  become: no
+  when: ansible_os_family == 'Darwin'
+  register: pip_install
+  changed_when: "'Successfully installed' in pip_install.stdout"
+  failed_when: pip_install.rc != 0 and 'Requirement already satisfied' not in pip_install.stdout_lines | join(' ')
+
 - name: Install Python 3.11
   ansible.builtin.package:
     name: "{{ 'python3.11' if ansible_os_family == 'Debian' else 'python@3.11' }}"
     state: present
+  become: "{{ ansible_os_family != 'Darwin' }}"
 
 - name: Install Python 3.11 venv
   ansible.builtin.package:
     name: python3.11-venv
     state: present
+  become: yes
   when: ansible_os_family == 'Debian'
 
 - name: Create project directory
@@ -14,8 +24,9 @@
     path: "{{ project_dir }}"
     state: directory
     owner: "{{ ansible_user_id }}"
-    group: "{{ ansible_user_id }}"
+    group: "{{ ansible_user_gid if ansible_os_family == 'Debian' else 'staff' }}"
     mode: '0755'
+  become: yes
 
 - name: Create virtual environment
   ansible.builtin.command: "python3.11 -m venv {{ venv_dir }}"

@@ -2,3 +2,4 @@
   ansible.builtin.package:
     name: git
     state: present
+  become: "{{ ansible_os_family != 'Darwin' }}"

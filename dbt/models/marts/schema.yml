@@ -1,0 +1,82 @@
+version: 2
+
+models:
+  - name: dim_date
+    columns:
+      - name: date_day
+        tests:
+          - not_null
+          - unique
+      - name: fiscal_year
+        tests:
+          - not_null
+
+  - name: dim_product
+    columns:
+      - name: product_name
+        tests:
+          - not_null
+          - unique
+
+  - name: dim_location
+    columns:
+      - name: sbu_name
+        tests:
+          - not_null
+      - name: sales_area_name
+        tests:
+          - not_null
+
+  - name: dim_company
+    columns:
+      - name: company_name
+        tests:
+          - not_null
+
+  - name: fact_hpcl_sales_daily
+    columns:
+      - name: sales_date
+        tests:
+          - not_null
+      - name: sbu_name
+        tests:
+          - not_null
+      - name: sales_area_name
+        tests:
+          - not_null
+
+  - name: fact_hpcl_sales_monthly_actuals
+    columns:
+      - name: month_start
+        tests:
+          - not_null
+      - name: sbu_name
+        tests:
+          - not_null
+      - name: sales_area_name
+        tests:
+          - not_null
+
+  - name: fact_hpcl_sales_monthly_targets
+    columns:
+      - name: target_month
+        tests:
+          - not_null
+      - name: sbu_name
+        tests:
+          - not_null
+      - name: sales_area_name
+        tests:
+          - not_null
+
+  - name: fact_industry_performance_monthly
+    columns:
+      - name: performance_month
+        tests:
+          - not_null
+      - name: company_name
+        tests:
+          - not_null
+      - name: product_name
+        tests:
+          - not_null

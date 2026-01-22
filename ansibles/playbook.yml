@@ -1,5 +1,4 @@
 - hosts: all
-  become: yes
   vars:
     project_dir: "/opt/quantyx"
     venv_dir: "{{ project_dir }}/.venv"

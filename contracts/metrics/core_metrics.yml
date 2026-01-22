@@ -1,0 +1,264 @@
+version: 1
+
+domain: hpcl_sales
+name: HPCL Sales Core Metrics
+
+description: >-
+  Core metrics for HPCL sales performance, targets/pace, and industry comparison.
+  These metrics are defined on top of the marts layer built in Phase 2.
+
+data_source: hpcl_ceg_postgres
+
+# Dimensions available for slicing metrics. These map to marts columns.
+dimensions:
+  - name: date_day
+    description: Calendar date.
+    data_type: date
+    sql: "{{ ref('fact_hpcl_sales_daily') }}.sales_date"
+
+  - name: month_name
+    description: Month name from the source (e.g., Apr, Nov).
+    data_type: string
+    sql: "{{ ref('fact_hpcl_sales_daily') }}.month_name"
+
+  - name: fiscal_year
+    description: Fiscal year label (e.g., 2024-2025).
+    data_type: string
+    sql: "{{ ref('fact_hpcl_sales_daily') }}.fiscal_year"
+
+  - name: calendar_quarter
+    description: Calendar quarter derived from the performance month (1-4).
+    data_type: number
+    sql: "EXTRACT(QUARTER FROM {{ ref('fact_industry_performance_monthly') }}.performance_month)"
+
+  - name: calendar_quarter_sales
+    description: Calendar quarter derived from HPCL sales date (1-4).
+    data_type: number
+    sql: "EXTRACT(QUARTER FROM {{ ref('fact_hpcl_sales_daily') }}.sales_date)"
+
+  - name: sbu_name
+    description: Strategic Business Unit name.
+    data_type: string
+    sql: "{{ ref('fact_hpcl_sales_daily') }}.sbu_name"
+
+  - name: zone_name
+    description: Sales zone name.
+    data_type: string
+    sql: "{{ ref('fact_hpcl_sales_daily') }}.zone_name"
+
+  - name: region_name
+    description: Sales region name.
+    data_type: string
+    sql: "{{ ref('fact_hpcl_sales_daily') }}.region_name"
+
+  - name: sales_area_name
+    description: Sales area name.
+    data_type: string
+    sql: "{{ ref('fact_hpcl_sales_daily') }}.sales_area_name"
+
+  - name: product_name
+    description: Product name (e.g., HSD, MS).
+    data_type: string
+    sql: "{{ ref('fact_hpcl_sales_daily') }}.product_name"
+
+  - name: state_name
+    description: State name (industry data).
+    data_type: string
+    sql: "{{ ref('fact_industry_performance_monthly') }}.state_name"
+
+  - name: company_name
+    description: Company name (industry data).
+    data_type: string
+    sql: "{{ ref('fact_industry_performance_monthly') }}.company_name"
+
+  - name: psu_pvt
+    description: Company type (PSU or Private).
+    data_type: string
+    sql: "{{ ref('fact_industry_performance_monthly') }}.psu_pvt"
+
+metrics:
+  - name: total_sales_volume_tmt
+    description: Total HPCL sales volume in TMT (daily actuals).
+    type: sum
+    sql: "{{ ref('fact_hpcl_sales_daily') }}.sales_tmt"
+    grain: day
+    dimensions:
+      - date_day
+      - month_name
+      - fiscal_year
+      - calendar_quarter_sales
+      - sbu_name
+      - zone_name
+      - region_name
+      - sales_area_name
+      - product_name
+
+  - name: total_sales_volume_kg
+    description: Total HPCL sales volume in KG (daily actuals).
+    type: sum
+    sql: "{{ ref('fact_hpcl_sales_daily') }}.sales_kg"
+    grain: day
+    dimensions:
+      - date_day
+      - month_name
+      - fiscal_year
+      - sbu_name
+      - zone_name
+      - region_name
+      - sales_area_name
+      - product_name
+
+  - name: target_sales_tmt
+    description: Monthly target sales volume in TMT.
+    type: sum
+    sql: "{{ ref('fact_hpcl_sales_monthly_targets') }}.target_qty_tmt"
+    grain: month
+    dimensions:
+      - month_name
+      - fiscal_year
+      - sbu_name
+      - zone_name
+      - region_name
+      - sales_area_name
+      - product_name
+
+  - name: sales_vs_target_achievement_pct
+    description: Percentage of target achieved (actual vs target).
+    type: ratio
+    sql: "SUM({{ ref('fact_hpcl_sales_monthly_actuals') }}.sales_tmt) / NULLIF(SUM({{ ref('fact_hpcl_sales_monthly_targets') }}.target_qty_tmt), 0)"
+    grain: month
+    dimensions:
+      - month_name
+      - fiscal_year
+      - sbu_name
+      - zone_name
+      - region_name
+      - sales_area_name
+      - product_name
+
+  - name: required_run_rate_mmt
+    description: Daily run-rate required to meet the monthly target.
+    type: average
+    sql: "{{ ref('fact_hpcl_sales_monthly_targets') }}.rate_per_day_required_mmt"
+    grain: month
+    dimensions:
+      - month_name
+      - fiscal_year
+      - sbu_name
+      - zone_name
+      - region_name
+      - sales_area_name
+      - product_name
+
+  - name: current_run_rate_mmt
+    description: Current daily run-rate achieved for the month.
+    type: average
+    sql: "{{ ref('fact_hpcl_sales_monthly_targets') }}.rate_per_day_current_mmt"
+    grain: month
+    dimensions:
+      - month_name
+      - fiscal_year
+      - sbu_name
+      - zone_name
+      - region_name
+      - sales_area_name
+      - product_name
+
+  - name: pending_days
+    description: Number of remaining days in the fiscal period.
+    type: average
+    sql: "{{ ref('fact_hpcl_sales_monthly_targets') }}.pending_days"
+    grain: month
+    dimensions:
+      - month_name
+      - fiscal_year
+      - sbu_name
+      - zone_name
+      - region_name
+      - sales_area_name
+      - product_name
+
+  - name: industry_sales_tmt
+    description: Industry sales volume in TMT.
+    type: sum
+    sql: "{{ ref('fact_industry_performance_monthly') }}.industry_sales_tmt"
+    grain: month
+    dimensions:
+      - month_name
+      - fiscal_year
+      - calendar_quarter
+      - product_name
+      - state_name
+      - company_name
+      - psu_pvt
+
+  - name: market_share_pct
+    description: HPCL share of total industry sales for a product/state/month.
+    type: ratio
+    sql: >-
+      SUM(CASE WHEN {{ ref('fact_industry_performance_monthly') }}.company_name ILIKE '%HPCL%'
+               THEN {{ ref('fact_industry_performance_monthly') }}.industry_sales_tmt
+               ELSE 0 END)
+      / NULLIF(SUM({{ ref('fact_industry_performance_monthly') }}.industry_sales_tmt), 0)
+    grain: month
+    dimensions:
+      - month_name
+      - fiscal_year
+      - calendar_quarter
+      - product_name
+      - state_name
+
+  - name: hpcl_vs_company_sales_diff_tmt
+    description: HPCL sales minus competitor sales in TMT for the selected slice.
+    type: derived
+    sql: >-
+      SUM(CASE WHEN {{ ref('fact_industry_performance_monthly') }}.company_name = 'HPCL'
+               THEN {{ ref('fact_industry_performance_monthly') }}.industry_sales_tmt
+               ELSE 0 END)
+      -
+      SUM(CASE WHEN {{ ref('fact_industry_performance_monthly') }}.company_name != 'HPCL'
+               THEN {{ ref('fact_industry_performance_monthly') }}.industry_sales_tmt
+               ELSE 0 END)
+    grain: month
+    dimensions:
+      - month_name
+      - fiscal_year
+      - calendar_quarter
+      - product_name
+      - state_name
+      - company_name
+
+  - name: hpcl_vs_company_sales_ratio
+    description: HPCL sales divided by competitor sales in TMT for the selected slice.
+    type: ratio
+    sql: >-
+      SUM(CASE WHEN {{ ref('fact_industry_performance_monthly') }}.company_name = 'HPCL'
+               THEN {{ ref('fact_industry_performance_monthly') }}.industry_sales_tmt
+               ELSE 0 END)
+      / NULLIF(
+          SUM(CASE WHEN {{ ref('fact_industry_performance_monthly') }}.company_name != 'HPCL'
+                   THEN {{ ref('fact_industry_performance_monthly') }}.industry_sales_tmt
+                   ELSE 0 END),
+          0
+        )
+    grain: month
+    dimensions:
+      - month_name
+      - fiscal_year
+      - calendar_quarter
+      - product_name
+      - state_name
+      - company_name
+
+  - name: industry_sales_by_company_tmt
+    description: Industry sales volume in TMT by company (for side-by-side totals).
+    type: sum
+    sql: "{{ ref('fact_industry_performance_monthly') }}.industry_sales_tmt"
+    grain: month
+    dimensions:
+      - month_name
+      - fiscal_year
+      - calendar_quarter
+      - product_name
+      - state_name
+      - company_name

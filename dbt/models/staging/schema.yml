@@ -1,0 +1,70 @@
+version: 2
+
+models:
+  - name: stg_hpcl_sales_daily
+    columns:
+      - name: sbu_name
+        tests:
+          - not_null
+      - name: zone_name
+      - name: region_name
+        tests:
+          - not_null
+      - name: sales_area_name
+        tests:
+          - not_null
+      - name: product_name
+      - name: fiscal_year
+        tests:
+          - not_null
+      - name: month_name
+        tests:
+          - not_null
+      - name: day_of_month
+        tests:
+          - not_null
+      - name: sales_date
+        tests:
+          - not_null
+
+  - name: stg_hpcl_monthly_targets
+    columns:
+      - name: fiscal_year
+        tests:
+          - not_null
+      - name: month_name
+        tests:
+          - not_null
+      - name: product_name
+        tests:
+          - not_null
+      - name: sales_area_name
+        tests:
+          - not_null
+      - name: sbu_name
+        tests:
+          - not_null
+      - name: target_month
+        tests:
+          - not_null
+
+  - name: stg_industry_performance_monthly
+    columns:
+      - name: company_name
+        tests:
+          - not_null
+      - name: product_name
+        tests:
+          - not_null
+      - name: state_name
+        tests:
+          - not_null
+      - name: month_name
+        tests:
+          - not_null
+      - name: fiscal_year
+        tests:
+          - not_null
+      - name: performance_month
+        tests:
+          - not_null

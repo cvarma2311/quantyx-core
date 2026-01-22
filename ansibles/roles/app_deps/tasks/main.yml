@@ -3,8 +3,9 @@
     src: requirements.txt
     dest: "{{ project_dir }}/requirements.txt"
     owner: "{{ ansible_user_id }}"
-    group: "{{ ansible_user_id }}"
+    group: "{{ ansible_user_gid if ansible_os_family == 'Debian' else 'staff' }}"
     mode: '0644'
+  become: yes
 
 - name: Install Python dependencies
   ansible.builtin.pip:

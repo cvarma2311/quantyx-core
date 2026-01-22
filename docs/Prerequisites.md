@@ -170,7 +170,7 @@ DB_PORT=5432
 DB_NAME=quantyx_db
 DB_USER=quantyx_user
 DB_PASSWORD=your_secret_password
-
+DB_SCHEMA=analytics
 APP_ENV=local
 LOG_LEVEL=INFO
 ```

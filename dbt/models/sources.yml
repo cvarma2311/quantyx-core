@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  - name: hpcl_raw_data
+    database: hpcl_ceg # Updated database name
+    schema: public # Updated schema
+    tables:
+      - name: MOM_DAY_LEVEL_DATA
+        description: "Contains daily sales data for HPCL."
+      - name: M60_LEVEL_METADATA
+        description: "Contains monthly targets and pace metadata for HPCL."
+      - name: industry_performance
+        description: "Contains industry performance data for comparison."
