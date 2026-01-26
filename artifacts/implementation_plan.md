@@ -159,6 +159,17 @@ Create a YAML file `contracts/metrics/core_metrics.yml` to define the metrics.
 
 ---
 
+## Phase 7: Anomaly Detection (Cross-Domain)
+
+**Goal:** Detect anomalies on time-series metrics, visualize them, and explain drivers.
+
+1.  **Baseline Generation:** Compute baselines per metric and time grain (rolling mean/std or MAD). Enforce a minimum history window.
+2.  **Detection + Severity:** Apply z-score or MAD thresholds; classify severity and confidence. Persist anomalies to `quantyx_insight_events` with `insight_type = "anomaly"`.
+3.  **Time-Series API + Visualization:** Return actual vs baseline with anomaly flags for line charts.
+4.  **Drilldown + Correlation:** On click, compute driver breakdown and correlate with related facts (targets, run-rate, inventory).
+
+---
+
 ## Scaling to Other Domains
 
 This implementation plan is designed for scalability. To onboard a new domain (e.g., Logistics, Manufacturing):

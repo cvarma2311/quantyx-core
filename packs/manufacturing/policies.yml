@@ -1,0 +1,10 @@
+industry: manufacturing
+version: 1
+
+policies:
+  - name: exclude_test_lines
+    applies_to: all
+    filter:
+      column: line_name
+      operator: not_in
+      values: ["Test", "Pilot"]

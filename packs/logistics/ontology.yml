@@ -1,0 +1,26 @@
+industry: logistics
+version: 1
+
+title: Logistics Ontology
+
+entity_types:
+  organizational_unit:
+    examples: [depot, hub, region]
+    description: Logistics organization hierarchy
+    join_key: depot_id
+  asset:
+    examples: [vehicle, route]
+    description: Fleet and route assets
+    join_key: vehicle_id
+  product:
+    examples: [sku]
+    description: Shipped products or SKUs
+    join_key: sku_id
+  time:
+    examples: [day, week, month, fiscal_year]
+    description: Time grains used for logistics analysis
+
+hierarchies:
+  - name: logistics_org
+    levels: [region, hub, depot]
+    description: Region to hub to depot rollup

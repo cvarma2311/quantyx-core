@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from services.ai.catalog import Dimension, Metric, resolve_ref
+from services.ai.join_graph import build_join_from
 
 
 _REF_PATTERN = re.compile(
@@ -66,7 +67,7 @@ def _build_filters(filters: Iterable[Filter], dimensions: dict[str, Dimension], 
     return (" AND ".join(clauses), params)
 
 
-def _build_base_sql(metric: Metric, schema: str) -> tuple[str, str | None, str | None]:
+def _build_base_sql(metric: Metric, schema: str) -> tuple[str, str | None, str | None, dict[str, str] | None]:
     if metric.name == "sales_vs_target_achievement_pct":
         base_table = f"{schema}.fact_hpcl_sales_monthly_actuals"
         return (
@@ -79,18 +80,38 @@ def _build_base_sql(metric: Metric, schema: str) -> tuple[str, str | None, str |
             "AND a.region_name = t.region_name "
             "AND a.sales_area_name = t.sales_area_name "
             "AND a.product_name = t.product_name"
-        ), base_table, "a"
+        ), base_table, "a", {
+            f"{schema}.fact_hpcl_sales_monthly_actuals": "a",
+            f"{schema}.fact_hpcl_sales_monthly_targets": "t",
+            "fact_hpcl_sales_monthly_actuals": "a",
+            "fact_hpcl_sales_monthly_targets": "t",
+        }
 
     metric_sql = _render_metric_sql(metric, schema)
     tables = _collect_tables(metric_sql)
     if len(tables) != 1:
-        raise ValueError("Multi-table metrics are not supported yet")
+        from_sql, alias_map = build_join_from(sorted(tables), schema)
+        return from_sql, None, None, alias_map
     table_name = sorted(tables)[0]
-    return f"FROM {table_name}", table_name, None
+    return f"FROM {table_name}", table_name, None, None
 
 
-def _rewrite_dimension_sql(dim_sql: str, base_table: str | None, base_alias: str | None) -> str:
+def _rewrite_dimension_sql(
+    dim_sql: str,
+    base_table: str | None,
+    base_alias: str | None,
+    alias_map: dict[str, str] | None,
+) -> str:
     if not base_table:
+        if not alias_map:
+            return dim_sql
+        match = _REF_PATTERN.fullmatch(dim_sql)
+        if not match:
+            return dim_sql
+        table = f"{match.group(1)}.{match.group(2)}"
+        alias = alias_map.get(table) or alias_map.get(match.group(2))
+        if alias:
+            return f"{alias}.{match.group(3)}"
         return dim_sql
 
     match = _REF_PATTERN.fullmatch(dim_sql)
@@ -104,12 +125,19 @@ def _rewrite_dimension_sql(dim_sql: str, base_table: str | None, base_alias: str
     return f"{base_schema}.{base_name}.{column}"
 
 
-def _rewrite_metric_sql(metric: Metric, metric_sql: str, schema: str) -> str:
+def _rewrite_metric_sql(
+    metric: Metric,
+    metric_sql: str,
+    schema: str,
+    alias_map: dict[str, str] | None,
+) -> str:
     if metric.name == "sales_vs_target_achievement_pct":
         actuals_prefix = f"{schema}.fact_hpcl_sales_monthly_actuals."
         targets_prefix = f"{schema}.fact_hpcl_sales_monthly_targets."
-        metric_sql = metric_sql.replace(actuals_prefix, "a.")
-        metric_sql = metric_sql.replace(targets_prefix, "t.")
+        actuals_alias = alias_map.get(f"{schema}.fact_hpcl_sales_monthly_actuals", "a") if alias_map else "a"
+        targets_alias = alias_map.get(f"{schema}.fact_hpcl_sales_monthly_targets", "t") if alias_map else "t"
+        metric_sql = metric_sql.replace(actuals_prefix, f"{actuals_alias}.")
+        metric_sql = metric_sql.replace(targets_prefix, f"{targets_alias}.")
     return metric_sql
 
 
@@ -131,11 +159,11 @@ def build_query(
     if not metrics:
         raise ValueError("At least one metric is required")
 
-    base_sql, base_table, base_alias = _build_base_sql(metrics[0], schema)
+    base_sql, base_table, base_alias, alias_map = _build_base_sql(metrics[0], schema)
     dimensions = _normalize_group_dimensions(metrics, dimensions)
 
     for metric in metrics[1:]:
-        metric_base_sql, _, _ = _build_base_sql(metric, schema)
+        metric_base_sql, _, _, _ = _build_base_sql(metric, schema)
         if metric_base_sql != base_sql:
             raise ValueError("All metrics must be from the same base table")
 
@@ -143,7 +171,12 @@ def build_query(
     select_parts = []
 
     for dim in dimensions:
-        dim_sql = _rewrite_dimension_sql(_render_dimension_sql(dim, schema), base_table, base_alias)
+        dim_sql = _rewrite_dimension_sql(
+            _render_dimension_sql(dim, schema),
+            base_table,
+            base_alias,
+            alias_map,
+        )
         select_parts.append(dim_sql)
         metric_tables.update(_collect_tables(dim_sql))
 
@@ -153,8 +186,8 @@ def build_query(
             metric_sql = f"SUM({metric_sql})"
         elif metric.metric_type in {"average", "avg"}:
             metric_sql = f"AVG({metric_sql})"
-        metric_sql = _rewrite_metric_sql(metric, metric_sql, schema)
-        metric_sql = _rewrite_dimension_sql(metric_sql, base_table, base_alias)
+        metric_sql = _rewrite_metric_sql(metric, metric_sql, schema, alias_map)
+        metric_sql = _rewrite_dimension_sql(metric_sql, base_table, base_alias, alias_map)
         select_parts.append(f"{metric_sql} AS {metric.name}")
         metric_tables.update(_collect_tables(metric_sql))
 
@@ -164,13 +197,19 @@ def build_query(
                 _render_dimension_sql(filter_dimensions[flt.field], schema),
                 base_table,
                 base_alias,
+                alias_map,
             )
             metric_tables.update(_collect_tables(dim_sql))
 
     rewritten_dimensions = dict(filter_dimensions)
     for flt in filters:
         dim = filter_dimensions[flt.field]
-        dim_sql = _rewrite_dimension_sql(_render_dimension_sql(dim, schema), base_table, base_alias)
+        dim_sql = _rewrite_dimension_sql(
+            _render_dimension_sql(dim, schema),
+            base_table,
+            base_alias,
+            alias_map,
+        )
         rewritten_dimensions[dim.name] = Dimension(
             name=dim.name,
             description=dim.description,
@@ -183,7 +222,12 @@ def build_query(
     group_by = ""
     if dimensions:
         group_by = " GROUP BY " + ", ".join(
-            _rewrite_dimension_sql(_render_dimension_sql(dim, schema), base_table, base_alias)
+            _rewrite_dimension_sql(
+                _render_dimension_sql(dim, schema),
+                base_table,
+                base_alias,
+                alias_map,
+            )
             for dim in dimensions
         )
 

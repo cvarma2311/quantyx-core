@@ -1,0 +1,7 @@
+industry: manufacturing
+version: 1
+
+datasets:
+  - name: production_output
+    source_model: fact_production_daily
+    description: Production output by plant and line

@@ -1,0 +1,13 @@
+industry: manufacturing
+version: 1
+
+templates:
+  - name: output_units
+    type: sum
+    description: Total production output units
+    measure_hint: quantity
+
+  - name: downtime_hours
+    type: sum
+    description: Total downtime hours
+    measure_hint: time

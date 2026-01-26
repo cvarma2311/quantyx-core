@@ -7,6 +7,8 @@ from typing import Any
 
 import yaml
 
+from services.ai.config import Settings
+from services.ai.metrics_registry import fetch_registry_metrics
 
 _REF_PATTERN = re.compile(r"\{\{\s*ref\('(?P<name>[^']+)'\)\s*\}\}")
 
@@ -19,6 +21,9 @@ class Metric:
     sql: str
     grain: str
     dimensions: list[str]
+    status: str | None = None
+    owner: str | None = None
+    version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,7 @@ def load_catalog(path: str) -> MetricCatalog:
             sql=metric["sql"],
             grain=metric.get("grain", ""),
             dimensions=metric.get("dimensions", []),
+            status="static",
         )
 
     dimensions = {}
@@ -68,6 +74,27 @@ def load_catalog(path: str) -> MetricCatalog:
         )
 
     return MetricCatalog(metrics=metrics, dimensions=dimensions)
+
+
+def load_catalog_with_registry(settings: Settings, path: str) -> MetricCatalog:
+    catalog = load_catalog(path)
+    registry_metrics = fetch_registry_metrics(settings)
+    metrics = dict(catalog.metrics)
+    for metric in registry_metrics:
+        name = metric.get("metric_name") or metric.get("display_name") or metric["metric_id"]
+        dimensions = metric.get("dimensions") or []
+        metrics[name] = Metric(
+            name=name,
+            description=metric.get("description") or "",
+            metric_type=metric.get("type") or "",
+            sql=metric.get("sql") or "",
+            grain=metric.get("grain") or "",
+            dimensions=list(dimensions),
+            status=metric.get("status"),
+            owner=metric.get("owner"),
+            version=metric.get("version"),
+        )
+    return MetricCatalog(metrics=metrics, dimensions=catalog.dimensions)
 
 
 def resolve_ref(sql: str, schema: str) -> str:

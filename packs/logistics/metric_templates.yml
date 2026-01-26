@@ -1,0 +1,13 @@
+industry: logistics
+version: 1
+
+templates:
+  - name: delivery_count
+    type: sum
+    description: Total deliveries
+    measure_hint: count
+
+  - name: on_time_pct
+    type: ratio
+    description: On-time delivery rate
+    measure_hint: SLA

@@ -1,0 +1,7 @@
+industry: logistics
+version: 1
+
+datasets:
+  - name: delivery_performance
+    source_model: fact_deliveries
+    description: Delivery performance by depot and route

@@ -1,0 +1,7 @@
+industry: energy_distribution
+version: 1
+
+datasets:
+  - name: sales_area_performance
+    source_model: fact_hpcl_sales_daily
+    description: Sales performance by sales area and product

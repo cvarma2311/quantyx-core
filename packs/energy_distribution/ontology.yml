@@ -1,0 +1,26 @@
+industry: energy_distribution
+version: 1
+
+title: Energy Distribution Ontology
+
+entity_types:
+  organizational_unit:
+    examples: [sbu, zone, region, sales_area]
+    description: Organizational hierarchy for sales operations
+    join_key: sales_area_name
+  asset:
+    examples: [depot, retail_outlet]
+    description: Physical assets in the distribution network
+    join_key: depot_id
+  product:
+    examples: [product]
+    description: Fuel products and variants
+    join_key: product_name
+  time:
+    examples: [day, month, fiscal_year]
+    description: Time grains used for analysis
+
+hierarchies:
+  - name: sales_org
+    levels: [sbu, zone, region, sales_area]
+    description: Sales organization rollup

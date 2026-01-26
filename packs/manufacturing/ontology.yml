@@ -1,0 +1,26 @@
+industry: manufacturing
+version: 1
+
+title: Manufacturing Ontology
+
+entity_types:
+  organizational_unit:
+    examples: [plant, line, workcenter]
+    description: Manufacturing organization hierarchy
+    join_key: workcenter_id
+  asset:
+    examples: [machine, tool]
+    description: Production assets and equipment
+    join_key: machine_id
+  product:
+    examples: [sku, grade]
+    description: Manufactured products or grades
+    join_key: product_code
+  time:
+    examples: [day, shift, month, fiscal_year]
+    description: Time grains used for production analysis
+
+hierarchies:
+  - name: production_org
+    levels: [plant, line, workcenter]
+    description: Plant to line hierarchy

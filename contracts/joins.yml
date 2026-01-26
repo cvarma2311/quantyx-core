@@ -1,0 +1,12 @@
+joins:
+  - left: fact_hpcl_sales_monthly_actuals
+    right: fact_hpcl_sales_monthly_targets
+    join_type: JOIN
+    condition: >-
+      a.month_name = b.month_name
+      AND a.fiscal_year = b.fiscal_year
+      AND a.sbu_name = b.sbu_name
+      AND a.zone_name = b.zone_name
+      AND a.region_name = b.region_name
+      AND a.sales_area_name = b.sales_area_name
+      AND a.product_name = b.product_name

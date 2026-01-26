@@ -76,6 +76,9 @@ Why: separate resolution, SQL generation, and execution for safety and audit.
 Endpoint:
 - `POST /query`
 
+API documentation rule:
+- All new endpoints must include `summary` and `description` for Swagger.
+
 Example request:
 ```json
 {

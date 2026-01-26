@@ -1,0 +1,13 @@
+industry: energy_distribution
+version: 1
+
+templates:
+  - name: actual_volume
+    type: sum
+    description: Total volume
+    measure_hint: volume
+
+  - name: achievement_pct
+    type: ratio
+    description: Actual vs target achievement
+    measure_hint: target

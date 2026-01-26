@@ -1,0 +1,10 @@
+industry: logistics
+version: 1
+
+policies:
+  - name: exclude_test_routes
+    applies_to: all
+    filter:
+      column: route_name
+      operator: not_in
+      values: ["Test", "Sandbox"]
