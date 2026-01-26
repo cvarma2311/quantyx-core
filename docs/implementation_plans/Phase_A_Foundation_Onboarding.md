@@ -26,6 +26,10 @@ Goal: introduce industry pack structure and prerequisites for any domain.
 4) **Doc updates**
    - Add industry pack checklist appendix
 
+5) **Ontology mapping API**
+   - `POST /onboard/map` for rule-based mapping
+   - confidence scoring + low-confidence bucket
+
 ## Acceptance criteria
 - New industry pack can be added without code change
 - Ontology appears in `/entities`

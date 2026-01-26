@@ -280,7 +280,34 @@ Response:
 }
 ```
 
-### 3.2 POST /metrics/suggested?domain_id=...&persist=true
+### 3.2 POST /onboard/map?domain_id=...&use_llm=...
+Suggest ontology mappings from schema columns to the selected domain pack.
+
+Request:
+```json
+{ "schema": "public" }
+```
+
+Response:
+```json
+{
+  "candidates": [
+    {
+      "table": "fact_production_daily",
+      "column": "plant_name",
+      "mapped_entity_type": "facility",
+      "confidence": 0.7
+    }
+  ],
+  "low_confidence_candidates": [],
+  "low_confidence_threshold": 0.7
+}
+```
+
+Notes:
+- Set `use_llm=true` to include LLM-assisted suggestions when `OPENAI_API_KEY` is configured.
+
+### 3.3 POST /metrics/suggested?domain_id=...&persist=true
 Return auto-generated metrics (status = suggested), including a low-confidence bucket.
 
 Request:

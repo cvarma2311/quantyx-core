@@ -386,6 +386,14 @@ class OnboardScanResponse(BaseModel):
     tables: List[dict]
 
 
+class OnboardMapResponse(BaseModel):
+    candidates: List[dict]
+    low_confidence_candidates: List[dict]
+    low_confidence_threshold: float = Field(
+        0.7, description="Confidence threshold used to classify low-confidence candidates"
+    )
+
+
 class SuggestedMetricsResponse(BaseModel):
     measures: List[dict]
     low_confidence_measures: List[dict]

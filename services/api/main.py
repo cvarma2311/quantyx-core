@@ -43,6 +43,7 @@ from services.api.overrides_endpoints import upsert_entity_override, upsert_hier
 from services.ai.onboarding.schema_scan import scan_schema
 from services.ai.onboarding.measure_detection import detect_measures, detect_time_columns
 from services.ai.onboarding.entity_mapping import map_entities
+from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
 from services.ai.sql_builder import Filter, build_query
 from services.api.schemas import (
@@ -58,6 +59,7 @@ from services.api.schemas import (
     DimensionValuesResponse,
     OnboardScanRequest,
     OnboardScanResponse,
+    OnboardMapResponse,
     QueryRequest,
     QueryResult,
     SchemaResponse,
@@ -1816,6 +1818,91 @@ def schema(limit: int = 200, cursor: str | None = None) -> SchemaResponse:
 def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
     tables = scan_schema(settings, request.schema)
     return OnboardScanResponse(tables=tables)
+
+
+def _merge_entity_candidates(
+    rule_based: list[dict],
+    llm_based: list[dict],
+) -> list[dict]:
+    merged: dict[tuple[str, str], dict] = {}
+    for candidate in rule_based:
+        key = (candidate.get("table"), candidate.get("column"))
+        merged[key] = {**candidate, "source": "rule"}
+    for candidate in llm_based:
+        key = (candidate.get("table"), candidate.get("column"))
+        existing = merged.get(key)
+        if not existing or candidate.get("confidence", 0) > existing.get("confidence", 0):
+            merged[key] = {**candidate, "source": "llm"}
+    return list(merged.values())
+
+
+@app.post(
+    "/onboard/map",
+    response_model=OnboardMapResponse,
+    tags=["onboard"],
+    summary="Map schema to ontology",
+    description="Suggest entity mappings from schema columns to the selected domain ontology.",
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "domain_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"manufacturing": {"value": "manufacturing"}},
+            },
+            {
+                "name": "use_llm",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "boolean"},
+                "examples": {"use_llm": {"value": True}},
+            },
+        ],
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "map_public": {
+                            "summary": "Map public schema",
+                            "value": {"schema": "public"},
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def onboard_map(
+    request: OnboardScanRequest,
+    domain_id: str,
+    use_llm: bool = False,
+) -> OnboardMapResponse:
+    tables = scan_schema(settings, request.schema)
+    ontology = load_pack(f"packs/{domain_id}").get("ontology", {})
+    rule_candidates = map_entities(tables, ontology)
+    llm_candidates: list[dict] = []
+    if use_llm:
+        try:
+            llm_candidates = llm_map_entities(settings, tables, ontology)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    candidates = _merge_entity_candidates(rule_candidates, llm_candidates)
+    low_confidence_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("confidence", 0) < LOW_CONFIDENCE_THRESHOLD
+    ]
+    high_confidence_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("confidence", 0) >= LOW_CONFIDENCE_THRESHOLD
+    ]
+    return OnboardMapResponse(
+        candidates=high_confidence_candidates,
+        low_confidence_candidates=low_confidence_candidates,
+        low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,
+    )
 
 
 @app.post(

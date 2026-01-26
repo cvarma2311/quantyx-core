@@ -86,6 +86,31 @@ Expected outcome:
 
 ## 3) Auto-detect metrics + entities (seed suggestions for faster onboarding)
 
+POST /onboard/map?domain_id=manufacturing&use_llm=true
+
+Purpose: map schema columns to the base ontology using rules (and optional LLM suggestions).
+
+Request:
+```json
+{ "schema": "public" }
+```
+
+Response (example):
+```json
+{
+  "candidates": [
+    {
+      "table": "fact_production_daily",
+      "column": "plant_name",
+      "mapped_entity_type": "facility",
+      "confidence": 0.7
+    }
+  ],
+  "low_confidence_candidates": [],
+  "low_confidence_threshold": 0.7
+}
+```
+
 POST /metrics/suggested?domain_id=manufacturing&persist=true
 
 Purpose: auto-detect measures, time columns, entity candidates. Persist to registry.

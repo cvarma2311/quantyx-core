@@ -5,6 +5,7 @@ Goal: implement the auto-detection pipeline from `V2_PRODUCT_PREREQUISITES.md`.
 ## Current state
 - Basic onboarding endpoints implemented:
   - `POST /onboard/scan`
+  - `POST /onboard/map`
   - `POST /metrics/suggested`
 - Schema scan reads information_schema and pg_stats.
 - Suggested metrics include:
@@ -19,6 +20,7 @@ Goal: implement the auto-detection pipeline from `V2_PRODUCT_PREREQUISITES.md`.
 1) **Entity mapping confidence**
    - strengthen confidence scoring
    - require user confirmation for low confidence
+   - optional LLM-assisted suggestions when API key is available
 
 2) **Suggested metric lifecycle**
    - persist suggestions to `quantyx_metrics_registry` with confidence/additive
@@ -26,3 +28,4 @@ Goal: implement the auto-detection pipeline from `V2_PRODUCT_PREREQUISITES.md`.
 ## Acceptance criteria
 - Onboarding scan returns suggestions
 - Suggested metrics available via `/metrics/suggested`
+- Ontology mapping available via `/onboard/map`
