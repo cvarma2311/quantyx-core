@@ -32,6 +32,9 @@ OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-4o-mini
 ```
 
+Note:
+- `.env` is for internal testing only. Production should use a secrets manager.
+
 ---
 
 ## 1) Discover available domains (choose the best industry pack)
@@ -84,7 +87,37 @@ Expected outcome:
 
 ---
 
-## 3) Auto-detect metrics + entities (seed suggestions for faster onboarding)
+## 3) Scan via connection (customer-provided credentials)
+
+POST /onboard/scan-connection
+
+Purpose: scan all tables from the customer-provided database and return profiles.
+
+Request:
+```json
+{
+  "db_type": "postgres",
+  "host": "db.company.com",
+  "port": 5432,
+  "database": "prod_warehouse",
+  "user": "readonly_user",
+  "password": "******",
+  "schema": "public",
+  "sample_rows": 100,
+  "limit": 20,
+  "cursor": null
+}
+```
+
+Expected outcome:
+- The UI shows a schema scan result view with profiles for each table/column.
+
+Note:
+- This endpoint is used when the customer does not want to set environment variables on our side.
+
+---
+
+## 4) Auto-detect metrics + entities (seed suggestions for faster onboarding)
 
 POST /onboard/map?domain_id=manufacturing&use_llm=true
 
@@ -154,7 +187,7 @@ Expected outcome:
 
 ---
 
-## 4) Review + correct entities and hierarchies (match customer reality)
+## 5) Review + correct entities and hierarchies (match customer reality)
 
 GET /entities?domain_id=manufacturing&tenant_id=x_mfg
 
@@ -190,7 +223,29 @@ Request:
 
 ---
 
-## 5) Review + promote metrics (make them queryable and trusted)
+## 6) Infer facts and dimensions (dbt-style model suggestions)
+
+POST /onboard/infer-models?domain_id=manufacturing
+
+Purpose: suggest candidate facts and dimensions before metric promotion.
+
+Request:
+```json
+{
+  "schema": "public",
+  "tables": ["fact_production_daily", "dim_plant"],
+  "time_column": "production_date",
+  "grain": "day",
+  "use_llm": true
+}
+```
+
+Expected outcome:
+- The UI shows recommended fact/dim models and confirms grain and keys.
+
+---
+
+## 7) Review + promote metrics (make them queryable and trusted)
 
 PATCH /metrics/{metric_id}
 
@@ -230,7 +285,7 @@ Request:
 
 ---
 
-## 6) Apply the contracts (reload catalog so the app can use them)
+## 8) Apply the contracts (reload catalog so the app can use them)
 
 POST /contracts/apply
 
@@ -241,7 +296,7 @@ Expected outcome:
 
 ---
 
-## 7) Validate schema + explore (confirm the semantic layer is ready)
+## 9) Validate schema + explore (confirm the semantic layer is ready)
 
 GET /schema
 GET /metrics
@@ -254,7 +309,7 @@ Expected outcome:
 
 ---
 
-## 8) Ask a question (first live query to prove value)
+## 10) Ask a question (first live query to prove value)
 
 POST /query
 
@@ -272,7 +327,7 @@ Expected outcome:
 
 ---
 
-## 9) Governance hooks (show lineage and policies to build trust)
+## 11) Governance hooks (show lineage and policies to build trust)
 
 GET /policies?domain_id=manufacturing
 
@@ -300,7 +355,7 @@ Expected outcome:
 
 ---
 
-## 10) Insights + Actions (turn observations into action)
+## 12) Insights + Actions (turn observations into action)
 
 POST /insights/generate?domain_id=manufacturing
 
@@ -345,7 +400,7 @@ Request:
 
 ---
 
-## 11) Anomaly detection + time-series (see issues early and explain them)
+## 13) Anomaly detection + time-series (see issues early and explain them)
 
 POST /timeseries
 
@@ -376,7 +431,7 @@ Purpose: drill down into drivers and correlated metrics for the anomaly point.
 
 ---
 
-## 12) Scenarios (plan responses before taking action)
+## 14) Scenarios (plan responses before taking action)
 
 POST /scenarios  
 POST /scenarios/{scenario_id}/run  

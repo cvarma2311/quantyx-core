@@ -307,7 +307,86 @@ Response:
 Notes:
 - Set `use_llm=true` to include LLM-assisted suggestions when `OPENAI_API_KEY` is configured.
 
-### 3.3 POST /metrics/suggested?domain_id=...&persist=true
+### 3.3 POST /onboard/scan-connection
+Scan a user-provided connection and return schema profiles with cursor pagination.
+
+Request:
+```json
+{
+  "db_type": "postgres",
+  "host": "db.company.com",
+  "port": 5432,
+  "database": "prod_warehouse",
+  "user": "readonly_user",
+  "password": "******",
+  "schema": "public",
+  "tables": ["fact_production_daily", "dim_plant"],
+  "sample_rows": 100,
+  "limit": 20,
+  "cursor": null
+}
+```
+
+Response:
+```json
+{
+  "tables": [
+    {
+      "table": "fact_production_daily",
+      "columns": [
+        { "name": "production_date", "data_type": "date", "null_frac": 0.0, "distinct": 365 },
+        { "name": "output_tmt", "data_type": "numeric", "mean": 124.5, "null_frac": 0.0 }
+      ]
+    }
+  ],
+  "limit": 20,
+  "cursor": null,
+  "next_cursor": "ZmFjdF9wcm9kdWN0aW9uX2RhaWx5"
+}
+```
+
+Notes:
+- Currently supported for `db_type=postgres`.
+- `sample_rows` is capped at 100 for safety.
+
+### 3.4 POST /onboard/infer-models?domain_id=...
+Infer candidate dbt facts and dimensions from schema scan + ontology.
+
+Request:
+```json
+{
+  "schema": "public",
+  "tables": ["fact_production_daily", "dim_plant"],
+  "time_column": "production_date",
+  "grain": "day",
+  "use_llm": true
+}
+```
+
+Response:
+```json
+{
+  "facts": [
+    {
+      "name": "fact_production_daily",
+      "grain": "day",
+      "measures": ["output_tmt", "downtime_hours"],
+      "dimensions": ["plant_name", "product_name", "fiscal_year"],
+      "confidence": 0.8
+    }
+  ],
+  "dimensions": [
+    {
+      "name": "dim_plant",
+      "keys": ["plant_id"],
+      "attributes": ["plant_name", "region_name"],
+      "confidence": 0.75
+    }
+  ]
+}
+```
+
+### 3.5 POST /metrics/suggested?domain_id=...&persist=true
 Return auto-generated metrics (status = suggested), including a low-confidence bucket.
 
 Request:
@@ -315,7 +394,7 @@ Request:
 { "schema": "public" }
 ```
 
-### 3.3 Metric lifecycle flow (seed → review → promote)
+### 3.6 Metric lifecycle flow (seed → review → promote)
 Use the registry APIs to turn auto-suggested metrics into certified metrics without code changes.
 
 Step 1: Seed suggestions into the registry

@@ -394,6 +394,40 @@ class OnboardMapResponse(BaseModel):
     )
 
 
+class OnboardScanConnectionRequest(BaseModel):
+    db_type: str = Field(..., examples=["postgres"])
+    host: str = Field(..., examples=["db.company.com"])
+    port: int = Field(5432, examples=[5432])
+    database: str = Field(..., examples=["prod_warehouse"])
+    user: str = Field(..., examples=["readonly_user"])
+    password: str = Field(..., examples=["******"])
+    schema: str = Field("public", examples=["public"])
+    tables: List[str] | None = Field(None, examples=[["fact_production_daily", "dim_plant"]])
+    sample_rows: int = Field(100, ge=10, le=100, examples=[100])
+    limit: int = Field(20, ge=1, le=500, examples=[20])
+    cursor: str | None = Field(None, examples=["ZmFjdF9wcm9kdWN0aW9uX2RhaWx5"])
+
+
+class OnboardScanConnectionResponse(BaseModel):
+    tables: List[dict]
+    limit: int = Field(20, examples=[20])
+    cursor: str | None = Field(None, examples=["ZmFjdF9wcm9kdWN0aW9uX2RhaWx5"])
+    next_cursor: str | None = Field(None, examples=["ZGltX3BsYW50"])
+
+
+class InferModelsRequest(BaseModel):
+    schema: str = Field("public", examples=["public"])
+    tables: List[str] | None = Field(None, examples=[["fact_production_daily", "dim_plant"]])
+    time_column: str | None = Field(None, examples=["production_date"])
+    grain: str | None = Field(None, examples=["day"])
+    use_llm: bool = Field(False, examples=[True])
+
+
+class InferModelsResponse(BaseModel):
+    facts: List[dict]
+    dimensions: List[dict]
+
+
 class SuggestedMetricsResponse(BaseModel):
     measures: List[dict]
     low_confidence_measures: List[dict]

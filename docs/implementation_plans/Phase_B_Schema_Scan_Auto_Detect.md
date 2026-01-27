@@ -22,7 +22,12 @@ Goal: implement the auto-detection pipeline from `V2_PRODUCT_PREREQUISITES.md`.
    - require user confirmation for low confidence
    - optional LLM-assisted suggestions when API key is available
 
-2) **Suggested metric lifecycle**
+2) **Connection scan profiling**
+   - `POST /onboard/scan-connection`
+   - sample-based profiling with max 100 rows
+   - sample cap keeps scans safe for production databases
+
+3) **Suggested metric lifecycle**
    - persist suggestions to `quantyx_metrics_registry` with confidence/additive
 
 ## Acceptance criteria

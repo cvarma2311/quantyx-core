@@ -41,10 +41,12 @@ from services.api.entities import list_entities, list_hierarchies
 from services.api.overrides import load_overrides, merge_entities, merge_hierarchies
 from services.api.overrides_endpoints import upsert_entity_override, upsert_hierarchy_override
 from services.ai.onboarding.schema_scan import scan_schema
+from services.ai.onboarding.connection_scan import scan_connection
 from services.ai.onboarding.measure_detection import detect_measures, detect_time_columns
 from services.ai.onboarding.entity_mapping import map_entities
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
+from services.ai.onboarding.model_inference_llm import llm_infer_models
 from services.ai.sql_builder import Filter, build_query
 from services.api.schemas import (
     EntitiesResponse,
@@ -60,6 +62,10 @@ from services.api.schemas import (
     OnboardScanRequest,
     OnboardScanResponse,
     OnboardMapResponse,
+    OnboardScanConnectionRequest,
+    OnboardScanConnectionResponse,
+    InferModelsRequest,
+    InferModelsResponse,
     QueryRequest,
     QueryResult,
     SchemaResponse,
@@ -1820,6 +1826,108 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
     return OnboardScanResponse(tables=tables)
 
 
+@app.post(
+    "/onboard/scan-connection",
+    response_model=OnboardScanConnectionResponse,
+    tags=["onboard"],
+    summary="Scan provided connection",
+    description="Scan tables and columns using customer-provided connection details (sample_rows capped at 100).",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "scan_connection": {
+                            "summary": "Scan connection",
+                            "value": {
+                                "db_type": "postgres",
+                                "host": "db.company.com",
+                                "port": 5432,
+                                "database": "prod_warehouse",
+                                "user": "readonly_user",
+                                "password": "******",
+                                "schema": "public",
+                                "sample_rows": 100,
+                                "limit": 20,
+                                "cursor": None,
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "scan_result": {
+                                "summary": "Scan results",
+                                "value": {
+                                    "tables": [
+                                        {
+                                            "table": "fact_production_daily",
+                                            "columns": [
+                                                {
+                                                    "name": "production_date",
+                                                    "data_type": "date",
+                                                    "null_frac": 0.0,
+                                                    "distinct": 365,
+                                                    "profile": {"min": "2024-01-01", "max": "2024-12-31"},
+                                                },
+                                                {
+                                                    "name": "plant_name",
+                                                    "data_type": "text",
+                                                    "null_frac": 0.0,
+                                                    "distinct": 42,
+                                                    "profile": {"sample_values": ["Plant A", "Plant B"]},
+                                                },
+                                                {
+                                                    "name": "output_tmt",
+                                                    "data_type": "numeric",
+                                                    "null_frac": 0.0,
+                                                    "distinct": -1,
+                                                    "profile": {"mean": 124.5, "min": 10.2, "max": 245.7},
+                                                },
+                                            ],
+                                        }
+                                    ],
+                                    "limit": 20,
+                                    "cursor": None,
+                                    "next_cursor": "ZmFjdF9wcm9kdWN0aW9uX2RhaWx5",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def onboard_scan_connection(request: OnboardScanConnectionRequest) -> OnboardScanConnectionResponse:
+    cursor_value = _decode_cursor(request.cursor) if request.cursor else None
+    tables, next_cursor = scan_connection(
+        db_type=request.db_type,
+        host=request.host,
+        port=request.port,
+        database=request.database,
+        user=request.user,
+        password=request.password,
+        schema=request.schema,
+        tables=request.tables,
+        limit=request.limit,
+        sample_rows=request.sample_rows,
+        cursor_value=cursor_value,
+    )
+    encoded_next = _encode_cursor(next_cursor) if next_cursor else None
+    return OnboardScanConnectionResponse(
+        tables=tables,
+        limit=request.limit,
+        cursor=request.cursor,
+        next_cursor=encoded_next,
+    )
+
+
 def _merge_entity_candidates(
     rule_based: list[dict],
     llm_based: list[dict],
@@ -1903,6 +2011,164 @@ def onboard_map(
         low_confidence_candidates=low_confidence_candidates,
         low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,
     )
+
+
+def _infer_models_from_scan(
+    tables: list[dict],
+    time_column: str | None,
+    grain: str | None,
+) -> tuple[list[dict], list[dict]]:
+    facts = []
+    dims = []
+    for table in tables:
+        columns = table.get("columns", [])
+        column_names = [col.get("name") for col in columns]
+        numeric_cols = [
+            col["name"]
+            for col in columns
+            if str(col.get("data_type", "")).lower() in {"integer", "bigint", "smallint", "numeric", "double precision", "real"}
+        ]
+        text_cols = [
+            col["name"]
+            for col in columns
+            if str(col.get("data_type", "")).lower() in {"text", "character varying", "varchar"}
+        ]
+        date_cols = [
+            col["name"]
+            for col in columns
+            if str(col.get("data_type", "")).lower() in {"date", "timestamp", "timestamp without time zone", "timestamp with time zone"}
+        ]
+
+        candidate_time = time_column if time_column in column_names else (date_cols[0] if date_cols else None)
+        is_fact = bool(numeric_cols) and bool(candidate_time)
+        if is_fact:
+            facts.append(
+                {
+                    "name": table.get("table"),
+                    "grain": grain or "day",
+                    "time_column": candidate_time,
+                    "measures": numeric_cols[:10],
+                    "dimensions": text_cols[:10],
+                    "confidence": 0.7 if len(numeric_cols) < 3 else 0.85,
+                }
+            )
+        else:
+            dim_keys = [col for col in column_names if col.endswith("_id") or col.endswith("_code")]
+            dims.append(
+                {
+                    "name": table.get("table"),
+                    "keys": dim_keys[:5],
+                    "attributes": text_cols[:15],
+                    "confidence": 0.6 if not dim_keys else 0.8,
+                }
+            )
+    return facts, dims
+
+
+def _merge_models(rule_facts: list[dict], rule_dims: list[dict], llm_payload: dict) -> tuple[list[dict], list[dict]]:
+    llm_facts = llm_payload.get("facts", []) if llm_payload else []
+    llm_dims = llm_payload.get("dimensions", []) if llm_payload else []
+
+    merged_facts = {fact.get("name"): fact for fact in rule_facts if fact.get("name")}
+    for fact in llm_facts:
+        name = fact.get("name")
+        if not name:
+            continue
+        if name not in merged_facts or fact.get("confidence", 0) > merged_facts[name].get("confidence", 0):
+            merged_facts[name] = fact
+
+    merged_dims = {dim.get("name"): dim for dim in rule_dims if dim.get("name")}
+    for dim in llm_dims:
+        name = dim.get("name")
+        if not name:
+            continue
+        if name not in merged_dims or dim.get("confidence", 0) > merged_dims[name].get("confidence", 0):
+            merged_dims[name] = dim
+
+    return list(merged_facts.values()), list(merged_dims.values())
+
+
+@app.post(
+    "/onboard/infer-models",
+    response_model=InferModelsResponse,
+    tags=["onboard"],
+    summary="Infer facts and dimensions",
+    description="Suggest candidate dbt facts and dimensions from scanned schema and ontology.",
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "domain_id",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"manufacturing": {"value": "manufacturing"}},
+            }
+        ],
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "infer_models": {
+                            "summary": "Infer models",
+                            "value": {
+                                "schema": "public",
+                                "tables": ["fact_production_daily", "dim_plant"],
+                                "time_column": "production_date",
+                                "grain": "day",
+                                "use_llm": True,
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "suggested_models": {
+                                "summary": "Suggested facts/dims",
+                                "value": {
+                                    "facts": [
+                                        {
+                                            "name": "fact_production_daily",
+                                            "grain": "day",
+                                            "time_column": "production_date",
+                                            "measures": ["output_tmt", "downtime_hours"],
+                                            "dimensions": ["plant_name", "product_name", "fiscal_year"],
+                                            "confidence": 0.85,
+                                        }
+                                    ],
+                                    "dimensions": [
+                                        {
+                                            "name": "dim_plant",
+                                            "keys": ["plant_id"],
+                                            "attributes": ["plant_name", "region_name"],
+                                            "confidence": 0.8,
+                                        }
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> InferModelsResponse:
+    tables = scan_schema(settings, request.schema)
+    if request.tables:
+        tables = [table for table in tables if table.get("table") in request.tables]
+    facts, dims = _infer_models_from_scan(tables, request.time_column, request.grain)
+    if request.use_llm:
+        try:
+            llm_payload = llm_infer_models(settings, tables, domain_id)
+            facts, dims = _merge_models(facts, dims, llm_payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return InferModelsResponse(facts=facts, dimensions=dims)
 
 
 @app.post(
