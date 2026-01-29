@@ -96,16 +96,30 @@ Purpose: scan all tables from the customer-provided database and return profiles
 Request:
 ```json
 {
-  "db_type": "postgres",
-  "host": "db.company.com",
-  "port": 5432,
-  "database": "prod_warehouse",
-  "user": "readonly_user",
-  "password": "******",
-  "schema": "public",
-  "sample_rows": 100,
-  "limit": 20,
-  "cursor": null
+  "connections": [
+    {
+      "connection_id": "conn_prod",
+      "db_type": "postgres",
+      "host": "db.company.com",
+      "port": 5432,
+      "user": "readonly_user",
+      "password": "******",
+      "sample_rows": 100,
+      "databases": [
+        {
+          "name": "prod_warehouse",
+          "schemas": [
+            {
+              "name": "public",
+              "tables": ["fact_production_daily"],
+              "limit": 20,
+              "cursor": null
+            }
+          ]
+        }
+      ]
+    }
+  ]
 }
 ```
 

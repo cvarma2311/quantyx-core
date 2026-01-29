@@ -109,7 +109,7 @@ Cursor pagination:
 - Response includes `next_cursor` if more items are available.
 - Next request: pass `cursor=<next_cursor>` to fetch the next page.
 
-### 2.2 GET /datasets?domain_id=...
+### 2.2 GET /datasets?domain_id=...&connection_id=...&database=...&schema=...
 List datasets defined in the domain pack.
 
 Response:
@@ -131,7 +131,7 @@ Response:
 Cursor pagination:
 - Use `cursor` + `limit` to page through datasets.
 
-### 2.3 GET /dimensions
+### 2.3 GET /dimensions?connection_id=...&database=...&schema=...
 List dimensions from the catalog.
 
 Response:
@@ -175,7 +175,7 @@ Cursor pagination:
 - Response includes `next_cursor` if more values are available.
 - Next request: pass `cursor=<next_cursor>` to fetch the next page.
 
-### 2.5 GET /schema
+### 2.5 GET /schema?connection_id=...&database=...&schema=...
 List dbt models and columns from `manifest.json`.
 
 Response:
@@ -308,40 +308,68 @@ Notes:
 - Set `use_llm=true` to include LLM-assisted suggestions when `OPENAI_API_KEY` is configured.
 
 ### 3.3 POST /onboard/scan-connection
-Scan a user-provided connection and return schema profiles with cursor pagination.
+Scan multiple user-provided connections and return schema profiles with cursor pagination.
 
 Request:
 ```json
 {
-  "db_type": "postgres",
-  "host": "db.company.com",
-  "port": 5432,
-  "database": "prod_warehouse",
-  "user": "readonly_user",
-  "password": "******",
-  "schema": "public",
-  "tables": ["fact_production_daily", "dim_plant"],
-  "sample_rows": 100,
-  "limit": 20,
-  "cursor": null
+  "connections": [
+    {
+      "connection_id": "conn_prod",
+      "db_type": "postgres",
+      "host": "db.company.com",
+      "port": 5432,
+      "user": "readonly_user",
+      "password": "******",
+      "sample_rows": 100,
+      "databases": [
+        {
+          "name": "prod_warehouse",
+          "schemas": [
+            {
+              "name": "public",
+              "tables": ["fact_production_daily", "dim_plant"],
+              "limit": 20,
+              "cursor": null
+            }
+          ]
+        }
+      ]
+    }
+  ]
 }
 ```
 
 Response:
 ```json
 {
-  "tables": [
+  "connections": [
     {
-      "table": "fact_production_daily",
-      "columns": [
-        { "name": "production_date", "data_type": "date", "null_frac": 0.0, "distinct": 365 },
-        { "name": "output_tmt", "data_type": "numeric", "mean": 124.5, "null_frac": 0.0 }
+      "connection_id": "conn_prod",
+      "databases": [
+        {
+          "name": "prod_warehouse",
+          "schemas": [
+            {
+              "name": "public",
+              "tables": [
+                {
+                  "table": "fact_production_daily",
+                  "columns": [
+                    { "name": "production_date", "data_type": "date", "null_frac": 0.0, "distinct": 365 },
+                    { "name": "output_tmt", "data_type": "numeric", "mean": 124.5, "null_frac": 0.0 }
+                  ]
+                }
+              ],
+              "limit": 20,
+              "cursor": null,
+              "next_cursor": "ZmFjdF9wcm9kdWN0aW9uX2RhaWx5"
+            }
+          ]
+        }
       ]
     }
-  ],
-  "limit": 20,
-  "cursor": null,
-  "next_cursor": "ZmFjdF9wcm9kdWN0aW9uX2RhaWx5"
+  ]
 }
 ```
 

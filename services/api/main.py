@@ -16,6 +16,12 @@ from services.ai.config import load_settings
 from services.ai.db import run_query
 from services.ai.metrics_registry import upsert_metric, update_metric
 from services.ai.audit import log_query_audit
+from services.ai.connection_registry import (
+    register_connection,
+    register_connection_scopes,
+    resolve_connection_scope,
+)
+from services.ai.onboarding.scan_store import persist_schema_scan
 from services.ai.resolver import resolve_question
 from services.ai.schema_loader import load_manifest_models
 from services.ai.semantic_layer.pack_loader import list_packs, load_pack
@@ -62,8 +68,8 @@ from services.api.schemas import (
     OnboardScanRequest,
     OnboardScanResponse,
     OnboardMapResponse,
-    OnboardScanConnectionRequest,
     OnboardScanConnectionResponse,
+    OnboardScanMultiConnectionRequest,
     InferModelsRequest,
     InferModelsResponse,
     QueryRequest,
@@ -137,6 +143,32 @@ def _paginate_list(
     if page:
         next_cursor = _encode_cursor(key_fn(page[-1]))
     return page, next_cursor
+
+
+def _model_schema_map() -> dict[str, str]:
+    models = load_manifest_models(settings.dbt_manifest_path)
+    return {model["name"]: model.get("schema") or "" for model in models}
+
+
+def _model_database_map() -> dict[str, str]:
+    models = load_manifest_models(settings.dbt_manifest_path)
+    return {model["name"]: model.get("database") or "" for model in models}
+
+
+def _filter_by_model_attr(items: list[dict], value: str | None, key: str, attr: str) -> list[dict]:
+    if not value:
+        return items
+    model_map = _model_schema_map() if attr == "schema" else _model_database_map()
+    filtered = []
+    for item in items:
+        model_name = item.get(key)
+        if not model_name:
+            filtered.append(item)
+            continue
+        model_value = model_map.get(model_name, "")
+        if model_value == value:
+            filtered.append(item)
+    return filtered
 
 
 @app.get(
@@ -244,7 +276,7 @@ def metrics(limit: int = 200, cursor: str | None = None) -> MetricsResponse:
     response_model=DatasetsResponse,
     tags=["explore"],
     summary="List datasets",
-    description="Return datasets defined in the selected domain pack.",
+    description="Return datasets defined in the selected domain pack, scoped by optional database/schema filters.",
     openapi_extra={
         "parameters": [
             {
@@ -253,6 +285,27 @@ def metrics(limit: int = 200, cursor: str | None = None) -> MetricsResponse:
                 "required": True,
                 "schema": {"type": "string"},
                 "examples": {"energy": {"value": "energy_distribution"}},
+            },
+            {
+                "name": "connection_id",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"connection_id": {"value": "conn_prod"}},
+            },
+            {
+                "name": "database",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"database": {"value": "prod_warehouse"}},
+            },
+            {
+                "name": "schema",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"schema": {"value": "public"}},
             },
             {
                 "name": "limit",
@@ -296,9 +349,25 @@ def metrics(limit: int = 200, cursor: str | None = None) -> MetricsResponse:
         },
     },
 )
-def datasets(domain_id: str, limit: int = 200, cursor: str | None = None) -> DatasetsResponse:
+def datasets(
+    domain_id: str,
+    database: str | None = None,
+    schema: str | None = None,
+    limit: int = 200,
+    cursor: str | None = None,
+    connection_id: str | None = None,
+) -> DatasetsResponse:
+    if connection_id:
+        scopes = resolve_connection_scope(settings, connection_id)
+        if not scopes:
+            raise HTTPException(status_code=404, detail="Unknown connection_id")
+        if not database and not schema and scopes:
+            database = scopes[0].get("database_name")
+            schema = scopes[0].get("schema_name")
     pack = load_pack(f"packs/{domain_id}")
     datasets_list = pack.get("datasets", {}).get("datasets", []) or []
+    datasets_list = _filter_by_model_attr(datasets_list, schema, key="source_model", attr="schema")
+    datasets_list = _filter_by_model_attr(datasets_list, database, key="source_model", attr="database")
     page, next_cursor = _paginate_list(datasets_list, cursor, limit, key_fn=lambda item: item["name"])
     return DatasetsResponse(datasets=page, limit=limit, cursor=cursor, next_cursor=next_cursor)
 
@@ -308,8 +377,31 @@ def datasets(domain_id: str, limit: int = 200, cursor: str | None = None) -> Dat
     response_model=DimensionsResponse,
     tags=["explore"],
     summary="List dimensions",
-    description="Return dimensions from the metric catalog.",
+    description="Return dimensions from the metric catalog, scoped by optional database/schema filters.",
     openapi_extra={
+        "parameters": [
+            {
+                "name": "connection_id",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"connection_id": {"value": "conn_prod"}},
+            },
+            {
+                "name": "database",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"database": {"value": "prod_warehouse"}},
+            },
+            {
+                "name": "schema",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"schema": {"value": "public"}},
+            },
+        ],
         "responses": {
             "200": {
                 "content": {
@@ -335,7 +427,14 @@ def datasets(domain_id: str, limit: int = 200, cursor: str | None = None) -> Dat
         }
     },
 )
-def dimensions() -> DimensionsResponse:
+def dimensions(database: str | None = None, schema: str | None = None, connection_id: str | None = None) -> DimensionsResponse:
+    if connection_id:
+        scopes = resolve_connection_scope(settings, connection_id)
+        if not scopes:
+            raise HTTPException(status_code=404, detail="Unknown connection_id")
+        if not database and not schema and scopes:
+            database = scopes[0].get("database_name")
+            schema = scopes[0].get("schema_name")
     payload = [
         {
             "name": dim.name,
@@ -345,6 +444,22 @@ def dimensions() -> DimensionsResponse:
         }
         for dim in catalog.dimensions.values()
     ]
+    if schema or database:
+        schema_map = _model_schema_map()
+        database_map = _model_database_map()
+        filtered = []
+        for item in payload:
+            match = re.search(r"\{\{\s*ref\('(?P<name>[^']+)'\)\s*\}\}", item["sql"])
+            if not match:
+                filtered.append(item)
+                continue
+            model_name = match.group("name")
+            if schema and schema_map.get(model_name) != schema:
+                continue
+            if database and database_map.get(model_name) != database:
+                continue
+            filtered.append(item)
+        payload = filtered
     return DimensionsResponse(dimensions=payload)
 
 
@@ -1726,9 +1841,30 @@ def update_hierarchy(
     response_model=SchemaResponse,
     tags=["explore"],
     summary="List dbt models",
-    description="Return models and columns from dbt manifest.json.",
+    description="Return models and columns from dbt manifest.json, scoped by optional database/schema filters.",
     openapi_extra={
         "parameters": [
+            {
+                "name": "connection_id",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"connection_id": {"value": "conn_prod"}},
+            },
+            {
+                "name": "database",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"database": {"value": "prod_warehouse"}},
+            },
+            {
+                "name": "schema",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"schema": {"value": "public"}},
+            },
             {
                 "name": "limit",
                 "in": "query",
@@ -1771,8 +1907,25 @@ def update_hierarchy(
         }
     },
 )
-def schema(limit: int = 200, cursor: str | None = None) -> SchemaResponse:
+def schema(
+    connection_id: str | None = None,
+    database: str | None = None,
+    schema: str | None = None,
+    limit: int = 200,
+    cursor: str | None = None,
+) -> SchemaResponse:
+    if connection_id:
+        scopes = resolve_connection_scope(settings, connection_id)
+        if not scopes:
+            raise HTTPException(status_code=404, detail="Unknown connection_id")
+        if not database and not schema and scopes:
+            database = scopes[0].get("database_name")
+            schema = scopes[0].get("schema_name")
     models = load_manifest_models(settings.dbt_manifest_path)
+    if database:
+        models = [model for model in models if model.get("database") == database]
+    if schema:
+        models = [model for model in models if model.get("schema") == schema]
     page, next_cursor = _paginate_list(models, cursor, limit, key_fn=lambda item: item["name"])
     return SchemaResponse(models=page, limit=limit, cursor=cursor, next_cursor=next_cursor)
 
@@ -1830,26 +1983,40 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
     "/onboard/scan-connection",
     response_model=OnboardScanConnectionResponse,
     tags=["onboard"],
-    summary="Scan provided connection",
-    description="Scan tables and columns using customer-provided connection details (sample_rows capped at 100).",
+    summary="Scan provided connections",
+    description="Scan tables and columns for multiple connections (sample_rows capped at 100).",
     openapi_extra={
         "requestBody": {
             "content": {
                 "application/json": {
                     "examples": {
-                        "scan_connection": {
-                            "summary": "Scan connection",
+                        "scan_connections": {
+                            "summary": "Scan multiple connections",
                             "value": {
-                                "db_type": "postgres",
-                                "host": "db.company.com",
-                                "port": 5432,
-                                "database": "prod_warehouse",
-                                "user": "readonly_user",
-                                "password": "******",
-                                "schema": "public",
-                                "sample_rows": 100,
-                                "limit": 20,
-                                "cursor": None,
+                                "connections": [
+                                    {
+                                        "connection_id": "conn_prod",
+                                        "db_type": "postgres",
+                                        "host": "db.company.com",
+                                        "port": 5432,
+                                        "user": "readonly_user",
+                                        "password": "******",
+                                        "sample_rows": 100,
+                                        "databases": [
+                                            {
+                                                "name": "prod_warehouse",
+                                                "schemas": [
+                                                    {
+                                                        "name": "public",
+                                                        "tables": ["fact_production_daily"],
+                                                        "limit": 20,
+                                                        "cursor": None,
+                                                    }
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                ]
                             },
                         }
                     }
@@ -1864,37 +2031,38 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
                             "scan_result": {
                                 "summary": "Scan results",
                                 "value": {
-                                    "tables": [
+                                    "connections": [
                                         {
-                                            "table": "fact_production_daily",
-                                            "columns": [
+                                            "connection_id": "conn_prod",
+                                            "databases": [
                                                 {
-                                                    "name": "production_date",
-                                                    "data_type": "date",
-                                                    "null_frac": 0.0,
-                                                    "distinct": 365,
-                                                    "profile": {"min": "2024-01-01", "max": "2024-12-31"},
-                                                },
-                                                {
-                                                    "name": "plant_name",
-                                                    "data_type": "text",
-                                                    "null_frac": 0.0,
-                                                    "distinct": 42,
-                                                    "profile": {"sample_values": ["Plant A", "Plant B"]},
-                                                },
-                                                {
-                                                    "name": "output_tmt",
-                                                    "data_type": "numeric",
-                                                    "null_frac": 0.0,
-                                                    "distinct": -1,
-                                                    "profile": {"mean": 124.5, "min": 10.2, "max": 245.7},
-                                                },
+                                                    "name": "prod_warehouse",
+                                                    "schemas": [
+                                                        {
+                                                            "name": "public",
+                                                            "tables": [
+                                                                {
+                                                                    "table": "fact_production_daily",
+                                                                    "columns": [
+                                                                        {
+                                                                            "name": "production_date",
+                                                                            "data_type": "date",
+                                                                            "null_frac": 0.0,
+                                                                            "distinct": 365,
+                                                                            "profile": {"min": "2024-01-01", "max": "2024-12-31"},
+                                                                        }
+                                                                    ],
+                                                                }
+                                                            ],
+                                                            "limit": 20,
+                                                            "cursor": None,
+                                                            "next_cursor": "ZmFjdF9wcm9kdWN0aW9uX2RhaWx5",
+                                                        }
+                                                    ],
+                                                }
                                             ],
                                         }
-                                    ],
-                                    "limit": 20,
-                                    "cursor": None,
-                                    "next_cursor": "ZmFjdF9wcm9kdWN0aW9uX2RhaWx5",
+                                    ]
                                 },
                             }
                         }
@@ -1904,28 +2072,53 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
         },
     },
 )
-def onboard_scan_connection(request: OnboardScanConnectionRequest) -> OnboardScanConnectionResponse:
-    cursor_value = _decode_cursor(request.cursor) if request.cursor else None
-    tables, next_cursor = scan_connection(
-        db_type=request.db_type,
-        host=request.host,
-        port=request.port,
-        database=request.database,
-        user=request.user,
-        password=request.password,
-        schema=request.schema,
-        tables=request.tables,
-        limit=request.limit,
-        sample_rows=request.sample_rows,
-        cursor_value=cursor_value,
+def onboard_scan_connection(request: OnboardScanMultiConnectionRequest) -> OnboardScanConnectionResponse:
+    connections_payload = []
+    for connection in request.connections:
+        databases_payload = []
+        scopes: list[tuple[str, str]] = []
+        for database in connection.databases:
+            schemas_payload = []
+            for schema in database.schemas:
+                cursor_value = _decode_cursor(schema.cursor) if schema.cursor else None
+                tables, next_cursor = scan_connection(
+                    db_type=connection.db_type,
+                    host=connection.host,
+                    port=connection.port,
+                    database=database.name,
+                    user=connection.user,
+                    password=connection.password,
+                    schema=schema.name,
+                    tables=schema.tables,
+                    limit=schema.limit,
+                    sample_rows=connection.sample_rows,
+                    cursor_value=cursor_value,
+                )
+                schemas_payload.append(
+                    {
+                        "name": schema.name,
+                        "tables": tables,
+                        "limit": schema.limit,
+                        "cursor": schema.cursor,
+                        "next_cursor": _encode_cursor(next_cursor) if next_cursor else None,
+                    }
+                )
+                scopes.append((database.name, schema.name))
+            databases_payload.append({"name": database.name, "schemas": schemas_payload})
+        connections_payload.append(
+            {"connection_id": connection.connection_id, "databases": databases_payload}
+        )
+        register_connection(settings, connection.connection_id)
+        if scopes:
+            register_connection_scopes(settings, connection.connection_id, scopes)
+
+    persist_schema_scan(
+        settings,
+        request.model_dump(),
+        {"connections": connections_payload},
     )
-    encoded_next = _encode_cursor(next_cursor) if next_cursor else None
-    return OnboardScanConnectionResponse(
-        tables=tables,
-        limit=request.limit,
-        cursor=request.cursor,
-        next_cursor=encoded_next,
-    )
+
+    return OnboardScanConnectionResponse(connections=connections_payload)
 
 
 def _merge_entity_candidates(
@@ -1986,7 +2179,13 @@ def onboard_map(
     domain_id: str,
     use_llm: bool = False,
 ) -> OnboardMapResponse:
-    tables = scan_schema(settings, request.schema)
+    schemas = request.schemas or ([request.schema] if request.schema else [settings.db_schema])
+    tables = []
+    for schema_name in schemas:
+        schema_tables = scan_schema(settings, schema_name)
+        if request.tables:
+            schema_tables = [table for table in schema_tables if table.get("table") in request.tables]
+        tables.extend(schema_tables)
     ontology = load_pack(f"packs/{domain_id}").get("ontology", {})
     rule_candidates = map_entities(tables, ontology)
     llm_candidates: list[dict] = []
@@ -2158,9 +2357,13 @@ def _merge_models(rule_facts: list[dict], rule_dims: list[dict], llm_payload: di
     },
 )
 def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> InferModelsResponse:
-    tables = scan_schema(settings, request.schema)
-    if request.tables:
-        tables = [table for table in tables if table.get("table") in request.tables]
+    schemas = request.schemas or [request.schema]
+    tables = []
+    for schema_name in schemas:
+        schema_tables = scan_schema(settings, schema_name)
+        if request.tables:
+            schema_tables = [table for table in schema_tables if table.get("table") in request.tables]
+        tables.extend(schema_tables)
     facts, dims = _infer_models_from_scan(tables, request.time_column, request.grain)
     if request.use_llm:
         try:
@@ -2256,7 +2459,13 @@ def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> I
     },
 )
 def suggested_metrics(request: OnboardScanRequest, domain_id: str, persist: bool = False) -> SuggestedMetricsResponse:
-    tables = scan_schema(settings, request.schema)
+    schemas = request.schemas or ([request.schema] if request.schema else [settings.db_schema])
+    tables = []
+    for schema_name in schemas:
+        schema_tables = scan_schema(settings, schema_name)
+        if request.tables:
+            schema_tables = [table for table in schema_tables if table.get("table") in request.tables]
+        tables.extend(schema_tables)
     measures = detect_measures(tables)
     low_confidence_measures = [
         measure

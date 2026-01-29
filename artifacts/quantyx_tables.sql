@@ -163,6 +163,42 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_timeseries_cache_dimension
   ON public.quantyx_timeseries_cache (dimension_hash);
 
 
+CREATE TABLE IF NOT EXISTS public.quantyx_schema_scans (
+  scan_id TEXT PRIMARY KEY,
+  tenant_id TEXT,
+  domain_id TEXT,
+  requested_by TEXT,
+  status TEXT NOT NULL DEFAULT 'completed',
+  request_payload JSONB NOT NULL,
+  result_payload JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_schema_scans_domain_time
+  ON public.quantyx_schema_scans (domain_id, created_at DESC);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_connection_registry (
+  connection_id TEXT PRIMARY KEY,
+  tenant_id TEXT,
+  domain_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_connection_registry_domain
+  ON public.quantyx_connection_registry (domain_id);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_connection_scopes (
+  connection_id TEXT NOT NULL REFERENCES public.quantyx_connection_registry(connection_id),
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  PRIMARY KEY (connection_id, database_name, schema_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_connection_scopes_db
+  ON public.quantyx_connection_scopes (database_name, schema_name);
+
+
 CREATE TABLE IF NOT EXISTS public.quantyx_metrics_registry (
   metric_id TEXT PRIMARY KEY,
   metric_name TEXT,
