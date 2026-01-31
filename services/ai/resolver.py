@@ -12,6 +12,7 @@ def resolve_question(
     catalog: MetricCatalog,
     settings: Settings,
     allowed_metrics: list[str] | None = None,
+    glossary: list[dict] | None = None,
 ) -> dict:
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY is not set")
@@ -27,6 +28,7 @@ def resolve_question(
         "question": question,
         "metrics": allowed_metrics or catalog.metric_names(),
         "dimensions": catalog.dimension_names(),
+        "glossary": glossary or [],
         "filter_format": {"field": "dimension_name", "operator": "=|!=|>|>=|<|<=|IN|ILIKE", "value": "..."},
     }
 

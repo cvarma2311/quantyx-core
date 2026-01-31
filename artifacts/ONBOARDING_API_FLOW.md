@@ -57,37 +57,7 @@ Expected outcome:
 
 ---
 
-## 2) Scan the customer schema (understand what tables exist)
-
-POST /onboard/scan
-
-Purpose: read source schema and column profiles.
-
-Request:
-```json
-{ "schema": "public" }
-```
-
-Response (example):
-```json
-{
-  "tables": [
-    {
-      "table": "fact_production_daily",
-      "columns": [
-        { "name": "output_tmt", "data_type": "numeric", "null_frac": 0.0 }
-      ]
-    }
-  ]
-}
-```
-
-Expected outcome:
-- We understand what raw tables and columns exist for production output, plants, and product dimensions.
-
----
-
-## 3) Scan via connection (customer-provided credentials)
+## 2) Scan via connection (customer-provided credentials)
 
 POST /onboard/scan-connection
 
@@ -131,7 +101,113 @@ Note:
 
 ---
 
-## 4) Auto-detect metrics + entities (seed suggestions for faster onboarding)
+## 3) Ingest business context (glossary, abbreviations, hierarchies, questions)
+
+POST /context/ingest (text)
+
+Purpose: store business context text provided by the customer (tables/columns, abbreviations, synonyms, hierarchies, sample questions).
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "source_type": "business_context",
+  "source_title": "Operations glossary and hierarchy notes",
+  "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
+  "metadata": {
+    "connection_id": "conn_prod",
+    "database": "prod_warehouse",
+    "schema": "public",
+    "tables": ["fact_production_daily", "dim_plant"],
+    "columns": ["plant_name", "region_name"]
+  }
+}
+```
+
+Response (example):
+```json
+{ "context_id": "ctx_123", "status": "submitted" }
+```
+
+Or upload a file (.txt or .docx):
+
+POST /context/ingest-file (multipart/form-data)
+
+Form fields:
+- `tenant_id`, `domain_id`, `source_type`, `source_title`
+- `metadata` (JSON string)
+- `file` (text file)
+
+Expected outcome:
+- We persist all business context text for LLM-based extraction and review.
+
+---
+
+## 4) Extract structured context (LLM)
+
+POST /context/extract
+
+Purpose: extract abbreviations, synonyms, hierarchy candidates, metric candidates, and question intents.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "context_id": "ctx_123",
+  "extraction_types": ["abbreviations", "synonyms", "hierarchies", "metric_candidates", "question_intents"],
+  "model": "gpt-4o-mini"
+}
+```
+
+Response (example):
+```json
+{
+  "extraction_id": "ext_123",
+  "context_id": "ctx_123",
+  "extractions": {
+    "abbreviations": [{"abbr": "SBU", "definition": "Strategic Business Unit"}],
+    "synonyms": [{"term": "sales area", "synonyms": ["territory"]}],
+    "hierarchies": [{"name": "sales_org", "levels": ["zone", "region", "sales_area"]}],
+    "metric_candidates": [{"metric_name": "output_tmt", "table": "fact_production_daily"}],
+    "question_intents": [{"question": "Which plants are underperforming?", "metrics": ["output_tmt"]}]
+  }
+}
+```
+
+Expected outcome:
+- We convert raw context into structured data for reuse across ontology and metrics.
+
+---
+
+## 5) Apply extracted context (seed ontology + metrics)
+
+POST /context/apply
+
+Purpose: apply context extractions to glossary, entity overrides, hierarchy overrides, and metric suggestions.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "extraction_id": "ext_123",
+  "apply": { "entities": true, "hierarchies": true, "glossary": true, "metrics": true }
+}
+```
+
+Response (example):
+```json
+{ "status": "applied", "updated": { "entities": 4, "hierarchies": 1, "metrics": 8 } }
+```
+
+Expected outcome:
+- Ontology, hierarchies, and metric suggestions are enriched with customer context.
+
+---
+
+## 6) Auto-detect metrics + entities (seed suggestions for faster onboarding)
 
 POST /onboard/map?domain_id=manufacturing&use_llm=true
 
@@ -201,7 +277,7 @@ Expected outcome:
 
 ---
 
-## 5) Review + correct entities and hierarchies (match customer reality)
+## 7) Review + correct entities and hierarchies (match customer reality)
 
 GET /entities?domain_id=manufacturing&tenant_id=x_mfg
 
@@ -237,7 +313,7 @@ Request:
 
 ---
 
-## 6) Infer facts and dimensions (dbt-style model suggestions)
+## 8) Infer facts and dimensions (dbt-style model suggestions)
 
 POST /onboard/infer-models?domain_id=manufacturing
 
@@ -259,7 +335,7 @@ Expected outcome:
 
 ---
 
-## 7) Review + promote metrics (make them queryable and trusted)
+## 9) Review + promote metrics (make them queryable and trusted)
 
 PATCH /metrics/{metric_id}
 
@@ -299,7 +375,7 @@ Request:
 
 ---
 
-## 8) Apply the contracts (reload catalog so the app can use them)
+## 10) Apply the contracts (reload catalog so the app can use them)
 
 POST /contracts/apply
 
@@ -310,7 +386,7 @@ Expected outcome:
 
 ---
 
-## 9) Validate schema + explore (confirm the semantic layer is ready)
+## 11) Validate schema + explore (confirm the semantic layer is ready)
 
 GET /schema
 GET /metrics
@@ -323,7 +399,7 @@ Expected outcome:
 
 ---
 
-## 10) Ask a question (first live query to prove value)
+## 12) Ask a question (first live query to prove value)
 
 POST /query
 
@@ -341,7 +417,7 @@ Expected outcome:
 
 ---
 
-## 11) Governance hooks (show lineage and policies to build trust)
+## 13) Governance hooks (show lineage and policies to build trust)
 
 GET /policies?domain_id=manufacturing
 
@@ -369,7 +445,7 @@ Expected outcome:
 
 ---
 
-## 12) Insights + Actions (turn observations into action)
+## 14) Insights + Actions (turn observations into action)
 
 POST /insights/generate?domain_id=manufacturing
 
@@ -414,7 +490,7 @@ Request:
 
 ---
 
-## 13) Anomaly detection + time-series (see issues early and explain them)
+## 15) Anomaly detection + time-series (see issues early and explain them)
 
 POST /timeseries
 
@@ -445,7 +521,7 @@ Purpose: drill down into drivers and correlated metrics for the anomaly point.
 
 ---
 
-## 14) Scenarios (plan responses before taking action)
+## 16) Scenarios (plan responses before taking action)
 
 POST /scenarios  
 POST /scenarios/{scenario_id}/run  

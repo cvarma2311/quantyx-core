@@ -15,6 +15,9 @@ export DEMO_DB_USER=your_user
 export DEMO_DB_PASSWORD=your_password
 export DEMO_DB_SCHEMA=public
 export DEMO_TABLES=table_one,table_two
+export DEMO_CONTEXT_TEXT="SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area."
+# or use a file
+export DEMO_CONTEXT_FILE=./artifacts/demo_business_context.txt
 
 uvicorn services.api.main:app --reload --port 8787
 ```

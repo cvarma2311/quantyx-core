@@ -2,8 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.ai.glossary import enrich_ontology_with_glossary
 
-def map_entities(tables: list[dict[str, Any]], ontology: dict[str, Any]) -> list[dict[str, Any]]:
+
+def map_entities(
+    tables: list[dict[str, Any]],
+    ontology: dict[str, Any],
+    glossary: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    if glossary:
+        ontology = enrich_ontology_with_glossary(ontology, glossary)
     entity_types = ontology.get("entity_types", {}) if ontology else {}
     candidates = []
     for table in tables:

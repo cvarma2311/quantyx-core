@@ -12,6 +12,8 @@ API_BASE = os.getenv("QUANTYX_API_BASE", "http://127.0.0.1:8787")
 DOMAIN_ID = os.getenv("QUANTYX_DOMAIN", "manufacturing")
 TENANT_ID = os.getenv("QUANTYX_TENANT", "x_mfg")
 DEMO_TABLES = [t.strip() for t in os.getenv("DEMO_TABLES", "").split(",") if t.strip()]
+DEMO_CONTEXT_TEXT = os.getenv("DEMO_CONTEXT_TEXT", "")
+DEMO_CONTEXT_FILE = os.getenv("DEMO_CONTEXT_FILE", "")
 
 def _mask_payload(payload: dict | None) -> dict | None:
     if payload is None:
@@ -59,6 +61,7 @@ def main() -> int:
     print(f"DOMAIN_ID={DOMAIN_ID}")
     print(f"TENANT_ID={TENANT_ID}")
     print(f"DEMO_TABLES={DEMO_TABLES}")
+    print(f"DEMO_CONTEXT_FILE={DEMO_CONTEXT_FILE}")
     print("Log detail: verbose")
 
     if not DEMO_TABLES:
@@ -99,6 +102,68 @@ def main() -> int:
     _log_response(scan_response)
     print("Step 1 end")
 
+    # 1b) Optional business context
+    print("\n[1b] Business context ingestion")
+    context_text = DEMO_CONTEXT_TEXT
+    if DEMO_CONTEXT_FILE:
+        try:
+            with open(DEMO_CONTEXT_FILE, "r", encoding="utf-8") as handle:
+                context_text = handle.read()
+        except OSError as exc:
+            print(f"Failed to read DEMO_CONTEXT_FILE: {exc}")
+            return 1
+
+    if context_text:
+        context_payload = {
+            "tenant_id": TENANT_ID,
+            "domain_id": DOMAIN_ID,
+            "source_type": "business_context",
+            "source_title": "Demo business context",
+            "raw_text": context_text,
+            "metadata": {
+                "connection_id": "conn_demo",
+                "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
+                "schema": os.getenv("DEMO_DB_SCHEMA", "public"),
+                "tables": DEMO_TABLES,
+            },
+        }
+        _log_request("POST", "/context/ingest", context_payload)
+        context_response = _request("POST", "/context/ingest", context_payload)
+        _log_response(context_response)
+        context_id = context_response.get("context_id")
+
+        if context_id:
+            extract_payload = {
+                "tenant_id": TENANT_ID,
+                "domain_id": DOMAIN_ID,
+                "context_id": context_id,
+                "extraction_types": [
+                    "abbreviations",
+                    "synonyms",
+                    "hierarchies",
+                    "metric_candidates",
+                    "question_intents",
+                ],
+                "model": os.getenv("DEMO_CONTEXT_MODEL", ""),
+            }
+            _log_request("POST", "/context/extract", extract_payload)
+            extract_response = _request("POST", "/context/extract", extract_payload)
+            _log_response(extract_response)
+            extraction_id = extract_response.get("extraction_id")
+
+            if extraction_id:
+                apply_payload = {
+                    "tenant_id": TENANT_ID,
+                    "domain_id": DOMAIN_ID,
+                    "extraction_id": extraction_id,
+                    "apply": {"entities": True, "hierarchies": True, "glossary": True, "metrics": True},
+                }
+                _log_request("POST", "/context/apply", apply_payload)
+                apply_response = _request("POST", "/context/apply", apply_payload)
+                _log_response(apply_response)
+    else:
+        print("No DEMO_CONTEXT_TEXT/DEMO_CONTEXT_FILE provided; skipping context ingestion.")
+
     # Pull a schema/table set for downstream steps
     print("\n[1a] Extract schema/table list from scan")
     schemas = []
@@ -128,7 +193,7 @@ def main() -> int:
         "schemas": schemas or None,
         "tables": tables[:10] or None,
     }
-    map_path = f"/onboard/map?domain_id={DOMAIN_ID}&use_llm=false"
+    map_path = f"/onboard/map?domain_id={DOMAIN_ID}&tenant_id={TENANT_ID}&use_llm=false"
     _log_request("POST", map_path, map_payload)
     map_response = _request("POST", map_path, map_payload)
     _log_response(map_response)

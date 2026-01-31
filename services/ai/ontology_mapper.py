@@ -34,6 +34,7 @@ def llm_map_entities(
     settings: Settings,
     tables: list[dict[str, Any]],
     ontology: dict[str, Any],
+    glossary: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY is not set")
@@ -68,6 +69,7 @@ def llm_map_entities(
     user_prompt = {
         "entities": entities,
         "columns": columns,
+        "glossary": glossary or [],
         "confidence_guidance": "0.9+ for exact match, 0.7 for partial, <=0.6 if unsure",
     }
 

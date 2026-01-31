@@ -79,6 +79,118 @@ Response data:
 }
 ```
 
+### 1.3 POST /context/ingest
+Store customer-provided business context text for downstream enrichment.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "source_type": "business_context",
+  "source_title": "Operations glossary and hierarchy notes",
+  "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
+  "metadata": {
+    "connection_id": "conn_prod",
+    "database": "prod_warehouse",
+    "schema": "public",
+    "tables": ["fact_production_daily", "dim_plant"],
+    "columns": ["plant_name", "region_name"]
+  }
+}
+```
+
+Response:
+```json
+{ "context_id": "ctx_123", "status": "submitted" }
+```
+
+### 1.3b POST /context/ingest-file
+Upload a .txt or .docx file and persist its contents as business context.
+
+Request (multipart/form-data):
+```
+tenant_id=tenant_a
+domain_id=manufacturing
+source_type=business_context
+source_title=Operations glossary
+metadata={"connection_id":"conn_prod","database":"prod_warehouse","schema":"public"}
+file=@context.txt
+```
+
+Response:
+```json
+{ "context_id": "ctx_123", "status": "submitted" }
+```
+
+### 1.4 GET /context?tenant_id=...&domain_id=...&source_type=...&status=...
+List stored business context entries with cursor pagination.
+
+Response:
+```json
+{
+  "entries": [
+    {
+      "context_id": "ctx_123",
+      "source_type": "business_context",
+      "source_title": "Operations glossary",
+      "status": "submitted",
+      "created_at": "2025-02-14T10:00:00Z"
+    }
+  ],
+  "limit": 200,
+  "cursor": null,
+  "next_cursor": null
+}
+```
+
+### 1.5 POST /context/extract
+Use LLMs to extract abbreviations, synonyms, hierarchies, metric candidates, and question intents.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "context_id": "ctx_123",
+  "extraction_types": ["abbreviations", "synonyms", "hierarchies", "metric_candidates", "question_intents"],
+  "model": "gpt-4o-mini"
+}
+```
+
+Response:
+```json
+{
+  "extraction_id": "ext_123",
+  "context_id": "ctx_123",
+  "extractions": {
+    "abbreviations": [{"abbr": "SBU", "definition": "Strategic Business Unit"}],
+    "synonyms": [{"term": "sales area", "synonyms": ["territory"]}],
+    "hierarchies": [{"name": "sales_org", "levels": ["zone", "region", "sales_area"]}],
+    "metric_candidates": [{"metric_name": "output_tmt", "table": "fact_production_daily"}],
+    "question_intents": [{"question": "Which plants are underperforming?", "metrics": ["output_tmt"]}]
+  }
+}
+```
+
+### 1.6 POST /context/apply
+Apply extracted context to glossary, entity overrides, hierarchy overrides, and metric suggestions.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "extraction_id": "ext_123",
+  "apply": { "entities": true, "hierarchies": true, "glossary": true, "metrics": true }
+}
+```
+
+Response:
+```json
+{ "status": "applied", "updated": { "entities": 4, "hierarchies": 1, "metrics": 8 } }
+```
+
 ---
 
 ## 2) Explore APIs
@@ -258,56 +370,7 @@ Response:
 
 These endpoints make onboarding generic across industries.
 
-### 3.1 POST /onboard/scan
-Inspect source schema and return detected columns and profiles.
-
-Request:
-```json
-{ "schema": "public" }
-```
-
-Response:
-```json
-{
-  "tables": [
-    {
-      "table": "fact_hpcl_sales_daily",
-      "columns": [
-        { "name": "sales_tmt", "data_type": "numeric", "null_frac": 0.0 }
-      ]
-    }
-  ]
-}
-```
-
-### 3.2 POST /onboard/map?domain_id=...&use_llm=...
-Suggest ontology mappings from schema columns to the selected domain pack.
-
-Request:
-```json
-{ "schema": "public" }
-```
-
-Response:
-```json
-{
-  "candidates": [
-    {
-      "table": "fact_production_daily",
-      "column": "plant_name",
-      "mapped_entity_type": "facility",
-      "confidence": 0.7
-    }
-  ],
-  "low_confidence_candidates": [],
-  "low_confidence_threshold": 0.7
-}
-```
-
-Notes:
-- Set `use_llm=true` to include LLM-assisted suggestions when `OPENAI_API_KEY` is configured.
-
-### 3.3 POST /onboard/scan-connection
+### 3.1 POST /onboard/scan-connection
 Scan multiple user-provided connections and return schema profiles with cursor pagination.
 
 Request:
@@ -377,7 +440,129 @@ Notes:
 - Currently supported for `db_type=postgres`.
 - `sample_rows` is capped at 100 for safety.
 
-### 3.4 POST /onboard/infer-models?domain_id=...
+### 3.2 POST /context/ingest
+Store customer-provided business context (glossary, abbreviations, table/column notes, hierarchies, and example questions).
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "source_type": "business_context",
+  "source_title": "Operations glossary and hierarchy notes",
+  "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
+  "metadata": {
+    "connection_id": "conn_prod",
+    "database": "prod_warehouse",
+    "schema": "public",
+    "tables": ["fact_production_daily", "dim_plant"],
+    "columns": ["plant_name", "region_name"]
+  }
+}
+```
+
+Response:
+```json
+{ "context_id": "ctx_123", "status": "submitted" }
+```
+
+### 3.3 POST /context/extract
+Use LLMs to extract abbreviations, synonyms, hierarchy candidates, metric candidates, and question intents.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "context_id": "ctx_123",
+  "extraction_types": ["abbreviations", "synonyms", "hierarchies", "metric_candidates", "question_intents"],
+  "model": "gpt-4o-mini"
+}
+```
+
+Response:
+```json
+{
+  "extraction_id": "ext_123",
+  "context_id": "ctx_123",
+  "extractions": {
+    "abbreviations": [{"abbr": "SBU", "definition": "Strategic Business Unit"}],
+    "synonyms": [{"term": "sales area", "synonyms": ["territory"]}],
+    "hierarchies": [{"name": "sales_org", "levels": ["zone", "region", "sales_area"]}],
+    "metric_candidates": [{"metric_name": "output_tmt", "table": "fact_production_daily"}],
+    "question_intents": [{"question": "Which plants are underperforming?", "metrics": ["output_tmt"]}]
+  }
+}
+```
+
+### 3.4 POST /context/apply
+Apply extracted context to glossary, entity overrides, hierarchy overrides, and metric suggestions.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "extraction_id": "ext_123",
+  "apply": { "entities": true, "hierarchies": true, "glossary": true, "metrics": true }
+}
+```
+
+Response:
+```json
+{ "status": "applied", "updated": { "entities": 4, "hierarchies": 1, "metrics": 8 } }
+```
+
+### 3.5 POST /onboard/scan
+Inspect source schema and return detected columns and profiles.
+
+Request:
+```json
+{ "schema": "public" }
+```
+
+Response:
+```json
+{
+  "tables": [
+    {
+      "table": "fact_hpcl_sales_daily",
+      "columns": [
+        { "name": "sales_tmt", "data_type": "numeric", "null_frac": 0.0 }
+      ]
+    }
+  ]
+}
+```
+
+### 3.6 POST /onboard/map?domain_id=...&tenant_id=...&use_llm=...
+Suggest ontology mappings from schema columns to the selected domain pack.
+
+Request:
+```json
+{ "schema": "public" }
+```
+
+Response:
+```json
+{
+  "candidates": [
+    {
+      "table": "fact_production_daily",
+      "column": "plant_name",
+      "mapped_entity_type": "facility",
+      "confidence": 0.7
+    }
+  ],
+  "low_confidence_candidates": [],
+  "low_confidence_threshold": 0.7
+}
+```
+
+Notes:
+- Set `use_llm=true` to include LLM-assisted suggestions when `OPENAI_API_KEY` is configured.
+
+### 3.7 POST /onboard/infer-models?domain_id=...
 Infer candidate dbt facts and dimensions from schema scan + ontology.
 
 Request:
@@ -414,7 +599,7 @@ Response:
 }
 ```
 
-### 3.5 POST /metrics/suggested?domain_id=...&persist=true
+### 3.8 POST /metrics/suggested?domain_id=...&persist=true
 Return auto-generated metrics (status = suggested), including a low-confidence bucket.
 
 Request:
@@ -422,7 +607,7 @@ Request:
 { "schema": "public" }
 ```
 
-### 3.6 Metric lifecycle flow (seed → review → promote)
+### 3.9 Metric lifecycle flow (seed → review → promote)
 Use the registry APIs to turn auto-suggested metrics into certified metrics without code changes.
 
 Step 1: Seed suggestions into the registry
@@ -501,6 +686,8 @@ Request:
 ```json
 {
   "question": "Top 5 sales areas by sales volume for MS in Q2 FY 2024-2025.",
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
   "limit": 100,
   "explain": true
 }
@@ -534,6 +721,22 @@ Response:
     {
       "policy_id": "sbu_exclusion",
       "description": "Exclude SBU values not relevant for this tenant"
+    }
+  ]
+}
+```
+
+### 5.2 GET /governance/lineage?metric_name=...
+Return metric lineage (metric → dataset → dbt model).
+
+Response:
+```json
+{
+  "lineage": [
+    {
+      "metric_name": "total_sales_volume_tmt",
+      "dataset": "fact_hpcl_sales_daily",
+      "dbt_model": "fact_hpcl_sales_daily"
     }
   ]
 }
@@ -873,94 +1076,6 @@ Response:
   "delta": 12.3
 }
 ```
-### 5.2 GET /governance/lineage?metric_name=...
-Return metric lineage (metric → dataset → dbt model).
-
-Response:
-```json
-{
-  "lineage": [
-    {
-      "metric_name": "total_sales_volume_tmt",
-      "dataset": "fact_hpcl_sales_daily",
-      "dbt_model": "fact_hpcl_sales_daily"
-    }
-  ]
-}
-```
-
-Notes:
-- `query_id` is used to fetch details, evidence, and audit later.
-- `result` can be table or timeseries (see types below).
-
-### 3.2 POST /query/explain
-Returns the structured interpretation + query plan + (optional) SQL.
-
-### 3.3 POST /query/followups
-Given a query (or context), propose next best questions.
-
----
-
-## 4) Explore APIs (Datasets / Metrics / Entities)
-
-### 4.1 GET /datasets?domain_id=...
-
-### 4.2 GET /metrics?domain_id=...&dataset_id=...
-
-Metrics include:
-- `status`: suggested | draft | certified | deprecated
-- `owner`, `version`, `deprecated`
-
-### 4.3 GET /entities?domain_id=...
-
----
-
-## 5) Insights APIs (Proactive Feed)
-
-### 5.1 GET /insights?domain_id=...&scenario_id=...&time_range=...
-
-### 5.2 GET /insights/{insight_id}
-
----
-
-## 6) Scenarios APIs (Planning)
-
-### 6.1 POST /scenarios
-
-### 6.2 POST /scenarios/{scenario_id}/run
-
-### 6.3 POST /scenarios/compare
-
----
-
-## 7) Decisions / Actions APIs (Action Loop)
-
-### 7.1 GET /actions?domain_id=...&status=open
-
-### 7.2 POST /actions/{action_id}/assign
-
-### 7.3 POST /actions/{action_id}/feedback
-
----
-
-## 8) Data and Semantics APIs (Admin)
-
-### 8.1 GET/POST /datasources
-
-### 8.2 POST /contracts/validate
-
-### 8.3 POST /contracts/apply
-
----
-
-## 9) Governance APIs (Lineage, Audit, Policies)
-
-### 9.1 GET /governance/lineage?metric_id=...
-
-### 9.2 GET /governance/audit?cursor=...
-
-### 9.3 GET /policies?domain_id=...
-
 ---
 
 ## Appendix A - Shared Types

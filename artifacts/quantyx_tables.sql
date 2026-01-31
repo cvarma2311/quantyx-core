@@ -263,3 +263,61 @@ CREATE TABLE IF NOT EXISTS public.quantyx_hierarchy_overrides (
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_hierarchy_overrides_domain
   ON public.quantyx_hierarchy_overrides (tenant_id, domain_id);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_business_context (
+  context_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NULL,
+  database_name TEXT NULL,
+  schema_name TEXT NULL,
+  source_type TEXT NOT NULL,
+  source_title TEXT NULL,
+  raw_text TEXT NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL DEFAULT 'submitted',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_business_context_tenant
+  ON public.quantyx_business_context (tenant_id, domain_id, source_type, status);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_business_context_conn
+  ON public.quantyx_business_context (connection_id, database_name, schema_name);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_context_extractions (
+  extraction_id TEXT PRIMARY KEY,
+  context_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  extraction_type TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  llm_model TEXT NULL,
+  confidence NUMERIC NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (context_id) REFERENCES public.quantyx_business_context(context_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_context_extractions_tenant
+  ON public.quantyx_context_extractions (tenant_id, domain_id, extraction_type);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_glossary_terms (
+  term_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  term TEXT NOT NULL,
+  normalized_term TEXT NOT NULL,
+  definition TEXT NULL,
+  synonyms JSONB NOT NULL DEFAULT '[]'::jsonb,
+  abbreviations JSONB NOT NULL DEFAULT '[]'::jsonb,
+  source_context_id TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_glossary_terms_lookup
+  ON public.quantyx_glossary_terms (tenant_id, domain_id, normalized_term);

@@ -22,6 +22,16 @@ class QueryRequest(BaseModel):
         description="Natural language question",
         examples=["Top 5 sales areas by sales volume for MS in Q2 FY 2024-2025."],
     )
+    tenant_id: Optional[str] = Field(
+        None,
+        description="Tenant identifier for glossary/context enrichment",
+        examples=["tenant_a"],
+    )
+    domain_id: Optional[str] = Field(
+        None,
+        description="Domain identifier for glossary/context enrichment",
+        examples=["manufacturing"],
+    )
     metric: Optional[str] = Field(
         None,
         description="Metric name to query directly",
@@ -48,6 +58,8 @@ class QueryRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "question": "Top 5 sales areas by sales volume for MS in Q2 FY 2024-2025.",
+                "tenant_id": "tenant_a",
+                "domain_id": "manufacturing",
                 "limit": 100,
                 "explain": True,
             }
@@ -765,6 +777,158 @@ class OnboardMapResponse(BaseModel):
                 "low_confidence_candidates": [],
                 "low_confidence_threshold": 0.7,
             }
+        }
+    }
+
+
+class ContextIngestRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    source_type: str = Field(..., examples=["business_context"])
+    source_title: str | None = Field(None, examples=["Operations glossary and hierarchy notes"])
+    raw_text: str = Field(..., examples=["SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area."])
+    metadata: dict | None = Field(
+        default=None,
+        examples=[
+            {
+                "connection_id": "conn_prod",
+                "database": "prod_warehouse",
+                "schema": "public",
+                "tables": ["fact_production_daily", "dim_plant"],
+                "columns": ["plant_name", "region_name"],
+            }
+        ],
+    )
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "tenant_a",
+                "domain_id": "manufacturing",
+                "source_type": "business_context",
+                "source_title": "Operations glossary and hierarchy notes",
+                "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area.",
+                "metadata": {
+                    "connection_id": "conn_prod",
+                    "database": "prod_warehouse",
+                    "schema": "public",
+                    "tables": ["fact_production_daily", "dim_plant"],
+                    "columns": ["plant_name", "region_name"],
+                },
+            }
+        }
+    }
+
+
+class ContextIngestResponse(BaseModel):
+    context_id: str = Field(..., examples=["ctx_123"])
+    status: str = Field(..., examples=["submitted"])
+    model_config = {
+        "json_schema_extra": {"example": {"context_id": "ctx_123", "status": "submitted"}}
+    }
+
+
+class ContextListResponse(BaseModel):
+    entries: List[dict]
+    limit: int = Field(200, examples=[200])
+    cursor: str | None = Field(None, examples=["MjAyNS0wMS0wMVQwMDowMDowMFo="])
+    next_cursor: str | None = Field(None, examples=["MjAyNS0wMS0wMVQwMDowMDowMFo="])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "entries": [
+                    {
+                        "context_id": "ctx_123",
+                        "source_type": "business_context",
+                        "source_title": "Operations glossary",
+                        "status": "submitted",
+                        "created_at": "2025-02-14T10:00:00Z",
+                    }
+                ],
+                "limit": 200,
+                "cursor": None,
+                "next_cursor": None,
+            }
+        }
+    }
+
+
+class ContextExtractRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    context_id: str = Field(..., examples=["ctx_123"])
+    extraction_types: List[str] = Field(
+        default_factory=list,
+        examples=[["abbreviations", "synonyms", "hierarchies", "metric_candidates", "question_intents"]],
+    )
+    model: str | None = Field(None, examples=["gpt-4o-mini"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "tenant_a",
+                "domain_id": "manufacturing",
+                "context_id": "ctx_123",
+                "extraction_types": [
+                    "abbreviations",
+                    "synonyms",
+                    "hierarchies",
+                    "metric_candidates",
+                    "question_intents",
+                ],
+                "model": "gpt-4o-mini",
+            }
+        }
+    }
+
+
+class ContextExtractResponse(BaseModel):
+    extraction_id: str = Field(..., examples=["ext_123"])
+    context_id: str = Field(..., examples=["ctx_123"])
+    extractions: dict
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "extraction_id": "ext_123",
+                "context_id": "ctx_123",
+                "extractions": {
+                    "abbreviations": [{"abbr": "SBU", "definition": "Strategic Business Unit"}],
+                    "synonyms": [{"term": "sales area", "synonyms": ["territory"]}],
+                    "hierarchies": [{"name": "sales_org", "levels": ["zone", "region", "sales_area"]}],
+                    "metric_candidates": [{"metric_name": "output_tmt", "table": "fact_production_daily"}],
+                    "question_intents": [
+                        {"question": "Which plants are underperforming?", "metrics": ["output_tmt"]}
+                    ],
+                },
+            }
+        }
+    }
+
+
+class ContextApplyRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    extraction_id: str = Field(..., examples=["ext_123"])
+    apply: dict = Field(
+        default_factory=dict,
+        examples=[{"entities": True, "hierarchies": True, "glossary": True, "metrics": True}],
+    )
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "tenant_a",
+                "domain_id": "manufacturing",
+                "extraction_id": "ext_123",
+                "apply": {"entities": True, "hierarchies": True, "glossary": True, "metrics": True},
+            }
+        }
+    }
+
+
+class ContextApplyResponse(BaseModel):
+    status: str = Field(..., examples=["applied"])
+    updated: dict = Field(default_factory=dict)
+    model_config = {
+        "json_schema_extra": {
+            "example": {"status": "applied", "updated": {"entities": 4, "hierarchies": 1, "metrics": 8}}
         }
     }
 

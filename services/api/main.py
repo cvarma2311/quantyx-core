@@ -3,13 +3,16 @@ from __future__ import annotations
 from typing import Callable, List, TypeVar
 
 import base64
+import io
 import logging
 import time
 import re
 import uuid
+import zipfile
+import xml.etree.ElementTree as ElementTree
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 
 from services.ai.catalog import load_catalog_with_registry, resolve_ref
 from services.ai.config import load_settings
@@ -53,6 +56,17 @@ from services.ai.onboarding.entity_mapping import map_entities
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
 from services.ai.onboarding.model_inference_llm import llm_infer_models
+from services.ai.context_store import (
+    create_context,
+    get_context,
+    get_extraction,
+    list_context,
+    mark_context_processed,
+    persist_extraction,
+)
+from services.ai.context_extraction import extract_context
+from services.ai.context_apply import apply_extractions
+from services.ai.glossary import fetch_glossary_terms
 from services.ai.sql_builder import Filter, build_query
 from services.api.schemas import (
     EntitiesResponse,
@@ -68,6 +82,13 @@ from services.api.schemas import (
     OnboardScanRequest,
     OnboardScanResponse,
     OnboardMapResponse,
+    ContextIngestRequest,
+    ContextIngestResponse,
+    ContextListResponse,
+    ContextExtractRequest,
+    ContextExtractResponse,
+    ContextApplyRequest,
+    ContextApplyResponse,
     OnboardScanConnectionResponse,
     OnboardScanMultiConnectionRequest,
     InferModelsRequest,
@@ -1602,6 +1623,378 @@ def domains() -> dict:
     return {"domains": [{"domain_id": name, "display_name": name} for name in packs]}
 
 
+@app.post(
+    "/context/ingest",
+    response_model=ContextIngestResponse,
+    tags=["context"],
+    summary="Ingest business context",
+    description="Persist customer-provided business context text for ontology, hierarchy, and metric enrichment.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "business_context": {
+                            "summary": "Glossary and hierarchy notes",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "domain_id": "manufacturing",
+                                "source_type": "business_context",
+                                "source_title": "Operations glossary and hierarchy notes",
+                                "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
+                                "metadata": {
+                                    "connection_id": "conn_prod",
+                                    "database": "prod_warehouse",
+                                    "schema": "public",
+                                    "tables": ["fact_production_daily", "dim_plant"],
+                                    "columns": ["plant_name", "region_name"],
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "submitted": {
+                                "summary": "Context stored",
+                                "value": {"context_id": "ctx_123", "status": "submitted"},
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
+    context_id = create_context(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=payload.domain_id,
+        source_type=payload.source_type,
+        source_title=payload.source_title,
+        raw_text=payload.raw_text,
+        metadata=payload.metadata,
+    )
+    return ContextIngestResponse(context_id=context_id, status="submitted")
+
+
+@app.post(
+    "/context/ingest-file",
+    response_model=ContextIngestResponse,
+    tags=["context"],
+    summary="Ingest business context file",
+    description="Upload a text file and persist its contents as business context.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "multipart/form-data": {
+                    "examples": {
+                        "upload_context": {
+                            "summary": "Upload business context (.txt or .docx)",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "domain_id": "manufacturing",
+                                "source_type": "business_context",
+                                "source_title": "Operations glossary",
+                                "metadata": "{\"connection_id\":\"conn_prod\",\"database\":\"prod_warehouse\",\"schema\":\"public\"}",
+                                "file": "@context.txt",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def ingest_context_file(
+    tenant_id: str = Form(...),
+    domain_id: str = Form(...),
+    source_type: str = Form(...),
+    source_title: str | None = Form(None),
+    metadata: str | None = Form(None),
+    file: UploadFile = File(...),
+) -> ContextIngestResponse:
+    filename = (file.filename or "").lower()
+    if filename.endswith(".doc"):
+        raise HTTPException(status_code=400, detail="Unsupported file type: .doc")
+    if not (filename.endswith(".txt") or filename.endswith(".docx")):
+        raise HTTPException(status_code=400, detail="Unsupported file type: use .txt or .docx")
+    try:
+        raw_bytes = file.file.read()
+    finally:
+        file.file.close()
+    if filename.endswith(".docx"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as docx:
+                xml_data = docx.read("word/document.xml")
+            root = ElementTree.fromstring(xml_data)
+            text_nodes = [node.text for node in root.iter() if node.tag.endswith("}t") and node.text]
+            raw_text = "\n".join(text_nodes).strip()
+        except (KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid .docx file") from exc
+    else:
+        raw_text = raw_bytes.decode("utf-8", errors="replace")
+    parsed_metadata = None
+    if metadata:
+        try:
+            parsed_metadata = json.loads(metadata)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="metadata must be valid JSON") from exc
+    context_id = create_context(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        source_type=source_type,
+        source_title=source_title,
+        raw_text=raw_text,
+        metadata=parsed_metadata,
+    )
+    return ContextIngestResponse(context_id=context_id, status="submitted")
+
+
+@app.get(
+    "/context",
+    response_model=ContextListResponse,
+    tags=["context"],
+    summary="List business context entries",
+    description="List stored business context entries with cursor pagination.",
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "tenant_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"tenant_a": {"value": "tenant_a"}},
+            },
+            {
+                "name": "domain_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"manufacturing": {"value": "manufacturing"}},
+            },
+            {
+                "name": "source_type",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"business_context": {"value": "business_context"}},
+            },
+            {
+                "name": "status",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"submitted": {"value": "submitted"}},
+            },
+            {
+                "name": "limit",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer"},
+                "examples": {"limit": {"value": 200}},
+            },
+            {
+                "name": "cursor",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"cursor": {"value": "MjAyNS0wMS0wMVQwMDowMDowMFo="}},
+            },
+        ]
+    },
+)
+def list_context_entries(
+    tenant_id: str,
+    domain_id: str,
+    source_type: str | None = None,
+    status: str | None = None,
+    limit: int = 200,
+    cursor: str | None = None,
+) -> ContextListResponse:
+    decoded_cursor = _decode_cursor(cursor) if cursor else None
+    entries, next_cursor = list_context(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        source_type=source_type,
+        status=status,
+        limit=limit,
+        cursor=decoded_cursor,
+    )
+    encoded_next = _encode_cursor(next_cursor) if next_cursor else None
+    return ContextListResponse(entries=entries, limit=limit, cursor=cursor, next_cursor=encoded_next)
+
+
+@app.post(
+    "/context/extract",
+    response_model=ContextExtractResponse,
+    tags=["context"],
+    summary="Extract structured context",
+    description="Run LLM-assisted extraction to derive abbreviations, synonyms, hierarchies, and metric candidates.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "extract_context": {
+                            "summary": "Extract from stored context",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "domain_id": "manufacturing",
+                                "context_id": "ctx_123",
+                                "extraction_types": [
+                                    "abbreviations",
+                                    "synonyms",
+                                    "hierarchies",
+                                    "metric_candidates",
+                                    "question_intents",
+                                ],
+                                "model": "gpt-4o-mini",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "extracted": {
+                                "summary": "Extraction results",
+                                "value": {
+                                    "extraction_id": "ext_123",
+                                    "context_id": "ctx_123",
+                                    "extractions": {
+                                        "abbreviations": [
+                                            {"abbr": "SBU", "definition": "Strategic Business Unit"}
+                                        ],
+                                        "synonyms": [{"term": "sales area", "synonyms": ["territory"]}],
+                                        "hierarchies": [
+                                            {"name": "sales_org", "levels": ["zone", "region", "sales_area"]}
+                                        ],
+                                        "metric_candidates": [
+                                            {"metric_name": "output_tmt", "table": "fact_production_daily"}
+                                        ],
+                                        "question_intents": [
+                                            {
+                                                "question": "Which plants are underperforming?",
+                                                "metrics": ["output_tmt"],
+                                            }
+                                        ],
+                                    },
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractResponse:
+    context_row = get_context(settings, payload.context_id)
+    if not context_row:
+        raise HTTPException(status_code=404, detail="Context not found")
+    if context_row["tenant_id"] != payload.tenant_id or context_row["domain_id"] != payload.domain_id:
+        raise HTTPException(status_code=400, detail="Context tenant/domain mismatch")
+
+    extracted = extract_context(
+        settings,
+        raw_text=context_row["raw_text"],
+        extraction_types=payload.extraction_types,
+        model=payload.model,
+    )
+    extraction_id = persist_extraction(
+        settings,
+        context_id=payload.context_id,
+        tenant_id=payload.tenant_id,
+        domain_id=payload.domain_id,
+        payload=extracted,
+        llm_model=payload.model or settings.openai_model,
+    )
+    mark_context_processed(settings, payload.context_id)
+    return ContextExtractResponse(
+        extraction_id=extraction_id,
+        context_id=payload.context_id,
+        extractions=extracted,
+    )
+
+
+@app.post(
+    "/context/apply",
+    response_model=ContextApplyResponse,
+    tags=["context"],
+    summary="Apply extracted context",
+    description="Apply extracted context to glossary, hierarchy overrides, entity overrides, and metrics registry.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "apply_context": {
+                            "summary": "Apply all extracted signals",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "domain_id": "manufacturing",
+                                "extraction_id": "ext_123",
+                                "apply": {
+                                    "entities": True,
+                                    "hierarchies": True,
+                                    "glossary": True,
+                                    "metrics": True,
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "applied": {
+                                "summary": "Applied results",
+                                "value": {
+                                    "status": "applied",
+                                    "updated": {"entities": 4, "hierarchies": 1, "metrics": 8},
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
+    extraction_row = get_extraction(settings, payload.extraction_id)
+    if not extraction_row:
+        raise HTTPException(status_code=404, detail="Extraction not found")
+    if extraction_row["tenant_id"] != payload.tenant_id or extraction_row["domain_id"] != payload.domain_id:
+        raise HTTPException(status_code=400, detail="Extraction tenant/domain mismatch")
+
+    updated = apply_extractions(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=payload.domain_id,
+        payload=extraction_row["payload"],
+        apply_flags=payload.apply,
+    )
+    return ContextApplyResponse(status="applied", updated=updated)
+
+
 @app.get(
     "/entities",
     response_model=EntitiesResponse,
@@ -2153,6 +2546,13 @@ def _merge_entity_candidates(
                 "examples": {"manufacturing": {"value": "manufacturing"}},
             },
             {
+                "name": "tenant_id",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"tenant_a": {"value": "tenant_a"}},
+            },
+            {
                 "name": "use_llm",
                 "in": "query",
                 "required": False,
@@ -2178,6 +2578,7 @@ def onboard_map(
     request: OnboardScanRequest,
     domain_id: str,
     use_llm: bool = False,
+    tenant_id: str | None = None,
 ) -> OnboardMapResponse:
     schemas = request.schemas or ([request.schema] if request.schema else [settings.db_schema])
     tables = []
@@ -2187,11 +2588,12 @@ def onboard_map(
             schema_tables = [table for table in schema_tables if table.get("table") in request.tables]
         tables.extend(schema_tables)
     ontology = load_pack(f"packs/{domain_id}").get("ontology", {})
-    rule_candidates = map_entities(tables, ontology)
+    glossary = fetch_glossary_terms(settings, tenant_id, domain_id) if tenant_id else None
+    rule_candidates = map_entities(tables, ontology, glossary=glossary)
     llm_candidates: list[dict] = []
     if use_llm:
         try:
-            llm_candidates = llm_map_entities(settings, tables, ontology)
+            llm_candidates = llm_map_entities(settings, tables, ontology, glossary=glossary)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     candidates = _merge_entity_candidates(rule_candidates, llm_candidates)
@@ -2611,7 +3013,10 @@ def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[
 
     if request.question:
         logger.info("resolving question: %s", request.question)
-        resolved = resolve_question(request.question, catalog, settings)
+        glossary = None
+        if request.tenant_id and request.domain_id:
+            glossary = fetch_glossary_terms(settings, request.tenant_id, request.domain_id)
+        resolved = resolve_question(request.question, catalog, settings, glossary=glossary)
         logger.info("resolver output: %s", resolved)
         metrics = resolved.get("metrics", [])
         dimensions = resolved.get("dimensions", [])
@@ -2656,6 +3061,7 @@ def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[
                 catalog,
                 settings,
                 allowed_metrics=allowed_metrics,
+                glossary=glossary,
             )
             logger.info("resolver output (restricted): %s", resolved)
             return (
@@ -2881,6 +3287,9 @@ def query(request: QueryRequest) -> QueryResult:
     start_time = time.perf_counter()
     sql_text = None
     row_count = None
+    glossary = None
+    if request.tenant_id and request.domain_id:
+        glossary = fetch_glossary_terms(settings, request.tenant_id, request.domain_id)
     metric_names, dimensions, filters = _resolve_metrics(request)
     if not metric_names and request.question:
         question = request.question.lower()
@@ -2939,7 +3348,13 @@ def query(request: QueryRequest) -> QueryResult:
         allowed_metrics = [metric.name for metric in metrics]
         if allowed_metrics:
             logger.info("re-resolving after coercion with allowed metrics: %s", allowed_metrics)
-            resolved = resolve_question(request.question, catalog, settings, allowed_metrics=allowed_metrics)
+            resolved = resolve_question(
+                request.question,
+                catalog,
+                settings,
+                allowed_metrics=allowed_metrics,
+                glossary=glossary,
+            )
             metric_names = resolved.get("metrics", [])
             dimensions = _coerce_sbu_dimensions(resolved.get("dimensions", []), resolved.get("filters", []))
             filters = _coerce_sbu_filters(resolved.get("filters", []))

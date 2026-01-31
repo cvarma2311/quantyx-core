@@ -16,24 +16,29 @@ Goal: provide a runnable demo that shows the full onboarding flow end-to-end.
    - `POST /onboard/scan-connection`
    - Uses multi-connection payload
 
-2) **Ontology mapping**
+2) **Business context intake (optional)**
+   - `POST /context/ingest`
+   - `POST /context/extract`
+   - `POST /context/apply`
+
+3) **Ontology mapping**
    - `POST /onboard/map`
    - Uses the schema/tables returned from scan
 
-3) **Entities + hierarchies**
+4) **Entities + hierarchies**
    - `GET /entities` for review
 
-4) **Infer facts/dims**
+5) **Infer facts/dims**
    - `POST /onboard/infer-models`
    - Uses scan outputs
 
-5) **Suggested metrics**
+6) **Suggested metrics**
    - `POST /metrics/suggested?persist=true`
 
-6) **Promote a metric**
+7) **Promote a metric**
    - `PATCH /metrics/{metric_id}`
 
-7) **Apply contracts**
+8) **Apply contracts**
    - `POST /contracts/apply`
 
 ---
@@ -45,6 +50,8 @@ Environment variables:
 - `QUANTYX_DOMAIN` (default `manufacturing`)
 - `QUANTYX_TENANT` (default `x_mfg`)
 - `DEMO_TABLES` (required; comma-separated table names)
+- `DEMO_CONTEXT_TEXT` (optional; business context text)
+- `DEMO_CONTEXT_FILE` (optional; path to business context text)
 
 Connection details:
 - `DEMO_DB_HOST`
