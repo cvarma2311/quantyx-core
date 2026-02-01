@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
+from services.ai.config import Settings
+from services.ai.dbt_manifest import load_latest_manifest
 
-def load_manifest_models(path: str) -> list[dict[str, Any]]:
-    manifest_path = Path(path)
-    if not manifest_path.exists():
+
+def load_manifest_models(
+    settings: Settings,
+    domain_id: str | None = None,
+    tenant_id: str | None = None,
+) -> list[dict[str, Any]]:
+    payload = load_latest_manifest(settings, domain_id=domain_id, tenant_id=tenant_id)
+    if not payload:
         return []
 
-    payload = json.loads(manifest_path.read_text())
     nodes = payload.get("nodes", {})
     models = []
     for node in nodes.values():

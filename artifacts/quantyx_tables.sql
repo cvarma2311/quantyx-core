@@ -321,3 +321,58 @@ CREATE TABLE IF NOT EXISTS public.quantyx_glossary_terms (
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_glossary_terms_lookup
   ON public.quantyx_glossary_terms (tenant_id, domain_id, normalized_term);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_context_files (
+  file_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  content_type TEXT NULL,
+  extracted_text TEXT NOT NULL,
+  raw_bytes BYTEA NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_context_files_tenant
+  ON public.quantyx_context_files (tenant_id, domain_id, created_at DESC);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_context_file_links (
+  context_id TEXT NOT NULL,
+  file_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (context_id, file_id),
+  FOREIGN KEY (context_id) REFERENCES public.quantyx_business_context(context_id),
+  FOREIGN KEY (file_id) REFERENCES public.quantyx_context_files(file_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_dbt_manifest (
+  manifest_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NULL,
+  dbt_project_path TEXT NOT NULL,
+  profile_name TEXT NOT NULL,
+  target_name TEXT NOT NULL,
+  manifest_json JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_dbt_manifest_tenant
+  ON public.quantyx_dbt_manifest (tenant_id, domain_id, created_at DESC);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_tenant_dbt_projects (
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  dbt_project_dir TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, domain_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_tenant_dbt_projects_dir
+  ON public.quantyx_tenant_dbt_projects (dbt_project_dir);

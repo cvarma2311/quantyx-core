@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from services.ai.catalog import MetricCatalog
+from services.ai.config import Settings
 from services.ai.schema_loader import load_manifest_models
 
 
@@ -21,8 +22,13 @@ def _resolve_metric_dataset(sql: str) -> str | None:
     return None
 
 
-def build_lineage(catalog: MetricCatalog, manifest_path: str) -> list[dict[str, Any]]:
-    models = load_manifest_models(manifest_path)
+def build_lineage(
+    catalog: MetricCatalog,
+    settings: Settings,
+    domain_id: str | None = None,
+    tenant_id: str | None = None,
+) -> list[dict[str, Any]]:
+    models = load_manifest_models(settings, domain_id=domain_id, tenant_id=tenant_id)
     model_names = {model["name"].lower(): model["name"] for model in models}
     lineage: list[dict[str, Any]] = []
 

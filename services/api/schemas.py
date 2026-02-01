@@ -786,7 +786,11 @@ class ContextIngestRequest(BaseModel):
     domain_id: str = Field(..., examples=["manufacturing"])
     source_type: str = Field(..., examples=["business_context"])
     source_title: str | None = Field(None, examples=["Operations glossary and hierarchy notes"])
-    raw_text: str = Field(..., examples=["SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area."])
+    raw_text: str | None = Field(
+        None,
+        examples=["SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area."],
+    )
+    file_ids: List[str] | None = Field(None, examples=[["file_123", "file_456"]])
     metadata: dict | None = Field(
         default=None,
         examples=[
@@ -807,6 +811,7 @@ class ContextIngestRequest(BaseModel):
                 "source_type": "business_context",
                 "source_title": "Operations glossary and hierarchy notes",
                 "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area.",
+                "file_ids": ["file_123", "file_456"],
                 "metadata": {
                     "connection_id": "conn_prod",
                     "database": "prod_warehouse",
@@ -824,6 +829,14 @@ class ContextIngestResponse(BaseModel):
     status: str = Field(..., examples=["submitted"])
     model_config = {
         "json_schema_extra": {"example": {"context_id": "ctx_123", "status": "submitted"}}
+    }
+
+
+class ContextFileIngestResponse(BaseModel):
+    file_id: str = Field(..., examples=["file_123"])
+    status: str = Field(..., examples=["stored"])
+    model_config = {
+        "json_schema_extra": {"example": {"file_id": "file_123", "status": "stored"}}
     }
 
 
@@ -1176,4 +1189,71 @@ class ContractValidateResponse(BaseModel):
     warnings: List[dict] = Field(default_factory=list)
     model_config = {
         "json_schema_extra": {"example": {"valid": True, "errors": [], "warnings": []}}
+    }
+
+
+class DbtManifestGenerateRequest(BaseModel):
+    tenant_id: str | None = Field(None, examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    connection_id: str | None = Field(None, examples=["conn_prod"])
+    dbt_project_path: str | None = Field(None, examples=["dbt"])
+    profile_name: str = Field(..., examples=["default"])
+    target_name: str = Field(..., examples=["dev"])
+    profiles_dir: str | None = Field(None, examples=["~/.dbt"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "tenant_a",
+                "domain_id": "manufacturing",
+                "connection_id": "conn_prod",
+                "dbt_project_path": "dbt",
+                "profile_name": "default",
+                "target_name": "dev",
+                "profiles_dir": "~/.dbt",
+            }
+        }
+    }
+
+
+class DbtManifestGenerateResponse(BaseModel):
+    manifest_id: str = Field(..., examples=["manifest_123"])
+    status: str = Field(..., examples=["stored"])
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    dbt_project_path: str = Field(..., examples=["dbt_projects/dbt-tenant_a"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "manifest_id": "manifest_123",
+                "status": "stored",
+                "tenant_id": "tenant_a",
+                "dbt_project_path": "dbt_projects/dbt-tenant_a",
+            }
+        }
+    }
+
+
+class DbtManifestLatestResponse(BaseModel):
+    manifest_id: str = Field(..., examples=["manifest_123"])
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    connection_id: str | None = Field(None, examples=["conn_prod"])
+    dbt_project_path: str = Field(..., examples=["dbt"])
+    profile_name: str = Field(..., examples=["default"])
+    target_name: str = Field(..., examples=["dev"])
+    created_at: str = Field(..., examples=["2025-02-14T10:00:00Z"])
+    manifest_json: dict
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "manifest_id": "manifest_123",
+                "tenant_id": "tenant_a",
+                "domain_id": "manufacturing",
+                "connection_id": "conn_prod",
+                "dbt_project_path": "dbt",
+                "profile_name": "default",
+                "target_name": "dev",
+                "created_at": "2025-02-14T10:00:00Z",
+                "manifest_json": {"metadata": {"dbt_version": "1.7.0"}},
+            }
+        }
     }

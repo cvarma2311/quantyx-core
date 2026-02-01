@@ -106,7 +106,7 @@ Response:
 ```
 
 ### 1.3b POST /context/ingest-file
-Upload a .txt or .docx file and persist its contents as business context.
+Upload a single .txt or .docx file and persist its contents as business context.
 
 Request (multipart/form-data):
 ```
@@ -120,7 +120,7 @@ file=@context.txt
 
 Response:
 ```json
-{ "context_id": "ctx_123", "status": "submitted" }
+{ "file_id": "file_123", "status": "stored" }
 ```
 
 ### 1.4 GET /context?tenant_id=...&domain_id=...&source_type=...&status=...
@@ -450,6 +450,7 @@ Request:
   "source_type": "business_context",
   "source_title": "Operations glossary and hierarchy notes",
   "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
+  "file_ids": ["file_123", "file_456"],
   "metadata": {
     "connection_id": "conn_prod",
     "database": "prod_warehouse",
@@ -669,6 +670,50 @@ Response:
   "entity_candidates": [
     { "table": "fact_hpcl_sales_daily", "column": "sales_area_name", "mapped_entity_type": "organizational_unit", "confidence": 0.9 }
   ]
+}
+```
+
+### 3.10 POST /dbt/manifest/generate
+Run dbt compile and store manifest.json in the database.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "dbt_project_path": "dbt_projects/dbt-tenant_a",
+  "profile_name": "default",
+  "target_name": "dev",
+  "profiles_dir": "~/.dbt"
+}
+```
+
+Response:
+```json
+{
+  "manifest_id": "manifest_123",
+  "status": "stored",
+  "tenant_id": "tenant_a",
+  "dbt_project_path": "dbt_projects/dbt-tenant_a"
+}
+```
+
+### 3.11 GET /dbt/manifest/latest?tenant_id=...&domain_id=...
+Fetch the latest stored manifest from the database.
+
+Response:
+```json
+{
+  "manifest_id": "manifest_123",
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "dbt_project_path": "dbt",
+  "profile_name": "default",
+  "target_name": "dev",
+  "created_at": "2025-02-14T10:00:00Z",
+  "manifest_json": {"metadata": {"dbt_version": "1.7.0"}}
 }
 ```
 

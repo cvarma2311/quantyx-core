@@ -40,7 +40,35 @@ CREATE INDEX IF NOT EXISTS quantyx_business_context_conn_idx
   ON public.quantyx_business_context (connection_id, database_name, schema_name);
 ```
 
-### 2) LLM extraction outputs (structured)
+### 2) Context file storage + linking
+
+```sql
+CREATE TABLE IF NOT EXISTS public.quantyx_context_files (
+  file_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  content_type TEXT NULL,
+  extracted_text TEXT NOT NULL,
+  raw_bytes BYTEA NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS quantyx_context_files_tenant_idx
+  ON public.quantyx_context_files (tenant_id, domain_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_context_file_links (
+  context_id TEXT NOT NULL,
+  file_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (context_id, file_id),
+  FOREIGN KEY (context_id) REFERENCES public.quantyx_business_context(context_id),
+  FOREIGN KEY (file_id) REFERENCES public.quantyx_context_files(file_id)
+);
+```
+
+### 3) LLM extraction outputs (structured)
 
 ```sql
 CREATE TABLE IF NOT EXISTS public.quantyx_context_extractions (
@@ -85,11 +113,11 @@ CREATE INDEX IF NOT EXISTS quantyx_glossary_terms_lookup_idx
 
 ## API changes
 
-### 1) Ingest business context (raw text)
+### 1) Ingest business context (raw text + file ids)
 
 `POST /context/ingest`
 
-- Accept raw text with metadata and optional scope (connection/database/schema/table/column)
+- Accept raw text with metadata and optional `file_ids` list
 - Persist in `quantyx_business_context` with `status=submitted`
 
 Request:
@@ -100,6 +128,7 @@ Request:
   "source_type": "business_context",
   "source_title": "Operations glossary and hierarchy notes",
   "raw_text": "SBU = Strategic Business Unit...",
+  "file_ids": ["file_123", "file_456"],
   "metadata": {
     "connection_id": "conn_prod",
     "database": "prod_warehouse",
@@ -115,13 +144,36 @@ Response:
 { "context_id": "ctx_123", "status": "submitted" }
 ```
 
-### 2) List context entries
+### 2) Upload a context file
+
+`POST /context/ingest-file`
+
+- Accept a single .txt or .docx file (one per request)
+- Persist extracted text + raw bytes to `quantyx_context_files`
+- Return `file_id` for linking in `/context/ingest`
+
+Request (multipart/form-data):
+```
+tenant_id=tenant_a
+domain_id=energy_distribution
+source_type=business_context
+source_title=Operations glossary
+metadata={"connection_id":"conn_prod","database":"prod_warehouse","schema":"public"}
+file=@context.txt
+```
+
+Response:
+```json
+{ "file_id": "file_123", "status": "stored" }
+```
+
+### 3) List context entries
 
 `GET /context`
 
 Query params: `tenant_id`, `domain_id`, `source_type`, `status`, `limit`, `cursor`
 
-### 3) Run extraction (LLM)
+### 4) Run extraction (LLM)
 
 `POST /context/extract`
 
@@ -155,7 +207,7 @@ Response:
 }
 ```
 
-### 4) Apply extractions
+### 5) Apply extractions
 
 `POST /context/apply`
 
@@ -196,7 +248,8 @@ Response:
    - Hierarchy candidates
    - Metric candidates (name, source, expression hints)
    - Question intents (metrics + dimensions)
-3) Validate extracted items:
+3) Combine raw_text + linked file text before LLM extraction.
+4) Validate extracted items:
    - Ensure referenced tables/columns exist (if connection scope exists)
    - Flag unknown terms as low confidence
 4) Persist results and expose for review/edit before applying.
@@ -215,11 +268,11 @@ Response:
 ## Phase plan (implementation steps)
 
 1) **Schema changes**
-   - Add `quantyx_business_context`, `quantyx_context_extractions`, and optional `quantyx_glossary_terms`.
+   - Add `quantyx_business_context`, `quantyx_context_files`, `quantyx_context_file_links`, `quantyx_context_extractions`, and optional `quantyx_glossary_terms`.
 
 2) **API contracts**
-   - Add new request/response models to `services/api/schemas.py`.
-   - Add endpoints in `services/api/main.py` with examples.
+   - Add request/response models to `services/api/schemas.py`.
+   - Add `/context/ingest-file` (single file upload) and `file_ids` on `/context/ingest`.
 
 3) **LLM extraction service**
    - Implement `services/ai/context_extraction.py`.

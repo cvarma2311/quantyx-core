@@ -14,6 +14,10 @@ TENANT_ID = os.getenv("QUANTYX_TENANT", "x_mfg")
 DEMO_TABLES = [t.strip() for t in os.getenv("DEMO_TABLES", "").split(",") if t.strip()]
 DEMO_CONTEXT_TEXT = os.getenv("DEMO_CONTEXT_TEXT", "")
 DEMO_CONTEXT_FILE = os.getenv("DEMO_CONTEXT_FILE", "")
+DEMO_DBT_PROJECT = os.getenv("DEMO_DBT_PROJECT", "")
+DEMO_DBT_PROFILE = os.getenv("DEMO_DBT_PROFILE", "default")
+DEMO_DBT_TARGET = os.getenv("DEMO_DBT_TARGET", "dev")
+DEMO_DBT_PROFILES_DIR = os.getenv("DEMO_DBT_PROFILES_DIR", "")
 
 def _mask_payload(payload: dict | None) -> dict | None:
     if payload is None:
@@ -62,6 +66,9 @@ def main() -> int:
     print(f"TENANT_ID={TENANT_ID}")
     print(f"DEMO_TABLES={DEMO_TABLES}")
     print(f"DEMO_CONTEXT_FILE={DEMO_CONTEXT_FILE}")
+    print(f"DEMO_DBT_PROJECT={DEMO_DBT_PROJECT or '(auto)'}")
+    print(f"DEMO_DBT_PROFILE={DEMO_DBT_PROFILE}")
+    print(f"DEMO_DBT_TARGET={DEMO_DBT_TARGET}")
     print("Log detail: verbose")
 
     if not DEMO_TABLES:
@@ -105,21 +112,64 @@ def main() -> int:
     # 1b) Optional business context
     print("\n[1b] Business context ingestion")
     context_text = DEMO_CONTEXT_TEXT
+    file_ids = []
     if DEMO_CONTEXT_FILE:
+        print("DEMO_CONTEXT_FILE set; file content will be uploaded and linked.")
+
+    if DEMO_CONTEXT_FILE:
+        print("\n[1b-1] Upload context file")
+        file_payload = {
+            "tenant_id": TENANT_ID,
+            "domain_id": DOMAIN_ID,
+            "source_type": "business_context",
+            "source_title": "Demo business context",
+            "metadata": json.dumps(
+                {
+                    "connection_id": "conn_demo",
+                    "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
+                    "schema": os.getenv("DEMO_DB_SCHEMA", "public"),
+                }
+            ),
+        }
+        boundary = "----quantyx-boundary"
+        file_path = DEMO_CONTEXT_FILE
         try:
-            with open(DEMO_CONTEXT_FILE, "r", encoding="utf-8") as handle:
-                context_text = handle.read()
+            with open(file_path, "rb") as fh:
+                file_bytes = fh.read()
         except OSError as exc:
             print(f"Failed to read DEMO_CONTEXT_FILE: {exc}")
             return 1
+        parts = []
+        for key, value in file_payload.items():
+            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n")
+        filename = os.path.basename(file_path)
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        )
+        body = "".join(parts).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        request = urllib.request.Request(
+            f"{API_BASE}/context/ingest-file",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        print("Request: POST /context/ingest-file")
+        with urllib.request.urlopen(request, timeout=60) as resp:
+            upload_response = json.loads(resp.read().decode("utf-8"))
+        print("Response payload:")
+        print(json.dumps(upload_response, indent=2))
+        if upload_response.get("file_id"):
+            file_ids.append(upload_response["file_id"])
 
-    if context_text:
+    if context_text or file_ids:
         context_payload = {
             "tenant_id": TENANT_ID,
             "domain_id": DOMAIN_ID,
             "source_type": "business_context",
             "source_title": "Demo business context",
             "raw_text": context_text,
+            "file_ids": file_ids or None,
             "metadata": {
                 "connection_id": "conn_demo",
                 "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
@@ -226,8 +276,24 @@ def main() -> int:
     _log_response(infer_response)
     print("Step 4 end")
 
-    # 5) Suggested metrics (persist)
-    print("\n[5] Suggested metrics (persist)")
+    # 5) Generate dbt manifest
+    print("\n[5] Generate dbt manifest")
+    manifest_payload = {
+        "tenant_id": TENANT_ID,
+        "domain_id": DOMAIN_ID,
+        "connection_id": "conn_demo",
+        "profile_name": DEMO_DBT_PROFILE,
+        "target_name": DEMO_DBT_TARGET,
+        "profiles_dir": DEMO_DBT_PROFILES_DIR or None,
+    }
+    if DEMO_DBT_PROJECT:
+        manifest_payload["dbt_project_path"] = DEMO_DBT_PROJECT
+    _log_request("POST", "/dbt/manifest/generate", manifest_payload)
+    manifest_response = _request("POST", "/dbt/manifest/generate", manifest_payload)
+    _log_response(manifest_response)
+
+    # 6) Suggested metrics (persist)
+    print("\n[6] Suggested metrics (persist)")
     print("Step 5 start")
     metrics_payload = {
         "schema": schemas[0] if schemas else "public",
@@ -242,9 +308,9 @@ def main() -> int:
     _log_response(suggested)
     print("Step 5 end")
 
-    # 6) Promote first suggested metric (if present)
-    print("\n[6] Promote a metric")
-    print("Step 6 start")
+    # 7) Promote first suggested metric (if present)
+    print("\n[7] Promote a metric")
+    print("Step 7 start")
     if suggested.get("measures"):
         measure = suggested["measures"][0]
         metric_id = f"{DOMAIN_ID}__{measure['table']}__{measure['column']}"
@@ -259,15 +325,15 @@ def main() -> int:
         _log_response(patch_response)
     else:
         print("No measures found to promote.")
-    print("Step 6 end")
+    print("Step 7 end")
 
-    # 7) Apply contracts
-    print("\n[7] Apply contracts")
-    print("Step 7 start")
+    # 8) Apply contracts
+    print("\n[8] Apply contracts")
+    print("Step 8 start")
     _log_request("POST", "/contracts/apply", {})
     apply_response = _request("POST", "/contracts/apply", {})
     _log_response(apply_response)
-    print("Step 7 end")
+    print("Step 8 end")
 
     print("\n== Demo complete ==")
     return 0

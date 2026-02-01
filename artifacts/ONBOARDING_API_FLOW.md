@@ -103,7 +103,7 @@ Note:
 
 ## 3) Ingest business context (glossary, abbreviations, hierarchies, questions)
 
-POST /context/ingest (text)
+POST /context/ingest (text + file_ids)
 
 Purpose: store business context text provided by the customer (tables/columns, abbreviations, synonyms, hierarchies, sample questions).
 
@@ -115,6 +115,7 @@ Request:
   "source_type": "business_context",
   "source_title": "Operations glossary and hierarchy notes",
   "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
+  "file_ids": ["file_123", "file_456"],
   "metadata": {
     "connection_id": "conn_prod",
     "database": "prod_warehouse",
@@ -132,15 +133,20 @@ Response (example):
 
 Or upload a file (.txt or .docx):
 
-POST /context/ingest-file (multipart/form-data)
+POST /context/ingest-file (multipart/form-data, single file)
 
 Form fields:
 - `tenant_id`, `domain_id`, `source_type`, `source_title`
 - `metadata` (JSON string)
 - `file` (text file)
 
+Response:
+```json
+{ "file_id": "file_123", "status": "stored" }
+```
+
 Expected outcome:
-- We persist all business context text for LLM-based extraction and review.
+- We persist all business context text and linked file content for LLM-based extraction and review.
 
 ---
 
@@ -335,7 +341,42 @@ Expected outcome:
 
 ---
 
-## 9) Review + promote metrics (make them queryable and trusted)
+## 9) Generate dbt manifest (store in DB)
+
+POST /dbt/manifest/generate
+
+Purpose: run dbt compile and store manifest.json in Postgres for lineage + model resolution.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "dbt_project_path": "dbt_projects/dbt-tenant_a",
+  "profile_name": "default",
+  "target_name": "dev",
+  "profiles_dir": "~/.dbt"
+}
+```
+
+Response:
+```json
+{
+  "manifest_id": "manifest_123",
+  "status": "stored",
+  "tenant_id": "tenant_a",
+  "dbt_project_path": "dbt_projects/dbt-tenant_a"
+}
+```
+
+Expected outcome:
+- Manifest is available from DB for schema listing and metric persistence.
+- If `dbt_project_path` is not provided, the API creates `dbt_projects/dbt-<tenant_id>` automatically.
+
+---
+
+## 10) Review + promote metrics (make them queryable and trusted)
 
 PATCH /metrics/{metric_id}
 
@@ -375,7 +416,7 @@ Request:
 
 ---
 
-## 10) Apply the contracts (reload catalog so the app can use them)
+## 11) Apply the contracts (reload catalog so the app can use them)
 
 POST /contracts/apply
 
@@ -386,7 +427,7 @@ Expected outcome:
 
 ---
 
-## 11) Validate schema + explore (confirm the semantic layer is ready)
+## 12) Validate schema + explore (confirm the semantic layer is ready)
 
 GET /schema
 GET /metrics
@@ -399,7 +440,7 @@ Expected outcome:
 
 ---
 
-## 12) Ask a question (first live query to prove value)
+## 13) Ask a question (first live query to prove value)
 
 POST /query
 
@@ -417,7 +458,7 @@ Expected outcome:
 
 ---
 
-## 13) Governance hooks (show lineage and policies to build trust)
+## 14) Governance hooks (show lineage and policies to build trust)
 
 GET /policies?domain_id=manufacturing
 
@@ -445,7 +486,7 @@ Expected outcome:
 
 ---
 
-## 14) Insights + Actions (turn observations into action)
+## 15) Insights + Actions (turn observations into action)
 
 POST /insights/generate?domain_id=manufacturing
 
@@ -490,7 +531,7 @@ Request:
 
 ---
 
-## 15) Anomaly detection + time-series (see issues early and explain them)
+## 16) Anomaly detection + time-series (see issues early and explain them)
 
 POST /timeseries
 
@@ -521,7 +562,7 @@ Purpose: drill down into drivers and correlated metrics for the anomaly point.
 
 ---
 
-## 16) Scenarios (plan responses before taking action)
+## 17) Scenarios (plan responses before taking action)
 
 POST /scenarios  
 POST /scenarios/{scenario_id}/run  

@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query
+from services.ai.dbt_manifest import load_latest_manifest
 
 
-def _load_dbt_model_map(manifest_path: str) -> dict[str, str]:
-    path = Path(manifest_path)
-    if not path.exists():
+def _load_dbt_model_map(settings: Settings, domain_id: str) -> dict[str, str]:
+    payload = load_latest_manifest(settings, domain_id=domain_id)
+    if not payload:
         return {}
-    payload = json.loads(path.read_text())
     nodes = payload.get("nodes", {})
     model_map = {}
     for node in nodes.values():
@@ -47,7 +45,7 @@ def persist_suggested_metrics(
     measures: list[dict[str, Any]],
     status: str = "suggested",
 ) -> None:
-    model_map = _load_dbt_model_map(settings.dbt_manifest_path)
+    model_map = _load_dbt_model_map(settings, domain_id)
     for measure in measures:
         metric_id = f"{domain_id}__{measure['table']}__{measure['column']}"
         model_name = _resolve_model_for_table(measure["table"], model_map)

@@ -13,7 +13,7 @@ def create_context(
     domain_id: str,
     source_type: str,
     source_title: str | None,
-    raw_text: str,
+    raw_text: str | None,
     metadata: dict[str, Any] | None,
 ) -> str:
     context_id = f"ctx_{uuid4().hex[:12]}"
@@ -49,11 +49,66 @@ def create_context(
             schema_name,
             source_type,
             source_title,
-            raw_text,
+            raw_text or "",
             metadata,
         ],
     )
     return context_id
+
+
+def create_context_file(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str,
+    filename: str,
+    content_type: str | None,
+    extracted_text: str,
+    file_bytes: bytes,
+    metadata: dict[str, Any] | None,
+) -> str:
+    file_id = f"file_{uuid4().hex[:12]}"
+    sql = """
+        INSERT INTO public.quantyx_context_files (
+          file_id,
+          tenant_id,
+          domain_id,
+          filename,
+          content_type,
+          extracted_text,
+          raw_bytes,
+          metadata
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    execute_non_query(
+        settings,
+        sql,
+        [
+            file_id,
+            tenant_id,
+            domain_id,
+            filename,
+            content_type,
+            extracted_text,
+            file_bytes,
+            metadata or {},
+        ],
+    )
+    return file_id
+
+
+def link_context_files(
+    settings: Settings,
+    context_id: str,
+    file_ids: list[str],
+) -> None:
+    sql = """
+        INSERT INTO public.quantyx_context_file_links (context_id, file_id)
+        VALUES (%s, %s)
+        ON CONFLICT DO NOTHING
+    """
+    for file_id in file_ids:
+        execute_non_query(settings, sql, [context_id, file_id])
 
 
 def list_context(
@@ -116,6 +171,19 @@ def get_context(settings: Settings, context_id: str) -> dict | None:
     """
     rows = run_query(settings, sql, [context_id])
     return rows[0] if rows else None
+
+
+def get_context_file_texts(settings: Settings, context_id: str) -> list[str]:
+    sql = """
+        SELECT f.extracted_text
+          FROM public.quantyx_context_file_links l
+          JOIN public.quantyx_context_files f
+            ON f.file_id = l.file_id
+         WHERE l.context_id = %s
+         ORDER BY l.created_at ASC
+    """
+    rows = run_query(settings, sql, [context_id])
+    return [row.get("extracted_text", "") for row in rows if row.get("extracted_text")]
 
 
 def mark_context_processed(settings: Settings, context_id: str) -> None:

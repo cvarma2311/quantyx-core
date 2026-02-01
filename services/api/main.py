@@ -27,6 +27,13 @@ from services.ai.connection_registry import (
 from services.ai.onboarding.scan_store import persist_schema_scan
 from services.ai.resolver import resolve_question
 from services.ai.schema_loader import load_manifest_models
+from services.ai.dbt_manifest import (
+    run_dbt_compile,
+    store_manifest,
+    load_latest_manifest_row,
+    resolve_dbt_project_dir,
+    upsert_tenant_project_dir,
+)
 from services.ai.semantic_layer.pack_loader import list_packs, load_pack
 from services.ai.governance import build_lineage
 from services.ai.insights import generate_variance_insight, get_insight, list_insights, persist_insight
@@ -58,11 +65,14 @@ from services.ai.onboarding.metrics_registry import persist_suggested_metrics
 from services.ai.onboarding.model_inference_llm import llm_infer_models
 from services.ai.context_store import (
     create_context,
+    create_context_file,
     get_context,
     get_extraction,
     list_context,
+    link_context_files,
     mark_context_processed,
     persist_extraction,
+    get_context_file_texts,
 )
 from services.ai.context_extraction import extract_context
 from services.ai.context_apply import apply_extractions
@@ -84,6 +94,7 @@ from services.api.schemas import (
     OnboardMapResponse,
     ContextIngestRequest,
     ContextIngestResponse,
+    ContextFileIngestResponse,
     ContextListResponse,
     ContextExtractRequest,
     ContextExtractResponse,
@@ -99,6 +110,9 @@ from services.api.schemas import (
     SuggestedMetricsResponse,
     ContractValidateRequest,
     ContractValidateResponse,
+    DbtManifestGenerateRequest,
+    DbtManifestGenerateResponse,
+    DbtManifestLatestResponse,
     PoliciesResponse,
     LineageResponse,
     InsightsResponse,
@@ -167,12 +181,12 @@ def _paginate_list(
 
 
 def _model_schema_map() -> dict[str, str]:
-    models = load_manifest_models(settings.dbt_manifest_path)
+    models = load_manifest_models(settings)
     return {model["name"]: model.get("schema") or "" for model in models}
 
 
 def _model_database_map() -> dict[str, str]:
-    models = load_manifest_models(settings.dbt_manifest_path)
+    models = load_manifest_models(settings)
     return {model["name"]: model.get("database") or "" for model in models}
 
 
@@ -570,10 +584,135 @@ def policies(domain_id: str) -> PoliciesResponse:
     },
 )
 def governance_lineage(metric_name: str | None = None) -> LineageResponse:
-    lineage = build_lineage(catalog, settings.dbt_manifest_path)
+    lineage = build_lineage(catalog, settings)
     if metric_name:
         lineage = [entry for entry in lineage if entry.get("metric_name") == metric_name]
     return LineageResponse(lineage=lineage)
+
+
+@app.post(
+    "/dbt/manifest/generate",
+    response_model=DbtManifestGenerateResponse,
+    tags=["admin"],
+    summary="Generate dbt manifest",
+    description="Run dbt compile and store manifest.json in the database.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "stored": {
+                                "summary": "Manifest stored",
+                                "value": {"manifest_id": "manifest_123", "status": "stored"},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def generate_dbt_manifest(payload: DbtManifestGenerateRequest) -> DbtManifestGenerateResponse:
+    tenant_id = payload.tenant_id or f"tenant_{uuid.uuid4().hex[:6]}"
+    dbt_project_path = payload.dbt_project_path or resolve_dbt_project_dir(tenant_id)
+    upsert_tenant_project_dir(settings, tenant_id, payload.domain_id, dbt_project_path)
+    try:
+        manifest_json = run_dbt_compile(
+            settings,
+            dbt_project_path=dbt_project_path,
+            profile_name=payload.profile_name,
+            target_name=payload.target_name,
+            profiles_dir=payload.profiles_dir,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    manifest_id = store_manifest(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=payload.domain_id,
+        connection_id=payload.connection_id,
+        dbt_project_path=dbt_project_path,
+        profile_name=payload.profile_name,
+        target_name=payload.target_name,
+        manifest_json=manifest_json,
+    )
+    return DbtManifestGenerateResponse(
+        manifest_id=manifest_id,
+        status="stored",
+        tenant_id=tenant_id,
+        dbt_project_path=dbt_project_path,
+    )
+
+
+@app.get(
+    "/dbt/manifest/latest",
+    response_model=DbtManifestLatestResponse,
+    tags=["admin"],
+    summary="Fetch latest dbt manifest",
+    description="Return the latest stored dbt manifest from the database.",
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "tenant_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"tenant_a": {"value": "tenant_a"}},
+            },
+            {
+                "name": "domain_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"manufacturing": {"value": "manufacturing"}},
+            },
+        ]
+        ,
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "latest": {
+                                "summary": "Latest manifest",
+                                "value": {
+                                    "manifest_id": "manifest_123",
+                                    "tenant_id": "tenant_a",
+                                    "domain_id": "manufacturing",
+                                    "connection_id": "conn_prod",
+                                    "dbt_project_path": "dbt",
+                                    "profile_name": "default",
+                                    "target_name": "dev",
+                                    "created_at": "2025-02-14T10:00:00Z",
+                                    "manifest_json": {"metadata": {"dbt_version": "1.7.0"}},
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_latest_dbt_manifest(
+    tenant_id: str,
+    domain_id: str,
+) -> DbtManifestLatestResponse:
+    row = load_latest_manifest_row(settings, domain_id=domain_id, tenant_id=tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    return DbtManifestLatestResponse(
+        manifest_id=row["manifest_id"],
+        tenant_id=row["tenant_id"],
+        domain_id=row["domain_id"],
+        connection_id=row.get("connection_id"),
+        dbt_project_path=row["dbt_project_path"],
+        profile_name=row["profile_name"],
+        target_name=row["target_name"],
+        created_at=row["created_at"].isoformat(),
+        manifest_json=row["manifest_json"],
+    )
 
 
 @app.get(
@@ -1642,6 +1781,7 @@ def domains() -> dict:
                                 "source_type": "business_context",
                                 "source_title": "Operations glossary and hierarchy notes",
                                 "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
+                                "file_ids": ["file_123", "file_456"],
                                 "metadata": {
                                     "connection_id": "conn_prod",
                                     "database": "prod_warehouse",
@@ -1681,12 +1821,14 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
         raw_text=payload.raw_text,
         metadata=payload.metadata,
     )
+    if payload.file_ids:
+        link_context_files(settings, context_id, payload.file_ids)
     return ContextIngestResponse(context_id=context_id, status="submitted")
 
 
 @app.post(
     "/context/ingest-file",
-    response_model=ContextIngestResponse,
+    response_model=ContextFileIngestResponse,
     tags=["context"],
     summary="Ingest business context file",
     description="Upload a text file and persist its contents as business context.",
@@ -1719,7 +1861,7 @@ def ingest_context_file(
     source_title: str | None = Form(None),
     metadata: str | None = Form(None),
     file: UploadFile = File(...),
-) -> ContextIngestResponse:
+) -> ContextFileIngestResponse:
     filename = (file.filename or "").lower()
     if filename.endswith(".doc"):
         raise HTTPException(status_code=400, detail="Unsupported file type: .doc")
@@ -1746,16 +1888,21 @@ def ingest_context_file(
             parsed_metadata = json.loads(metadata)
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail="metadata must be valid JSON") from exc
-    context_id = create_context(
+    file_id = create_context_file(
         settings,
         tenant_id=tenant_id,
         domain_id=domain_id,
-        source_type=source_type,
-        source_title=source_title,
-        raw_text=raw_text,
-        metadata=parsed_metadata,
+        filename=filename,
+        content_type=file.content_type,
+        extracted_text=raw_text,
+        file_bytes=raw_bytes,
+        metadata={
+            "source_type": source_type,
+            "source_title": source_title,
+            **(parsed_metadata or {}),
+        },
     )
-    return ContextIngestResponse(context_id=context_id, status="submitted")
+    return ContextFileIngestResponse(file_id=file_id, status="stored")
 
 
 @app.get(
@@ -1907,9 +2054,13 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
     if context_row["tenant_id"] != payload.tenant_id or context_row["domain_id"] != payload.domain_id:
         raise HTTPException(status_code=400, detail="Context tenant/domain mismatch")
 
+    file_texts = get_context_file_texts(settings, payload.context_id)
+    combined_parts = [context_row["raw_text"]] if context_row["raw_text"] else []
+    combined_parts.extend(file_texts)
+    combined_text = "\n\n".join([part for part in combined_parts if part])
     extracted = extract_context(
         settings,
-        raw_text=context_row["raw_text"],
+        raw_text=combined_text,
         extraction_types=payload.extraction_types,
     )
     extraction_id = persist_extraction(
@@ -2312,7 +2463,7 @@ def schema(
         if not database and not schema and scopes:
             database = scopes[0].get("database_name")
             schema = scopes[0].get("schema_name")
-    models = load_manifest_models(settings.dbt_manifest_path)
+    models = load_manifest_models(settings)
     if database:
         models = [model for model in models if model.get("database") == database]
     if schema:
