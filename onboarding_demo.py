@@ -144,7 +144,6 @@ def main() -> int:
                     "metric_candidates",
                     "question_intents",
                 ],
-                "model": os.getenv("DEMO_CONTEXT_MODEL", ""),
             }
             _log_request("POST", "/context/extract", extract_payload)
             extract_response = _request("POST", "/context/extract", extract_payload)

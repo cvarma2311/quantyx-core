@@ -1857,7 +1857,6 @@ def list_context_entries(
                                     "metric_candidates",
                                     "question_intents",
                                 ],
-                                "model": "gpt-4o-mini",
                             },
                         }
                     }
@@ -1912,7 +1911,6 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
         settings,
         raw_text=context_row["raw_text"],
         extraction_types=payload.extraction_types,
-        model=payload.model,
     )
     extraction_id = persist_extraction(
         settings,
@@ -1920,7 +1918,7 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
         tenant_id=payload.tenant_id,
         domain_id=payload.domain_id,
         payload=extracted,
-        llm_model=payload.model or settings.openai_model,
+        llm_model=settings.openai_model,
     )
     mark_context_processed(settings, payload.context_id)
     return ContextExtractResponse(

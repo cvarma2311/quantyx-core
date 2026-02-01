@@ -15,7 +15,6 @@ def extract_context(
     settings: Settings,
     raw_text: str,
     extraction_types: list[str],
-    model: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY is not set")
@@ -45,7 +44,7 @@ def extract_context(
     }
 
     payload = {
-        "model": model or settings.openai_model,
+        "model": settings.openai_model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_prompt)},

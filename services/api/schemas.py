@@ -860,7 +860,6 @@ class ContextExtractRequest(BaseModel):
         default_factory=list,
         examples=[["abbreviations", "synonyms", "hierarchies", "metric_candidates", "question_intents"]],
     )
-    model: str | None = Field(None, examples=["gpt-4o-mini"])
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -874,7 +873,6 @@ class ContextExtractRequest(BaseModel):
                     "metric_candidates",
                     "question_intents",
                 ],
-                "model": "gpt-4o-mini",
             }
         }
     }

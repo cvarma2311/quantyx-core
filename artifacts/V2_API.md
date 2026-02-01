@@ -153,8 +153,7 @@ Request:
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
   "context_id": "ctx_123",
-  "extraction_types": ["abbreviations", "synonyms", "hierarchies", "metric_candidates", "question_intents"],
-  "model": "gpt-4o-mini"
+  "extraction_types": ["abbreviations", "synonyms", "hierarchies", "metric_candidates", "question_intents"]
 }
 ```
 
