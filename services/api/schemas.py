@@ -981,7 +981,9 @@ class OnboardScanMultiConnectionRequest(BaseModel):
                         "user": "readonly_user",
                         "password": "******",
                         "sample_rows": 100,
-                        "databases": [{"name": "prod_warehouse", "schemas": [{"name": "public"}]}],
+                        "databases": [
+                            {"name": "prod_warehouse", "schemas": [{"name": "public"}]}
+                        ],
                     }
                 ]
             }

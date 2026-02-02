@@ -368,6 +368,8 @@ Response:
 ## 3) Onboarding APIs (Industry Packs + Auto Metrics)
 
 These endpoints make onboarding generic across industries.
+Connection-scoped onboarding and multi-context apply details are defined in
+`docs/implementation_plans/Phase_N_Connection_Scoped_Onboarding.md`.
 
 ### 3.1 POST /onboard/scan-connection
 Scan multiple user-provided connections and return schema profiles with cursor pagination.

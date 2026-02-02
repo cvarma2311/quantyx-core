@@ -25,3 +25,10 @@ psql \
   -d "$DB_NAME" \
   -p "$DB_PORT" \
   -f artifacts/quantyx_tables.sql
+
+psql \
+  -h "$DB_HOST" \
+  -U "$DB_USER" \
+  -d "$DB_NAME" \
+  -p "$DB_PORT" \
+  -f artifacts/quantyx_tables_updates.sql

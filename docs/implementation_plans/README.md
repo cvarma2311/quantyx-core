@@ -34,6 +34,7 @@ dependency order.
    - `Phase_J_Anomaly_Detection.md`
 
 10) Phase I - Hardening and Productization
+11) Phase N - Connection-Scoped Onboarding + Multi-Context Apply
    - `Phase_I_Hardening_Productization.md`
 
 ## Dependencies (summary)

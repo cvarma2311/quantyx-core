@@ -3,6 +3,8 @@
 This document shows the end-to-end flow to onboard a new customer and get them
 to a usable AI analytics experience. It connects the API calls to a narrative
 so the value is clear at each step.
+For connection-scoped onboarding and multi-context apply rules, see
+`docs/implementation_plans/Phase_N_Connection_Scoped_Onboarding.md`.
 
 Example organization: X Manufacturing Ltd  
 Selected domain pack: manufacturing
