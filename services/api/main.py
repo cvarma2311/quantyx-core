@@ -4,6 +4,7 @@ from typing import Callable, List, TypeVar
 
 import base64
 import io
+import json
 import logging
 import time
 import re
@@ -67,12 +68,16 @@ from services.ai.context_store import (
     create_context,
     create_context_file,
     get_context,
+    get_context_file,
     get_extraction,
     list_context,
     link_context_files,
     mark_context_processed,
     persist_extraction,
     get_context_file_texts,
+    update_context,
+    update_context_file_metadata,
+    update_extraction,
 )
 from services.ai.context_extraction import extract_context
 from services.ai.context_apply import apply_extractions
@@ -98,8 +103,12 @@ from services.api.schemas import (
     ContextListResponse,
     ContextExtractRequest,
     ContextExtractResponse,
+    ContextExtractionResponse,
     ContextApplyRequest,
     ContextApplyResponse,
+    ContextPatchRequest,
+    ContextFilePatchRequest,
+    ContextExtractionPatchRequest,
     OnboardScanConnectionResponse,
     OnboardScanMultiConnectionRequest,
     InferModelsRequest,
@@ -133,6 +142,12 @@ from services.api.schemas import (
     TimeSeriesRequest,
     TimeSeriesResponse,
     InsightDetailWithContextResponse,
+)
+from services.api.validators import (
+    extract_scope_from_metadata,
+    generate_source_title,
+    scopes_match,
+    validate_scope_fields,
 )
 
 
@@ -178,6 +193,39 @@ def _paginate_list(
     if page:
         next_cursor = _encode_cursor(key_fn(page[-1]))
     return page, next_cursor
+
+
+def _require_scope(scope: dict | None, endpoint: str) -> None:
+    missing = validate_scope_fields(scope)
+    if missing:
+        detail = (
+            f"{endpoint} requires connection scope fields: "
+            f"{', '.join(missing)}. Include connection_id, database, schema, tables."
+        )
+        raise HTTPException(status_code=400, detail=detail)
+
+
+def _request_scope(
+    connection_id: str | None,
+    database: str | None,
+    schema: str | None,
+    tables: list[str] | None,
+) -> dict:
+    return {
+        "connection_id": connection_id,
+        "database": database,
+        "schema": schema,
+        "tables": tables,
+    }
+
+
+def _metadata_has_scope(metadata: dict | None) -> bool:
+    if not metadata:
+        return False
+    return any(
+        key in metadata
+        for key in ("connection_id", "database", "database_name", "schema", "schema_name", "tables")
+    )
 
 
 def _model_schema_map() -> dict[str, str]:
@@ -1695,6 +1743,10 @@ def dimension_values(
     },
 )
 def create_metric(payload: MetricUpsertRequest) -> MetricUpsertResponse:
+    _require_scope(
+        _request_scope(payload.connection_id, payload.database, payload.schema, payload.tables),
+        "/metrics",
+    )
     metric_id = upsert_metric(settings, payload.model_dump())
     return MetricUpsertResponse(metric_id=metric_id, status=payload.status or "suggested")
 
@@ -1725,6 +1777,10 @@ def create_metric(payload: MetricUpsertRequest) -> MetricUpsertResponse:
     },
 )
 def patch_metric(metric_id: str, payload: MetricPatchRequest) -> MetricUpsertResponse:
+    _require_scope(
+        _request_scope(payload.connection_id, payload.database, payload.schema, payload.tables),
+        "/metrics/{metric_id}",
+    )
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
     update_metric(settings, metric_id, updates)
     status = updates.get("status", "updated")
@@ -1812,12 +1868,15 @@ def domains() -> dict:
     },
 )
 def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
+    scope = extract_scope_from_metadata(payload.metadata)
+    _require_scope(scope, "/context/ingest")
+    source_title = payload.source_title or generate_source_title(payload.raw_text, payload.metadata)
     context_id = create_context(
         settings,
         tenant_id=payload.tenant_id,
         domain_id=payload.domain_id,
         source_type=payload.source_type,
-        source_title=payload.source_title,
+        source_title=source_title,
         raw_text=payload.raw_text,
         metadata=payload.metadata,
     )
@@ -1888,6 +1947,10 @@ def ingest_context_file(
             parsed_metadata = json.loads(metadata)
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail="metadata must be valid JSON") from exc
+    if not parsed_metadata:
+        raise HTTPException(status_code=400, detail="metadata is required and must include connection scope")
+    scope = extract_scope_from_metadata(parsed_metadata)
+    _require_scope(scope, "/context/ingest-file")
     file_id = create_context_file(
         settings,
         tenant_id=tenant_id,
@@ -1942,6 +2005,27 @@ def ingest_context_file(
                 "examples": {"submitted": {"value": "submitted"}},
             },
             {
+                "name": "connection_id",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"connection_id": {"value": "conn_prod"}},
+            },
+            {
+                "name": "database",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"database": {"value": "prod_warehouse"}},
+            },
+            {
+                "name": "schema",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "examples": {"schema": {"value": "public"}},
+            },
+            {
                 "name": "limit",
                 "in": "query",
                 "required": False,
@@ -1963,6 +2047,9 @@ def list_context_entries(
     domain_id: str,
     source_type: str | None = None,
     status: str | None = None,
+    connection_id: str | None = None,
+    database: str | None = None,
+    schema: str | None = None,
     limit: int = 200,
     cursor: str | None = None,
 ) -> ContextListResponse:
@@ -1973,6 +2060,9 @@ def list_context_entries(
         domain_id=domain_id,
         source_type=source_type,
         status=status,
+        connection_id=connection_id,
+        database=database,
+        schema=schema,
         limit=limit,
         cursor=decoded_cursor,
     )
@@ -2079,6 +2169,35 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
     )
 
 
+@app.get(
+    "/context/extractions/{extraction_id}",
+    response_model=ContextExtractionResponse,
+    tags=["context"],
+    summary="Fetch an extraction",
+    description="Return a stored extraction payload for review.",
+)
+def get_context_extraction(
+    extraction_id: str,
+    tenant_id: str,
+    domain_id: str,
+) -> ContextExtractionResponse:
+    extraction_row = get_extraction(settings, extraction_id)
+    if not extraction_row:
+        raise HTTPException(status_code=404, detail="Extraction not found")
+    if extraction_row["tenant_id"] != tenant_id or extraction_row["domain_id"] != domain_id:
+        raise HTTPException(status_code=400, detail="Extraction tenant/domain mismatch")
+    created_at = extraction_row.get("created_at")
+    return ContextExtractionResponse(
+        extraction_id=extraction_row["extraction_id"],
+        context_id=extraction_row["context_id"],
+        extraction_type=extraction_row.get("extraction_type"),
+        payload=extraction_row.get("payload") or {},
+        status=extraction_row.get("status"),
+        notes=extraction_row.get("notes"),
+        created_at=created_at.isoformat() if created_at else None,
+    )
+
+
 @app.post(
     "/context/apply",
     response_model=ContextApplyResponse,
@@ -2140,8 +2259,93 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
         domain_id=payload.domain_id,
         payload=extraction_row["payload"],
         apply_flags=payload.apply,
+        source_context_id=extraction_row.get("context_id"),
     )
     return ContextApplyResponse(status="applied", updated=updated)
+
+
+@app.patch(
+    "/context/{context_id}",
+    tags=["context"],
+    summary="Update a context entry",
+    description="Update context metadata or status; scope fields cannot change.",
+)
+def patch_context(
+    context_id: str,
+    tenant_id: str,
+    domain_id: str,
+    payload: ContextPatchRequest,
+) -> dict:
+    context_row = get_context(settings, context_id)
+    if not context_row:
+        raise HTTPException(status_code=404, detail="Context not found")
+    if context_row["tenant_id"] != tenant_id or context_row["domain_id"] != domain_id:
+        raise HTTPException(status_code=400, detail="Context tenant/domain mismatch")
+
+    if payload.metadata and _metadata_has_scope(payload.metadata):
+        _require_scope(extract_scope_from_metadata(payload.metadata), "/context/{context_id}")
+        existing_scope = {
+            "connection_id": context_row.get("connection_id"),
+            "database": context_row.get("database_name"),
+            "schema": context_row.get("schema_name"),
+            "tables": (context_row.get("metadata") or {}).get("tables"),
+        }
+        if extract_scope_from_metadata(payload.metadata) != existing_scope:
+            raise HTTPException(status_code=400, detail="Context scope cannot be changed")
+
+    updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+    if not updates:
+        return {"ok": True}
+    update_context(settings, context_id, updates)
+    return {"ok": True}
+
+
+@app.patch(
+    "/context/files/{file_id}",
+    tags=["context"],
+    summary="Update a context file",
+    description="Update context file metadata; scope fields cannot change.",
+)
+def patch_context_file(
+    file_id: str,
+    tenant_id: str,
+    domain_id: str,
+    payload: ContextFilePatchRequest,
+) -> dict:
+    if payload.metadata is None:
+        raise HTTPException(status_code=400, detail="metadata is required")
+    file_row = get_context_file(settings, file_id)
+    if not file_row:
+        raise HTTPException(status_code=404, detail="Context file not found")
+    if file_row["tenant_id"] != tenant_id or file_row["domain_id"] != domain_id:
+        raise HTTPException(status_code=400, detail="Context file tenant/domain mismatch")
+    if _metadata_has_scope(payload.metadata):
+        _require_scope(extract_scope_from_metadata(payload.metadata), "/context/files/{file_id}")
+        if not scopes_match(file_row.get("metadata"), payload.metadata):
+            raise HTTPException(status_code=400, detail="Context file scope cannot be changed")
+    update_context_file_metadata(settings, file_id, payload.metadata)
+    return {"ok": True}
+
+
+@app.patch(
+    "/context/extractions/{extraction_id}",
+    tags=["context"],
+    summary="Update a context extraction",
+    description="Update extraction status or notes; payload is immutable.",
+)
+def patch_context_extraction(
+    extraction_id: str,
+    tenant_id: str,
+    domain_id: str,
+    payload: ContextExtractionPatchRequest,
+) -> dict:
+    extraction_row = get_extraction(settings, extraction_id)
+    if not extraction_row:
+        raise HTTPException(status_code=404, detail="Extraction not found")
+    if extraction_row["tenant_id"] != tenant_id or extraction_row["domain_id"] != domain_id:
+        raise HTTPException(status_code=400, detail="Extraction tenant/domain mismatch")
+    update_extraction(settings, extraction_id, status=payload.status, notes=payload.notes)
+    return {"ok": True}
 
 
 @app.get(
@@ -2729,6 +2933,11 @@ def onboard_map(
     use_llm: bool = False,
     tenant_id: str | None = None,
 ) -> OnboardMapResponse:
+    schema_value = request.schema or (request.schemas[0] if request.schemas else None)
+    _require_scope(
+        _request_scope(request.connection_id, request.database, schema_value, request.tables),
+        "/onboard/map",
+    )
     schemas = request.schemas or ([request.schema] if request.schema else [settings.db_schema])
     tables = []
     for schema_name in schemas:
@@ -2908,6 +3117,11 @@ def _merge_models(rule_facts: list[dict], rule_dims: list[dict], llm_payload: di
     },
 )
 def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> InferModelsResponse:
+    schema_value = request.schema or (request.schemas[0] if request.schemas else None)
+    _require_scope(
+        _request_scope(request.connection_id, request.database, schema_value, request.tables),
+        "/onboard/infer-models",
+    )
     schemas = request.schemas or [request.schema]
     tables = []
     for schema_name in schemas:
@@ -3010,6 +3224,11 @@ def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> I
     },
 )
 def suggested_metrics(request: OnboardScanRequest, domain_id: str, persist: bool = False) -> SuggestedMetricsResponse:
+    schema_value = request.schema or (request.schemas[0] if request.schemas else None)
+    _require_scope(
+        _request_scope(request.connection_id, request.database, schema_value, request.tables),
+        "/metrics/suggested",
+    )
     schemas = request.schemas or ([request.schema] if request.schema else [settings.db_schema])
     tables = []
     for schema_name in schemas:
@@ -3436,6 +3655,10 @@ def query(request: QueryRequest) -> QueryResult:
     start_time = time.perf_counter()
     sql_text = None
     row_count = None
+    _require_scope(
+        _request_scope(request.connection_id, request.database, request.schema, request.tables),
+        "/query",
+    )
     glossary = None
     if request.tenant_id and request.domain_id:
         glossary = fetch_glossary_terms(settings, request.tenant_id, request.domain_id)

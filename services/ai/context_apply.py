@@ -16,6 +16,7 @@ def apply_extractions(
     domain_id: str,
     payload: dict[str, Any],
     apply_flags: dict[str, bool],
+    source_context_id: str | None = None,
 ) -> dict[str, int]:
     updated: dict[str, int] = {"entities": 0, "hierarchies": 0, "glossary": 0, "metrics": 0}
 
@@ -32,14 +33,16 @@ def apply_extractions(
                   description,
                   join_key,
                   examples,
+                  source_context_id,
                   updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, now())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, now())
                 ON CONFLICT (tenant_id, domain_id, entity_id)
                 DO UPDATE SET
                   description = EXCLUDED.description,
                   join_key = EXCLUDED.join_key,
                   examples = EXCLUDED.examples,
+                  source_context_id = EXCLUDED.source_context_id,
                   updated_at = now()
             """
             execute_non_query(
@@ -52,6 +55,7 @@ def apply_extractions(
                     entity.get("description"),
                     entity.get("join_key"),
                     entity.get("examples"),
+                    source_context_id,
                 ],
             )
             updated["entities"] += 1
@@ -69,19 +73,21 @@ def apply_extractions(
                   hierarchy_name,
                   levels,
                   description,
+                  source_context_id,
                   updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, now())
+                VALUES (%s, %s, %s, %s, %s, %s, now())
                 ON CONFLICT (tenant_id, domain_id, hierarchy_name)
                 DO UPDATE SET
                   levels = EXCLUDED.levels,
                   description = EXCLUDED.description,
+                  source_context_id = EXCLUDED.source_context_id,
                   updated_at = now()
             """
             execute_non_query(
                 settings,
                 sql,
-                [tenant_id, domain_id, name, levels, hierarchy.get("description")],
+                [tenant_id, domain_id, name, levels, hierarchy.get("description"), source_context_id],
             )
             updated["hierarchies"] += 1
 
@@ -112,6 +118,7 @@ def apply_extractions(
                   definition = EXCLUDED.definition,
                   synonyms = EXCLUDED.synonyms,
                   abbreviations = EXCLUDED.abbreviations,
+                  source_context_id = EXCLUDED.source_context_id,
                   updated_at = now()
             """
             execute_non_query(
@@ -126,7 +133,7 @@ def apply_extractions(
                     entry.get("definition"),
                     entry.get("synonyms", []),
                     entry.get("abbreviations", []),
-                    entry.get("source_context_id"),
+                    source_context_id,
                 ],
             )
             updated["glossary"] += 1
@@ -157,6 +164,7 @@ def apply_extractions(
                 DO UPDATE SET
                   definition = EXCLUDED.definition,
                   abbreviations = EXCLUDED.abbreviations,
+                  source_context_id = EXCLUDED.source_context_id,
                   updated_at = now()
             """
             execute_non_query(
@@ -171,7 +179,7 @@ def apply_extractions(
                     definition,
                     [],
                     [abbr],
-                    entry.get("source_context_id"),
+                    source_context_id,
                 ],
             )
             updated["glossary"] += 1

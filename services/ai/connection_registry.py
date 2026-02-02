@@ -62,3 +62,27 @@ def resolve_connection_scope(settings: Settings, connection_id: str) -> list[dic
     except psycopg2.errors.UndefinedTable:
         return None
     return rows if rows else None
+
+
+def count_connections(
+    settings: Settings,
+    tenant_id: str | None = None,
+    domain_id: str | None = None,
+) -> int:
+    filters = []
+    params: list[object] = []
+    if tenant_id:
+        filters.append("tenant_id = %s")
+        params.append(tenant_id)
+    if domain_id:
+        filters.append("domain_id = %s")
+        params.append(domain_id)
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    sql = f"SELECT COUNT(*) AS count FROM public.quantyx_connection_registry {where_clause}"
+    try:
+        rows = run_query(settings, sql, params)
+    except psycopg2.errors.UndefinedTable:
+        return 0
+    if not rows:
+        return 0
+    return int(rows[0].get("count", 0) or 0)

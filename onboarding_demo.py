@@ -128,6 +128,7 @@ def main() -> int:
                     "connection_id": "conn_demo",
                     "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
                     "schema": os.getenv("DEMO_DB_SCHEMA", "public"),
+                    "tables": DEMO_TABLES,
                 }
             ),
         }
@@ -198,7 +199,30 @@ def main() -> int:
             _log_request("POST", "/context/extract", extract_payload)
             extract_response = _request("POST", "/context/extract", extract_payload)
             _log_response(extract_response)
+            extraction_types = sorted((extract_response.get("extractions") or {}).keys())
+            if extraction_types:
+                print(f"Extraction types: {extraction_types}")
             extraction_id = extract_response.get("extraction_id")
+            list_path = (
+                "/context"
+                f"?tenant_id={TENANT_ID}"
+                f"&domain_id={DOMAIN_ID}"
+                f"&connection_id=conn_demo"
+                f"&database={os.getenv('DEMO_DB_NAME', 'prod_warehouse')}"
+                f"&schema={os.getenv('DEMO_DB_SCHEMA', 'public')}"
+            )
+            _log_request("GET", list_path)
+            list_response = _request("GET", list_path)
+            _log_response(list_response)
+            if extraction_id:
+                extraction_path = (
+                    f"/context/extractions/{extraction_id}"
+                    f"?tenant_id={TENANT_ID}"
+                    f"&domain_id={DOMAIN_ID}"
+                )
+                _log_request("GET", extraction_path)
+                extraction_response = _request("GET", extraction_path)
+                _log_response(extraction_response)
 
             if extraction_id:
                 apply_payload = {
@@ -241,6 +265,8 @@ def main() -> int:
         "schema": schemas[0] if schemas else "public",
         "schemas": schemas or None,
         "tables": tables[:10] or None,
+        "connection_id": "conn_demo",
+        "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
     }
     map_path = f"/onboard/map?domain_id={DOMAIN_ID}&tenant_id={TENANT_ID}&use_llm=false"
     _log_request("POST", map_path, map_payload)
@@ -318,6 +344,10 @@ def main() -> int:
             "display_name": measure["column"].replace("_", " ").title(),
             "description": f"Auto-promoted metric for {measure['table']}.{measure['column']}",
             "status": "certified",
+            "connection_id": "conn_demo",
+            "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
+            "schema": os.getenv("DEMO_DB_SCHEMA", "public"),
+            "tables": [measure["table"]],
         }
         patch_path = f"/metrics/{metric_id}"
         _log_request("PATCH", patch_path, patch_payload)

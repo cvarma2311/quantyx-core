@@ -243,6 +243,7 @@ CREATE TABLE IF NOT EXISTS public.quantyx_entity_overrides (
   description TEXT,
   join_key TEXT,
   examples TEXT[],
+  source_context_id TEXT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, domain_id, entity_id)
 );
@@ -257,6 +258,7 @@ CREATE TABLE IF NOT EXISTS public.quantyx_hierarchy_overrides (
   hierarchy_name TEXT NOT NULL,
   levels TEXT[] NOT NULL,
   description TEXT,
+  source_context_id TEXT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, domain_id, hierarchy_name)
 );
@@ -297,6 +299,8 @@ CREATE TABLE IF NOT EXISTS public.quantyx_context_extractions (
   payload JSONB NOT NULL,
   llm_model TEXT NULL,
   confidence NUMERIC NULL,
+  status TEXT NULL,
+  notes TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   FOREIGN KEY (context_id) REFERENCES public.quantyx_business_context(context_id)
 );

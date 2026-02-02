@@ -32,6 +32,26 @@ class QueryRequest(BaseModel):
         description="Domain identifier for glossary/context enrichment",
         examples=["manufacturing"],
     )
+    connection_id: Optional[str] = Field(
+        None,
+        description="Connection scope identifier",
+        examples=["conn_prod"],
+    )
+    database: Optional[str] = Field(
+        None,
+        description="Database scope name",
+        examples=["prod_warehouse"],
+    )
+    schema: Optional[str] = Field(
+        None,
+        description="Schema scope name",
+        examples=["public"],
+    )
+    tables: Optional[List[str]] = Field(
+        None,
+        description="Tables in scope",
+        examples=[["fact_production_daily", "dim_plant"]],
+    )
     metric: Optional[str] = Field(
         None,
         description="Metric name to query directly",
@@ -854,6 +874,7 @@ class ContextListResponse(BaseModel):
                         "source_type": "business_context",
                         "source_title": "Operations glossary",
                         "status": "submitted",
+                        "extraction_types": ["combined"],
                         "created_at": "2025-02-14T10:00:00Z",
                     }
                 ],
@@ -914,6 +935,29 @@ class ContextExtractResponse(BaseModel):
     }
 
 
+class ContextExtractionResponse(BaseModel):
+    extraction_id: str = Field(..., examples=["ext_123"])
+    context_id: str = Field(..., examples=["ctx_123"])
+    extraction_type: str | None = Field(None, examples=["combined"])
+    payload: dict
+    status: str | None = Field(None, examples=["reviewed"])
+    notes: str | None = Field(None, examples=["Reviewed by analyst"])
+    created_at: str | None = Field(None, examples=["2025-02-14T10:00:00Z"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "extraction_id": "ext_123",
+                "context_id": "ctx_123",
+                "extraction_type": "combined",
+                "payload": {"hierarchies": [{"name": "sales_org", "levels": ["zone", "region"]}]},
+                "status": "reviewed",
+                "notes": "Reviewed by analyst",
+                "created_at": "2025-02-14T10:00:00Z",
+            }
+        }
+    }
+
+
 class ContextApplyRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str = Field(..., examples=["manufacturing"])
@@ -942,6 +986,44 @@ class ContextApplyResponse(BaseModel):
             "example": {"status": "applied", "updated": {"entities": 4, "hierarchies": 1, "metrics": 8}}
         }
     }
+
+
+class ContextPatchRequest(BaseModel):
+    source_title: str | None = Field(None, examples=["Operations glossary v2"])
+    raw_text: str | None = Field(None, examples=["Updated glossary content..."])
+    metadata: dict | None = Field(None, examples=[{"connection_id": "conn_prod", "tables": ["fact_sales"]}])
+    status: str | None = Field(None, examples=["processed"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "source_title": "Operations glossary v2",
+                "status": "processed",
+                "metadata": {"connection_id": "conn_prod", "database": "prod_warehouse", "schema": "public"},
+            }
+        }
+    }
+
+
+class ContextFilePatchRequest(BaseModel):
+    metadata: dict | None = Field(None, examples=[{"connection_id": "conn_prod", "tables": ["fact_sales"]}])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "metadata": {
+                    "connection_id": "conn_prod",
+                    "database": "prod_warehouse",
+                    "schema": "public",
+                    "tables": ["fact_sales"],
+                }
+            }
+        }
+    }
+
+
+class ContextExtractionPatchRequest(BaseModel):
+    status: str | None = Field(None, examples=["reviewed"])
+    notes: str | None = Field(None, examples=["Reviewed by analytics lead"])
+    model_config = {"json_schema_extra": {"example": {"status": "reviewed", "notes": "Looks good"}}}
 
 
 class OnboardScanSchemaSpec(BaseModel):
@@ -1097,6 +1179,10 @@ class SuggestedMetricsResponse(BaseModel):
 
 class MetricUpsertRequest(BaseModel):
     domain_id: str = Field(..., examples=["energy_distribution"])
+    connection_id: str | None = Field(None, examples=["conn_prod"])
+    database: str | None = Field(None, examples=["prod_warehouse"])
+    schema: str | None = Field(None, examples=["public"])
+    tables: List[str] | None = Field(None, examples=[["fact_hpcl_sales_daily"]])
     metric_name: str = Field(..., examples=["total_sales_volume_tmt"])
     display_name: str | None = Field(None, examples=["Total Sales Volume (TMT)"])
     description: str | None = Field(None, examples=["Total sales volume in TMT"])
@@ -1127,6 +1213,11 @@ class MetricUpsertRequest(BaseModel):
 
 
 class MetricPatchRequest(BaseModel):
+    domain_id: str | None = Field(None, examples=["energy_distribution"])
+    connection_id: str | None = Field(None, examples=["conn_prod"])
+    database: str | None = Field(None, examples=["prod_warehouse"])
+    schema: str | None = Field(None, examples=["public"])
+    tables: List[str] | None = Field(None, examples=[["fact_hpcl_sales_daily"]])
     metric_name: str | None = Field(None, examples=["total_sales_volume_tmt"])
     display_name: str | None = Field(None, examples=["Total Sales Volume (TMT)"])
     description: str | None = Field(None, examples=["Updated description"])

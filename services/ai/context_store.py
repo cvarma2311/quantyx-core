@@ -117,6 +117,9 @@ def list_context(
     domain_id: str,
     source_type: str | None,
     status: str | None,
+    connection_id: str | None,
+    database: str | None,
+    schema: str | None,
     limit: int,
     cursor: str | None,
 ) -> tuple[list[dict], str | None]:
@@ -128,26 +131,53 @@ def list_context(
     if status:
         filters.append("status = %s")
         params.append(status)
+    if connection_id:
+        filters.append("connection_id = %s")
+        params.append(connection_id)
+    if database:
+        filters.append("database_name = %s")
+        params.append(database)
+    if schema:
+        filters.append("schema_name = %s")
+        params.append(schema)
     if cursor:
         filters.append("created_at < %s")
         params.append(cursor)
 
     where_clause = " AND ".join(filters)
     sql = f"""
-        SELECT context_id,
-               tenant_id,
-               domain_id,
-               connection_id,
-               database_name,
-               schema_name,
-               source_type,
-               source_title,
-               status,
-               metadata,
-               created_at
-          FROM public.quantyx_business_context
+        SELECT c.context_id,
+               c.tenant_id,
+               c.domain_id,
+               c.connection_id,
+               c.database_name,
+               c.schema_name,
+               c.source_type,
+               c.source_title,
+               c.status,
+               c.metadata,
+               c.created_at,
+               COALESCE(
+                 array_agg(DISTINCT e.extraction_type)
+                   FILTER (WHERE e.extraction_type IS NOT NULL),
+                 ARRAY[]::TEXT[]
+               ) AS extraction_types
+          FROM public.quantyx_business_context c
+          LEFT JOIN public.quantyx_context_extractions e
+            ON e.context_id = c.context_id
          WHERE {where_clause}
-         ORDER BY created_at DESC
+         GROUP BY c.context_id,
+                  c.tenant_id,
+                  c.domain_id,
+                  c.connection_id,
+                  c.database_name,
+                  c.schema_name,
+                  c.source_type,
+                  c.source_title,
+                  c.status,
+                  c.metadata,
+                  c.created_at
+         ORDER BY c.created_at DESC
          LIMIT %s
     """
     rows = run_query(settings, sql, params + [limit + 1])
@@ -163,6 +193,10 @@ def get_context(settings: Settings, context_id: str) -> dict | None:
         SELECT context_id,
                tenant_id,
                domain_id,
+               connection_id,
+               database_name,
+               schema_name,
+               source_title,
                raw_text,
                metadata,
                status
@@ -184,6 +218,19 @@ def get_context_file_texts(settings: Settings, context_id: str) -> list[str]:
     """
     rows = run_query(settings, sql, [context_id])
     return [row.get("extracted_text", "") for row in rows if row.get("extracted_text")]
+
+
+def get_context_file(settings: Settings, file_id: str) -> dict | None:
+    sql = """
+        SELECT file_id,
+               tenant_id,
+               domain_id,
+               metadata
+          FROM public.quantyx_context_files
+         WHERE file_id = %s
+    """
+    rows = run_query(settings, sql, [file_id])
+    return rows[0] if rows else None
 
 
 def mark_context_processed(settings: Settings, context_id: str) -> None:
@@ -236,16 +283,68 @@ def persist_extraction(
     return extraction_id
 
 
+def update_context(settings: Settings, context_id: str, updates: dict[str, Any]) -> None:
+    allowed = {"source_title", "raw_text", "metadata", "status"}
+    filtered = {key: value for key, value in updates.items() if key in allowed}
+    if not filtered:
+        return
+    columns = []
+    params: list[Any] = []
+    for key, value in filtered.items():
+        columns.append(f"{key} = %s")
+        params.append(value)
+    columns.append("updated_at = now()")
+    params.append(context_id)
+    sql = f"UPDATE public.quantyx_business_context SET {', '.join(columns)} WHERE context_id = %s"
+    execute_non_query(settings, sql, params)
+
+
+def update_context_file_metadata(settings: Settings, file_id: str, metadata: dict[str, Any]) -> None:
+    sql = """
+        UPDATE public.quantyx_context_files
+           SET metadata = %s
+         WHERE file_id = %s
+    """
+    execute_non_query(settings, sql, [metadata, file_id])
+
+
 def get_extraction(settings: Settings, extraction_id: str) -> dict | None:
     sql = """
         SELECT extraction_id,
                context_id,
                tenant_id,
                domain_id,
+               extraction_type,
                payload,
-               llm_model
+               llm_model,
+               status,
+               notes,
+               created_at
           FROM public.quantyx_context_extractions
          WHERE extraction_id = %s
     """
     rows = run_query(settings, sql, [extraction_id])
     return rows[0] if rows else None
+
+
+def update_extraction(
+    settings: Settings,
+    extraction_id: str,
+    status: str | None = None,
+    notes: str | None = None,
+) -> None:
+    updates = {}
+    if status is not None:
+        updates["status"] = status
+    if notes is not None:
+        updates["notes"] = notes
+    if not updates:
+        return
+    columns = []
+    params: list[Any] = []
+    for key, value in updates.items():
+        columns.append(f"{key} = %s")
+        params.append(value)
+    params.append(extraction_id)
+    sql = f"UPDATE public.quantyx_context_extractions SET {', '.join(columns)} WHERE extraction_id = %s"
+    execute_non_query(settings, sql, params)
