@@ -34,6 +34,9 @@ from services.ai.dbt_manifest import (
     load_latest_manifest_row,
     resolve_dbt_project_dir,
     upsert_tenant_project_dir,
+    upsert_dbt_config,
+    get_latest_dbt_config,
+    resolve_dbt_config,
 )
 from services.ai.semantic_layer.pack_loader import list_packs, load_pack
 from services.ai.governance import build_lineage
@@ -122,6 +125,8 @@ from services.api.schemas import (
     DbtManifestGenerateRequest,
     DbtManifestGenerateResponse,
     DbtManifestLatestResponse,
+    DbtConfigUpsertRequest,
+    DbtConfigResponse,
     PoliciesResponse,
     LineageResponse,
     InsightsResponse,
@@ -760,6 +765,69 @@ def get_latest_dbt_manifest(
         target_name=row["target_name"],
         created_at=row["created_at"].isoformat(),
         manifest_json=row["manifest_json"],
+    )
+
+
+@app.post(
+    "/dbt/config",
+    response_model=DbtConfigResponse,
+    tags=["admin"],
+    summary="Upsert dbt config",
+    description="Store dbt config for a tenant/domain/connection (admin use only).",
+)
+def upsert_dbt_config_endpoint(payload: DbtConfigUpsertRequest) -> DbtConfigResponse:
+    dbt_project_path = payload.dbt_project_path or resolve_dbt_project_dir(payload.tenant_id)
+    profile_name = payload.profile_name or settings.dbt_profile_name
+    target_name = payload.target_name or settings.dbt_target_name
+    profiles_dir = payload.profiles_dir or settings.dbt_profiles_dir
+    config_id = upsert_dbt_config(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=payload.domain_id,
+        connection_id=payload.connection_id,
+        dbt_project_path=dbt_project_path,
+        profile_name=profile_name,
+        target_name=target_name,
+        profiles_dir=profiles_dir,
+    )
+    return DbtConfigResponse(
+        config_id=config_id,
+        tenant_id=payload.tenant_id,
+        domain_id=payload.domain_id,
+        connection_id=payload.connection_id,
+        dbt_project_path=dbt_project_path,
+        profile_name=profile_name,
+        target_name=target_name,
+        profiles_dir=profiles_dir,
+    )
+
+
+@app.get(
+    "/dbt/config/latest",
+    response_model=DbtConfigResponse,
+    tags=["admin"],
+    summary="Fetch latest dbt config",
+    description="Return the latest dbt config for a tenant/domain/connection (admin use only).",
+)
+def get_latest_dbt_config_endpoint(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str | None = None,
+) -> DbtConfigResponse:
+    config = get_latest_dbt_config(settings, tenant_id, domain_id, connection_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="dbt config not found")
+    return DbtConfigResponse(
+        config_id=config.get("config_id"),
+        tenant_id=config["tenant_id"],
+        domain_id=config["domain_id"],
+        connection_id=config.get("connection_id"),
+        dbt_project_path=config["dbt_project_path"],
+        profile_name=config["profile_name"],
+        target_name=config["target_name"],
+        profiles_dir=config.get("profiles_dir"),
+        created_at=config.get("created_at").isoformat() if config.get("created_at") else None,
+        updated_at=config.get("updated_at").isoformat() if config.get("updated_at") else None,
     )
 
 
@@ -2819,6 +2887,8 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
     },
 )
 def onboard_scan_connection(request: OnboardScanMultiConnectionRequest) -> OnboardScanConnectionResponse:
+    tenant_id = request.tenant_id or settings.default_tenant_id
+    domain_id = request.domain_id or settings.default_domain_id
     connections_payload = []
     for connection in request.connections:
         databases_payload = []
@@ -2863,6 +2933,46 @@ def onboard_scan_connection(request: OnboardScanMultiConnectionRequest) -> Onboa
         request.model_dump(),
         {"connections": connections_payload},
     )
+
+    try:
+        for connection in request.connections:
+            resolved = resolve_dbt_config(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                connection_id=connection.connection_id,
+            )
+            if resolved.get("config_id") is None:
+                upsert_dbt_config(
+                    settings,
+                    tenant_id=tenant_id,
+                    domain_id=domain_id,
+                    connection_id=connection.connection_id,
+                    dbt_project_path=resolved["dbt_project_path"],
+                    profile_name=resolved["profile_name"],
+                    target_name=resolved["target_name"],
+                    profiles_dir=resolved.get("profiles_dir"),
+                )
+            upsert_tenant_project_dir(settings, tenant_id, domain_id, resolved["dbt_project_path"])
+            manifest_json = run_dbt_compile(
+                settings,
+                dbt_project_path=resolved["dbt_project_path"],
+                profile_name=resolved["profile_name"],
+                target_name=resolved["target_name"],
+                profiles_dir=resolved.get("profiles_dir"),
+            )
+            store_manifest(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                connection_id=connection.connection_id,
+                dbt_project_path=resolved["dbt_project_path"],
+                profile_name=resolved["profile_name"],
+                target_name=resolved["target_name"],
+                manifest_json=manifest_json,
+            )
+    except RuntimeError as exc:
+        logger.warning("dbt manifest generation skipped: %s", exc)
 
     return OnboardScanConnectionResponse(connections=connections_payload)
 

@@ -369,6 +369,23 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_dbt_manifest_tenant
   ON public.quantyx_dbt_manifest (tenant_id, domain_id, created_at DESC);
 
 
+CREATE TABLE IF NOT EXISTS public.quantyx_dbt_config (
+  config_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NULL,
+  dbt_project_path TEXT NOT NULL,
+  profile_name TEXT NOT NULL,
+  target_name TEXT NOT NULL,
+  profiles_dir TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_dbt_config_lookup
+  ON public.quantyx_dbt_config (tenant_id, domain_id, connection_id, updated_at DESC);
+
+
 CREATE TABLE IF NOT EXISTS public.quantyx_tenant_dbt_projects (
   tenant_id TEXT NOT NULL,
   domain_id TEXT NOT NULL,

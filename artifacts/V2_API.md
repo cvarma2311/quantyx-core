@@ -678,6 +678,9 @@ Response:
 ### 3.10 POST /dbt/manifest/generate
 Run dbt compile and store manifest.json in the database.
 
+Note: With automated dbt (Phase O), this is triggered automatically after
+`/onboard/scan-connection` and does not require UI input.
+
 Request:
 ```json
 {
@@ -716,6 +719,55 @@ Response:
   "target_name": "dev",
   "created_at": "2025-02-14T10:00:00Z",
   "manifest_json": {"metadata": {"dbt_version": "1.7.0"}}
+}
+```
+
+### 3.12 POST /dbt/config
+Admin-only. Upsert dbt config for a tenant/domain/connection.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "dbt_project_path": "dbt_projects/dbt-tenant_a",
+  "profile_name": "default",
+  "target_name": "dev",
+  "profiles_dir": "~/.dbt"
+}
+```
+
+Response:
+```json
+{
+  "config_id": "dbt_cfg_123",
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "dbt_project_path": "dbt_projects/dbt-tenant_a",
+  "profile_name": "default",
+  "target_name": "dev",
+  "profiles_dir": "~/.dbt"
+}
+```
+
+### 3.13 GET /dbt/config/latest?tenant_id=...&domain_id=...&connection_id=...
+Admin-only. Fetch latest dbt config for a tenant/domain/connection.
+
+Response:
+```json
+{
+  "config_id": "dbt_cfg_123",
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "dbt_project_path": "dbt_projects/dbt-tenant_a",
+  "profile_name": "default",
+  "target_name": "dev",
+  "profiles_dir": "~/.dbt",
+  "created_at": "2025-02-14T10:00:00Z",
+  "updated_at": "2025-02-14T10:00:00Z"
 }
 ```
 

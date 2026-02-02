@@ -16,6 +16,11 @@ class Settings:
     openai_model: str
     dbt_manifest_path: str
     metrics_catalog_path: str
+    dbt_profile_name: str
+    dbt_target_name: str
+    dbt_profiles_dir: str | None
+    default_tenant_id: str
+    default_domain_id: str
 
 
 def load_settings() -> Settings:
@@ -30,4 +35,9 @@ def load_settings() -> Settings:
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         dbt_manifest_path=os.getenv("DBT_MANIFEST_PATH", "dbt/target/manifest.json"),
         metrics_catalog_path=os.getenv("METRICS_CATALOG_PATH", "contracts/metrics/core_metrics.yml"),
+        dbt_profile_name=os.getenv("DBT_PROFILE_NAME", "default"),
+        dbt_target_name=os.getenv("DBT_TARGET_NAME", "dev"),
+        dbt_profiles_dir=os.getenv("DBT_PROFILES_DIR"),
+        default_tenant_id=os.getenv("DEFAULT_TENANT_ID", "tenant_default"),
+        default_domain_id=os.getenv("DEFAULT_DOMAIN_ID", "default_domain"),
     )

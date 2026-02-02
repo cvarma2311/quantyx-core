@@ -6,11 +6,13 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from typing import Any
 
 
 API_BASE = os.getenv("QUANTYX_API_BASE", "http://127.0.0.1:8787")
 DOMAIN_ID = os.getenv("QUANTYX_DOMAIN", "manufacturing")
 TENANT_ID = os.getenv("QUANTYX_TENANT", "x_mfg")
+CONNECTION_ID = os.getenv("DEMO_CONNECTION_ID", "conn_demo")
 DEMO_TABLES = [t.strip() for t in os.getenv("DEMO_TABLES", "").split(",") if t.strip()]
 DEMO_CONTEXT_TEXT = os.getenv("DEMO_CONTEXT_TEXT", "")
 DEMO_CONTEXT_FILE = os.getenv("DEMO_CONTEXT_FILE", "")
@@ -59,11 +61,64 @@ def _request(method: str, path: str, payload: dict | None = None) -> dict:
         raise RuntimeError(f"{method} {path} failed: {exc.code} {body}") from exc
 
 
+def run_onboarding(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    db_host: str,
+    db_port: int,
+    db_user: str,
+    db_password: str,
+    db_name: str,
+    db_schema: str,
+    tables: list[str],
+    context_text: str = "",
+    context_file: str = "",
+    dbt_project_path: str = "",
+    dbt_profile: str = "default",
+    dbt_target: str = "dev",
+    dbt_profiles_dir: str = "",
+) -> int:
+    """
+    Run the full onboarding flow for a tenant.
+    context_file should be a local file path to a .txt or .docx file.
+    """
+    global TENANT_ID, DOMAIN_ID, DEMO_TABLES, DEMO_CONTEXT_TEXT, DEMO_CONTEXT_FILE
+    global DEMO_DBT_PROJECT, DEMO_DBT_PROFILE, DEMO_DBT_TARGET, DEMO_DBT_PROFILES_DIR
+    global CONNECTION_ID
+
+    TENANT_ID = tenant_id
+    DOMAIN_ID = domain_id
+    CONNECTION_ID = connection_id
+    DEMO_TABLES = tables
+    DEMO_CONTEXT_TEXT = context_text
+    DEMO_CONTEXT_FILE = context_file
+    DEMO_DBT_PROJECT = dbt_project_path
+    DEMO_DBT_PROFILE = dbt_profile
+    DEMO_DBT_TARGET = dbt_target
+    DEMO_DBT_PROFILES_DIR = dbt_profiles_dir
+
+    os.environ["DEMO_DB_HOST"] = db_host
+    os.environ["DEMO_DB_PORT"] = str(db_port)
+    os.environ["DEMO_DB_USER"] = db_user
+    os.environ["DEMO_DB_PASSWORD"] = db_password
+    os.environ["DEMO_DB_NAME"] = db_name
+    os.environ["DEMO_DB_SCHEMA"] = db_schema
+    os.environ["DEMO_CONNECTION_ID"] = connection_id
+
+    if DEMO_CONTEXT_FILE and not os.path.isfile(DEMO_CONTEXT_FILE):
+        raise FileNotFoundError(f"context_file not found: {DEMO_CONTEXT_FILE}")
+
+    return main()
+
+
 def main() -> int:
     print("== Onboarding Demo ==")
     print(f"API_BASE={API_BASE}")
     print(f"DOMAIN_ID={DOMAIN_ID}")
     print(f"TENANT_ID={TENANT_ID}")
+    print(f"CONNECTION_ID={CONNECTION_ID}")
     print(f"DEMO_TABLES={DEMO_TABLES}")
     print(f"DEMO_CONTEXT_FILE={DEMO_CONTEXT_FILE}")
     print(f"DEMO_DBT_PROJECT={DEMO_DBT_PROJECT or '(auto)'}")
@@ -75,14 +130,32 @@ def main() -> int:
         print("DEMO_TABLES must be set (comma-separated table names).")
         return 1
 
+    # 0) Optional admin dbt config seed
+    if DEMO_DBT_PROJECT or DEMO_DBT_PROFILES_DIR:
+        print("\n[0] Seed dbt config (admin)")
+        dbt_config_payload = {
+            "tenant_id": TENANT_ID,
+            "domain_id": DOMAIN_ID,
+            "connection_id": CONNECTION_ID,
+            "dbt_project_path": DEMO_DBT_PROJECT or None,
+            "profile_name": DEMO_DBT_PROFILE,
+            "target_name": DEMO_DBT_TARGET,
+            "profiles_dir": DEMO_DBT_PROFILES_DIR or None,
+        }
+        _log_request("POST", "/dbt/config", dbt_config_payload)
+        dbt_config_response = _request("POST", "/dbt/config", dbt_config_payload)
+        _log_response(dbt_config_response)
+
     # 1) Schema scan via connection
     print("\n[1] Scan connection")
     print("Step 1 start")
-    scan_payload = {
+    scan_payload: dict[str, Any] = {
+        "tenant_id": TENANT_ID,
+        "domain_id": DOMAIN_ID,
         "connections": [
-            {
-                "connection_id": "conn_demo",
-                "db_type": "postgres",
+                {
+                    "connection_id": CONNECTION_ID,
+                    "db_type": "postgres",
                 "host": os.getenv("DEMO_DB_HOST", "db.company.com"),
                 "port": int(os.getenv("DEMO_DB_PORT", "5432")),
                 "user": os.getenv("DEMO_DB_USER", "readonly_user"),
@@ -125,7 +198,7 @@ def main() -> int:
             "source_title": "Demo business context",
             "metadata": json.dumps(
                 {
-                    "connection_id": "conn_demo",
+                    "connection_id": CONNECTION_ID,
                     "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
                     "schema": os.getenv("DEMO_DB_SCHEMA", "public"),
                     "tables": DEMO_TABLES,
@@ -172,7 +245,7 @@ def main() -> int:
             "raw_text": context_text,
             "file_ids": file_ids or None,
             "metadata": {
-                "connection_id": "conn_demo",
+                "connection_id": CONNECTION_ID,
                 "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
                 "schema": os.getenv("DEMO_DB_SCHEMA", "public"),
                 "tables": DEMO_TABLES,
@@ -207,7 +280,7 @@ def main() -> int:
                 "/context"
                 f"?tenant_id={TENANT_ID}"
                 f"&domain_id={DOMAIN_ID}"
-                f"&connection_id=conn_demo"
+                f"&connection_id={CONNECTION_ID}"
                 f"&database={os.getenv('DEMO_DB_NAME', 'prod_warehouse')}"
                 f"&schema={os.getenv('DEMO_DB_SCHEMA', 'public')}"
             )
@@ -265,7 +338,7 @@ def main() -> int:
         "schema": schemas[0] if schemas else "public",
         "schemas": schemas or None,
         "tables": tables[:10] or None,
-        "connection_id": "conn_demo",
+                "connection_id": CONNECTION_ID,
         "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
     }
     map_path = f"/onboard/map?domain_id={DOMAIN_ID}&tenant_id={TENANT_ID}&use_llm=false"
@@ -293,7 +366,7 @@ def main() -> int:
         "time_column": None,
         "grain": "day",
         "use_llm": False,
-        "connection_id": "conn_demo",
+        "connection_id": CONNECTION_ID,
         "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
     }
     infer_path = f"/onboard/infer-models?domain_id={DOMAIN_ID}"
@@ -307,7 +380,7 @@ def main() -> int:
     manifest_payload = {
         "tenant_id": TENANT_ID,
         "domain_id": DOMAIN_ID,
-        "connection_id": "conn_demo",
+        "connection_id": CONNECTION_ID,
         "profile_name": DEMO_DBT_PROFILE,
         "target_name": DEMO_DBT_TARGET,
         "profiles_dir": DEMO_DBT_PROFILES_DIR or None,
@@ -325,7 +398,7 @@ def main() -> int:
         "schema": schemas[0] if schemas else "public",
         "schemas": schemas or None,
         "tables": tables[:10] or None,
-        "connection_id": "conn_demo",
+        "connection_id": CONNECTION_ID,
         "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
     }
     suggested_path = f"/metrics/suggested?domain_id={DOMAIN_ID}&persist=true"
@@ -344,7 +417,7 @@ def main() -> int:
             "display_name": measure["column"].replace("_", " ").title(),
             "description": f"Auto-promoted metric for {measure['table']}.{measure['column']}",
             "status": "certified",
-            "connection_id": "conn_demo",
+            "connection_id": CONNECTION_ID,
             "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
             "schema": os.getenv("DEMO_DB_SCHEMA", "public"),
             "tables": [measure["table"]],

@@ -36,6 +36,8 @@ dependency order.
 10) Phase I - Hardening and Productization
 11) Phase N - Connection-Scoped Onboarding + Multi-Context Apply
    - `Phase_I_Hardening_Productization.md`
+12) Phase O - Automated dbt Manifest (Backend-Only)
+   - `Phase_O_Automated_Dbt_Manifest.md`
 
 ## Dependencies (summary)
 

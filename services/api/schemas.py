@@ -1050,10 +1050,14 @@ class OnboardScanConnectionSpec(BaseModel):
 
 
 class OnboardScanMultiConnectionRequest(BaseModel):
+    tenant_id: str | None = Field(None, examples=["tenant_a"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
     connections: List[OnboardScanConnectionSpec] = Field(default_factory=list)
     model_config = {
         "json_schema_extra": {
             "example": {
+                "tenant_id": "tenant_a",
+                "domain_id": "manufacturing",
                 "connections": [
                     {
                         "connection_id": "conn_prod",
@@ -1320,6 +1324,58 @@ class DbtManifestGenerateResponse(BaseModel):
                 "status": "stored",
                 "tenant_id": "tenant_a",
                 "dbt_project_path": "dbt_projects/dbt-tenant_a",
+            }
+        }
+    }
+
+
+class DbtConfigUpsertRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    connection_id: str | None = Field(None, examples=["conn_prod"])
+    dbt_project_path: str | None = Field(None, examples=["dbt_projects/dbt-tenant_a"])
+    profile_name: str | None = Field(None, examples=["default"])
+    target_name: str | None = Field(None, examples=["dev"])
+    profiles_dir: str | None = Field(None, examples=["~/.dbt"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "tenant_a",
+                "domain_id": "manufacturing",
+                "connection_id": "conn_prod",
+                "dbt_project_path": "dbt_projects/dbt-tenant_a",
+                "profile_name": "default",
+                "target_name": "dev",
+                "profiles_dir": "~/.dbt",
+            }
+        }
+    }
+
+
+class DbtConfigResponse(BaseModel):
+    config_id: str | None = Field(None, examples=["dbt_cfg_123"])
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    connection_id: str | None = Field(None, examples=["conn_prod"])
+    dbt_project_path: str = Field(..., examples=["dbt_projects/dbt-tenant_a"])
+    profile_name: str = Field(..., examples=["default"])
+    target_name: str = Field(..., examples=["dev"])
+    profiles_dir: str | None = Field(None, examples=["~/.dbt"])
+    created_at: str | None = Field(None, examples=["2025-02-14T10:00:00Z"])
+    updated_at: str | None = Field(None, examples=["2025-02-14T10:00:00Z"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "config_id": "dbt_cfg_123",
+                "tenant_id": "tenant_a",
+                "domain_id": "manufacturing",
+                "connection_id": "conn_prod",
+                "dbt_project_path": "dbt_projects/dbt-tenant_a",
+                "profile_name": "default",
+                "target_name": "dev",
+                "profiles_dir": "~/.dbt",
+                "created_at": "2025-02-14T10:00:00Z",
+                "updated_at": "2025-02-14T10:00:00Z",
             }
         }
     }

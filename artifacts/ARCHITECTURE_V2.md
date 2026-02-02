@@ -20,6 +20,7 @@ This is a platform architecture, not a customer-specific implementation.
    - Business meaning lives in YAML contracts, not Python logic.
 2. dbt owns data truth
    - Joins, transformations, and correlations happen in dbt.
+   - dbt manifests are generated automatically during onboarding (Phase O), stored in Postgres, and never require UI input.
 3. AI reasons over semantics, not tables
    - The AI engine does not read raw schemas directly.
 4. Explainability before optimization
@@ -64,6 +65,11 @@ This is a platform architecture, not a customer-specific implementation.
 │ (Facts, Dims, Wide Tables)   │
 └──────────────────────────────┘
 ```
+
+Automated dbt (Phase O):
+- Connection scan triggers `dbt compile` in the backend.
+- Manifests are stored in `public.quantyx_dbt_manifest` for schema and lineage reads.
+- Per-tenant dbt config is resolved from `quantyx_dbt_config` or server defaults.
 
 ---
 

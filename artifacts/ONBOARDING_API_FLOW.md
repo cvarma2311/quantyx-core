@@ -349,6 +349,9 @@ POST /dbt/manifest/generate
 
 Purpose: run dbt compile and store manifest.json in Postgres for lineage + model resolution.
 
+Note: When using automated dbt (Phase O), this is triggered automatically after
+`/onboard/scan-connection` and does not require UI input.
+
 Request:
 ```json
 {
@@ -375,6 +378,7 @@ Response:
 Expected outcome:
 - Manifest is available from DB for schema listing and metric persistence.
 - If `dbt_project_path` is not provided, the API creates `dbt_projects/dbt-<tenant_id>` automatically.
+ - Automated dbt can be configured per tenant via `quantyx_dbt_config`.
 
 ---
 

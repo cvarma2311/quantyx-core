@@ -77,6 +77,132 @@ def upsert_tenant_project_dir(
     execute_non_query(settings, sql, [tenant_id, domain_id, dbt_project_dir])
 
 
+def upsert_dbt_config(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str | None,
+    dbt_project_path: str,
+    profile_name: str,
+    target_name: str,
+    profiles_dir: str | None,
+) -> str:
+    existing = get_latest_dbt_config(settings, tenant_id, domain_id, connection_id)
+    if existing and existing.get("config_id"):
+        sql = """
+            UPDATE public.quantyx_dbt_config
+               SET dbt_project_path = %s,
+                   profile_name = %s,
+                   target_name = %s,
+                   profiles_dir = %s,
+                   updated_at = now()
+             WHERE config_id = %s
+        """
+        execute_non_query(
+            settings,
+            sql,
+            [dbt_project_path, profile_name, target_name, profiles_dir, existing["config_id"]],
+        )
+        return str(existing["config_id"])
+
+    config_id = f"dbt_cfg_{uuid4().hex[:12]}"
+    sql = """
+        INSERT INTO public.quantyx_dbt_config (
+          config_id,
+          tenant_id,
+          domain_id,
+          connection_id,
+          dbt_project_path,
+          profile_name,
+          target_name,
+          profiles_dir,
+          updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+    """
+    execute_non_query(
+        settings,
+        sql,
+        [
+            config_id,
+            tenant_id,
+            domain_id,
+            connection_id,
+            dbt_project_path,
+            profile_name,
+            target_name,
+            profiles_dir,
+        ],
+    )
+    return config_id
+
+
+def get_latest_dbt_config(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str | None = None,
+) -> dict[str, Any] | None:
+    filters = ["tenant_id = %s", "domain_id = %s"]
+    params: list[Any] = [tenant_id, domain_id]
+    if connection_id:
+        filters.append("connection_id = %s")
+        params.append(connection_id)
+    else:
+        filters.append("connection_id IS NULL")
+    where_clause = " AND ".join(filters)
+    sql = f"""
+        SELECT config_id,
+               tenant_id,
+               domain_id,
+               connection_id,
+               dbt_project_path,
+               profile_name,
+               target_name,
+               profiles_dir,
+               created_at,
+               updated_at
+          FROM public.quantyx_dbt_config
+         WHERE {where_clause}
+         ORDER BY updated_at DESC
+         LIMIT 1
+    """
+    rows = run_query(settings, sql, params)
+    return rows[0] if rows else None
+
+
+def resolve_dbt_config(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str | None = None,
+) -> dict[str, Any]:
+    config = get_latest_dbt_config(settings, tenant_id, domain_id, connection_id)
+    if not config and connection_id:
+        config = get_latest_dbt_config(settings, tenant_id, domain_id, None)
+    if not config:
+        dbt_project_path = resolve_dbt_project_dir(tenant_id)
+        profile_name = settings.dbt_profile_name
+        target_name = settings.dbt_target_name
+        profiles_dir = settings.dbt_profiles_dir
+        config = {
+            "config_id": None,
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "connection_id": connection_id,
+            "dbt_project_path": dbt_project_path,
+            "profile_name": profile_name,
+            "target_name": target_name,
+            "profiles_dir": profiles_dir,
+        }
+        return config
+
+    dbt_project_path = config.get("dbt_project_path") or resolve_dbt_project_dir(tenant_id)
+    Path(dbt_project_path).mkdir(parents=True, exist_ok=True)
+    config["dbt_project_path"] = dbt_project_path
+    return config
+
+
 def store_manifest(
     settings: Settings,
     tenant_id: str,
