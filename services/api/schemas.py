@@ -1334,7 +1334,6 @@ class DbtConfigUpsertRequest(BaseModel):
     domain_id: str = Field(..., examples=["manufacturing"])
     connection_id: str | None = Field(None, examples=["conn_prod"])
     dbt_project_path: str | None = Field(None, examples=["dbt_projects/dbt-tenant_a"])
-    profile_name: str | None = Field(None, examples=["default"])
     target_name: str | None = Field(None, examples=["dev"])
     profiles_dir: str | None = Field(None, examples=["~/.dbt"])
     model_config = {
@@ -1344,7 +1343,6 @@ class DbtConfigUpsertRequest(BaseModel):
                 "domain_id": "manufacturing",
                 "connection_id": "conn_prod",
                 "dbt_project_path": "dbt_projects/dbt-tenant_a",
-                "profile_name": "default",
                 "target_name": "dev",
                 "profiles_dir": "~/.dbt",
             }
@@ -1358,7 +1356,7 @@ class DbtConfigResponse(BaseModel):
     domain_id: str = Field(..., examples=["manufacturing"])
     connection_id: str | None = Field(None, examples=["conn_prod"])
     dbt_project_path: str = Field(..., examples=["dbt_projects/dbt-tenant_a"])
-    profile_name: str = Field(..., examples=["default"])
+    profile_name: str = Field(..., examples=["tenant_a"])
     target_name: str = Field(..., examples=["dev"])
     profiles_dir: str | None = Field(None, examples=["~/.dbt"])
     created_at: str | None = Field(None, examples=["2025-02-14T10:00:00Z"])

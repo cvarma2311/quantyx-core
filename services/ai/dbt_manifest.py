@@ -18,6 +18,7 @@ def run_dbt_compile(
     target_name: str,
     profiles_dir: str | None = None,
 ) -> dict[str, Any]:
+    ensure_dbt_project(dbt_project_path, profile_name=profile_name)
     command = [
         "dbt",
         "compile",
@@ -42,6 +43,41 @@ def run_dbt_compile(
     if not manifest_path.exists():
         raise RuntimeError("dbt manifest.json not found after compile")
     return json.loads(manifest_path.read_text())
+
+
+def ensure_dbt_project(dbt_project_path: str, profile_name: str | None = None) -> None:
+    project_dir = Path(dbt_project_path)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    project_file = project_dir / "dbt_project.yml"
+    if project_file.exists():
+        return
+    project_name = project_dir.name.replace(" ", "_")
+    models_dir = project_dir / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    (models_dir / ".gitkeep").touch()
+    packages_file = project_dir / "packages.yml"
+    if not packages_file.exists():
+        packages_file.write_text("packages: []\n")
+    profile_value = profile_name or "default"
+    project_file.write_text(
+        "\n".join(
+            [
+                f"name: {project_name}",
+                "version: '1.0'",
+                "config-version: 2",
+                f"profile: {profile_value}",
+                "model-paths: ['models']",
+                "analysis-paths: ['analyses']",
+                "test-paths: ['tests']",
+                "seed-paths: ['seeds']",
+                "macro-paths: ['macros']",
+                "snapshot-paths: ['snapshots']",
+                "target-path: 'target'",
+                "clean-targets: ['target', 'dbt_packages']",
+                "",
+            ]
+        )
+    )
 
 
 def resolve_dbt_project_dir(tenant_id: str | None) -> str:
@@ -182,7 +218,7 @@ def resolve_dbt_config(
         config = get_latest_dbt_config(settings, tenant_id, domain_id, None)
     if not config:
         dbt_project_path = resolve_dbt_project_dir(tenant_id)
-        profile_name = settings.dbt_profile_name
+        profile_name = tenant_id
         target_name = settings.dbt_target_name
         profiles_dir = settings.dbt_profiles_dir
         config = {

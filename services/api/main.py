@@ -777,7 +777,7 @@ def get_latest_dbt_manifest(
 )
 def upsert_dbt_config_endpoint(payload: DbtConfigUpsertRequest) -> DbtConfigResponse:
     dbt_project_path = payload.dbt_project_path or resolve_dbt_project_dir(payload.tenant_id)
-    profile_name = payload.profile_name or settings.dbt_profile_name
+    profile_name = payload.tenant_id
     target_name = payload.target_name or settings.dbt_target_name
     profiles_dir = payload.profiles_dir or settings.dbt_profiles_dir
     config_id = upsert_dbt_config(

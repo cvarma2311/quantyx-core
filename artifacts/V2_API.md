@@ -732,7 +732,6 @@ Request:
   "domain_id": "manufacturing",
   "connection_id": "conn_prod",
   "dbt_project_path": "dbt_projects/dbt-tenant_a",
-  "profile_name": "default",
   "target_name": "dev",
   "profiles_dir": "~/.dbt"
 }
@@ -746,7 +745,7 @@ Response:
   "domain_id": "manufacturing",
   "connection_id": "conn_prod",
   "dbt_project_path": "dbt_projects/dbt-tenant_a",
-  "profile_name": "default",
+  "profile_name": "tenant_a",
   "target_name": "dev",
   "profiles_dir": "~/.dbt"
 }
@@ -763,7 +762,7 @@ Response:
   "domain_id": "manufacturing",
   "connection_id": "conn_prod",
   "dbt_project_path": "dbt_projects/dbt-tenant_a",
-  "profile_name": "default",
+  "profile_name": "tenant_a",
   "target_name": "dev",
   "profiles_dir": "~/.dbt",
   "created_at": "2025-02-14T10:00:00Z",
