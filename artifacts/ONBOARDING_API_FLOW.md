@@ -358,7 +358,7 @@ Request:
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
   "connection_id": "conn_prod",
-  "dbt_project_path": "dbt_projects/dbt-tenant_a",
+  "dbt_project_path": "dbt_projects/dbt_tenant_a",
   "profile_name": "default",
   "target_name": "dev",
   "profiles_dir": "~/.dbt"
@@ -371,13 +371,13 @@ Response:
   "manifest_id": "manifest_123",
   "status": "stored",
   "tenant_id": "tenant_a",
-  "dbt_project_path": "dbt_projects/dbt-tenant_a"
+  "dbt_project_path": "dbt_projects/dbt_tenant_a"
 }
 ```
 
 Expected outcome:
 - Manifest is available from DB for schema listing and metric persistence.
-- If `dbt_project_path` is not provided, the API creates `dbt_projects/dbt-<tenant_id>` automatically.
+- If `dbt_project_path` is not provided, the API creates `dbt_projects/dbt_<tenant_id>` automatically.
 - Automated dbt can be configured per tenant via `quantyx_dbt_config`.
 
 ---
@@ -386,7 +386,7 @@ Expected outcome:
 
 Triggered automatically after `/onboard/scan-connection` when dbt automation is enabled.
 Outputs draft dbt models into:
-`dbt_projects/dbt-<tenant_id>/models/auto/`
+`dbt_projects/dbt_<tenant_id>/models/auto/`
 
 Draft models must be reviewed before apply.
 

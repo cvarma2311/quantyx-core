@@ -42,7 +42,7 @@ This guarantees dbt config even if nothing is pre-seeded.
 
 ## 3) Per-tenant dbt project directories
 
-- Directory per tenant: `dbt_projects/dbt-<tenant_id>/`
+- Directory per tenant: `dbt_projects/dbt_<tenant_id>/`
 - Path tracked in `quantyx_dbt_config`
 - If missing, auto-create on scan
 

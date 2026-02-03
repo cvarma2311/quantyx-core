@@ -687,7 +687,7 @@ Request:
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
   "connection_id": "conn_prod",
-  "dbt_project_path": "dbt_projects/dbt-tenant_a",
+  "dbt_project_path": "dbt_projects/dbt_tenant_a",
   "profile_name": "default",
   "target_name": "dev",
   "profiles_dir": "~/.dbt"
@@ -700,7 +700,7 @@ Response:
   "manifest_id": "manifest_123",
   "status": "stored",
   "tenant_id": "tenant_a",
-  "dbt_project_path": "dbt_projects/dbt-tenant_a"
+  "dbt_project_path": "dbt_projects/dbt_tenant_a"
 }
 ```
 
@@ -731,7 +731,7 @@ Request:
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
   "connection_id": "conn_prod",
-  "dbt_project_path": "dbt_projects/dbt-tenant_a",
+  "dbt_project_path": "dbt_projects/dbt_tenant_a",
   "target_name": "dev",
   "profiles_dir": "~/.dbt"
 }
@@ -744,7 +744,7 @@ Response:
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
   "connection_id": "conn_prod",
-  "dbt_project_path": "dbt_projects/dbt-tenant_a",
+  "dbt_project_path": "dbt_projects/dbt_tenant_a",
   "profile_name": "tenant_a",
   "target_name": "dev",
   "profiles_dir": "~/.dbt"
@@ -761,7 +761,7 @@ Response:
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
   "connection_id": "conn_prod",
-  "dbt_project_path": "dbt_projects/dbt-tenant_a",
+  "dbt_project_path": "dbt_projects/dbt_tenant_a",
   "profile_name": "tenant_a",
   "target_name": "dev",
   "profiles_dir": "~/.dbt",

@@ -8,6 +8,7 @@ from uuid import uuid4
 from typing import Any
 import shutil
 import tempfile
+import re
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, run_query
@@ -56,23 +57,34 @@ def ensure_dbt_project(dbt_project_path: str, profile_name: str | None = None) -
     project_dir = Path(dbt_project_path)
     project_dir.mkdir(parents=True, exist_ok=True)
     project_file = project_dir / "dbt_project.yml"
+    project_name = _sanitize_project_name(project_dir.name)
     if project_file.exists():
+        content = project_file.read_text()
+        updated = False
+        if "name:" in content and not _is_valid_project_name(_extract_project_name(content)):
+            content = _replace_project_name(content, project_name)
+            updated = True
+        profile_value = normalize_profile_name(profile_name or "default")
+        if "profile:" in content:
+            content = _replace_profile_name(content, profile_value)
+            updated = True
+        if updated:
+            project_file.write_text(content)
         return
-    project_name = project_dir.name.replace(" ", "_")
     models_dir = project_dir / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
     (models_dir / ".gitkeep").touch()
     packages_file = project_dir / "packages.yml"
     if not packages_file.exists():
         packages_file.write_text("packages: []\n")
-    profile_value = profile_name or "default"
+    profile_value = normalize_profile_name(profile_name or "default")
     project_file.write_text(
         "\n".join(
             [
                 f"name: {project_name}",
                 "version: '1.0'",
                 "config-version: 2",
-                f"profile: {profile_value}",
+                f"profile: \"{profile_value}\"",
                 "model-paths: ['models']",
                 "analysis-paths: ['analyses']",
                 "test-paths: ['tests']",
@@ -87,6 +99,61 @@ def ensure_dbt_project(dbt_project_path: str, profile_name: str | None = None) -
     )
 
 
+def _extract_project_name(content: str) -> str:
+    for line in content.splitlines():
+        if line.strip().startswith("name:"):
+            return line.split(":", 1)[1].strip().strip("'\"")
+    return ""
+
+
+def _replace_project_name(content: str, project_name: str) -> str:
+    lines = []
+    replaced = False
+    for line in content.splitlines():
+        if line.strip().startswith("name:") and not replaced:
+            lines.append(f"name: {project_name}")
+            replaced = True
+        else:
+            lines.append(line)
+    if not replaced:
+        lines.insert(0, f"name: {project_name}")
+    return "\n".join(lines)
+
+
+def _replace_profile_name(content: str, profile_name: str) -> str:
+    lines = []
+    replaced = False
+    for line in content.splitlines():
+        if line.strip().startswith("profile:") and not replaced:
+            lines.append(f"profile: \"{normalize_profile_name(profile_name)}\"")
+            replaced = True
+        else:
+            lines.append(line)
+    if not replaced:
+        lines.insert(1, f"profile: \"{normalize_profile_name(profile_name)}\"")
+    return "\n".join(lines)
+
+
+def _is_valid_project_name(name: str) -> bool:
+    return bool(re.match(r"^[^\\d\\W]\\w*$", name))
+
+
+def _sanitize_project_name(raw: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z_]+", "_", raw)
+    if not cleaned or cleaned[0].isdigit():
+        cleaned = f"dbt_tenant_{cleaned}"
+    if not _is_valid_project_name(cleaned):
+        cleaned = "dbt_project"
+    return cleaned
+
+
+def normalize_profile_name(raw: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z_]+", "_", raw)
+    if not cleaned or cleaned[0].isdigit():
+        cleaned = f"dbt_{cleaned}"
+    return cleaned
+
+
 def create_temp_profiles_dir(
     tenant_id: str,
     target_name: str,
@@ -96,13 +163,15 @@ def create_temp_profiles_dir(
 ) -> str:
     profiles_dir = tempfile.mkdtemp(prefix=f"dbt_profiles_{tenant_id}_")
     profiles_path = Path(profiles_dir) / "profiles.yml"
+    profile_name = normalize_profile_name(tenant_id)
+    profile_key = f"\"{profile_name}\""
     host = connection.get("host")
     port = connection.get("port")
     user = connection.get("user")
     password = connection.get("password")
     profile_yaml = "\n".join(
         [
-            f"{tenant_id}:",
+            f"{profile_key}:",
             f"  target: {target_name}",
             "  outputs:",
             f"    {target_name}:",
@@ -123,10 +192,16 @@ def create_temp_profiles_dir(
 def resolve_dbt_project_dir(tenant_id: str | None) -> str:
     base_dir = os.getenv("DBT_PROJECT_BASE", "dbt_projects")
     if tenant_id:
-        project_dir = f"dbt-{tenant_id}"
+        project_dir = f"dbt_{tenant_id}"
+        legacy_dir = f"dbt-{tenant_id}"
     else:
-        project_dir = f"dbt-{uuid4().hex[:6]}"
+        project_dir = f"dbt_{uuid4().hex[:6]}"
+        legacy_dir = None
     path = Path(base_dir) / project_dir
+    if legacy_dir:
+        legacy_path = Path(base_dir) / legacy_dir
+        if not path.exists() and legacy_path.exists():
+            legacy_path.rename(path)
     path.mkdir(parents=True, exist_ok=True)
     return str(path)
 
@@ -139,6 +214,7 @@ def ensure_tenant_dbt_project(
     project_path = Path(project_dir)
     project_file = project_path / "dbt_project.yml"
     if project_file.exists():
+        ensure_dbt_project(project_dir, profile_name=tenant_id)
         return project_dir
     if template_dir:
         template_path = Path(template_dir)
@@ -284,7 +360,7 @@ def resolve_dbt_config(
         config = get_latest_dbt_config(settings, tenant_id, domain_id, None)
     if not config:
         dbt_project_path = resolve_dbt_project_dir(tenant_id)
-        profile_name = tenant_id
+        profile_name = normalize_profile_name(tenant_id)
         target_name = settings.dbt_target_name
         profiles_dir = settings.dbt_profiles_dir
         config = {
@@ -300,8 +376,23 @@ def resolve_dbt_config(
         return config
 
     dbt_project_path = config.get("dbt_project_path") or resolve_dbt_project_dir(tenant_id)
+    if "dbt-" in dbt_project_path and "dbt_" not in dbt_project_path:
+        migrated_path = resolve_dbt_project_dir(tenant_id)
+        if Path(dbt_project_path).exists() and not Path(migrated_path).exists():
+            Path(dbt_project_path).rename(migrated_path)
+        dbt_project_path = migrated_path
+        try:
+            execute_non_query(
+                settings,
+                "UPDATE public.quantyx_dbt_config SET dbt_project_path = %s, updated_at = now() WHERE config_id = %s",
+                [dbt_project_path, config.get("config_id")],
+            )
+        except Exception:
+            pass
     Path(dbt_project_path).mkdir(parents=True, exist_ok=True)
     config["dbt_project_path"] = dbt_project_path
+    if config.get("profile_name"):
+        config["profile_name"] = normalize_profile_name(config["profile_name"])
     return config
 
 
@@ -340,7 +431,7 @@ def store_manifest(
             dbt_project_path,
             profile_name,
             target_name,
-            manifest_json,
+            json.dumps(manifest_json),
         ],
     )
     return manifest_id

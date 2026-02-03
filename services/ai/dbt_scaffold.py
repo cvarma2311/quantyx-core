@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import urllib.request
+import re
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -126,6 +127,14 @@ def _llm_generate_scaffold(
     return parsed
 
 
+def _normalize_source_sql(sql: str, source_name: str) -> str:
+    if "source(" not in sql:
+        return sql
+    pattern = r"source\(\s*'[^']+'\s*,"
+    replacement = "source('" + source_name + "',"
+    return re.sub(pattern, replacement, sql)
+
+
 def build_scaffold_payload(
     settings: Settings,
     database: str,
@@ -140,6 +149,7 @@ def build_scaffold_payload(
         for model in llm_payload["models"]:
             if not model.get("name") or not model.get("sql"):
                 continue
+            model["sql"] = _normalize_source_sql(model.get("sql", ""), "raw")
             model["status"] = "draft"
             models.append(model)
     if not models:

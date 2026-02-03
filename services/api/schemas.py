@@ -1316,14 +1316,14 @@ class DbtManifestGenerateResponse(BaseModel):
     manifest_id: str = Field(..., examples=["manifest_123"])
     status: str = Field(..., examples=["stored"])
     tenant_id: str = Field(..., examples=["tenant_a"])
-    dbt_project_path: str = Field(..., examples=["dbt_projects/dbt-tenant_a"])
+    dbt_project_path: str = Field(..., examples=["dbt_projects/dbt_tenant_a"])
     model_config = {
         "json_schema_extra": {
             "example": {
                 "manifest_id": "manifest_123",
                 "status": "stored",
                 "tenant_id": "tenant_a",
-                "dbt_project_path": "dbt_projects/dbt-tenant_a",
+                "dbt_project_path": "dbt_projects/dbt_tenant_a",
             }
         }
     }
@@ -1333,7 +1333,7 @@ class DbtConfigUpsertRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str = Field(..., examples=["manufacturing"])
     connection_id: str | None = Field(None, examples=["conn_prod"])
-    dbt_project_path: str | None = Field(None, examples=["dbt_projects/dbt-tenant_a"])
+    dbt_project_path: str | None = Field(None, examples=["dbt_projects/dbt_tenant_a"])
     target_name: str | None = Field(None, examples=["dev"])
     profiles_dir: str | None = Field(None, examples=["~/.dbt"])
     model_config = {
@@ -1342,7 +1342,7 @@ class DbtConfigUpsertRequest(BaseModel):
                 "tenant_id": "tenant_a",
                 "domain_id": "manufacturing",
                 "connection_id": "conn_prod",
-                "dbt_project_path": "dbt_projects/dbt-tenant_a",
+                "dbt_project_path": "dbt_projects/dbt_tenant_a",
                 "target_name": "dev",
                 "profiles_dir": "~/.dbt",
             }
@@ -1355,7 +1355,7 @@ class DbtConfigResponse(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str = Field(..., examples=["manufacturing"])
     connection_id: str | None = Field(None, examples=["conn_prod"])
-    dbt_project_path: str = Field(..., examples=["dbt_projects/dbt-tenant_a"])
+    dbt_project_path: str = Field(..., examples=["dbt_projects/dbt_tenant_a"])
     profile_name: str = Field(..., examples=["tenant_a"])
     target_name: str = Field(..., examples=["dev"])
     profiles_dir: str | None = Field(None, examples=["~/.dbt"])
@@ -1368,7 +1368,7 @@ class DbtConfigResponse(BaseModel):
                 "tenant_id": "tenant_a",
                 "domain_id": "manufacturing",
                 "connection_id": "conn_prod",
-                "dbt_project_path": "dbt_projects/dbt-tenant_a",
+                "dbt_project_path": "dbt_projects/dbt_tenant_a",
                 "profile_name": "default",
                 "target_name": "dev",
                 "profiles_dir": "~/.dbt",

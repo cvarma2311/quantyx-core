@@ -28,7 +28,7 @@ Optional inputs:
 
 Generated dbt assets are written to:
 
-`dbt_projects/dbt-<tenant_id>/models/auto/`
+`dbt_projects/dbt_<tenant_id>/models/auto/`
 
 Files:
 - `models/auto/fact_<name>.sql`
