@@ -1971,7 +1971,7 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
                                 "domain_id": "manufacturing",
                                 "source_type": "business_context",
                                 "source_title": "Operations glossary",
-                                "metadata": "{\"connection_id\":\"conn_prod\",\"database\":\"prod_warehouse\",\"schema\":\"public\"}",
+                                "metadata": "{\"connection_id\":\"conn_prod\",\"database\":\"prod_warehouse\",\"schema\":\"public\",\"tables\":[\"fact_production_daily\",\"dim_plant\"]}",
                                 "file": "@context.txt",
                             },
                         }
@@ -2243,6 +2243,33 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
     tags=["context"],
     summary="Fetch an extraction",
     description="Return a stored extraction payload for review.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "extraction": {
+                                "summary": "Stored extraction",
+                                "value": {
+                                    "extraction_id": "ext_123",
+                                    "context_id": "ctx_123",
+                                    "extraction_type": "combined",
+                                    "payload": {
+                                        "hierarchies": [
+                                            {"name": "sales_org", "levels": ["zone", "region", "sales_area"]}
+                                        ]
+                                    },
+                                    "status": "reviewed",
+                                    "notes": "Reviewed by analyst",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_context_extraction(
     extraction_id: str,
@@ -2337,6 +2364,31 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
     tags=["context"],
     summary="Update a context entry",
     description="Update context metadata or status; scope fields cannot change.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "update_title": {
+                            "summary": "Update title and status",
+                            "value": {"source_title": "Ops glossary v2", "status": "processed"},
+                        },
+                        "update_metadata": {
+                            "summary": "Update metadata (same scope)",
+                            "value": {
+                                "metadata": {
+                                    "connection_id": "conn_prod",
+                                    "database": "prod_warehouse",
+                                    "schema": "public",
+                                    "tables": ["fact_production_daily", "dim_plant"],
+                                }
+                            },
+                        },
+                    }
+                }
+            }
+        }
+    },
 )
 def patch_context(
     context_id: str,
@@ -2373,6 +2425,27 @@ def patch_context(
     tags=["context"],
     summary="Update a context file",
     description="Update context file metadata; scope fields cannot change.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "update_file_metadata": {
+                            "summary": "Update file metadata",
+                            "value": {
+                                "metadata": {
+                                    "connection_id": "conn_prod",
+                                    "database": "prod_warehouse",
+                                    "schema": "public",
+                                    "tables": ["fact_production_daily", "dim_plant"],
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def patch_context_file(
     file_id: str,
@@ -2400,6 +2473,20 @@ def patch_context_file(
     tags=["context"],
     summary="Update a context extraction",
     description="Update extraction status or notes; payload is immutable.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "reviewed": {
+                            "summary": "Mark as reviewed",
+                            "value": {"status": "reviewed", "notes": "Reviewed by analyst"},
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def patch_context_extraction(
     extraction_id: str,
@@ -2807,6 +2894,8 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
                         "scan_connections": {
                             "summary": "Scan multiple connections",
                             "value": {
+                                "tenant_id": "tenant_a",
+                                "domain_id": "manufacturing",
                                 "connections": [
                                     {
                                         "connection_id": "conn_prod",
@@ -3712,6 +3801,12 @@ def _extract_top_n(question: str | None) -> int | None:
                             "summary": "Top 5 sales areas",
                             "value": {
                                 "question": "Top 5 sales areas by sales volume for MS in Q2 FY 2024-2025.",
+                                "tenant_id": "tenant_a",
+                                "domain_id": "manufacturing",
+                                "connection_id": "conn_prod",
+                                "database": "prod_warehouse",
+                                "schema": "public",
+                                "tables": ["fact_sales", "dim_sales_area"],
                                 "limit": 100,
                                 "explain": True,
                             },
@@ -3720,6 +3815,12 @@ def _extract_top_n(question: str | None) -> int | None:
                             "summary": "HPCL vs BPCL market share",
                             "value": {
                                 "question": "HPCL vs BPCL market share for MS in UTTAR PRADESH during FY 2024-2025.",
+                                "tenant_id": "tenant_a",
+                                "domain_id": "manufacturing",
+                                "connection_id": "conn_prod",
+                                "database": "prod_warehouse",
+                                "schema": "public",
+                                "tables": ["fact_sales", "dim_sales_area"],
                                 "limit": 100,
                                 "explain": True,
                             },
@@ -3728,6 +3829,12 @@ def _extract_top_n(question: str | None) -> int | None:
                             "summary": "Below required run rate",
                             "value": {
                                 "question": "Which sales areas are below required run rate this month?",
+                                "tenant_id": "tenant_a",
+                                "domain_id": "manufacturing",
+                                "connection_id": "conn_prod",
+                                "database": "prod_warehouse",
+                                "schema": "public",
+                                "tables": ["fact_sales", "dim_sales_area"],
                                 "limit": 100,
                                 "explain": True,
                             },
