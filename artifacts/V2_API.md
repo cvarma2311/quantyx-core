@@ -770,6 +770,82 @@ Response:
 }
 ```
 
+### 3.14 POST /dbt/scaffold
+Admin-only. Generate draft dbt models from latest scan results.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "tables": ["fact_sales", "dim_customer"],
+  "context_id": "ctx_123",
+  "host": "db.company.com",
+  "port": 5432,
+  "user": "readonly_user",
+  "password": "******"
+}
+```
+
+Response:
+```json
+{
+  "status": "generated",
+  "scaffold_id": "scaffold_123",
+  "models": [
+    { "name": "fact_sales", "path": "models/auto/fact_sales.sql", "status": "draft" },
+    { "name": "dim_customer", "path": "models/auto/dim_customer.sql", "status": "draft" }
+  ]
+}
+```
+
+### 3.15 GET /dbt/scaffold?tenant_id=...&domain_id=...&connection_id=...
+Admin-only. List generated dbt scaffolds.
+
+Response:
+```json
+{
+  "scaffolds": [
+    {
+      "scaffold_id": "scaffold_123",
+      "connection_id": "conn_prod",
+      "database_name": "prod_warehouse",
+      "schema_name": "public",
+      "tables": ["fact_sales", "dim_customer"],
+      "status": "draft",
+      "created_at": "2025-02-14T10:00:00Z"
+    }
+  ]
+}
+```
+
+### 3.16 PATCH /dbt/scaffold/{scaffold_id}
+Admin-only. Update scaffold status or payload.
+
+Request:
+```json
+{
+  "status": "reviewed",
+  "notes": "Reviewed by analyst"
+}
+```
+
+Response:
+```json
+{ "ok": true }
+```
+
+### 3.17 POST /dbt/scaffold/{scaffold_id}/apply
+Admin-only. Apply reviewed scaffold to dbt project and compile.
+
+Response:
+```json
+{ "ok": true, "status": "applied" }
+```
+
 ---
 
 ## 4) Ask APIs (Conversational)

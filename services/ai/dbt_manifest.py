@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 from typing import Any
+import shutil
+import tempfile
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, run_query
@@ -19,6 +21,8 @@ def run_dbt_compile(
     profiles_dir: str | None = None,
 ) -> dict[str, Any]:
     ensure_dbt_project(dbt_project_path, profile_name=profile_name)
+    if shutil.which("dbt") is None:
+        raise RuntimeError("dbt binary not found in PATH")
     command = [
         "dbt",
         "compile",
@@ -31,12 +35,15 @@ def run_dbt_compile(
     ]
     if profiles_dir:
         command.extend(["--profiles-dir", profiles_dir])
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        env=None,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            env=None,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("dbt binary not found in PATH") from exc
     if result.returncode != 0:
         raise RuntimeError(f"dbt compile failed: {result.stderr.strip() or result.stdout.strip()}")
     manifest_path = Path(dbt_project_path) / "target" / "manifest.json"
@@ -80,6 +87,39 @@ def ensure_dbt_project(dbt_project_path: str, profile_name: str | None = None) -
     )
 
 
+def create_temp_profiles_dir(
+    tenant_id: str,
+    target_name: str,
+    connection: dict[str, Any],
+    database: str,
+    schema: str,
+) -> str:
+    profiles_dir = tempfile.mkdtemp(prefix=f"dbt_profiles_{tenant_id}_")
+    profiles_path = Path(profiles_dir) / "profiles.yml"
+    host = connection.get("host")
+    port = connection.get("port")
+    user = connection.get("user")
+    password = connection.get("password")
+    profile_yaml = "\n".join(
+        [
+            f"{tenant_id}:",
+            f"  target: {target_name}",
+            "  outputs:",
+            f"    {target_name}:",
+            "      type: postgres",
+            f"      host: {host}",
+            f"      port: {port}",
+            f"      user: {user}",
+            f"      password: {password}",
+            f"      dbname: {database}",
+            f"      schema: {schema}",
+            "",
+        ]
+    )
+    profiles_path.write_text(profile_yaml)
+    return profiles_dir
+
+
 def resolve_dbt_project_dir(tenant_id: str | None) -> str:
     base_dir = os.getenv("DBT_PROJECT_BASE", "dbt_projects")
     if tenant_id:
@@ -89,6 +129,32 @@ def resolve_dbt_project_dir(tenant_id: str | None) -> str:
     path = Path(base_dir) / project_dir
     path.mkdir(parents=True, exist_ok=True)
     return str(path)
+
+
+def ensure_tenant_dbt_project(
+    tenant_id: str,
+    template_dir: str | None = None,
+) -> str:
+    project_dir = resolve_dbt_project_dir(tenant_id)
+    project_path = Path(project_dir)
+    project_file = project_path / "dbt_project.yml"
+    if project_file.exists():
+        return project_dir
+    if template_dir:
+        template_path = Path(template_dir)
+        if template_path.exists():
+            for item in template_path.iterdir():
+                dest = project_path / item.name
+                if dest.exists():
+                    continue
+                if item.is_dir():
+                    shutil.copytree(item, dest)
+                else:
+                    shutil.copy2(item, dest)
+            if project_file.exists():
+                return project_dir
+    ensure_dbt_project(project_dir, profile_name=tenant_id)
+    return project_dir
 
 
 def upsert_tenant_project_dir(

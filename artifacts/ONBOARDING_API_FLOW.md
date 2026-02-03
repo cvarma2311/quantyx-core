@@ -378,7 +378,17 @@ Response:
 Expected outcome:
 - Manifest is available from DB for schema listing and metric persistence.
 - If `dbt_project_path` is not provided, the API creates `dbt_projects/dbt-<tenant_id>` automatically.
- - Automated dbt can be configured per tenant via `quantyx_dbt_config`.
+- Automated dbt can be configured per tenant via `quantyx_dbt_config`.
+
+---
+
+## 9a) Auto-generate dbt scaffolds (draft models)
+
+Triggered automatically after `/onboard/scan-connection` when dbt automation is enabled.
+Outputs draft dbt models into:
+`dbt_projects/dbt-<tenant_id>/models/auto/`
+
+Draft models must be reviewed before apply.
 
 ---
 

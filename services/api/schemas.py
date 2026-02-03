@@ -1379,6 +1379,91 @@ class DbtConfigResponse(BaseModel):
     }
 
 
+class DbtScaffoldRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    connection_id: str = Field(..., examples=["conn_prod"])
+    database: str = Field(..., examples=["prod_warehouse"])
+    schema: str = Field(..., examples=["public"])
+    tables: List[str] = Field(default_factory=list, examples=[["fact_sales", "dim_customer"]])
+    context_id: str | None = Field(None, examples=["ctx_123"])
+    model: str | None = Field(None, examples=["gpt-4o-mini"])
+    host: str | None = Field(None, examples=["db.company.com"])
+    port: int | None = Field(None, examples=[5432])
+    user: str | None = Field(None, examples=["readonly_user"])
+    password: str | None = Field(None, examples=["******"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "tenant_a",
+                "domain_id": "manufacturing",
+                "connection_id": "conn_prod",
+                "database": "prod_warehouse",
+                "schema": "public",
+                "tables": ["fact_sales", "dim_customer"],
+                "context_id": "ctx_123",
+                "host": "db.company.com",
+                "port": 5432,
+                "user": "readonly_user",
+                "password": "******",
+            }
+        }
+    }
+
+
+class DbtScaffoldResponse(BaseModel):
+    status: str = Field(..., examples=["generated"])
+    scaffold_id: str = Field(..., examples=["scaffold_123"])
+    models: List[dict] = Field(
+        examples=[
+            [
+                {"name": "fact_sales", "path": "models/auto/fact_sales.sql", "status": "draft"},
+                {"name": "dim_customer", "path": "models/auto/dim_customer.sql", "status": "draft"},
+            ]
+        ]
+    )
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "status": "generated",
+                "scaffold_id": "scaffold_123",
+                "models": [
+                    {"name": "fact_sales", "path": "models/auto/fact_sales.sql", "status": "draft"},
+                    {"name": "dim_customer", "path": "models/auto/dim_customer.sql", "status": "draft"},
+                ],
+            }
+        }
+    }
+
+
+class DbtScaffoldListResponse(BaseModel):
+    scaffolds: List[dict]
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "scaffolds": [
+                    {
+                        "scaffold_id": "scaffold_123",
+                        "connection_id": "conn_prod",
+                        "database_name": "prod_warehouse",
+                        "schema_name": "public",
+                        "tables": ["fact_sales", "dim_customer"],
+                        "status": "draft",
+                        "created_at": "2025-02-14T10:00:00Z",
+                    }
+                ]
+            }
+        }
+    }
+
+
+class DbtScaffoldPatchRequest(BaseModel):
+    status: str | None = Field(None, examples=["reviewed"])
+    notes: str | None = Field(None, examples=["Reviewed by analyst"])
+    payload: dict | None = Field(None, examples=[{"schema_yaml": "version: 2"}])
+    model_config = {"json_schema_extra": {"example": {"status": "reviewed", "notes": "Looks good"}}}
+
+
 class DbtManifestLatestResponse(BaseModel):
     manifest_id: str = Field(..., examples=["manifest_123"])
     tenant_id: str = Field(..., examples=["tenant_a"])

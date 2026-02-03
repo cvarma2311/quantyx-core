@@ -38,6 +38,8 @@ dependency order.
    - `Phase_I_Hardening_Productization.md`
 12) Phase O - Automated dbt Manifest (Backend-Only)
    - `Phase_O_Automated_Dbt_Manifest.md`
+13) Phase P - Automated dbt Scaffolding (LLM-Assisted, Human Review)
+   - `Phase_P_Automated_Dbt_Scaffolding.md`
 
 ## Dependencies (summary)
 

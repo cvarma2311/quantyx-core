@@ -182,6 +182,15 @@ def main() -> int:
     _log_response(scan_response)
     print("Step 1 end")
 
+    # 1c) List dbt scaffolds (auto-generated)
+    print("\n[1c] List dbt scaffolds")
+    scaffold_list_path = (
+        f"/dbt/scaffold?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}&connection_id={CONNECTION_ID}"
+    )
+    _log_request("GET", scaffold_list_path)
+    scaffold_list_response = _request("GET", scaffold_list_path)
+    _log_response(scaffold_list_response)
+
     # 1b) Optional business context
     print("\n[1b] Business context ingestion")
     context_text = DEMO_CONTEXT_TEXT

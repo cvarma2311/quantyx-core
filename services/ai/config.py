@@ -19,6 +19,7 @@ class Settings:
     dbt_profile_name: str
     dbt_target_name: str
     dbt_profiles_dir: str | None
+    dbt_project_template: str | None
     default_tenant_id: str
     default_domain_id: str
 
@@ -38,6 +39,7 @@ def load_settings() -> Settings:
         dbt_profile_name=os.getenv("DBT_PROFILE_NAME", "default"),
         dbt_target_name=os.getenv("DBT_TARGET_NAME", "dev"),
         dbt_profiles_dir=os.getenv("DBT_PROFILES_DIR"),
+        dbt_project_template=os.getenv("DBT_PROJECT_TEMPLATE"),
         default_tenant_id=os.getenv("DEFAULT_TENANT_ID", "tenant_default"),
         default_domain_id=os.getenv("DEFAULT_DOMAIN_ID", "default_domain"),
     )

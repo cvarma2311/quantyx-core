@@ -26,6 +26,7 @@ from services.ai.connection_registry import (
     resolve_connection_scope,
 )
 from services.ai.onboarding.scan_store import persist_schema_scan
+from services.ai.onboarding.scan_store import load_latest_scan_result
 from services.ai.resolver import resolve_question
 from services.ai.schema_loader import load_manifest_models
 from services.ai.dbt_manifest import (
@@ -37,6 +38,16 @@ from services.ai.dbt_manifest import (
     upsert_dbt_config,
     get_latest_dbt_config,
     resolve_dbt_config,
+    ensure_tenant_dbt_project,
+    create_temp_profiles_dir,
+)
+from services.ai.dbt_scaffold import (
+    build_scaffold_payload,
+    write_scaffold_files,
+    persist_scaffold,
+    list_scaffolds,
+    get_scaffold,
+    update_scaffold,
 )
 from services.ai.semantic_layer.pack_loader import list_packs, load_pack
 from services.ai.governance import build_lineage
@@ -127,6 +138,10 @@ from services.api.schemas import (
     DbtManifestLatestResponse,
     DbtConfigUpsertRequest,
     DbtConfigResponse,
+    DbtScaffoldRequest,
+    DbtScaffoldResponse,
+    DbtScaffoldListResponse,
+    DbtScaffoldPatchRequest,
     PoliciesResponse,
     LineageResponse,
     InsightsResponse,
@@ -243,6 +258,28 @@ def _model_database_map() -> dict[str, str]:
     return {model["name"]: model.get("database") or "" for model in models}
 
 
+def _extract_tables_from_scan(
+    scan_result: dict,
+    connection_id: str,
+    database: str,
+    schema: str,
+    tables: list[str],
+) -> list[dict]:
+    for connection in scan_result.get("connections", []):
+        if connection.get("connection_id") != connection_id:
+            continue
+        for db in connection.get("databases", []):
+            if db.get("name") != database:
+                continue
+            for sch in db.get("schemas", []):
+                if sch.get("name") != schema:
+                    continue
+                if not tables:
+                    return sch.get("tables", [])
+                return [t for t in sch.get("tables", []) if t.get("table") in tables]
+    return []
+
+
 def _filter_by_model_attr(items: list[dict], value: str | None, key: str, attr: str) -> list[dict]:
     if not value:
         return items
@@ -257,6 +294,11 @@ def _filter_by_model_attr(items: list[dict], value: str | None, key: str, attr: 
         if model_value == value:
             filtered.append(item)
     return filtered
+
+
+def _log_scan_step(step: str, details: dict | None = None) -> None:
+    payload = details or {}
+    logger.info("scan-connection: %s | %s", step, payload)
 
 
 @app.get(
@@ -829,6 +871,262 @@ def get_latest_dbt_config_endpoint(
         created_at=config.get("created_at").isoformat() if config.get("created_at") else None,
         updated_at=config.get("updated_at").isoformat() if config.get("updated_at") else None,
     )
+
+
+@app.post(
+    "/dbt/scaffold",
+    response_model=DbtScaffoldResponse,
+    tags=["admin"],
+    summary="Generate dbt scaffold",
+    description="Generate draft dbt models from latest scan results (admin use only).",
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "generate_dbt",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "boolean"},
+                "examples": {"generate_dbt": {"value": True}},
+            }
+        ],
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "generate_scaffold": {
+                            "summary": "Generate scaffold",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "domain_id": "manufacturing",
+                                "connection_id": "conn_prod",
+                                "database": "prod_warehouse",
+                                "schema": "public",
+                                "tables": ["fact_sales", "dim_customer"],
+                                "context_id": "ctx_123",
+                                "host": "db.company.com",
+                                "port": 5432,
+                                "user": "readonly_user",
+                                "password": "******",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
+    scan_result = load_latest_scan_result(settings, payload.tenant_id, payload.domain_id)
+    if not scan_result:
+        raise HTTPException(status_code=404, detail="No scan results found for tenant/domain")
+    tables = _extract_tables_from_scan(
+        scan_result,
+        connection_id=payload.connection_id,
+        database=payload.database,
+        schema=payload.schema,
+        tables=payload.tables,
+    )
+    if not tables:
+        raise HTTPException(status_code=400, detail="No matching tables found in latest scan")
+    dbt_project_path = ensure_tenant_dbt_project(
+        payload.tenant_id,
+        template_dir=settings.dbt_project_template,
+    )
+    context_text = None
+    if payload.context_id:
+        context_row = get_context(settings, payload.context_id)
+        if context_row and context_row.get("raw_text"):
+            context_text = context_row.get("raw_text")
+    scaffold_payload = build_scaffold_payload(
+        settings,
+        database=payload.database,
+        schema=payload.schema,
+        tables=tables,
+        context_text=context_text,
+        use_llm=True,
+    )
+    if payload.host and payload.user:
+        scaffold_payload["connection"] = {
+            "host": payload.host,
+            "port": payload.port or 5432,
+            "user": payload.user,
+            "password": payload.password,
+        }
+    write_scaffold_files(dbt_project_path, scaffold_payload)
+    scaffold_id = persist_scaffold(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=payload.domain_id,
+        connection_id=payload.connection_id,
+        database=payload.database,
+        schema=payload.schema,
+        tables=[t.get("table") for t in tables if t.get("table")],
+        context_id=payload.context_id,
+        payload=scaffold_payload,
+    )
+    models = [
+        {"name": model["name"], "path": f"models/auto/{model['name']}.sql", "status": model["status"]}
+        for model in scaffold_payload.get("models", [])
+    ]
+    return DbtScaffoldResponse(status="generated", scaffold_id=scaffold_id, models=models)
+
+
+@app.get(
+    "/dbt/scaffold",
+    response_model=DbtScaffoldListResponse,
+    tags=["admin"],
+    summary="List dbt scaffolds",
+    description="List generated dbt scaffolds for a tenant/domain (admin use only).",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "scaffolds": {
+                                "summary": "Scaffold list",
+                                "value": {
+                                    "scaffolds": [
+                                        {
+                                            "scaffold_id": "scaffold_123",
+                                            "connection_id": "conn_prod",
+                                            "database_name": "prod_warehouse",
+                                            "schema_name": "public",
+                                            "tables": ["fact_sales", "dim_customer"],
+                                            "status": "draft",
+                                            "created_at": "2025-02-14T10:00:00Z",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_dbt_scaffolds(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str | None = None,
+) -> DbtScaffoldListResponse:
+    scaffolds = list_scaffolds(settings, tenant_id, domain_id, connection_id)
+    return DbtScaffoldListResponse(scaffolds=scaffolds)
+
+
+@app.patch(
+    "/dbt/scaffold/{scaffold_id}",
+    tags=["admin"],
+    summary="Update scaffold",
+    description="Update scaffold payload or status (admin use only).",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "reviewed": {
+                            "summary": "Mark as reviewed",
+                            "value": {"status": "reviewed", "notes": "Reviewed by analyst"},
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def patch_dbt_scaffold(
+    scaffold_id: str,
+    tenant_id: str,
+    domain_id: str,
+    payload: DbtScaffoldPatchRequest,
+) -> dict:
+    scaffold = get_scaffold(settings, scaffold_id)
+    if not scaffold:
+        raise HTTPException(status_code=404, detail="Scaffold not found")
+    if scaffold["tenant_id"] != tenant_id or scaffold["domain_id"] != domain_id:
+        raise HTTPException(status_code=400, detail="Scaffold tenant/domain mismatch")
+    update_scaffold(
+        settings,
+        scaffold_id=scaffold_id,
+        status=payload.status,
+        payload=payload.payload,
+        notes=payload.notes,
+    )
+    return {"ok": True}
+
+
+@app.post(
+    "/dbt/scaffold/{scaffold_id}/apply",
+    tags=["admin"],
+    summary="Apply scaffold",
+    description="Write reviewed scaffold into dbt project and compile (admin use only).",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "applied": {
+                                "summary": "Applied scaffold",
+                                "value": {"ok": True, "status": "applied"},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def apply_dbt_scaffold(
+    scaffold_id: str,
+    tenant_id: str,
+    domain_id: str,
+) -> dict:
+    scaffold = get_scaffold(settings, scaffold_id)
+    if not scaffold:
+        raise HTTPException(status_code=404, detail="Scaffold not found")
+    if scaffold["tenant_id"] != tenant_id or scaffold["domain_id"] != domain_id:
+        raise HTTPException(status_code=400, detail="Scaffold tenant/domain mismatch")
+    payload = scaffold.get("payload") or {}
+    dbt_project_path = ensure_tenant_dbt_project(
+        tenant_id,
+        template_dir=settings.dbt_project_template,
+    )
+    write_scaffold_files(dbt_project_path, payload)
+    connection = payload.get("connection") or {}
+    profiles_dir = None
+    if connection.get("host") and connection.get("user"):
+        profiles_dir = create_temp_profiles_dir(
+            tenant_id=tenant_id,
+            target_name=settings.dbt_target_name,
+            connection=connection,
+            database=scaffold.get("database_name") or settings.db_name,
+            schema=scaffold.get("schema_name") or settings.db_schema,
+        )
+    elif settings.dbt_profiles_dir:
+        profiles_dir = settings.dbt_profiles_dir
+    else:
+        raise HTTPException(status_code=400, detail="No dbt profiles available for compile")
+    manifest_json = run_dbt_compile(
+        settings,
+        dbt_project_path=dbt_project_path,
+        profile_name=tenant_id,
+        target_name=settings.dbt_target_name,
+        profiles_dir=profiles_dir,
+    )
+    store_manifest(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=scaffold.get("connection_id"),
+        dbt_project_path=dbt_project_path,
+        profile_name=tenant_id,
+        target_name=settings.dbt_target_name,
+        manifest_json=manifest_json,
+    )
+    update_scaffold(settings, scaffold_id=scaffold_id, status="applied")
+    return {"ok": True, "status": "applied"}
 
 
 @app.get(
@@ -2975,16 +3273,46 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
         },
     },
 )
-def onboard_scan_connection(request: OnboardScanMultiConnectionRequest) -> OnboardScanConnectionResponse:
+def onboard_scan_connection(
+    request: OnboardScanMultiConnectionRequest,
+    generate_dbt: bool = True,
+) -> OnboardScanConnectionResponse:
     tenant_id = request.tenant_id or settings.default_tenant_id
     domain_id = request.domain_id or settings.default_domain_id
+    _log_scan_step(
+        "start",
+        {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "connections": len(request.connections),
+            "generate_dbt": generate_dbt,
+        },
+    )
     connections_payload = []
+    payload_by_connection: dict[str, list[dict]] = {}
     for connection in request.connections:
+        _log_scan_step(
+            "connection.begin",
+            {"connection_id": connection.connection_id, "db_type": connection.db_type},
+        )
         databases_payload = []
         scopes: list[tuple[str, str]] = []
         for database in connection.databases:
+            _log_scan_step(
+                "database.begin",
+                {"connection_id": connection.connection_id, "database": database.name},
+            )
             schemas_payload = []
             for schema in database.schemas:
+                _log_scan_step(
+                    "schema.begin",
+                    {
+                        "connection_id": connection.connection_id,
+                        "database": database.name,
+                        "schema": schema.name,
+                        "tables": len(schema.tables or []),
+                    },
+                )
                 cursor_value = _decode_cursor(schema.cursor) if schema.cursor else None
                 tables, next_cursor = scan_connection(
                     db_type=connection.db_type,
@@ -2999,6 +3327,15 @@ def onboard_scan_connection(request: OnboardScanMultiConnectionRequest) -> Onboa
                     sample_rows=connection.sample_rows,
                     cursor_value=cursor_value,
                 )
+                _log_scan_step(
+                    "schema.scanned",
+                    {
+                        "connection_id": connection.connection_id,
+                        "database": database.name,
+                        "schema": schema.name,
+                        "tables_scanned": len(tables),
+                    },
+                )
                 schemas_payload.append(
                     {
                         "name": schema.name,
@@ -3010,59 +3347,164 @@ def onboard_scan_connection(request: OnboardScanMultiConnectionRequest) -> Onboa
                 )
                 scopes.append((database.name, schema.name))
             databases_payload.append({"name": database.name, "schemas": schemas_payload})
-        connections_payload.append(
-            {"connection_id": connection.connection_id, "databases": databases_payload}
-        )
+            _log_scan_step(
+                "database.complete",
+                {"connection_id": connection.connection_id, "database": database.name},
+            )
+        connection_payload = {"connection_id": connection.connection_id, "databases": databases_payload}
+        connections_payload.append(connection_payload)
+        payload_by_connection[connection.connection_id] = databases_payload
         register_connection(settings, connection.connection_id)
         if scopes:
             register_connection_scopes(settings, connection.connection_id, scopes)
+        _log_scan_step(
+            "connection.complete",
+            {"connection_id": connection.connection_id, "schemas": len(scopes)},
+        )
 
     persist_schema_scan(
         settings,
         request.model_dump(),
         {"connections": connections_payload},
+        tenant_id=tenant_id,
+        domain_id=domain_id,
     )
+    _log_scan_step("persisted.scan", {"tenant_id": tenant_id, "domain_id": domain_id})
 
-    try:
-        for connection in request.connections:
-            resolved = resolve_dbt_config(
-                settings,
-                tenant_id=tenant_id,
-                domain_id=domain_id,
-                connection_id=connection.connection_id,
-            )
-            if resolved.get("config_id") is None:
-                upsert_dbt_config(
+    if generate_dbt:
+        try:
+            for connection in request.connections:
+                _log_scan_step(
+                    "dbt.begin",
+                    {"connection_id": connection.connection_id, "tenant_id": tenant_id},
+                )
+                dbt_project_path = ensure_tenant_dbt_project(
+                    tenant_id,
+                    template_dir=settings.dbt_project_template,
+                )
+                _log_scan_step(
+                    "dbt.project.ready",
+                    {"connection_id": connection.connection_id, "path": dbt_project_path},
+                )
+                databases_payload = payload_by_connection.get(connection.connection_id, [])
+                for database_payload in databases_payload:
+                    for schema_payload in database_payload.get("schemas", []):
+                        schema_tables = schema_payload.get("tables", [])
+                        if not schema_tables:
+                            continue
+                        _log_scan_step(
+                            "dbt.scaffold.begin",
+                            {
+                                "connection_id": connection.connection_id,
+                                "database": database_payload.get("name", ""),
+                                "schema": schema_payload.get("name", ""),
+                                "tables": len(schema_tables),
+                            },
+                        )
+                        payload = build_scaffold_payload(
+                            settings,
+                            database=database_payload.get("name", ""),
+                            schema=schema_payload.get("name", ""),
+                            tables=schema_tables,
+                            context_text=None,
+                            use_llm=True,
+                        )
+                        payload["connection"] = {
+                            "host": connection.host,
+                            "port": connection.port,
+                            "user": connection.user,
+                            "password": connection.password,
+                        }
+                        write_scaffold_files(dbt_project_path, payload)
+                        persist_scaffold(
+                            settings,
+                            tenant_id=tenant_id,
+                            domain_id=domain_id,
+                            connection_id=connection.connection_id,
+                            database=database_payload.get("name", ""),
+                            schema=schema_payload.get("name", ""),
+                            tables=[t.get("table") for t in schema_tables if t.get("table")],
+                            context_id=None,
+                            payload=payload,
+                        )
+                        _log_scan_step(
+                            "dbt.scaffold.complete",
+                            {
+                                "connection_id": connection.connection_id,
+                                "database": database_payload.get("name", ""),
+                                "schema": schema_payload.get("name", ""),
+                            },
+                        )
+                resolved = resolve_dbt_config(
                     settings,
                     tenant_id=tenant_id,
                     domain_id=domain_id,
                     connection_id=connection.connection_id,
-                    dbt_project_path=resolved["dbt_project_path"],
+                )
+                resolved["dbt_project_path"] = dbt_project_path
+                if resolved.get("config_id") is None:
+                    upsert_dbt_config(
+                        settings,
+                        tenant_id=tenant_id,
+                        domain_id=domain_id,
+                        connection_id=connection.connection_id,
+                        dbt_project_path=dbt_project_path,
+                        profile_name=resolved["profile_name"],
+                        target_name=resolved["target_name"],
+                        profiles_dir=resolved.get("profiles_dir"),
+                    )
+                    _log_scan_step(
+                        "dbt.config.seeded",
+                        {"connection_id": connection.connection_id, "tenant_id": tenant_id},
+                    )
+                upsert_tenant_project_dir(settings, tenant_id, domain_id, dbt_project_path)
+                database_name = None
+                schema_name = None
+                if connection.databases:
+                    database_name = connection.databases[0].name
+                    if connection.databases[0].schemas:
+                        schema_name = connection.databases[0].schemas[0].name
+                profiles_dir = create_temp_profiles_dir(
+                    tenant_id=tenant_id,
+                    target_name=resolved["target_name"],
+                    connection=connection.model_dump(),
+                    database=database_name or settings.db_name,
+                    schema=schema_name or settings.db_schema,
+                )
+                _log_scan_step(
+                    "dbt.compile.begin",
+                    {"connection_id": connection.connection_id, "profiles_dir": profiles_dir},
+                )
+                manifest_json = run_dbt_compile(
+                    settings,
+                    dbt_project_path=dbt_project_path,
                     profile_name=resolved["profile_name"],
                     target_name=resolved["target_name"],
-                    profiles_dir=resolved.get("profiles_dir"),
+                    profiles_dir=profiles_dir,
                 )
-            upsert_tenant_project_dir(settings, tenant_id, domain_id, resolved["dbt_project_path"])
-            manifest_json = run_dbt_compile(
-                settings,
-                dbt_project_path=resolved["dbt_project_path"],
-                profile_name=resolved["profile_name"],
-                target_name=resolved["target_name"],
-                profiles_dir=resolved.get("profiles_dir"),
-            )
-            store_manifest(
-                settings,
-                tenant_id=tenant_id,
-                domain_id=domain_id,
-                connection_id=connection.connection_id,
-                dbt_project_path=resolved["dbt_project_path"],
-                profile_name=resolved["profile_name"],
-                target_name=resolved["target_name"],
-                manifest_json=manifest_json,
-            )
-    except RuntimeError as exc:
-        logger.warning("dbt manifest generation skipped: %s", exc)
+                _log_scan_step(
+                    "dbt.compile.complete",
+                    {"connection_id": connection.connection_id},
+                )
+                store_manifest(
+                    settings,
+                    tenant_id=tenant_id,
+                    domain_id=domain_id,
+                    connection_id=connection.connection_id,
+                    dbt_project_path=dbt_project_path,
+                    profile_name=resolved["profile_name"],
+                    target_name=resolved["target_name"],
+                    manifest_json=manifest_json,
+                )
+                _log_scan_step(
+                    "dbt.manifest.stored",
+                    {"connection_id": connection.connection_id},
+                )
+        except RuntimeError as exc:
+            logger.warning("dbt manifest generation skipped: %s", exc)
+            _log_scan_step("dbt.error", {"error": str(exc)})
 
+    _log_scan_step("complete", {"tenant_id": tenant_id, "domain_id": domain_id})
     return OnboardScanConnectionResponse(connections=connections_payload)
 
 
