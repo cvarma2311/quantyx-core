@@ -290,34 +290,208 @@ class HierarchyOverrideRequest(BaseModel):
 
 
 class EntitiesResponse(BaseModel):
+    connection_id: str | None = Field(None, examples=["conn_prod"])
+    database: str | None = Field(None, examples=["prod_warehouse"])
+    schema: str | None = Field(None, examples=["public"])
     entities: List[dict] = Field(
         examples=[[{"entity_id": "organizational_unit", "join_key": "sales_area_name"}]]
     )
     hierarchies: List[dict] = Field(
         examples=[[{"name": "sales_org", "levels": ["sbu", "zone", "region", "sales_area"]}]]
     )
-    entity_limit: int = Field(200, examples=[200])
+    entity_limit: int | None = Field(None, examples=[200])
     entity_cursor: str | None = Field(None, examples=["b3JnYW5pemF0aW9uYWxfdW5pdA=="])
     entity_next_cursor: str | None = Field(None, examples=["cHJvZHVjdA=="])
-    hierarchy_limit: int = Field(200, examples=[200])
+    hierarchy_limit: int | None = Field(None, examples=[200])
     hierarchy_cursor: str | None = Field(None, examples=["c2FsZXNfb3Jn"])
     hierarchy_next_cursor: str | None = Field(None, examples=["cmVnaW9uX29yZw=="])
     model_config = {
         "json_schema_extra": {
             "example": {
+                "connection_id": "conn_prod",
+                "database": "prod_warehouse",
+                "schema": "public",
                 "entities": [{"entity_id": "organizational_unit", "join_key": "sales_area_name"}],
                 "hierarchies": [
                     {"name": "sales_org", "levels": ["sbu", "zone", "region", "sales_area"]}
                 ],
-                "entity_limit": 200,
-                "entity_cursor": None,
-                "entity_next_cursor": None,
-                "hierarchy_limit": 200,
-                "hierarchy_cursor": None,
-                "hierarchy_next_cursor": None,
             }
         }
     }
+
+
+class EntitiesAllResponse(BaseModel):
+    connections: List[dict] = Field(
+        examples=[
+            [
+                {
+                    "connection_id": "conn_prod",
+                    "database": "prod_warehouse",
+                    "schema": "public",
+                    "entities": [{"entity_id": "organizational_unit"}],
+                    "hierarchies": [{"name": "sales_org", "levels": ["zone", "region"]}],
+                }
+            ]
+        ]
+    )
+
+
+class FactsUpsertRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    connection_id: str = Field(..., examples=["conn_prod"])
+    database: str = Field(..., examples=["prod_warehouse"])
+    schema: str = Field(..., examples=["public"])
+    name: str = Field(..., examples=["fact_sales"])
+    grain: str | None = Field(None, examples=["day"])
+    time_column: str | None = Field(None, examples=["sales_date"])
+    measures: List[str] = Field(default_factory=list, examples=[["sales_amount", "sales_tmt"]])
+    dimensions: List[str] = Field(default_factory=list, examples=[["sales_area_name"]])
+    description: str | None = Field(None, examples=["Daily sales fact"])
+    status: str | None = Field("draft", examples=["reviewed"])
+
+
+class FactsPatchRequest(BaseModel):
+    name: str | None = Field(None, examples=["fact_sales"])
+    grain: str | None = Field(None, examples=["day"])
+    time_column: str | None = Field(None, examples=["sales_date"])
+    measures: List[str] | None = Field(None, examples=[["sales_amount"]])
+    dimensions: List[str] | None = Field(None, examples=[["sales_area_name"]])
+    description: str | None = Field(None, examples=["Updated description"])
+    status: str | None = Field(None, examples=["reviewed"])
+
+
+class FactsResponse(BaseModel):
+    facts: List[dict] = Field(
+        examples=[
+            [
+                {
+                    "fact_id": "fact_123",
+                    "name": "fact_sales",
+                    "grain": "day",
+                    "time_column": "sales_date",
+                    "measures": ["sales_amount"],
+                    "dimensions": ["sales_area_name"],
+                    "status": "draft",
+                }
+            ]
+        ]
+    )
+
+
+class FactsAllResponse(BaseModel):
+    connections: List[dict] = Field(
+        examples=[
+            [
+                {
+                    "connection_id": "conn_prod",
+                    "database": "prod_warehouse",
+                    "schema": "public",
+                    "facts": [{"fact_id": "fact_123", "name": "fact_sales"}],
+                }
+            ]
+        ]
+    )
+
+
+class DimensionsUpsertRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    connection_id: str = Field(..., examples=["conn_prod"])
+    database: str = Field(..., examples=["prod_warehouse"])
+    schema: str = Field(..., examples=["public"])
+    name: str = Field(..., examples=["dim_customer"])
+    keys: List[str] = Field(default_factory=list, examples=[["customer_id"]])
+    attributes: List[str] = Field(default_factory=list, examples=[["customer_name", "region_name"]])
+    description: str | None = Field(None, examples=["Customer dimension"])
+    status: str | None = Field("draft", examples=["reviewed"])
+
+
+class DimensionsPatchRequest(BaseModel):
+    name: str | None = Field(None, examples=["dim_customer"])
+    keys: List[str] | None = Field(None, examples=[["customer_id"]])
+    attributes: List[str] | None = Field(None, examples=[["customer_name"]])
+    description: str | None = Field(None, examples=["Updated description"])
+    status: str | None = Field(None, examples=["reviewed"])
+
+
+class DimensionsResponse(BaseModel):
+    dimensions: List[dict] = Field(
+        examples=[
+            [
+                {
+                    "dimension_id": "dim_123",
+                    "name": "dim_customer",
+                    "keys": ["customer_id"],
+                    "attributes": ["customer_name"],
+                    "status": "draft",
+                }
+            ]
+        ]
+    )
+
+
+class DimensionsAllResponse(BaseModel):
+    connections: List[dict] = Field(
+        examples=[
+            [
+                {
+                    "connection_id": "conn_prod",
+                    "database": "prod_warehouse",
+                    "schema": "public",
+                    "dimensions": [{"dimension_id": "dim_123", "name": "dim_customer"}],
+                }
+            ]
+        ]
+    )
+
+
+class ReviewCreateRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    connection_id: str = Field(..., examples=["conn_prod"])
+    database: str = Field(..., examples=["prod_warehouse"])
+    schema: str = Field(..., examples=["public"])
+    artifact_type: str = Field(..., examples=["entities"])
+    artifact_id: str = Field(..., examples=["map_123"])
+    status: str = Field(..., examples=["reviewed"])
+    notes: str | None = Field(None, examples=["Looks good"])
+    payload: dict | None = Field(default=None, examples=[{"entities": 4}])
+
+
+class ReviewPatchRequest(BaseModel):
+    status: str | None = Field(None, examples=["applied"])
+    notes: str | None = Field(None, examples=["Applied to registry"])
+
+
+class ReviewResponse(BaseModel):
+    review_id: str = Field(..., examples=["review_abc123"])
+    status: str = Field(..., examples=["reviewed"])
+
+
+class ReviewListResponse(BaseModel):
+    reviews: List[dict] = Field(
+        examples=[
+            [
+                {
+                    "review_id": "review_abc123",
+                    "artifact_type": "entities",
+                    "artifact_id": "map_123",
+                    "status": "reviewed",
+                }
+            ]
+        ]
+    )
+
+
+class ReviewSummaryResponse(BaseModel):
+    scan: dict | None = Field(default=None, examples=[{"tables": 12}])
+    entities: List[dict] = Field(default_factory=list)
+    hierarchies: List[dict] = Field(default_factory=list)
+    facts: List[dict] = Field(default_factory=list)
+    dimensions: List[dict] = Field(default_factory=list)
+    metrics: List[dict] = Field(default_factory=list)
+    ontology: dict | None = Field(default=None)
 
 
 class PoliciesResponse(BaseModel):
@@ -743,6 +917,7 @@ class InsightDetailWithContextResponse(BaseModel):
 
 
 class OnboardScanRequest(BaseModel):
+    tenant_id: str | None = Field(None, examples=["tenant_a"])
     schema: str | None = Field(None, examples=["public"])
     schemas: List[str] | None = Field(None, examples=[["public", "staging"]])
     tables: List[str] | None = Field(None, examples=[["fact_production_daily", "dim_plant"]])
@@ -751,6 +926,7 @@ class OnboardScanRequest(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
+                "tenant_id": "tenant_a",
                 "schema": "public",
                 "tables": ["fact_production_daily", "dim_plant"],
                 "connection_id": "conn_prod",
@@ -779,6 +955,11 @@ class OnboardScanResponse(BaseModel):
 
 
 class OnboardMapResponse(BaseModel):
+    mapping_id: str | None = Field(None, examples=["map_ab12cd34"])
+    connection_id: str | None = Field(None, examples=["conn_prod"])
+    database: str | None = Field(None, examples=["prod_warehouse"])
+    schema: str | None = Field(None, examples=["public"])
+    tables: List[str] | None = Field(None, examples=[["fact_sales", "dim_customer"]])
     candidates: List[dict]
     low_confidence_candidates: List[dict]
     low_confidence_threshold: float = Field(
@@ -787,6 +968,11 @@ class OnboardMapResponse(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
+                "mapping_id": "map_ab12cd34",
+                "connection_id": "conn_prod",
+                "database": "prod_warehouse",
+                "schema": "public",
+                "tables": ["fact_production_daily", "dim_plant"],
                 "candidates": [
                     {
                         "column": "sales_area_name",
@@ -1125,6 +1311,7 @@ class OnboardScanConnectionResponse(BaseModel):
 
 
 class InferModelsRequest(BaseModel):
+    tenant_id: str | None = Field(None, examples=["tenant_a"])
     schema: str = Field("public", examples=["public"])
     schemas: List[str] | None = Field(None, examples=[["public", "staging"]])
     tables: List[str] | None = Field(None, examples=[["fact_production_daily", "dim_plant"]])
@@ -1136,6 +1323,7 @@ class InferModelsRequest(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
+                "tenant_id": "tenant_a",
                 "schema": "public",
                 "tables": ["fact_production_daily", "dim_plant"],
                 "grain": "day",
@@ -1182,6 +1370,7 @@ class SuggestedMetricsResponse(BaseModel):
 
 
 class MetricUpsertRequest(BaseModel):
+    tenant_id: str | None = Field(None, examples=["tenant_a"])
     domain_id: str = Field(..., examples=["energy_distribution"])
     connection_id: str | None = Field(None, examples=["conn_prod"])
     database: str | None = Field(None, examples=["prod_warehouse"])
@@ -1204,6 +1393,7 @@ class MetricUpsertRequest(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
+                "tenant_id": "tenant_a",
                 "domain_id": "energy_distribution",
                 "metric_name": "total_sales_volume_tmt",
                 "type": "sum",
@@ -1217,6 +1407,7 @@ class MetricUpsertRequest(BaseModel):
 
 
 class MetricPatchRequest(BaseModel):
+    tenant_id: str | None = Field(None, examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["energy_distribution"])
     connection_id: str | None = Field(None, examples=["conn_prod"])
     database: str | None = Field(None, examples=["prod_warehouse"])

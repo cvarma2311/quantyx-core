@@ -344,10 +344,11 @@ def main() -> int:
     print("\n[2] Ontology mapping")
     print("Step 2 start")
     map_payload = {
+        "tenant_id": TENANT_ID,
         "schema": schemas[0] if schemas else "public",
         "schemas": schemas or None,
         "tables": tables[:10] or None,
-                "connection_id": CONNECTION_ID,
+        "connection_id": CONNECTION_ID,
         "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
     }
     map_path = f"/onboard/map?domain_id={DOMAIN_ID}&tenant_id={TENANT_ID}&use_llm=false"
@@ -359,7 +360,13 @@ def main() -> int:
     # 3) Entities + hierarchies (review / override)
     print("\n[3] Entities and hierarchies")
     print("Step 3 start")
-    entities_path = f"/entities?domain_id={DOMAIN_ID}&tenant_id={TENANT_ID}&entity_limit=50"
+    entities_path = (
+        f"/entities?domain_id={DOMAIN_ID}"
+        f"&tenant_id={TENANT_ID}"
+        f"&connection_id={CONNECTION_ID}"
+        f"&database={os.getenv('DEMO_DB_NAME', 'prod_warehouse')}"
+        f"&schema={os.getenv('DEMO_DB_SCHEMA', 'public')}"
+    )
     _log_request("GET", entities_path)
     entities_response = _request("GET", entities_path)
     _log_response(entities_response)
@@ -369,6 +376,7 @@ def main() -> int:
     print("\n[4] Infer facts and dimensions")
     print("Step 4 start")
     infer_payload = {
+        "tenant_id": TENANT_ID,
         "schema": schemas[0] if schemas else "public",
         "schemas": schemas or None,
         "tables": tables[:10] or None,
@@ -404,6 +412,7 @@ def main() -> int:
     print("\n[6] Suggested metrics (persist)")
     print("Step 5 start")
     metrics_payload = {
+        "tenant_id": TENANT_ID,
         "schema": schemas[0] if schemas else "public",
         "schemas": schemas or None,
         "tables": tables[:10] or None,
@@ -423,6 +432,8 @@ def main() -> int:
         measure = suggested["measures"][0]
         metric_id = f"{DOMAIN_ID}__{measure['table']}__{measure['column']}"
         patch_payload = {
+            "tenant_id": TENANT_ID,
+            "domain_id": DOMAIN_ID,
             "display_name": measure["column"].replace("_", " ").title(),
             "description": f"Auto-promoted metric for {measure['table']}.{measure['column']}",
             "status": "certified",
@@ -446,6 +457,21 @@ def main() -> int:
     apply_response = _request("POST", "/contracts/apply", {})
     _log_response(apply_response)
     print("Step 8 end")
+
+    # 9) Review summary
+    print("\n[9] Review summary")
+    print("Step 9 start")
+    review_path = (
+        f"/review/summary?tenant_id={TENANT_ID}"
+        f"&domain_id={DOMAIN_ID}"
+        f"&connection_id={CONNECTION_ID}"
+        f"&database={os.getenv('DEMO_DB_NAME', 'prod_warehouse')}"
+        f"&schema={os.getenv('DEMO_DB_SCHEMA', 'public')}"
+    )
+    _log_request("GET", review_path)
+    review_response = _request("GET", review_path)
+    _log_response(review_response)
+    print("Step 9 end")
 
     print("\n== Demo complete ==")
     return 0

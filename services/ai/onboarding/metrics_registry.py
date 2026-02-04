@@ -41,7 +41,11 @@ def _resolve_model_for_table(table: str, model_map: dict[str, str]) -> str | Non
 
 def persist_suggested_metrics(
     settings: Settings,
+    tenant_id: str,
     domain_id: str,
+    connection_id: str,
+    database_name: str,
+    schema_name: str,
     measures: list[dict[str, Any]],
     status: str = "suggested",
 ) -> None:
@@ -61,9 +65,11 @@ def persist_suggested_metrics(
             sql_expr = f"SUM({measure['table']}.{measure['column']})"
         sql = """
         INSERT INTO public.quantyx_metrics_registry
-          (metric_id, metric_name, domain_id, display_name, description, type, unit, confidence, additive, grain, dimensions, dataset_id, source_model, source_schema, sql, status)
+          (metric_id, metric_name, domain_id, tenant_id, connection_id, database_name, schema_name,
+           display_name, description, type, unit, confidence, additive, grain, dimensions, dataset_id,
+           source_model, source_schema, sql, status)
         VALUES
-          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (metric_id)
         DO UPDATE SET
           metric_name = EXCLUDED.metric_name,
@@ -80,6 +86,10 @@ def persist_suggested_metrics(
             metric_id,
             measure["column"],
             domain_id,
+            tenant_id,
+            connection_id,
+            database_name,
+            schema_name,
             measure["column"],
             f"Auto-detected metric from {measure['table']}.{measure['column']}",
             "sum",

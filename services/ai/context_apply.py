@@ -17,8 +17,14 @@ def apply_extractions(
     payload: dict[str, Any],
     apply_flags: dict[str, bool],
     source_context_id: str | None = None,
+    connection_id: str | None = None,
+    database_name: str | None = None,
+    schema_name: str | None = None,
 ) -> dict[str, int]:
     updated: dict[str, int] = {"entities": 0, "hierarchies": 0, "glossary": 0, "metrics": 0}
+    connection_id = connection_id or "global"
+    database_name = database_name or "global"
+    schema_name = schema_name or "global"
 
     if apply_flags.get("entities"):
         for entity in payload.get("entities", []):
@@ -29,6 +35,9 @@ def apply_extractions(
                 INSERT INTO public.quantyx_entity_overrides (
                   tenant_id,
                   domain_id,
+                  connection_id,
+                  database_name,
+                  schema_name,
                   entity_id,
                   description,
                   join_key,
@@ -36,8 +45,8 @@ def apply_extractions(
                   source_context_id,
                   updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, now())
-                ON CONFLICT (tenant_id, domain_id, entity_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id)
                 DO UPDATE SET
                   description = EXCLUDED.description,
                   join_key = EXCLUDED.join_key,
@@ -51,6 +60,9 @@ def apply_extractions(
                 [
                     tenant_id,
                     domain_id,
+                    connection_id,
+                    database_name,
+                    schema_name,
                     entity_id,
                     entity.get("description"),
                     entity.get("join_key"),
@@ -70,14 +82,17 @@ def apply_extractions(
                 INSERT INTO public.quantyx_hierarchy_overrides (
                   tenant_id,
                   domain_id,
+                  connection_id,
+                  database_name,
+                  schema_name,
                   hierarchy_name,
                   levels,
                   description,
                   source_context_id,
                   updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, now())
-                ON CONFLICT (tenant_id, domain_id, hierarchy_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name)
                 DO UPDATE SET
                   levels = EXCLUDED.levels,
                   description = EXCLUDED.description,
@@ -87,7 +102,17 @@ def apply_extractions(
             execute_non_query(
                 settings,
                 sql,
-                [tenant_id, domain_id, name, levels, hierarchy.get("description"), source_context_id],
+                [
+                    tenant_id,
+                    domain_id,
+                    connection_id,
+                    database_name,
+                    schema_name,
+                    name,
+                    levels,
+                    hierarchy.get("description"),
+                    source_context_id,
+                ],
             )
             updated["hierarchies"] += 1
 
@@ -195,6 +220,10 @@ def apply_extractions(
                   metric_id,
                   metric_name,
                   domain_id,
+                  tenant_id,
+                  connection_id,
+                  database_name,
+                  schema_name,
                   description,
                   type,
                   unit,
@@ -208,7 +237,7 @@ def apply_extractions(
                   created_at,
                   updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
                 ON CONFLICT (metric_id)
                 DO UPDATE SET
                   description = EXCLUDED.description,
@@ -230,6 +259,10 @@ def apply_extractions(
                     metric_id,
                     metric_name,
                     domain_id,
+                    tenant_id,
+                    connection_id,
+                    database_name,
+                    schema_name,
                     metric.get("description"),
                     metric.get("type"),
                     metric.get("unit"),

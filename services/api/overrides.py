@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.ai.semantic_layer.overrides_loader import load_entity_overrides, load_hierarchy_overrides
+from services.ai.semantic_layer.overrides_loader import (
+    load_entity_overrides,
+    load_entity_overrides_all,
+    load_hierarchy_overrides,
+    load_hierarchy_overrides_all,
+)
 from services.ai.config import Settings
 
 
@@ -28,7 +33,34 @@ def merge_hierarchies(base: list[dict[str, Any]], overrides: list[dict[str, Any]
     return list(merged.values())
 
 
-def load_overrides(settings: Settings, tenant_id: str, domain_id: str) -> tuple[list[dict], list[dict]]:
-    entity_overrides = load_entity_overrides(settings, tenant_id, domain_id)
-    hierarchy_overrides = load_hierarchy_overrides(settings, tenant_id, domain_id)
+def load_overrides(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str | None = None,
+    database_name: str | None = None,
+    schema_name: str | None = None,
+) -> tuple[list[dict], list[dict]]:
+    entity_overrides = load_entity_overrides(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    hierarchy_overrides = load_hierarchy_overrides(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    return entity_overrides, hierarchy_overrides
+
+
+def load_overrides_all(settings: Settings, tenant_id: str, domain_id: str) -> tuple[list[dict], list[dict]]:
+    entity_overrides = load_entity_overrides_all(settings, tenant_id, domain_id)
+    hierarchy_overrides = load_hierarchy_overrides_all(settings, tenant_id, domain_id)
     return entity_overrides, hierarchy_overrides

@@ -18,7 +18,12 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from services.ai.catalog import load_catalog_with_registry, resolve_ref
 from services.ai.config import load_settings
 from services.ai.db import run_query
-from services.ai.metrics_registry import upsert_metric, update_metric
+from services.ai.metrics_registry import (
+    delete_metric,
+    fetch_registry_metrics,
+    upsert_metric,
+    update_metric,
+)
 from services.ai.audit import log_query_audit
 from services.ai.connection_registry import (
     register_connection,
@@ -26,7 +31,7 @@ from services.ai.connection_registry import (
     resolve_connection_scope,
 )
 from services.ai.onboarding.scan_store import persist_schema_scan
-from services.ai.onboarding.scan_store import load_latest_scan_result
+from services.ai.onboarding.scan_store import load_latest_scan_result, load_latest_scan_for_scope
 from services.ai.resolver import resolve_question
 from services.ai.schema_loader import load_manifest_models
 from services.ai.dbt_manifest import (
@@ -69,16 +74,33 @@ from services.ai.anomalies import (
     normalize_period,
     score_anomalies,
 )
-from services.api.entities import list_entities, list_hierarchies
-from services.api.overrides import load_overrides, merge_entities, merge_hierarchies
+from services.api.overrides import load_overrides, load_overrides_all
 from services.api.overrides_endpoints import upsert_entity_override, upsert_hierarchy_override
 from services.ai.onboarding.schema_scan import scan_schema
 from services.ai.onboarding.connection_scan import scan_connection
 from services.ai.onboarding.measure_detection import detect_measures, detect_time_columns
 from services.ai.onboarding.entity_mapping import map_entities
+from services.ai.onboarding.entity_mappings_store import list_entity_mappings, persist_entity_mapping
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
 from services.ai.onboarding.model_inference_llm import llm_infer_models
+from services.ai.onboarding.models_registry import (
+    delete_dimension,
+    delete_fact,
+    list_dimensions,
+    list_dimensions_all,
+    list_facts,
+    list_facts_all,
+    update_dimension,
+    update_fact,
+    upsert_dimension,
+    upsert_fact,
+)
+from services.ai.onboarding.review_store import (
+    create_review_event,
+    list_review_events,
+    update_review_event,
+)
 from services.ai.context_store import (
     create_context,
     create_context_file,
@@ -100,6 +122,7 @@ from services.ai.glossary import fetch_glossary_terms
 from services.ai.sql_builder import Filter, build_query
 from services.api.schemas import (
     EntitiesResponse,
+    EntitiesAllResponse,
     EntityOverrideRequest,
     HierarchyOverrideRequest,
     MetricsResponse,
@@ -112,6 +135,18 @@ from services.api.schemas import (
     OnboardScanRequest,
     OnboardScanResponse,
     OnboardMapResponse,
+    FactsResponse,
+    FactsAllResponse,
+    FactsUpsertRequest,
+    FactsPatchRequest,
+    DimensionsUpsertRequest,
+    DimensionsPatchRequest,
+    DimensionsAllResponse,
+    ReviewCreateRequest,
+    ReviewPatchRequest,
+    ReviewResponse,
+    ReviewListResponse,
+    ReviewSummaryResponse,
     ContextIngestRequest,
     ContextIngestResponse,
     ContextFileIngestResponse,
@@ -226,6 +261,20 @@ def _require_scope(scope: dict | None, endpoint: str) -> None:
         raise HTTPException(status_code=400, detail=detail)
 
 
+def _require_basic_scope(scope: dict | None, endpoint: str) -> None:
+    scope = scope or {}
+    missing = []
+    for key in ("connection_id", "database", "schema"):
+        if not scope.get(key):
+            missing.append(key)
+    if missing:
+        detail = (
+            f"{endpoint} requires connection scope fields: "
+            f"{', '.join(missing)}. Include connection_id, database, schema."
+        )
+        raise HTTPException(status_code=400, detail=detail)
+
+
 def _request_scope(
     connection_id: str | None,
     database: str | None,
@@ -330,9 +379,44 @@ def health() -> dict:
     response_model=MetricsResponse,
     tags=["explore"],
     summary="List metrics",
-    description="Return metric catalog entries from the contracts layer.",
+    description="Return tenant-scoped metrics from the registry.",
     openapi_extra={
         "parameters": [
+            {
+                "name": "tenant_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"tenant_id": {"value": "tenant_a"}},
+            },
+            {
+                "name": "domain_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"domain_id": {"value": "energy_distribution"}},
+            },
+            {
+                "name": "connection_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"connection_id": {"value": "conn_prod"}},
+            },
+            {
+                "name": "database",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"database": {"value": "prod_warehouse"}},
+            },
+            {
+                "name": "schema",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"schema": {"value": "public"}},
+            },
             {
                 "name": "limit",
                 "in": "query",
@@ -384,22 +468,81 @@ def health() -> dict:
         }
     },
 )
-def metrics(limit: int = 200, cursor: str | None = None) -> MetricsResponse:
-    payload = [
-        {
-            "name": metric.name,
-            "description": metric.description,
-            "type": metric.metric_type,
-            "grain": metric.grain,
-            "dimensions": metric.dimensions,
-            "status": metric.status,
-            "owner": metric.owner,
-            "version": metric.version,
-        }
-        for metric in catalog.metrics.values()
-    ]
+def metrics(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database: str,
+    schema: str,
+    limit: int = 200,
+    cursor: str | None = None,
+) -> MetricsResponse:
+    payload = []
+    metrics_rows = fetch_registry_metrics(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database,
+        schema_name=schema,
+        include_all_statuses=True,
+    )
+    for row in metrics_rows:
+        payload.append(
+            {
+                "metric_id": row.get("metric_id"),
+                "name": row.get("metric_name"),
+                "description": row.get("description"),
+                "type": row.get("type"),
+                "grain": row.get("grain"),
+                "dimensions": row.get("dimensions"),
+                "status": row.get("status"),
+                "owner": row.get("owner"),
+                "version": row.get("version"),
+            }
+        )
     page, next_cursor = _paginate_list(payload, cursor, limit, key_fn=lambda item: item["name"])
     return MetricsResponse(metrics=page, limit=limit, cursor=cursor, next_cursor=next_cursor)
+
+
+@app.get(
+    "/metrics/all",
+    response_model=dict,
+    tags=["explore"],
+    summary="List metrics for all connections",
+    description="Return all tenant-scoped metrics grouped by connection.",
+)
+def metrics_all(tenant_id: str, domain_id: str) -> dict:
+    metrics_rows = fetch_registry_metrics(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        include_all_statuses=True,
+    )
+    grouped: dict[tuple[str, str, str], dict] = {}
+    for row in metrics_rows:
+        key = (row.get("connection_id"), row.get("database_name"), row.get("schema_name"))
+        grouped.setdefault(
+            key,
+            {
+                "connection_id": key[0],
+                "database": key[1],
+                "schema": key[2],
+                "metrics": [],
+            },
+        )
+        grouped[key]["metrics"].append(
+            {
+                "metric_id": row.get("metric_id"),
+                "metric_name": row.get("metric_name"),
+                "description": row.get("description"),
+                "type": row.get("type"),
+                "grain": row.get("grain"),
+                "dimensions": row.get("dimensions"),
+                "status": row.get("status"),
+            }
+        )
+    return {"connections": list(grouped.values())}
 
 
 @app.get(
@@ -2110,7 +2253,9 @@ def dimension_values(
     },
 )
 def create_metric(payload: MetricUpsertRequest) -> MetricUpsertResponse:
-    _require_scope(
+    if not payload.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    _require_basic_scope(
         _request_scope(payload.connection_id, payload.database, payload.schema, payload.tables),
         "/metrics",
     )
@@ -2144,7 +2289,9 @@ def create_metric(payload: MetricUpsertRequest) -> MetricUpsertResponse:
     },
 )
 def patch_metric(metric_id: str, payload: MetricPatchRequest) -> MetricUpsertResponse:
-    _require_scope(
+    if not payload.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    _require_basic_scope(
         _request_scope(payload.connection_id, payload.database, payload.schema, payload.tables),
         "/metrics/{metric_id}",
     )
@@ -2152,6 +2299,17 @@ def patch_metric(metric_id: str, payload: MetricPatchRequest) -> MetricUpsertRes
     update_metric(settings, metric_id, updates)
     status = updates.get("status", "updated")
     return MetricUpsertResponse(metric_id=metric_id, status=status)
+
+
+@app.delete(
+    "/metrics/{metric_id}",
+    tags=["admin"],
+    summary="Delete a metric",
+    description="Delete a metric from the registry.",
+)
+def delete_metric_endpoint(metric_id: str) -> dict:
+    delete_metric(settings, metric_id)
+    return {"ok": True}
 
 @app.get(
     "/context/domains",
@@ -2647,6 +2805,7 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
     if extraction_row["tenant_id"] != payload.tenant_id or extraction_row["domain_id"] != payload.domain_id:
         raise HTTPException(status_code=400, detail="Extraction tenant/domain mismatch")
 
+    context_row = get_context(settings, extraction_row.get("context_id"))
     updated = apply_extractions(
         settings,
         tenant_id=payload.tenant_id,
@@ -2654,6 +2813,9 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
         payload=extraction_row["payload"],
         apply_flags=payload.apply,
         source_context_id=extraction_row.get("context_id"),
+        connection_id=(context_row or {}).get("connection_id"),
+        database_name=(context_row or {}).get("database_name"),
+        schema_name=(context_row or {}).get("schema_name"),
     )
     return ContextApplyResponse(status="applied", updated=updated)
 
@@ -2807,7 +2969,7 @@ def patch_context_extraction(
     response_model=EntitiesResponse,
     tags=["explore"],
     summary="List entities and hierarchies",
-    description="Return ontology entities and hierarchies, with optional tenant overrides.",
+    description="Return tenant-scoped entities and hierarchies for a connection.",
     openapi_extra={
         "parameters": [
             {
@@ -2823,37 +2985,29 @@ def patch_context_extraction(
             {
                 "name": "tenant_id",
                 "in": "query",
-                "required": False,
+                "required": True,
                 "schema": {"type": "string"},
                 "examples": {"tenant_a": {"value": "tenant_1"}},
             },
             {
-                "name": "entity_limit",
+                "name": "connection_id",
                 "in": "query",
-                "required": False,
-                "schema": {"type": "integer"},
-                "examples": {"entity_limit": {"value": 200}},
-            },
-            {
-                "name": "entity_cursor",
-                "in": "query",
-                "required": False,
+                "required": True,
                 "schema": {"type": "string"},
-                "examples": {"entity_cursor": {"value": "b3JnYW5pemF0aW9uYWxfdW5pdA=="}},
+                "examples": {"connection_id": {"value": "conn_prod"}},
             },
             {
-                "name": "hierarchy_limit",
+                "name": "database",
                 "in": "query",
-                "required": False,
-                "schema": {"type": "integer"},
-                "examples": {"hierarchy_limit": {"value": 200}},
-            },
-            {
-                "name": "hierarchy_cursor",
-                "in": "query",
-                "required": False,
+                "required": True,
                 "schema": {"type": "string"},
-                "examples": {"hierarchy_cursor": {"value": "c2FsZXNfb3Jn"}},
+                "examples": {"database": {"value": "prod_warehouse"}},
+            },
+            {
+                "name": "schema",
+                "in": "query",
+                "schema": {"type": "string"},
+                "examples": {"schema": {"value": "public"}},
             },
         ],
         "responses": {
@@ -2864,6 +3018,9 @@ def patch_context_extraction(
                             "entities": {
                                 "summary": "Entities and hierarchies",
                                 "value": {
+                                    "connection_id": "conn_prod",
+                                    "database": "prod_warehouse",
+                                    "schema": "public",
                                     "entities": [
                                         {
                                             "entity_id": "organizational_unit",
@@ -2877,12 +3034,6 @@ def patch_context_extraction(
                                             "levels": ["sbu", "zone", "region", "sales_area"],
                                         }
                                     ],
-                                    "entity_limit": 200,
-                                    "entity_cursor": None,
-                                    "entity_next_cursor": "cHJvZHVjdA==",
-                                    "hierarchy_limit": 200,
-                                    "hierarchy_cursor": None,
-                                    "hierarchy_next_cursor": "cmVnaW9uX29yZw==",
                                 },
                             }
                         }
@@ -2894,43 +3045,127 @@ def patch_context_extraction(
 )
 def entities(
     domain_id: str,
-    tenant_id: str | None = None,
-    entity_limit: int = 200,
-    entity_cursor: str | None = None,
-    hierarchy_limit: int = 200,
-    hierarchy_cursor: str | None = None,
+    tenant_id: str,
+    connection_id: str,
+    database: str,
+    schema: str,
 ) -> EntitiesResponse:
-    pack_path = f"packs/{domain_id}"
-    entities_list = list_entities(pack_path)
-    hierarchies_list = list_hierarchies(pack_path)
-
-    if tenant_id:
-        entity_overrides, hierarchy_overrides = load_overrides(settings, tenant_id, domain_id)
-        entities_list = merge_entities(entities_list, entity_overrides)
-        hierarchies_list = merge_hierarchies(hierarchies_list, hierarchy_overrides)
-
-    entity_page, entity_next = _paginate_list(
-        entities_list,
-        entity_cursor,
-        entity_limit,
-        key_fn=lambda item: item.get("entity_id", ""),
+    entity_overrides, hierarchy_overrides = load_overrides(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id=connection_id,
+        database_name=database,
+        schema_name=schema,
     )
-    hierarchy_page, hierarchy_next = _paginate_list(
-        hierarchies_list,
-        hierarchy_cursor,
-        hierarchy_limit,
-        key_fn=lambda item: item.get("name", ""),
-    )
+    entity_page = [
+        {
+            "entity_id": item.get("entity_id"),
+            "description": item.get("description"),
+            "join_key": item.get("join_key"),
+            "examples": item.get("examples"),
+        }
+        for item in sorted(entity_overrides, key=lambda item: item.get("entity_id", ""))
+    ]
+    hierarchy_page = [
+        {
+            "name": item.get("hierarchy_name"),
+            "levels": item.get("levels", []),
+            "description": item.get("description"),
+        }
+        for item in sorted(hierarchy_overrides, key=lambda item: item.get("hierarchy_name", ""))
+    ]
     return EntitiesResponse(
+        connection_id=connection_id,
+        database=database,
+        schema=schema,
         entities=entity_page,
         hierarchies=hierarchy_page,
-        entity_limit=entity_limit,
-        entity_cursor=entity_cursor,
-        entity_next_cursor=entity_next,
-        hierarchy_limit=hierarchy_limit,
-        hierarchy_cursor=hierarchy_cursor,
-        hierarchy_next_cursor=hierarchy_next,
     )
+
+
+@app.get(
+    "/entities/all",
+    response_model=EntitiesAllResponse,
+    tags=["explore"],
+    summary="List entities and hierarchies for all connections",
+    description="Return all tenant-scoped entities and hierarchies grouped by connection.",
+)
+def entities_all(domain_id: str, tenant_id: str) -> EntitiesAllResponse:
+    entity_overrides, hierarchy_overrides = load_overrides_all(settings, tenant_id, domain_id)
+    grouped: dict[tuple[str, str, str], dict] = {}
+    for entity in entity_overrides:
+        key = (entity.get("connection_id"), entity.get("database_name"), entity.get("schema_name"))
+        grouped.setdefault(
+            key,
+            {
+                "connection_id": key[0],
+                "database": key[1],
+                "schema": key[2],
+                "entities": [],
+                "hierarchies": [],
+            },
+        )
+        grouped[key]["entities"].append(
+            {
+                "entity_id": entity.get("entity_id"),
+                "description": entity.get("description"),
+                "join_key": entity.get("join_key"),
+                "examples": entity.get("examples"),
+            }
+        )
+    for hierarchy in hierarchy_overrides:
+        key = (hierarchy.get("connection_id"), hierarchy.get("database_name"), hierarchy.get("schema_name"))
+        grouped.setdefault(
+            key,
+            {
+                "connection_id": key[0],
+                "database": key[1],
+                "schema": key[2],
+                "entities": [],
+                "hierarchies": [],
+            },
+        )
+        grouped[key]["hierarchies"].append(
+            {
+                "name": hierarchy.get("hierarchy_name"),
+                "levels": hierarchy.get("levels", []),
+                "description": hierarchy.get("description"),
+            }
+        )
+    return EntitiesAllResponse(connections=list(grouped.values()))
+
+
+@app.get(
+    "/hierarchies",
+    tags=["explore"],
+    summary="List hierarchies (connection-scoped)",
+    description="Return hierarchy overrides for the given tenant/domain/connection scope.",
+)
+def hierarchies(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database: str,
+    schema: str,
+) -> dict:
+    _, hierarchy_overrides = load_overrides(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id=connection_id,
+        database_name=database,
+        schema_name=schema,
+    )
+    hierarchies_payload = [
+        {
+            "name": item.get("hierarchy_name"),
+            "levels": item.get("levels", []),
+            "description": item.get("description"),
+        }
+        for item in sorted(hierarchy_overrides, key=lambda item: item.get("hierarchy_name", ""))
+    ]
+    return {"hierarchies": hierarchies_payload}
 
 
 @app.patch(
@@ -2939,6 +3174,43 @@ def entities(
     summary="Override an entity",
     description="Upsert a tenant-specific entity override (description/join_key/examples).",
     openapi_extra={
+        "parameters": [
+            {
+                "name": "tenant_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"tenant_a": {"value": "tenant_a"}},
+            },
+            {
+                "name": "domain_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"domain_id": {"value": "manufacturing"}},
+            },
+            {
+                "name": "connection_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"connection_id": {"value": "conn_prod"}},
+            },
+            {
+                "name": "database",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"database": {"value": "prod_warehouse"}},
+            },
+            {
+                "name": "schema",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"schema": {"value": "public"}},
+            },
+        ],
         "requestBody": {
             "content": {
                 "application/json": {
@@ -2970,12 +3242,18 @@ def update_entity(
     entity_id: str,
     domain_id: str,
     tenant_id: str,
+    connection_id: str,
+    database: str,
+    schema: str,
     payload: EntityOverrideRequest,
 ) -> dict:
     upsert_entity_override(
         settings,
         tenant_id,
         domain_id,
+        connection_id,
+        database,
+        schema,
         {
             "entity_id": entity_id,
             "description": payload.description,
@@ -2992,6 +3270,43 @@ def update_entity(
     summary="Override a hierarchy",
     description="Upsert a tenant-specific hierarchy override (levels/description).",
     openapi_extra={
+        "parameters": [
+            {
+                "name": "tenant_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"tenant_a": {"value": "tenant_a"}},
+            },
+            {
+                "name": "domain_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"domain_id": {"value": "manufacturing"}},
+            },
+            {
+                "name": "connection_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"connection_id": {"value": "conn_prod"}},
+            },
+            {
+                "name": "database",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"database": {"value": "prod_warehouse"}},
+            },
+            {
+                "name": "schema",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "examples": {"schema": {"value": "public"}},
+            },
+        ],
         "requestBody": {
             "content": {
                 "application/json": {
@@ -3022,12 +3337,18 @@ def update_hierarchy(
     hierarchy_name: str,
     domain_id: str,
     tenant_id: str,
+    connection_id: str,
+    database: str,
+    schema: str,
     payload: HierarchyOverrideRequest,
 ) -> dict:
     upsert_hierarchy_override(
         settings,
         tenant_id,
         domain_id,
+        connection_id,
+        database,
+        schema,
         {
             "hierarchy_name": hierarchy_name,
             "levels": payload.levels,
@@ -3035,6 +3356,352 @@ def update_hierarchy(
         },
     )
     return {"ok": True}
+
+
+@app.post(
+    "/facts",
+    response_model=dict,
+    tags=["onboard"],
+    summary="Create or upsert a fact",
+)
+def create_fact(payload: FactsUpsertRequest) -> dict:
+    fact_id = upsert_fact(
+        settings,
+        {
+            "fact_id": None,
+            "tenant_id": payload.tenant_id,
+            "domain_id": payload.domain_id,
+            "connection_id": payload.connection_id,
+            "database_name": payload.database,
+            "schema_name": payload.schema,
+            "name": payload.name,
+            "grain": payload.grain,
+            "time_column": payload.time_column,
+            "measures": payload.measures,
+            "dimensions": payload.dimensions,
+            "description": payload.description,
+            "status": payload.status or "draft",
+        },
+    )
+    return {"fact_id": fact_id, "status": payload.status or "draft"}
+
+
+@app.get(
+    "/facts",
+    response_model=FactsResponse,
+    tags=["explore"],
+    summary="List facts (connection-scoped)",
+)
+def get_facts(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database: str,
+    schema: str,
+) -> FactsResponse:
+    facts = list_facts(settings, tenant_id, domain_id, connection_id, database, schema)
+    return FactsResponse(facts=facts)
+
+
+@app.get(
+    "/facts/all",
+    response_model=FactsAllResponse,
+    tags=["explore"],
+    summary="List facts for all connections",
+)
+def get_facts_all(tenant_id: str, domain_id: str) -> FactsAllResponse:
+    rows = list_facts_all(settings, tenant_id, domain_id)
+    grouped: dict[tuple[str, str, str], dict] = {}
+    for row in rows:
+        key = (row.get("connection_id"), row.get("database_name"), row.get("schema_name"))
+        grouped.setdefault(
+            key,
+            {
+                "connection_id": key[0],
+                "database": key[1],
+                "schema": key[2],
+                "facts": [],
+            },
+        )
+        grouped[key]["facts"].append(row)
+    return FactsAllResponse(connections=list(grouped.values()))
+
+
+@app.patch(
+    "/facts/{fact_id}",
+    tags=["onboard"],
+    summary="Update a fact",
+)
+def patch_fact(fact_id: str, payload: FactsPatchRequest) -> dict:
+    updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+    update_fact(settings, fact_id, updates)
+    return {"ok": True}
+
+
+@app.delete(
+    "/facts/{fact_id}",
+    tags=["onboard"],
+    summary="Delete a fact",
+)
+def remove_fact(fact_id: str) -> dict:
+    delete_fact(settings, fact_id)
+    return {"ok": True}
+
+
+@app.post(
+    "/dimensions",
+    response_model=dict,
+    tags=["onboard"],
+    summary="Create or upsert a dimension",
+)
+def create_dimension(payload: DimensionsUpsertRequest) -> dict:
+    dimension_id = upsert_dimension(
+        settings,
+        {
+            "dimension_id": None,
+            "tenant_id": payload.tenant_id,
+            "domain_id": payload.domain_id,
+            "connection_id": payload.connection_id,
+            "database_name": payload.database,
+            "schema_name": payload.schema,
+            "name": payload.name,
+            "keys": payload.keys,
+            "attributes": payload.attributes,
+            "description": payload.description,
+            "status": payload.status or "draft",
+        },
+    )
+    return {"dimension_id": dimension_id, "status": payload.status or "draft"}
+
+
+@app.get(
+    "/dimensions",
+    response_model=DimensionsResponse,
+    tags=["explore"],
+    summary="List dimensions (connection-scoped)",
+)
+def get_dimensions(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database: str,
+    schema: str,
+) -> DimensionsResponse:
+    dimensions = list_dimensions(settings, tenant_id, domain_id, connection_id, database, schema)
+    return DimensionsResponse(dimensions=dimensions)
+
+
+@app.get(
+    "/dimensions/all",
+    response_model=DimensionsAllResponse,
+    tags=["explore"],
+    summary="List dimensions for all connections",
+)
+def get_dimensions_all(tenant_id: str, domain_id: str) -> DimensionsAllResponse:
+    rows = list_dimensions_all(settings, tenant_id, domain_id)
+    grouped: dict[tuple[str, str, str], dict] = {}
+    for row in rows:
+        key = (row.get("connection_id"), row.get("database_name"), row.get("schema_name"))
+        grouped.setdefault(
+            key,
+            {
+                "connection_id": key[0],
+                "database": key[1],
+                "schema": key[2],
+                "dimensions": [],
+            },
+        )
+        grouped[key]["dimensions"].append(row)
+    return DimensionsAllResponse(connections=list(grouped.values()))
+
+
+@app.patch(
+    "/dimensions/{dimension_id}",
+    tags=["onboard"],
+    summary="Update a dimension",
+)
+def patch_dimension(dimension_id: str, payload: DimensionsPatchRequest) -> dict:
+    updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+    update_dimension(settings, dimension_id, updates)
+    return {"ok": True}
+
+
+@app.delete(
+    "/dimensions/{dimension_id}",
+    tags=["onboard"],
+    summary="Delete a dimension",
+)
+def remove_dimension(dimension_id: str) -> dict:
+    delete_dimension(settings, dimension_id)
+    return {"ok": True}
+
+
+@app.post(
+    "/review",
+    response_model=ReviewResponse,
+    tags=["onboard"],
+    summary="Create a review event",
+)
+def create_review(payload: ReviewCreateRequest) -> ReviewResponse:
+    review_id = create_review_event(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=payload.domain_id,
+        connection_id=payload.connection_id,
+        database_name=payload.database,
+        schema_name=payload.schema,
+        artifact_type=payload.artifact_type,
+        artifact_id=payload.artifact_id,
+        status=payload.status,
+        notes=payload.notes,
+        payload=payload.payload,
+    )
+    return ReviewResponse(review_id=review_id, status=payload.status)
+
+
+@app.get(
+    "/review",
+    response_model=ReviewListResponse,
+    tags=["onboard"],
+    summary="List review events",
+)
+def list_review(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database: str,
+    schema: str,
+    artifact_type: str | None = None,
+) -> ReviewListResponse:
+    reviews = list_review_events(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id,
+        database,
+        schema,
+        artifact_type=artifact_type,
+    )
+    return ReviewListResponse(reviews=reviews)
+
+
+@app.patch(
+    "/review/{review_id}",
+    tags=["onboard"],
+    summary="Update a review event",
+)
+def patch_review(review_id: str, payload: ReviewPatchRequest) -> dict:
+    update_review_event(settings, review_id, payload.status, payload.notes)
+    return {"ok": True}
+
+
+@app.get(
+    "/review/summary",
+    response_model=ReviewSummaryResponse,
+    tags=["onboard"],
+    summary="Review summary",
+    description="Return scan results and onboarding artifacts for review.",
+)
+def review_summary(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database: str,
+    schema: str,
+) -> ReviewSummaryResponse:
+    scoped_scan = load_latest_scan_for_scope(
+        settings, tenant_id, domain_id, connection_id, database, schema
+    )
+    scan_summary = None
+    if scoped_scan is not None:
+        scan_summary = {
+            "tables": len(scoped_scan.get("tables", [])),
+            "schema_payload": scoped_scan,
+        }
+    entity_overrides, hierarchy_overrides = load_overrides(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id=connection_id,
+        database_name=database,
+        schema_name=schema,
+    )
+    facts = list_facts(settings, tenant_id, domain_id, connection_id, database, schema)
+    dimensions = list_dimensions(settings, tenant_id, domain_id, connection_id, database, schema)
+    metrics_rows = fetch_registry_metrics(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database,
+        schema_name=schema,
+        include_all_statuses=True,
+    )
+    review_events = list_review_events(
+        settings, tenant_id, domain_id, connection_id, database, schema
+    )
+    review_map: dict[tuple[str, str], dict] = {}
+    for event in review_events:
+        key = (event.get("artifact_type"), event.get("artifact_id"))
+        if key not in review_map:
+            review_map[key] = event
+
+    entities_payload = []
+    for entity in entity_overrides:
+        entry = dict(entity)
+        status = review_map.get(("entities", entity.get("entity_id")))
+        if status:
+            entry["status"] = status.get("status")
+        entities_payload.append(entry)
+
+    hierarchies_payload = []
+    for hierarchy in hierarchy_overrides:
+        entry = {
+            "name": hierarchy.get("hierarchy_name"),
+            "levels": hierarchy.get("levels", []),
+            "description": hierarchy.get("description"),
+        }
+        status = review_map.get(("hierarchies", hierarchy.get("hierarchy_name")))
+        if status:
+            entry["status"] = status.get("status")
+        hierarchies_payload.append(entry)
+
+    facts_payload = []
+    for fact in facts:
+        entry = dict(fact)
+        status = review_map.get(("facts", fact.get("fact_id")))
+        if status:
+            entry["review_status"] = status.get("status")
+        facts_payload.append(entry)
+
+    dims_payload = []
+    for dim in dimensions:
+        entry = dict(dim)
+        status = review_map.get(("dimensions", dim.get("dimension_id")))
+        if status:
+            entry["review_status"] = status.get("status")
+        dims_payload.append(entry)
+
+    metrics_payload = []
+    for metric in metrics_rows:
+        entry = dict(metric)
+        status = review_map.get(("metrics", metric.get("metric_id")))
+        if status:
+            entry["review_status"] = status.get("status")
+        metrics_payload.append(entry)
+
+    return ReviewSummaryResponse(
+        scan=scan_summary,
+        entities=entities_payload,
+        hierarchies=hierarchies_payload,
+        facts=facts_payload,
+        dimensions=dims_payload,
+        metrics=metrics_payload,
+        ontology={
+            "entities": entities_payload,
+            "hierarchies": hierarchies_payload,
+        },
+    )
 
 @app.get(
     "/schema",
@@ -3543,7 +4210,7 @@ def _merge_entity_candidates(
             {
                 "name": "tenant_id",
                 "in": "query",
-                "required": False,
+                "required": True,
                 "schema": {"type": "string"},
                 "examples": {"tenant_a": {"value": "tenant_a"}},
             },
@@ -3562,6 +4229,7 @@ def _merge_entity_candidates(
                         "map_public": {
                             "summary": "Map public schema",
                             "value": {
+                                "tenant_id": "tenant_a",
                                 "schema": "public",
                                 "tables": ["fact_production_daily", "dim_plant"],
                                 "connection_id": "conn_prod",
@@ -3577,7 +4245,7 @@ def _merge_entity_candidates(
 def onboard_map(
     request: OnboardScanRequest,
     domain_id: str,
-    use_llm: bool = False,
+    use_llm: bool = True,
     tenant_id: str | None = None,
 ) -> OnboardMapResponse:
     schema_value = request.schema or (request.schemas[0] if request.schemas else None)
@@ -3585,13 +4253,21 @@ def onboard_map(
         _request_scope(request.connection_id, request.database, schema_value, request.tables),
         "/onboard/map",
     )
-    schemas = request.schemas or ([request.schema] if request.schema else [settings.db_schema])
-    tables = []
-    for schema_name in schemas:
-        schema_tables = scan_schema(settings, schema_name)
-        if request.tables:
-            schema_tables = [table for table in schema_tables if table.get("table") in request.tables]
-        tables.extend(schema_tables)
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    schema_payload = load_latest_scan_for_scope(
+        settings,
+        tenant_id,
+        domain_id,
+        request.connection_id,
+        request.database,
+        schema_value,
+    )
+    if not schema_payload:
+        raise HTTPException(status_code=400, detail="No scan results found for scope")
+    tables = schema_payload.get("tables", [])
+    if request.tables:
+        tables = [table for table in tables if table.get("table") in request.tables]
     ontology = load_pack(f"packs/{domain_id}").get("ontology", {})
     glossary = fetch_glossary_terms(settings, tenant_id, domain_id) if tenant_id else None
     rule_candidates = map_entities(tables, ontology, glossary=glossary)
@@ -3612,11 +4288,64 @@ def onboard_map(
         for candidate in candidates
         if candidate.get("confidence", 0) >= LOW_CONFIDENCE_THRESHOLD
     ]
+    mapping_id = persist_entity_mapping(
+        settings,
+        tenant_id,
+        domain_id,
+        request.connection_id,
+        request.database,
+        schema_value,
+        request.tables or [table.get("table") for table in tables],
+        high_confidence_candidates,
+        low_confidence_candidates,
+        LOW_CONFIDENCE_THRESHOLD,
+    )
     return OnboardMapResponse(
+        mapping_id=mapping_id,
+        connection_id=request.connection_id,
+        database=request.database,
+        schema=schema_value,
+        tables=request.tables or [table.get("table") for table in tables],
         candidates=high_confidence_candidates,
         low_confidence_candidates=low_confidence_candidates,
         low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,
     )
+
+
+@app.get(
+    "/onboard/map/history",
+    tags=["onboard"],
+    summary="List mapping history",
+    description="Return recent entity mapping runs for the given scope.",
+)
+def onboard_map_history(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database: str,
+    schema: str,
+    limit: int = 20,
+) -> dict:
+    runs = list_entity_mappings(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id,
+        database,
+        schema,
+        limit=limit,
+    )
+    summarized = [
+        {
+            "mapping_id": run.get("mapping_id"),
+            "created_at": run.get("created_at"),
+            "candidates": len(run.get("candidates", []) or []),
+            "low_confidence": len(run.get("low_confidence_candidates", []) or []),
+            "status": run.get("status"),
+        }
+        for run in runs
+    ]
+    return {"runs": summarized}
 
 
 def _infer_models_from_scan(
@@ -3717,6 +4446,7 @@ def _merge_models(rule_facts: list[dict], rule_dims: list[dict], llm_payload: di
                         "infer_models": {
                             "summary": "Infer models",
                             "value": {
+                                "tenant_id": "tenant_a",
                                 "schema": "public",
                                 "tables": ["fact_production_daily", "dim_plant"],
                                 "time_column": "production_date",
@@ -3771,13 +4501,21 @@ def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> I
         _request_scope(request.connection_id, request.database, schema_value, request.tables),
         "/onboard/infer-models",
     )
-    schemas = request.schemas or [request.schema]
-    tables = []
-    for schema_name in schemas:
-        schema_tables = scan_schema(settings, schema_name)
-        if request.tables:
-            schema_tables = [table for table in schema_tables if table.get("table") in request.tables]
-        tables.extend(schema_tables)
+    if not request.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    schema_payload = load_latest_scan_for_scope(
+        settings,
+        request.tenant_id,
+        domain_id,
+        request.connection_id,
+        request.database,
+        schema_value,
+    )
+    if not schema_payload:
+        raise HTTPException(status_code=400, detail="No scan results found for scope")
+    tables = schema_payload.get("tables", [])
+    if request.tables:
+        tables = [table for table in tables if table.get("table") in request.tables]
     facts, dims = _infer_models_from_scan(tables, request.time_column, request.grain)
     if request.use_llm:
         try:
@@ -3818,6 +4556,7 @@ def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> I
                         "suggest_public": {
                             "summary": "Suggest metrics for public schema",
                             "value": {
+                                "tenant_id": "tenant_a",
                                 "schema": "public",
                                 "tables": ["fact_hpcl_sales_daily"],
                                 "connection_id": "conn_prod",
@@ -3883,13 +4622,21 @@ def suggested_metrics(request: OnboardScanRequest, domain_id: str, persist: bool
         _request_scope(request.connection_id, request.database, schema_value, request.tables),
         "/metrics/suggested",
     )
-    schemas = request.schemas or ([request.schema] if request.schema else [settings.db_schema])
-    tables = []
-    for schema_name in schemas:
-        schema_tables = scan_schema(settings, schema_name)
-        if request.tables:
-            schema_tables = [table for table in schema_tables if table.get("table") in request.tables]
-        tables.extend(schema_tables)
+    if not request.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    schema_payload = load_latest_scan_for_scope(
+        settings,
+        request.tenant_id,
+        domain_id,
+        request.connection_id,
+        request.database,
+        schema_value,
+    )
+    if not schema_payload:
+        raise HTTPException(status_code=400, detail="No scan results found for scope")
+    tables = schema_payload.get("tables", [])
+    if request.tables:
+        tables = [table for table in tables if table.get("table") in request.tables]
     measures = detect_measures(tables)
     low_confidence_measures = [
         measure
@@ -3905,7 +4652,15 @@ def suggested_metrics(request: OnboardScanRequest, domain_id: str, persist: bool
     ontology = load_pack(f"packs/{domain_id}").get("ontology", {})
     entity_candidates = map_entities(tables, ontology)
     if persist:
-        persist_suggested_metrics(settings, domain_id, measures)
+        persist_suggested_metrics(
+            settings,
+            request.tenant_id,
+            domain_id,
+            request.connection_id,
+            request.database,
+            schema_value,
+            measures,
+        )
     return SuggestedMetricsResponse(
         measures=high_confidence_measures,
         low_confidence_measures=low_confidence_measures,

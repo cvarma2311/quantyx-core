@@ -201,8 +201,12 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_connection_scopes_db
 
 CREATE TABLE IF NOT EXISTS public.quantyx_metrics_registry (
   metric_id TEXT PRIMARY KEY,
+  tenant_id TEXT NULL,
   metric_name TEXT,
   domain_id TEXT,
+  connection_id TEXT NULL,
+  database_name TEXT NULL,
+  schema_name TEXT NULL,
   display_name TEXT,
   description TEXT,
   type TEXT,
@@ -235,36 +239,51 @@ ALTER TABLE public.quantyx_metrics_registry
 CREATE INDEX IF NOT EXISTS idx_quantyx_metrics_registry_domain
   ON public.quantyx_metrics_registry (domain_id);
 
+CREATE INDEX IF NOT EXISTS idx_quantyx_metrics_registry_scope
+  ON public.quantyx_metrics_registry (tenant_id, domain_id, connection_id, database_name, schema_name);
+
 
 CREATE TABLE IF NOT EXISTS public.quantyx_entity_overrides (
   tenant_id TEXT NOT NULL,
   domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL DEFAULT 'global',
+  database_name TEXT NOT NULL DEFAULT 'global',
+  schema_name TEXT NOT NULL DEFAULT 'global',
   entity_id TEXT NOT NULL,
   description TEXT,
   join_key TEXT,
   examples TEXT[],
   source_context_id TEXT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (tenant_id, domain_id, entity_id)
+  PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_entity_overrides_domain
   ON public.quantyx_entity_overrides (tenant_id, domain_id);
 
+CREATE INDEX IF NOT EXISTS idx_quantyx_entity_overrides_scope
+  ON public.quantyx_entity_overrides (tenant_id, domain_id, connection_id, database_name, schema_name);
+
 
 CREATE TABLE IF NOT EXISTS public.quantyx_hierarchy_overrides (
   tenant_id TEXT NOT NULL,
   domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL DEFAULT 'global',
+  database_name TEXT NOT NULL DEFAULT 'global',
+  schema_name TEXT NOT NULL DEFAULT 'global',
   hierarchy_name TEXT NOT NULL,
   levels TEXT[] NOT NULL,
   description TEXT,
   source_context_id TEXT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (tenant_id, domain_id, hierarchy_name)
+  PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_hierarchy_overrides_domain
   ON public.quantyx_hierarchy_overrides (tenant_id, domain_id);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_hierarchy_overrides_scope
+  ON public.quantyx_hierarchy_overrides (tenant_id, domain_id, connection_id, database_name, schema_name);
 
 
 CREATE TABLE IF NOT EXISTS public.quantyx_business_context (
@@ -384,6 +403,69 @@ CREATE TABLE IF NOT EXISTS public.quantyx_dbt_config (
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_dbt_config_lookup
   ON public.quantyx_dbt_config (tenant_id, domain_id, connection_id, updated_at DESC);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_entity_mappings (
+  mapping_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  tables JSONB NOT NULL DEFAULT '[]'::jsonb,
+  payload JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_entity_mappings_scope
+  ON public.quantyx_entity_mappings (tenant_id, domain_id, connection_id, created_at DESC);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_facts_registry (
+  fact_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  table_name TEXT NOT NULL,
+  time_column TEXT NULL,
+  grain TEXT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  payload JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_dimensions_registry (
+  dimension_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  table_name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  payload JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_review_events (
+  review_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  artifact_type TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  notes TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_review_events_scope
+  ON public.quantyx_review_events (tenant_id, domain_id, connection_id, artifact_type, created_at DESC);
 
 
 CREATE TABLE IF NOT EXISTS public.quantyx_dbt_scaffolds (

@@ -10,16 +10,44 @@ from services.ai.db import execute_non_query, run_query
 
 def fetch_registry_metrics(
     settings: Settings,
+    tenant_id: str | None = None,
+    domain_id: str | None = None,
+    connection_id: str | None = None,
+    database_name: str | None = None,
+    schema_name: str | None = None,
     statuses: Iterable[str] | None = None,
+    include_all_statuses: bool = False,
 ) -> list[dict[str, Any]]:
-    allowed = list(statuses) if statuses else ["certified", "active"]
-    sql = """
-    SELECT metric_id, metric_name, display_name, description, type, sql, grain, dimensions
+    filters = ["deprecated = false"]
+    params: list[object] = []
+    if not include_all_statuses:
+        allowed = list(statuses) if statuses else ["certified", "active"]
+        filters.append("status = ANY(%s)")
+        params.append(allowed)
+    if tenant_id:
+        filters.append("tenant_id = %s")
+        params.append(tenant_id)
+    if domain_id:
+        filters.append("domain_id = %s")
+        params.append(domain_id)
+    if connection_id:
+        filters.append("connection_id = %s")
+        params.append(connection_id)
+    if database_name:
+        filters.append("database_name = %s")
+        params.append(database_name)
+    if schema_name:
+        filters.append("schema_name = %s")
+        params.append(schema_name)
+    where_clause = " AND ".join(filters)
+    sql = f"""
+    SELECT metric_id, metric_name, display_name, description, type, sql, grain, dimensions,
+           domain_id, tenant_id, connection_id, database_name, schema_name, status, owner, version
     FROM public.quantyx_metrics_registry
-    WHERE deprecated = false AND status = ANY(%s)
+    WHERE {where_clause}
     """
     try:
-        return run_query(settings, sql, [allowed])
+        return run_query(settings, sql, params)
     except psycopg2.errors.UndefinedTable:
         return []
 
@@ -30,9 +58,11 @@ def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
     display_name = payload.get("display_name") or metric_name
     sql = """
     INSERT INTO public.quantyx_metrics_registry
-      (metric_id, metric_name, domain_id, display_name, description, type, unit, confidence, additive, grain, dimensions, dataset_id, source_model, source_schema, sql, status, owner, version)
+      (metric_id, metric_name, domain_id, tenant_id, connection_id, database_name, schema_name,
+       display_name, description, type, unit, confidence, additive, grain, dimensions, dataset_id,
+       source_model, source_schema, sql, status, owner, version)
     VALUES
-      (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+      (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (metric_id)
     DO UPDATE SET
       metric_name = EXCLUDED.metric_name,
@@ -57,6 +87,10 @@ def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
         metric_id,
         metric_name,
         payload["domain_id"],
+        payload.get("tenant_id"),
+        payload.get("connection_id"),
+        payload.get("database"),
+        payload.get("schema"),
         display_name,
         payload.get("description"),
         payload.get("type"),
@@ -78,7 +112,16 @@ def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
 
 
 def update_metric(settings: Settings, metric_id: str, updates: dict[str, Any]) -> None:
+    key_map = {
+        "database": "database_name",
+        "schema": "schema_name",
+    }
     allowed_fields = {
+        "tenant_id",
+        "domain_id",
+        "connection_id",
+        "database_name",
+        "schema_name",
         "metric_name",
         "display_name",
         "description",
@@ -96,7 +139,11 @@ def update_metric(settings: Settings, metric_id: str, updates: dict[str, Any]) -
         "owner",
         "version",
     }
-    filtered = {key: value for key, value in updates.items() if key in allowed_fields}
+    filtered = {}
+    for key, value in updates.items():
+        mapped_key = key_map.get(key, key)
+        if mapped_key in allowed_fields:
+            filtered[mapped_key] = value
     if not filtered:
         return
     columns = []
@@ -108,3 +155,8 @@ def update_metric(settings: Settings, metric_id: str, updates: dict[str, Any]) -
     params.append(metric_id)
     sql = f"UPDATE public.quantyx_metrics_registry SET {', '.join(columns)} WHERE metric_id = %s"
     execute_non_query(settings, sql, params)
+
+
+def delete_metric(settings: Settings, metric_id: str) -> None:
+    sql = "DELETE FROM public.quantyx_metrics_registry WHERE metric_id = %s"
+    execute_non_query(settings, sql, [metric_id])

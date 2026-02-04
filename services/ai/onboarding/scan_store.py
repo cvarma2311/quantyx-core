@@ -85,3 +85,27 @@ def load_latest_scan_result(
     if not rows:
         return None
     return rows[0].get("result_payload")
+
+
+def load_latest_scan_for_scope(
+    settings: Settings,
+    tenant_id: str | None,
+    domain_id: str | None,
+    connection_id: str | None,
+    database_name: str | None,
+    schema_name: str | None,
+) -> dict | None:
+    payload = load_latest_scan_result(settings, tenant_id, domain_id)
+    if not payload or not connection_id or not database_name or not schema_name:
+        return None
+    for connection in payload.get("connections", []):
+        if connection.get("connection_id") != connection_id:
+            continue
+        for database in connection.get("databases", []):
+            if database.get("name") != database_name:
+                continue
+            for schema in database.get("schemas", []):
+                if schema.get("name") != schema_name:
+                    continue
+                return schema
+    return None

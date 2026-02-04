@@ -68,6 +68,8 @@ Purpose: scan all tables from the customer-provided database and return profiles
 Request:
 ```json
 {
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
   "connections": [
     {
       "connection_id": "conn_prod",
@@ -141,6 +143,16 @@ Form fields:
 - `tenant_id`, `domain_id`, `source_type`, `source_title`
 - `metadata` (JSON string)
 - `file` (text file)
+
+Request (example):
+```
+tenant_id=tenant_a
+domain_id=manufacturing
+source_type=business_context
+source_title=Ops glossary
+metadata={"connection_id":"conn_prod","database":"prod_warehouse","schema":"public","tables":["fact_production_daily","dim_plant"]}
+file=@context.txt
+```
 
 Response:
 ```json
@@ -217,13 +229,14 @@ Expected outcome:
 
 ## 6) Auto-detect metrics + entities (seed suggestions for faster onboarding)
 
-POST /onboard/map?domain_id=manufacturing&use_llm=true
+POST /onboard/map?domain_id=manufacturing&tenant_id=tenant_a&use_llm=true
 
 Purpose: map schema columns to the base ontology using rules (and optional LLM suggestions).
 
 Request:
 ```json
 {
+  "tenant_id": "tenant_a",
   "schema": "public",
   "tables": ["fact_production_daily", "dim_plant"],
   "connection_id": "conn_prod",
@@ -254,6 +267,7 @@ Purpose: auto-detect measures, time columns, entity candidates. Persist to regis
 Request:
 ```json
 {
+  "tenant_id": "tenant_a",
   "schema": "public",
   "tables": ["fact_production_daily"],
   "connection_id": "conn_prod",
@@ -297,11 +311,11 @@ Expected outcome:
 
 ## 7) Review + correct entities and hierarchies (match customer reality)
 
-GET /entities?domain_id=manufacturing&tenant_id=x_mfg
+GET /entities?domain_id=manufacturing&tenant_id=x_mfg&connection_id=conn_prod&database=prod_warehouse&schema=public
 
 Purpose: see entities + hierarchies from the pack.
 
-PATCH /entities/{entity_id}?domain_id=manufacturing&tenant_id=x_mfg
+PATCH /entities/{entity_id}?domain_id=manufacturing&tenant_id=x_mfg&connection_id=conn_prod&database=prod_warehouse&schema=public
 
 Purpose: override entity mapping (join key, description).
 
@@ -317,7 +331,7 @@ Request:
 Expected outcome:
 - The ontology is aligned with X Manufacturing’s plant hierarchy (division → plant → line).
 
-PATCH /hierarchies/{hierarchy_name}?domain_id=manufacturing&tenant_id=x_mfg
+PATCH /hierarchies/{hierarchy_name}?domain_id=manufacturing&tenant_id=x_mfg&connection_id=conn_prod&database=prod_warehouse&schema=public
 
 Purpose: override hierarchy levels if the customer differs from the default pack.
 
@@ -340,6 +354,7 @@ Purpose: suggest candidate facts and dimensions before metric promotion.
 Request:
 ```json
 {
+  "tenant_id": "tenant_a",
   "schema": "public",
   "tables": ["fact_production_daily", "dim_plant"],
   "connection_id": "conn_prod",
@@ -413,6 +428,11 @@ Purpose: promote suggested metrics to certified and fix SQL/dimensions.
 Request:
 ```json
 {
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
   "display_name": "Total Output (TMT)",
   "description": "Total production output in TMT",
   "dimensions": ["plant_name", "product_name", "fiscal_year"],
@@ -430,7 +450,11 @@ POST /metrics
 Request:
 ```json
 {
+  "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
   "metric_name": "total_output_tmt",
   "description": "Total production output in TMT",
   "type": "sum",
@@ -458,9 +482,9 @@ Expected outcome:
 ## 12) Validate schema + explore (confirm the semantic layer is ready)
 
 GET /schema
-GET /metrics
+GET /metrics?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
 GET /datasets?domain_id=manufacturing
-GET /dimensions
+GET /dimensions?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
 GET /dimension-values?dimension=plant_name&limit=50
 
 Expected outcome:

@@ -442,11 +442,74 @@ Request:
 Query params:
 - `tenant_id`, `domain_id`, `connection_id`, `database`, `schema`
 
+Response:
+```json
+{
+  "metrics": [
+    {
+      "metric_id": "manufacturing__total_sales",
+      "metric_name": "total_sales",
+      "status": "suggested"
+    }
+  ]
+}
+```
+
+Reads from:
+- `public.quantyx_metrics_registry` (scoped by tenant + connection)
+
+#### GET /metrics/all (tenant-wide)
+Query params:
+- `tenant_id`, `domain_id`
+
+Response:
+```json
+{
+  "connections": [
+    {
+      "connection_id": "conn_prod",
+      "database": "prod_warehouse",
+      "schema": "public",
+      "metrics": [
+        {
+          "metric_id": "manufacturing__total_sales",
+          "metric_name": "total_sales",
+          "status": "suggested"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Reads from:
+- `public.quantyx_metrics_registry` (grouped by connection)
+
 #### PATCH /metrics/{metric_id} (connection-scoped)
 Request:
 ```json
 { "status": "certified", "description": "Reviewed metric" }
 ```
+
+Response:
+```json
+{ "ok": true }
+```
+
+Writes to:
+- `public.quantyx_metrics_registry`
+
+#### DELETE /metrics/{metric_id} (connection-scoped)
+Query params:
+- `tenant_id`, `domain_id`, `connection_id`, `database`, `schema`
+
+Response:
+```json
+{ "ok": true }
+```
+
+Deletes from:
+- `public.quantyx_metrics_registry`
 
 Metric lifecycle (facts/dims → auto → review → promote):
 1) Confirm facts/dims from `/onboard/infer-models`
@@ -513,6 +576,92 @@ Response:
 ---
 
 ## 3) Database Changes (SQL)
+
+---
+
+## 2.6 Review Dashboard (aggregate)
+
+#### GET /review/summary (tenant + connection scope)
+Purpose: fetch all onboarding artifacts in one response with per-item status.
+
+Query params:
+- `tenant_id`, `domain_id`, `connection_id`, `database`, `schema`
+
+Response:
+```json
+{
+  "scan": {
+    "last_scan_at": "2026-02-04T12:00:00Z",
+    "tables": 12,
+    "result_payload": { "connections": [] }
+  },
+  "entities": [
+    {
+      "entity_id": "organizational_unit",
+      "description": "Sales org",
+      "join_key": "sales_area_name",
+      "examples": ["zone", "region", "sales_area"],
+      "status": "reviewed"
+    }
+  ],
+  "hierarchies": [
+    {
+      "name": "sales_org",
+      "levels": ["zone", "region", "sales_area"],
+      "description": "Sales rollup",
+      "status": "draft"
+    }
+  ],
+  "facts": [
+    {
+      "fact_id": "fact_123",
+      "table_name": "fact_sales",
+      "grain": "day",
+      "time_column": "sales_date",
+      "payload": { "measures": ["sales_amount"], "dimensions": ["sales_area_name"] },
+      "status": "draft"
+    }
+  ],
+  "dimensions": [
+    {
+      "dimension_id": "dim_123",
+      "table_name": "dim_customer",
+      "payload": { "attributes": ["customer_name", "region_name"] },
+      "status": "reviewed"
+    }
+  ],
+  "metrics": [
+    {
+      "metric_id": "manufacturing__total_sales",
+      "metric_name": "total_sales",
+      "type": "sum",
+      "sql": "{{ ref('fact_sales') }}.sales_amount",
+      "dimensions": ["sales_area_name"],
+      "status": "suggested"
+    }
+  ],
+  "ontology": {
+    "status": "seeded",
+    "entities": [{ "entity_id": "organizational_unit", "description": "Sales org" }],
+    "hierarchies": [{ "name": "sales_org", "levels": ["zone", "region", "sales_area"] }]
+  }
+}
+```
+
+Notes:
+- Aggregates from: `quantyx_schema_scans`, `quantyx_entity_overrides`,
+  `quantyx_hierarchy_overrides`, `quantyx_facts_registry`,
+  `quantyx_dimensions_registry`, `quantyx_metrics_registry`,
+  and domain pack ontology.
+
+Implementation logic (data sources):
+- `scan.result_payload` ← `public.quantyx_schema_scans.result_payload` (latest for scope)
+- `entities` ← `public.quantyx_entity_overrides` (scoped) + domain pack defaults (if not overridden)
+- `hierarchies` ← `public.quantyx_hierarchy_overrides` (scoped); pack only used for seeding
+- `facts` ← `public.quantyx_facts_registry` (scoped)
+- `dimensions` ← `public.quantyx_dimensions_registry` (scoped)
+- `metrics` ← `public.quantyx_metrics_registry` (scoped)
+- `ontology` ← domain pack ontology snapshot + seeded overrides
 
 ### 3.1 Entity mapping runs (new)
 ```sql
