@@ -3561,7 +3561,12 @@ def _merge_entity_candidates(
                     "examples": {
                         "map_public": {
                             "summary": "Map public schema",
-                            "value": {"schema": "public"},
+                            "value": {
+                                "schema": "public",
+                                "tables": ["fact_production_daily", "dim_plant"],
+                                "connection_id": "conn_prod",
+                                "database": "prod_warehouse",
+                            },
                         }
                     }
                 }
@@ -3717,6 +3722,8 @@ def _merge_models(rule_facts: list[dict], rule_dims: list[dict], llm_payload: di
                                 "time_column": "production_date",
                                 "grain": "day",
                                 "use_llm": True,
+                                "connection_id": "conn_prod",
+                                "database": "prod_warehouse",
                             },
                         }
                     }
@@ -3810,7 +3817,12 @@ def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> I
                     "examples": {
                         "suggest_public": {
                             "summary": "Suggest metrics for public schema",
-                            "value": {"schema": "public"},
+                            "value": {
+                                "schema": "public",
+                                "tables": ["fact_hpcl_sales_daily"],
+                                "connection_id": "conn_prod",
+                                "database": "prod_warehouse",
+                            },
                         }
                     }
                 }

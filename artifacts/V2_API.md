@@ -542,7 +542,12 @@ Suggest ontology mappings from schema columns to the selected domain pack.
 
 Request:
 ```json
-{ "schema": "public" }
+{
+  "schema": "public",
+  "tables": ["fact_production_daily", "dim_plant"],
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse"
+}
 ```
 
 Response:
@@ -574,7 +579,9 @@ Request:
   "tables": ["fact_production_daily", "dim_plant"],
   "time_column": "production_date",
   "grain": "day",
-  "use_llm": true
+  "use_llm": true,
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse"
 }
 ```
 
@@ -606,7 +613,12 @@ Return auto-generated metrics (status = suggested), including a low-confidence b
 
 Request:
 ```json
-{ "schema": "public" }
+{
+  "schema": "public",
+  "tables": ["fact_hpcl_sales_daily"],
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse"
+}
 ```
 
 ### 3.9 Metric lifecycle flow (seed → review → promote)
@@ -615,7 +627,12 @@ Use the registry APIs to turn auto-suggested metrics into certified metrics with
 Step 1: Seed suggestions into the registry
 ```
 POST /metrics/suggested?domain_id=energy_distribution&persist=true
-{ "schema": "public" }
+{
+  "schema": "public",
+  "tables": ["fact_hpcl_sales_daily"],
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse"
+}
 ```
 
 Step 2: Review + promote (PATCH)

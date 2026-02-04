@@ -223,7 +223,12 @@ Purpose: map schema columns to the base ontology using rules (and optional LLM s
 
 Request:
 ```json
-{ "schema": "public" }
+{
+  "schema": "public",
+  "tables": ["fact_production_daily", "dim_plant"],
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse"
+}
 ```
 
 Response (example):
@@ -248,7 +253,12 @@ Purpose: auto-detect measures, time columns, entity candidates. Persist to regis
 
 Request:
 ```json
-{ "schema": "public" }
+{
+  "schema": "public",
+  "tables": ["fact_production_daily"],
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse"
+}
 ```
 
 Response (example):
@@ -332,6 +342,8 @@ Request:
 {
   "schema": "public",
   "tables": ["fact_production_daily", "dim_plant"],
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
   "time_column": "production_date",
   "grain": "day",
   "use_llm": true
