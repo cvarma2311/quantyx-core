@@ -449,6 +449,11 @@ Response:
     {
       "metric_id": "manufacturing__total_sales",
       "metric_name": "total_sales",
+      "type": "sum",
+      "sql": "{{ ref('fact_sales') }}.sales_amount",
+      "grain": "day",
+      "dimensions": ["sales_area_name"],
+      "tables": ["fact_sales"],
       "status": "suggested"
     }
   ]
@@ -474,6 +479,11 @@ Response:
         {
           "metric_id": "manufacturing__total_sales",
           "metric_name": "total_sales",
+          "type": "sum",
+          "sql": "{{ ref('fact_sales') }}.sales_amount",
+          "grain": "day",
+          "dimensions": ["sales_area_name"],
+          "tables": ["fact_sales"],
           "status": "suggested"
         }
       ]
@@ -524,6 +534,23 @@ Metric lifecycle (facts/dims → auto → review → promote):
 ---
 
 ### 2.5 Review
+
+Field definitions:
+- `review_id`: unique identifier for the review event record (audit trail entry).
+- `artifact_type`: what is being reviewed (enum):
+  - `entities`
+  - `hierarchies`
+  - `facts`
+  - `dimensions`
+  - `metrics`
+  - `mapping`
+- `artifact_id`: identifier of the reviewed object:
+  - `entities` → `entity_id` (from `quantyx_entity_overrides`)
+  - `hierarchies` → `hierarchy_name` (from `quantyx_hierarchy_overrides`)
+  - `facts` → `fact_id` (from `quantyx_facts_registry`)
+  - `dimensions` → `dimension_id` (from `quantyx_dimensions_registry`)
+  - `metrics` → `metric_id` (from `quantyx_metrics_registry`)
+  - `mapping` → `mapping_id` (from `quantyx_entity_mappings`)
 
 #### POST /review
 Request:

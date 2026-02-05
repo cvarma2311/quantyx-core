@@ -442,15 +442,13 @@ def health() -> dict:
                                 "value": {
                                     "metrics": [
                                         {
-                                            "name": "total_sales_volume_tmt",
-                                            "description": "Total HPCL sales volume in TMT",
+                                            "metric_name": "total_sales",
+                                            "description": "Total sales amount",
                                             "type": "sum",
+                                            "sql": "{{ ref('fact_sales') }}.sales_amount",
                                             "grain": "day",
-                                            "dimensions": [
-                                                "sales_area_name",
-                                                "product_name",
-                                                "fiscal_year",
-                                            ],
+                                            "dimensions": ["sales_area_name"],
+                                            "tables": ["fact_sales"],
                                             "status": "certified",
                                             "owner": "analytics@company.com",
                                             "version": "v1",
@@ -488,20 +486,24 @@ def metrics(
         include_all_statuses=True,
     )
     for row in metrics_rows:
+        table_name = row.get("dataset_id") or row.get("source_model")
+        tables = [table_name] if table_name else []
         payload.append(
             {
                 "metric_id": row.get("metric_id"),
-                "name": row.get("metric_name"),
+                "metric_name": row.get("metric_name"),
                 "description": row.get("description"),
                 "type": row.get("type"),
+                "sql": row.get("sql"),
                 "grain": row.get("grain"),
                 "dimensions": row.get("dimensions"),
+                "tables": tables,
                 "status": row.get("status"),
                 "owner": row.get("owner"),
                 "version": row.get("version"),
             }
         )
-    page, next_cursor = _paginate_list(payload, cursor, limit, key_fn=lambda item: item["name"])
+    page, next_cursor = _paginate_list(payload, cursor, limit, key_fn=lambda item: item["metric_name"])
     return MetricsResponse(metrics=page, limit=limit, cursor=cursor, next_cursor=next_cursor)
 
 
@@ -531,14 +533,18 @@ def metrics_all(tenant_id: str, domain_id: str) -> dict:
                 "metrics": [],
             },
         )
+        table_name = row.get("dataset_id") or row.get("source_model")
+        tables = [table_name] if table_name else []
         grouped[key]["metrics"].append(
             {
                 "metric_id": row.get("metric_id"),
                 "metric_name": row.get("metric_name"),
                 "description": row.get("description"),
                 "type": row.get("type"),
+                "sql": row.get("sql"),
                 "grain": row.get("grain"),
                 "dimensions": row.get("dimensions"),
+                "tables": tables,
                 "status": row.get("status"),
             }
         )
@@ -2393,9 +2399,21 @@ def domains() -> dict:
     },
 )
 def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
+    logger.info(
+        "context.ingest: start | %s",
+        {
+            "tenant_id": payload.tenant_id,
+            "domain_id": payload.domain_id,
+            "source_type": payload.source_type,
+            "has_text": bool(payload.raw_text),
+            "file_ids": len(payload.file_ids or []),
+        },
+    )
     scope = extract_scope_from_metadata(payload.metadata)
+    logger.info("context.ingest: scope.parsed | %s", scope)
     _require_scope(scope, "/context/ingest")
     source_title = payload.source_title or generate_source_title(payload.raw_text, payload.metadata)
+    logger.info("context.ingest: source_title.resolved | %s", {"source_title": source_title})
     context_id = create_context(
         settings,
         tenant_id=payload.tenant_id,
@@ -2405,8 +2423,15 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
         raw_text=payload.raw_text,
         metadata=payload.metadata,
     )
+    logger.info("context.ingest: stored | %s", {"context_id": context_id})
     if payload.file_ids:
+        logger.info(
+            "context.ingest: link.files.begin | %s",
+            {"context_id": context_id, "file_ids": len(payload.file_ids)},
+        )
         link_context_files(settings, context_id, payload.file_ids)
+        logger.info("context.ingest: link.files.complete | %s", {"context_id": context_id})
+    logger.info("context.ingest: complete | %s", {"context_id": context_id})
     return ContextIngestResponse(context_id=context_id, status="submitted")
 
 
@@ -2446,6 +2471,15 @@ def ingest_context_file(
     metadata: str | None = Form(None),
     file: UploadFile = File(...),
 ) -> ContextFileIngestResponse:
+    logger.info(
+        "context.ingest-file: start | %s",
+        {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "source_type": source_type,
+            "filename": file.filename,
+        },
+    )
     filename = (file.filename or "").lower()
     if filename.endswith(".doc"):
         raise HTTPException(status_code=400, detail="Unsupported file type: .doc")
@@ -2455,6 +2489,7 @@ def ingest_context_file(
         raw_bytes = file.file.read()
     finally:
         file.file.close()
+    logger.info("context.ingest-file: file.read | %s", {"bytes": len(raw_bytes)})
     if filename.endswith(".docx"):
         try:
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as docx:
@@ -2462,10 +2497,18 @@ def ingest_context_file(
             root = ElementTree.fromstring(xml_data)
             text_nodes = [node.text for node in root.iter() if node.tag.endswith("}t") and node.text]
             raw_text = "\n".join(text_nodes).strip()
+            logger.info(
+                "context.ingest-file: docx.parsed | %s",
+                {"text_chars": len(raw_text)},
+            )
         except (KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
             raise HTTPException(status_code=400, detail="Invalid .docx file") from exc
     else:
         raw_text = raw_bytes.decode("utf-8", errors="replace")
+        logger.info(
+            "context.ingest-file: text.decoded | %s",
+            {"text_chars": len(raw_text)},
+        )
     parsed_metadata = None
     if metadata:
         try:
@@ -2475,6 +2518,7 @@ def ingest_context_file(
     if not parsed_metadata:
         raise HTTPException(status_code=400, detail="metadata is required and must include connection scope")
     scope = extract_scope_from_metadata(parsed_metadata)
+    logger.info("context.ingest-file: scope.parsed | %s", scope)
     _require_scope(scope, "/context/ingest-file")
     file_id = create_context_file(
         settings,
@@ -2490,6 +2534,8 @@ def ingest_context_file(
             **(parsed_metadata or {}),
         },
     )
+    logger.info("context.ingest-file: stored | %s", {"file_id": file_id})
+    logger.info("context.ingest-file: complete | %s", {"file_id": file_id})
     return ContextFileIngestResponse(file_id=file_id, status="stored")
 
 
@@ -2663,6 +2709,15 @@ def list_context_entries(
     },
 )
 def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractResponse:
+    logger.info(
+        "context.extract: start | %s",
+        {
+            "tenant_id": payload.tenant_id,
+            "domain_id": payload.domain_id,
+            "context_id": payload.context_id,
+            "extraction_types": payload.extraction_types,
+        },
+    )
     context_row = get_context(settings, payload.context_id)
     if not context_row:
         raise HTTPException(status_code=404, detail="Context not found")
@@ -2670,13 +2725,34 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
         raise HTTPException(status_code=400, detail="Context tenant/domain mismatch")
 
     file_texts = get_context_file_texts(settings, payload.context_id)
+    logger.info(
+        "context.extract: files.loaded | %s",
+        {"context_id": payload.context_id, "files": len(file_texts)},
+    )
+    if file_texts:
+        total_file_chars = sum(len(text) for text in file_texts if text)
+        logger.info(
+            "context.extract: files.summary | %s",
+            {"context_id": payload.context_id, "file_text_chars": total_file_chars},
+        )
     combined_parts = [context_row["raw_text"]] if context_row["raw_text"] else []
     combined_parts.extend(file_texts)
     combined_text = "\n\n".join([part for part in combined_parts if part])
+    logger.info(
+        "context.extract: text.prepared | %s",
+        {"context_id": payload.context_id, "chars": len(combined_text)},
+    )
     extracted = extract_context(
         settings,
         raw_text=combined_text,
         extraction_types=payload.extraction_types,
+    )
+    logger.info(
+        "context.extract: llm.complete | %s",
+        {
+            "context_id": payload.context_id,
+            "extraction_types": list((extracted or {}).keys()),
+        },
     )
     extraction_id = persist_extraction(
         settings,
@@ -2686,7 +2762,13 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
         payload=extracted,
         llm_model=settings.openai_model,
     )
+    logger.info(
+        "context.extract: stored | %s",
+        {"context_id": payload.context_id, "extraction_id": extraction_id},
+    )
     mark_context_processed(settings, payload.context_id)
+    logger.info("context.extract: context.marked | %s", {"context_id": payload.context_id})
+    logger.info("context.extract: complete | %s", {"extraction_id": extraction_id})
     return ContextExtractResponse(
         extraction_id=extraction_id,
         context_id=payload.context_id,
@@ -2799,6 +2881,15 @@ def get_context_extraction(
     },
 )
 def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
+    logger.info(
+        "context.apply: start | %s",
+        {
+            "tenant_id": payload.tenant_id,
+            "domain_id": payload.domain_id,
+            "extraction_id": payload.extraction_id,
+            "apply": payload.apply,
+        },
+    )
     extraction_row = get_extraction(settings, payload.extraction_id)
     if not extraction_row:
         raise HTTPException(status_code=404, detail="Extraction not found")
@@ -2806,6 +2897,15 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
         raise HTTPException(status_code=400, detail="Extraction tenant/domain mismatch")
 
     context_row = get_context(settings, extraction_row.get("context_id"))
+    logger.info(
+        "context.apply: scope.resolved | %s",
+        {
+            "context_id": extraction_row.get("context_id"),
+            "connection_id": (context_row or {}).get("connection_id"),
+            "database": (context_row or {}).get("database_name"),
+            "schema": (context_row or {}).get("schema_name"),
+        },
+    )
     updated = apply_extractions(
         settings,
         tenant_id=payload.tenant_id,
@@ -2816,6 +2916,10 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
         connection_id=(context_row or {}).get("connection_id"),
         database_name=(context_row or {}).get("database_name"),
         schema_name=(context_row or {}).get("schema_name"),
+    )
+    logger.info(
+        "context.apply: complete | %s",
+        {"extraction_id": payload.extraction_id, "updated": updated},
     )
     return ContextApplyResponse(status="applied", updated=updated)
 
@@ -3652,6 +3756,7 @@ def review_summary(
         status = review_map.get(("entities", entity.get("entity_id")))
         if status:
             entry["status"] = status.get("status")
+            entry["review_id"] = status.get("review_id")
         entities_payload.append(entry)
 
     hierarchies_payload = []
@@ -3664,6 +3769,7 @@ def review_summary(
         status = review_map.get(("hierarchies", hierarchy.get("hierarchy_name")))
         if status:
             entry["status"] = status.get("status")
+            entry["review_id"] = status.get("review_id")
         hierarchies_payload.append(entry)
 
     facts_payload = []
@@ -3672,6 +3778,7 @@ def review_summary(
         status = review_map.get(("facts", fact.get("fact_id")))
         if status:
             entry["review_status"] = status.get("status")
+            entry["review_id"] = status.get("review_id")
         facts_payload.append(entry)
 
     dims_payload = []
@@ -3680,6 +3787,7 @@ def review_summary(
         status = review_map.get(("dimensions", dim.get("dimension_id")))
         if status:
             entry["review_status"] = status.get("status")
+            entry["review_id"] = status.get("review_id")
         dims_payload.append(entry)
 
     metrics_payload = []
@@ -3688,6 +3796,7 @@ def review_summary(
         status = review_map.get(("metrics", metric.get("metric_id")))
         if status:
             entry["review_status"] = status.get("status")
+            entry["review_id"] = status.get("review_id")
         metrics_payload.append(entry)
 
     return ReviewSummaryResponse(

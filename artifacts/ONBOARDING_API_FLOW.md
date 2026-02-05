@@ -227,11 +227,11 @@ Expected outcome:
 
 ---
 
-## 6) Auto-detect metrics + entities (seed suggestions for faster onboarding)
+## 6) Entity mapping (connection-scoped, tenant-aware)
 
-POST /onboard/map?domain_id=manufacturing&tenant_id=tenant_a&use_llm=true
+POST /onboard/map?domain_id=manufacturing&tenant_id=tenant_a
 
-Purpose: map schema columns to the base ontology using rules (and optional LLM suggestions).
+Purpose: map schema columns to ontology (rule + LLM, default `use_llm=true`). Stores a mapping run.
 
 Request:
 ```json
@@ -247,6 +247,11 @@ Request:
 Response (example):
 ```json
 {
+  "mapping_id": "map_ab12cd34",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "tables": ["fact_production_daily", "dim_plant"],
   "candidates": [
     {
       "table": "fact_production_daily",
@@ -260,64 +265,19 @@ Response (example):
 }
 ```
 
-POST /metrics/suggested?domain_id=manufacturing&persist=true
+Optional history:
 
-Purpose: auto-detect measures, time columns, entity candidates. Persist to registry.
-
-Request:
-```json
-{
-  "tenant_id": "tenant_a",
-  "schema": "public",
-  "tables": ["fact_production_daily"],
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse"
-}
-```
-
-Response (example):
-```json
-{
-  "measures": [
-    {
-      "table": "fact_production_daily",
-      "column": "output_tmt",
-      "measure_type": "volume",
-      "unit": "tmt",
-      "confidence": 0.9,
-      "additive": true
-    }
-  ],
-  "low_confidence_measures": [],
-  "low_confidence_threshold": 0.7,
-  "time_columns": [
-    { "table": "fact_production_daily", "column": "production_date" }
-  ],
-  "entity_candidates": [
-    {
-      "table": "fact_production_daily",
-      "column": "plant_name",
-      "mapped_entity_type": "facility",
-      "confidence": 0.7
-    }
-  ]
-}
-```
-
-Expected outcome:
-- The system suggests the most likely metrics and entity columns, reducing manual work.
+GET /onboard/map/history?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
 
 ---
 
-## 7) Review + correct entities and hierarchies (match customer reality)
+## 7) Entities + hierarchies (connection-scoped, persisted overrides)
 
-GET /entities?domain_id=manufacturing&tenant_id=x_mfg&connection_id=conn_prod&database=prod_warehouse&schema=public
+GET /entities?domain_id=manufacturing&tenant_id=tenant_a&connection_id=conn_prod&database=prod_warehouse&schema=public
 
-Purpose: see entities + hierarchies from the pack.
+Purpose: list tenant overrides for entities + hierarchies (no pack fallback after overrides seeded).
 
-PATCH /entities/{entity_id}?domain_id=manufacturing&tenant_id=x_mfg&connection_id=conn_prod&database=prod_warehouse&schema=public
-
-Purpose: override entity mapping (join key, description).
+PATCH /entities/{entity_id}?domain_id=manufacturing&tenant_id=tenant_a&connection_id=conn_prod&database=prod_warehouse&schema=public
 
 Request:
 ```json
@@ -328,12 +288,7 @@ Request:
 }
 ```
 
-Expected outcome:
-- The ontology is aligned with X Manufacturing’s plant hierarchy (division → plant → line).
-
-PATCH /hierarchies/{hierarchy_name}?domain_id=manufacturing&tenant_id=x_mfg&connection_id=conn_prod&database=prod_warehouse&schema=public
-
-Purpose: override hierarchy levels if the customer differs from the default pack.
+PATCH /hierarchies/{hierarchy_name}?domain_id=manufacturing&tenant_id=tenant_a&connection_id=conn_prod&database=prod_warehouse&schema=public
 
 Request:
 ```json
@@ -343,13 +298,19 @@ Request:
 }
 ```
 
+Optional:
+
+GET /entities/all?domain_id=manufacturing&tenant_id=tenant_a
+
+GET /hierarchies?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+
 ---
 
-## 8) Infer facts and dimensions (dbt-style model suggestions)
+## 8) Infer facts and dimensions (connection-scoped)
 
 POST /onboard/infer-models?domain_id=manufacturing
 
-Purpose: suggest candidate facts and dimensions before metric promotion.
+Purpose: suggest candidate facts and dimensions based on the latest scan for the scope.
 
 Request:
 ```json
@@ -365,8 +326,45 @@ Request:
 }
 ```
 
-Expected outcome:
-- The UI shows recommended fact/dim models and confirms grain and keys.
+Then persist user-confirmed models:
+
+POST /facts
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "name": "fact_production_daily",
+  "grain": "day",
+  "time_column": "production_date",
+  "measures": ["output_tmt", "downtime_hours"],
+  "dimensions": ["plant_name", "product_name"],
+  "status": "draft"
+}
+```
+
+POST /dimensions
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "name": "dim_plant",
+  "keys": ["plant_id"],
+  "attributes": ["plant_name", "region_name"],
+  "status": "draft"
+}
+```
+
+List for scope:
+
+GET /facts?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+
+GET /dimensions?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
 
 ---
 
@@ -419,7 +417,24 @@ Draft models must be reviewed before apply.
 
 ---
 
-## 10) Review + promote metrics (make them queryable and trusted)
+## 10) Metrics suggestions + promotion (after facts/dims)
+
+POST /metrics/suggested?domain_id=manufacturing&persist=true
+
+Purpose: auto-detect measures, time columns, entity candidates and persist to registry (scoped).
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "schema": "public",
+  "tables": ["fact_production_daily"],
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse"
+}
+```
+
+Review and promote:
 
 PATCH /metrics/{metric_id}
 
@@ -437,6 +452,28 @@ Request:
   "description": "Total production output in TMT",
   "dimensions": ["plant_name", "product_name", "fiscal_year"],
   "status": "certified"
+}
+```
+
+GET /metrics?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+
+Response (example):
+```json
+{
+  "metrics": [
+    {
+      "metric_name": "total_sales",
+      "type": "sum",
+      "sql": "{{ ref('fact_sales') }}.sales_amount",
+      "grain": "day",
+      "dimensions": ["sales_area_name"],
+      "tables": ["fact_sales"],
+      "status": "certified"
+    }
+  ],
+  "limit": 200,
+  "cursor": null,
+  "next_cursor": null
 }
 ```
 
@@ -468,7 +505,32 @@ Request:
 
 ---
 
-## 11) Apply the contracts (reload catalog so the app can use them)
+## 11) Review summary (all artifacts in one call)
+
+GET /review/summary?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+
+Purpose: fetch scan results + entities + hierarchies + facts + dimensions + metrics with review status.
+
+Optional review events:
+
+POST /review
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "artifact_type": "facts",
+  "artifact_id": "fact_123",
+  "status": "reviewed",
+  "notes": "Looks good"
+}
+```
+
+---
+
+## 12) Apply the contracts (reload catalog so the app can use them)
 
 POST /contracts/apply
 
@@ -479,7 +541,7 @@ Expected outcome:
 
 ---
 
-## 12) Validate schema + explore (confirm the semantic layer is ready)
+## 13) Validate schema + explore (confirm the semantic layer is ready)
 
 GET /schema
 GET /metrics?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
@@ -492,7 +554,7 @@ Expected outcome:
 
 ---
 
-## 13) Ask a question (first live query to prove value)
+## 14) Ask a question (first live query to prove value)
 
 POST /query
 

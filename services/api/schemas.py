@@ -126,9 +126,12 @@ class MetricsResponse(BaseModel):
         examples=[
             [
                 {
-                    "name": "total_sales_volume_tmt",
+                    "metric_name": "total_sales",
                     "type": "sum",
                     "grain": "day",
+                    "sql": "{{ ref('fact_sales') }}.sales_amount",
+                    "dimensions": ["sales_area_name"],
+                    "tables": ["fact_sales"],
                     "status": "certified",
                     "owner": "analytics@company.com",
                     "version": "v1",
@@ -144,9 +147,12 @@ class MetricsResponse(BaseModel):
             "example": {
                 "metrics": [
                     {
-                        "name": "total_sales_volume_tmt",
+                        "metric_name": "total_sales",
                         "type": "sum",
                         "grain": "day",
+                        "sql": "{{ ref('fact_sales') }}.sales_amount",
+                        "dimensions": ["sales_area_name"],
+                        "tables": ["fact_sales"],
                         "status": "certified",
                         "owner": "analytics@company.com",
                         "version": "v1",
@@ -454,13 +460,15 @@ class ReviewCreateRequest(BaseModel):
     schema: str = Field(..., examples=["public"])
     artifact_type: str = Field(..., examples=["entities"])
     artifact_id: str = Field(..., examples=["map_123"])
-    status: str = Field(..., examples=["reviewed"])
+    status: str = Field(..., examples=["reviewed"], description="Enum: draft, reviewed, applied, rejected")
     notes: str | None = Field(None, examples=["Looks good"])
     payload: dict | None = Field(default=None, examples=[{"entities": 4}])
 
 
 class ReviewPatchRequest(BaseModel):
-    status: str | None = Field(None, examples=["applied"])
+    status: str | None = Field(
+        None, examples=["applied"], description="Enum: draft, reviewed, applied, rejected"
+    )
     notes: str | None = Field(None, examples=["Applied to registry"])
 
 

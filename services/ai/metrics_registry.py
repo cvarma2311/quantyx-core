@@ -42,7 +42,8 @@ def fetch_registry_metrics(
     where_clause = " AND ".join(filters)
     sql = f"""
     SELECT metric_id, metric_name, display_name, description, type, sql, grain, dimensions,
-           domain_id, tenant_id, connection_id, database_name, schema_name, status, owner, version
+           domain_id, tenant_id, connection_id, database_name, schema_name, status, owner, version,
+           dataset_id, source_model
     FROM public.quantyx_metrics_registry
     WHERE {where_clause}
     """
