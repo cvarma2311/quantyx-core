@@ -2742,6 +2742,16 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
         "context.extract: text.prepared | %s",
         {"context_id": payload.context_id, "chars": len(combined_text)},
     )
+    logger.info(
+        "context.extract: llm.request | %s",
+        {
+            "context_id": payload.context_id,
+            "extraction_types": payload.extraction_types,
+            "raw_text_chars": len(context_row["raw_text"] or ""),
+            "file_text_chars": sum(len(text) for text in file_texts if text),
+            "total_chars": len(combined_text),
+        },
+    )
     extracted = extract_context(
         settings,
         raw_text=combined_text,
