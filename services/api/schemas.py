@@ -79,7 +79,6 @@ class QueryRequest(BaseModel):
             "example": {
                 "question": "Top 5 sales areas by sales volume for MS in Q2 FY 2024-2025.",
                 "tenant_id": "tenant_a",
-                "domain_id": "manufacturing",
                 "limit": 100,
                 "explain": True,
             }
@@ -344,7 +343,7 @@ class EntitiesAllResponse(BaseModel):
 
 class FactsUpsertRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
-    domain_id: str = Field(..., examples=["manufacturing"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
     connection_id: str = Field(..., examples=["conn_prod"])
     database: str = Field(..., examples=["prod_warehouse"])
     schema: str = Field(..., examples=["public"])
@@ -402,7 +401,7 @@ class FactsAllResponse(BaseModel):
 
 class DimensionsUpsertRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
-    domain_id: str = Field(..., examples=["manufacturing"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
     connection_id: str = Field(..., examples=["conn_prod"])
     database: str = Field(..., examples=["prod_warehouse"])
     schema: str = Field(..., examples=["public"])
@@ -454,7 +453,7 @@ class DimensionsAllResponse(BaseModel):
 
 class ReviewCreateRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
-    domain_id: str = Field(..., examples=["manufacturing"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
     connection_id: str = Field(..., examples=["conn_prod"])
     database: str = Field(..., examples=["prod_warehouse"])
     schema: str = Field(..., examples=["public"])
@@ -618,7 +617,8 @@ class InsightDetailResponse(BaseModel):
 
 
 class ActionCreateRequest(BaseModel):
-    domain_id: str = Field(..., examples=["energy_distribution"])
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str | None = Field(None, examples=["energy_distribution"])
     headline: str = Field(..., examples=["Investigate sales drop in Tenali"])
     severity: str | None = Field(None, examples=["medium"])
     status: str | None = Field("open", examples=["open"])
@@ -628,7 +628,7 @@ class ActionCreateRequest(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
-                "domain_id": "energy_distribution",
+                "tenant_id": "tenant_a",
                 "headline": "Investigate sales drop in Tenali",
                 "severity": "medium",
                 "status": "open",
@@ -773,7 +773,8 @@ class ScenariosResponse(BaseModel):
 
 class ScenarioCreateRequest(BaseModel):
     scenario_id: str | None = Field(None, examples=["scenario_001"])
-    domain_id: str = Field(..., examples=["energy_distribution"])
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str | None = Field(None, examples=["energy_distribution"])
     name: str = Field(..., examples=["Distribution Disruption"])
     description: str | None = Field(None, examples=["Simulate loss of supply in Zone A"])
     status: str | None = Field("draft", examples=["draft"])
@@ -783,7 +784,7 @@ class ScenarioCreateRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "scenario_id": "scenario_001",
-                "domain_id": "energy_distribution",
+                "tenant_id": "tenant_a",
                 "name": "Distribution Disruption",
                 "description": "Simulate loss of supply in Zone A",
                 "status": "draft",
@@ -997,7 +998,7 @@ class OnboardMapResponse(BaseModel):
 
 class ContextIngestRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
-    domain_id: str = Field(..., examples=["manufacturing"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
     source_type: str = Field(..., examples=["business_context"])
     source_title: str | None = Field(None, examples=["Operations glossary and hierarchy notes"])
     raw_text: str | None = Field(
@@ -1021,7 +1022,6 @@ class ContextIngestRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "domain_id": "manufacturing",
                 "source_type": "business_context",
                 "source_title": "Operations glossary and hierarchy notes",
                 "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area.",
@@ -1082,7 +1082,7 @@ class ContextListResponse(BaseModel):
 
 class ContextExtractRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
-    domain_id: str = Field(..., examples=["manufacturing"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
     context_id: str = Field(..., examples=["ctx_123"])
     extraction_types: List[str] = Field(
         default_factory=list,
@@ -1092,7 +1092,6 @@ class ContextExtractRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "domain_id": "manufacturing",
                 "context_id": "ctx_123",
                 "extraction_types": [
                     "abbreviations",
@@ -1154,7 +1153,7 @@ class ContextExtractionResponse(BaseModel):
 
 class ContextApplyRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
-    domain_id: str = Field(..., examples=["manufacturing"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
     extraction_id: str = Field(..., examples=["ext_123"])
     apply: dict = Field(
         default_factory=dict,
@@ -1164,7 +1163,6 @@ class ContextApplyRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "domain_id": "manufacturing",
                 "extraction_id": "ext_123",
                 "apply": {"entities": True, "hierarchies": True, "glossary": True, "metrics": True},
             }
@@ -1244,14 +1242,13 @@ class OnboardScanConnectionSpec(BaseModel):
 
 
 class OnboardScanMultiConnectionRequest(BaseModel):
-    tenant_id: str | None = Field(None, examples=["tenant_a"])
+    tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["manufacturing"])
     connections: List[OnboardScanConnectionSpec] = Field(default_factory=list)
     model_config = {
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "domain_id": "manufacturing",
                 "connections": [
                     {
                         "connection_id": "conn_prod",
@@ -1379,7 +1376,7 @@ class SuggestedMetricsResponse(BaseModel):
 
 class MetricUpsertRequest(BaseModel):
     tenant_id: str | None = Field(None, examples=["tenant_a"])
-    domain_id: str = Field(..., examples=["energy_distribution"])
+    domain_id: str | None = Field(None, examples=["energy_distribution"])
     connection_id: str | None = Field(None, examples=["conn_prod"])
     database: str | None = Field(None, examples=["prod_warehouse"])
     schema: str | None = Field(None, examples=["public"])
@@ -1402,7 +1399,6 @@ class MetricUpsertRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "domain_id": "energy_distribution",
                 "metric_name": "total_sales_volume_tmt",
                 "type": "sum",
                 "sql": "{{ ref('fact_hpcl_sales_daily') }}.sales_tmt",
@@ -1489,8 +1485,8 @@ class ContractValidateResponse(BaseModel):
 
 
 class DbtManifestGenerateRequest(BaseModel):
-    tenant_id: str | None = Field(None, examples=["tenant_a"])
-    domain_id: str = Field(..., examples=["manufacturing"])
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
     connection_id: str | None = Field(None, examples=["conn_prod"])
     dbt_project_path: str | None = Field(None, examples=["dbt"])
     profile_name: str = Field(..., examples=["default"])
@@ -1500,7 +1496,6 @@ class DbtManifestGenerateRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "domain_id": "manufacturing",
                 "connection_id": "conn_prod",
                 "dbt_project_path": "dbt",
                 "profile_name": "default",
@@ -1530,7 +1525,7 @@ class DbtManifestGenerateResponse(BaseModel):
 
 class DbtConfigUpsertRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
-    domain_id: str = Field(..., examples=["manufacturing"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
     connection_id: str | None = Field(None, examples=["conn_prod"])
     dbt_project_path: str | None = Field(None, examples=["dbt_projects/dbt_tenant_a"])
     target_name: str | None = Field(None, examples=["dev"])
@@ -1539,7 +1534,6 @@ class DbtConfigUpsertRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "domain_id": "manufacturing",
                 "connection_id": "conn_prod",
                 "dbt_project_path": "dbt_projects/dbt_tenant_a",
                 "target_name": "dev",
@@ -1580,7 +1574,7 @@ class DbtConfigResponse(BaseModel):
 
 class DbtScaffoldRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
-    domain_id: str = Field(..., examples=["manufacturing"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
     connection_id: str = Field(..., examples=["conn_prod"])
     database: str = Field(..., examples=["prod_warehouse"])
     schema: str = Field(..., examples=["public"])
@@ -1595,7 +1589,6 @@ class DbtScaffoldRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "domain_id": "manufacturing",
                 "connection_id": "conn_prod",
                 "database": "prod_warehouse",
                 "schema": "public",

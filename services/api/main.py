@@ -120,6 +120,7 @@ from services.ai.context_extraction import extract_context
 from services.ai.context_apply import apply_extractions
 from services.ai.glossary import fetch_glossary_terms
 from services.ai.sql_builder import Filter, build_query
+from services.ai.tenant_domain import get_tenant_domain, upsert_tenant_domain
 from services.api.schemas import (
     EntitiesResponse,
     EntitiesAllResponse,
@@ -275,6 +276,18 @@ def _require_basic_scope(scope: dict | None, endpoint: str) -> None:
         raise HTTPException(status_code=400, detail=detail)
 
 
+def _resolve_domain_id(tenant_id: str, request_domain_id: str | None = None) -> str:
+    row = get_tenant_domain(settings, tenant_id)
+    if row and row.get("domain_id"):
+        return row["domain_id"]
+    if request_domain_id:
+        logger.warning(
+            "domain_id fallback used for tenant %s; configure /tenant/domain", tenant_id
+        )
+        return request_domain_id
+    raise HTTPException(status_code=400, detail="domain_id not configured for tenant")
+
+
 def _request_scope(
     connection_id: str | None,
     database: str | None,
@@ -374,6 +387,34 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.post(
+    "/tenant/domain",
+    tags=["admin"],
+    summary="Set tenant domain",
+    description="Persist the active domain for a tenant.",
+)
+def set_tenant_domain(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    domain_id = payload.get("domain_id")
+    if not tenant_id or not domain_id:
+        raise HTTPException(status_code=400, detail="tenant_id and domain_id are required")
+    upsert_tenant_domain(settings, tenant_id, domain_id)
+    return {"ok": True}
+
+
+@app.get(
+    "/tenant/domain",
+    tags=["admin"],
+    summary="Get tenant domain",
+    description="Fetch the active domain for a tenant.",
+)
+def get_tenant_domain_api(tenant_id: str) -> dict:
+    row = get_tenant_domain(settings, tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Tenant domain not found")
+    return row
+
+
 @app.get(
     "/metrics",
     response_model=MetricsResponse,
@@ -381,57 +422,6 @@ def health() -> dict:
     summary="List metrics",
     description="Return tenant-scoped metrics from the registry.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "tenant_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"tenant_id": {"value": "tenant_a"}},
-            },
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"domain_id": {"value": "energy_distribution"}},
-            },
-            {
-                "name": "connection_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"connection_id": {"value": "conn_prod"}},
-            },
-            {
-                "name": "database",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"database": {"value": "prod_warehouse"}},
-            },
-            {
-                "name": "schema",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"schema": {"value": "public"}},
-            },
-            {
-                "name": "limit",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "integer"},
-                "examples": {"limit": {"value": 200}},
-            },
-            {
-                "name": "cursor",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"cursor": {"value": "dG90YWxfc2FsZXNfdm9sdW1lX3RtdA=="}},
-            },
-        ],
         "responses": {
             "200": {
                 "content": {
@@ -468,13 +458,13 @@ def health() -> dict:
 )
 def metrics(
     tenant_id: str,
-    domain_id: str,
     connection_id: str,
     database: str,
     schema: str,
     limit: int = 200,
     cursor: str | None = None,
 ) -> MetricsResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     payload = []
     metrics_rows = fetch_registry_metrics(
         settings,
@@ -514,7 +504,8 @@ def metrics(
     summary="List metrics for all connections",
     description="Return all tenant-scoped metrics grouped by connection.",
 )
-def metrics_all(tenant_id: str, domain_id: str) -> dict:
+def metrics_all(tenant_id: str) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
     metrics_rows = fetch_registry_metrics(
         settings,
         tenant_id=tenant_id,
@@ -558,50 +549,6 @@ def metrics_all(tenant_id: str, domain_id: str) -> dict:
     summary="List datasets",
     description="Return datasets defined in the selected domain pack, scoped by optional database/schema filters.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"energy": {"value": "energy_distribution"}},
-            },
-            {
-                "name": "connection_id",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"connection_id": {"value": "conn_prod"}},
-            },
-            {
-                "name": "database",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"database": {"value": "prod_warehouse"}},
-            },
-            {
-                "name": "schema",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"schema": {"value": "public"}},
-            },
-            {
-                "name": "limit",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "integer"},
-                "examples": {"limit": {"value": 200}},
-            },
-            {
-                "name": "cursor",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"cursor": {"value": "c2FsZXNfYXJlYV9wZXJmb3JtYW5jZQ=="}},
-            },
-        ],
         "responses": {
             "200": {
                 "content": {
@@ -630,13 +577,14 @@ def metrics_all(tenant_id: str, domain_id: str) -> dict:
     },
 )
 def datasets(
-    domain_id: str,
+    tenant_id: str,
     database: str | None = None,
     schema: str | None = None,
     limit: int = 200,
     cursor: str | None = None,
     connection_id: str | None = None,
 ) -> DatasetsResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     if connection_id:
         scopes = resolve_connection_scope(settings, connection_id)
         if not scopes:
@@ -659,29 +607,6 @@ def datasets(
     summary="List dimensions",
     description="Return dimensions from the metric catalog, scoped by optional database/schema filters.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "connection_id",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"connection_id": {"value": "conn_prod"}},
-            },
-            {
-                "name": "database",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"database": {"value": "prod_warehouse"}},
-            },
-            {
-                "name": "schema",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"schema": {"value": "public"}},
-            },
-        ],
         "responses": {
             "200": {
                 "content": {
@@ -750,15 +675,6 @@ def dimensions(database: str | None = None, schema: str | None = None, connectio
     summary="List policies",
     description="Return policy rules from the domain pack.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"energy": {"value": "energy_distribution"}},
-            }
-        ],
         "responses": {
             "200": {
                 "content": {
@@ -782,7 +698,8 @@ def dimensions(database: str | None = None, schema: str | None = None, connectio
         },
     },
 )
-def policies(domain_id: str) -> PoliciesResponse:
+def policies(tenant_id: str) -> PoliciesResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     pack = load_pack(f"packs/{domain_id}")
     policies_list = pack.get("policies", {}).get("policies", []) or []
     return PoliciesResponse(policies=policies_list)
@@ -795,15 +712,6 @@ def policies(domain_id: str) -> PoliciesResponse:
     summary="Metric lineage",
     description="Return metric to dataset and dbt model lineage.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "metric_name",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"metric_name": {"value": "total_sales_volume_tmt"}},
-            }
-        ],
         "responses": {
             "200": {
                 "content": {
@@ -859,9 +767,12 @@ def governance_lineage(metric_name: str | None = None) -> LineageResponse:
     },
 )
 def generate_dbt_manifest(payload: DbtManifestGenerateRequest) -> DbtManifestGenerateResponse:
-    tenant_id = payload.tenant_id or f"tenant_{uuid.uuid4().hex[:6]}"
+    if not payload.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    tenant_id = payload.tenant_id
+    domain_id = _resolve_domain_id(tenant_id, payload.domain_id)
     dbt_project_path = payload.dbt_project_path or resolve_dbt_project_dir(tenant_id)
-    upsert_tenant_project_dir(settings, tenant_id, payload.domain_id, dbt_project_path)
+    upsert_tenant_project_dir(settings, tenant_id, domain_id, dbt_project_path)
     try:
         manifest_json = run_dbt_compile(
             settings,
@@ -875,7 +786,7 @@ def generate_dbt_manifest(payload: DbtManifestGenerateRequest) -> DbtManifestGen
     manifest_id = store_manifest(
         settings,
         tenant_id=tenant_id,
-        domain_id=payload.domain_id,
+        domain_id=domain_id,
         connection_id=payload.connection_id,
         dbt_project_path=dbt_project_path,
         profile_name=payload.profile_name,
@@ -897,36 +808,18 @@ def generate_dbt_manifest(payload: DbtManifestGenerateRequest) -> DbtManifestGen
     summary="Fetch latest dbt manifest",
     description="Return the latest stored dbt manifest from the database.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "tenant_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"tenant_a": {"value": "tenant_a"}},
-            },
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"manufacturing": {"value": "manufacturing"}},
-            },
-        ]
-        ,
         "responses": {
             "200": {
                 "content": {
                     "application/json": {
                         "examples": {
-                            "latest": {
-                                "summary": "Latest manifest",
-                                "value": {
-                                    "manifest_id": "manifest_123",
-                                    "tenant_id": "tenant_a",
-                                    "domain_id": "manufacturing",
-                                    "connection_id": "conn_prod",
-                                    "dbt_project_path": "dbt",
+                                    "latest": {
+                                        "summary": "Latest manifest",
+                                        "value": {
+                                            "manifest_id": "manifest_123",
+                                            "tenant_id": "tenant_a",
+                                            "connection_id": "conn_prod",
+                                            "dbt_project_path": "dbt",
                                     "profile_name": "default",
                                     "target_name": "dev",
                                     "created_at": "2025-02-14T10:00:00Z",
@@ -942,8 +835,8 @@ def generate_dbt_manifest(payload: DbtManifestGenerateRequest) -> DbtManifestGen
 )
 def get_latest_dbt_manifest(
     tenant_id: str,
-    domain_id: str,
 ) -> DbtManifestLatestResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     row = load_latest_manifest_row(settings, domain_id=domain_id, tenant_id=tenant_id)
     if not row:
         raise HTTPException(status_code=404, detail="Manifest not found")
@@ -968,6 +861,7 @@ def get_latest_dbt_manifest(
     description="Store dbt config for a tenant/domain/connection (admin use only).",
 )
 def upsert_dbt_config_endpoint(payload: DbtConfigUpsertRequest) -> DbtConfigResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
     dbt_project_path = payload.dbt_project_path or resolve_dbt_project_dir(payload.tenant_id)
     profile_name = normalize_profile_name(payload.tenant_id)
     target_name = payload.target_name or settings.dbt_target_name
@@ -975,7 +869,7 @@ def upsert_dbt_config_endpoint(payload: DbtConfigUpsertRequest) -> DbtConfigResp
     config_id = upsert_dbt_config(
         settings,
         tenant_id=payload.tenant_id,
-        domain_id=payload.domain_id,
+        domain_id=domain_id,
         connection_id=payload.connection_id,
         dbt_project_path=dbt_project_path,
         profile_name=profile_name,
@@ -985,7 +879,7 @@ def upsert_dbt_config_endpoint(payload: DbtConfigUpsertRequest) -> DbtConfigResp
     return DbtConfigResponse(
         config_id=config_id,
         tenant_id=payload.tenant_id,
-        domain_id=payload.domain_id,
+        domain_id=domain_id,
         connection_id=payload.connection_id,
         dbt_project_path=dbt_project_path,
         profile_name=profile_name,
@@ -1003,9 +897,9 @@ def upsert_dbt_config_endpoint(payload: DbtConfigUpsertRequest) -> DbtConfigResp
 )
 def get_latest_dbt_config_endpoint(
     tenant_id: str,
-    domain_id: str,
     connection_id: str | None = None,
 ) -> DbtConfigResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     config = get_latest_dbt_config(settings, tenant_id, domain_id, connection_id)
     if not config:
         raise HTTPException(status_code=404, detail="dbt config not found")
@@ -1030,15 +924,6 @@ def get_latest_dbt_config_endpoint(
     summary="Generate dbt scaffold",
     description="Generate draft dbt models from latest scan results (admin use only).",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "generate_dbt",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "boolean"},
-                "examples": {"generate_dbt": {"value": True}},
-            }
-        ],
         "requestBody": {
             "content": {
                 "application/json": {
@@ -1047,7 +932,6 @@ def get_latest_dbt_config_endpoint(
                             "summary": "Generate scaffold",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "domain_id": "manufacturing",
                                 "connection_id": "conn_prod",
                                 "database": "prod_warehouse",
                                 "schema": "public",
@@ -1066,7 +950,8 @@ def get_latest_dbt_config_endpoint(
     },
 )
 def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
-    scan_result = load_latest_scan_result(settings, payload.tenant_id, payload.domain_id)
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    scan_result = load_latest_scan_result(settings, payload.tenant_id, domain_id)
     if not scan_result:
         raise HTTPException(status_code=404, detail="No scan results found for tenant/domain")
     tables = _extract_tables_from_scan(
@@ -1106,7 +991,7 @@ def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
     scaffold_id = persist_scaffold(
         settings,
         tenant_id=payload.tenant_id,
-        domain_id=payload.domain_id,
+        domain_id=domain_id,
         connection_id=payload.connection_id,
         database=payload.database,
         schema=payload.schema,
@@ -1158,9 +1043,9 @@ def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
 )
 def list_dbt_scaffolds(
     tenant_id: str,
-    domain_id: str,
     connection_id: str | None = None,
 ) -> DbtScaffoldListResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     scaffolds = list_scaffolds(settings, tenant_id, domain_id, connection_id)
     return DbtScaffoldListResponse(scaffolds=scaffolds)
 
@@ -1188,9 +1073,9 @@ def list_dbt_scaffolds(
 def patch_dbt_scaffold(
     scaffold_id: str,
     tenant_id: str,
-    domain_id: str,
     payload: DbtScaffoldPatchRequest,
 ) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
     scaffold = get_scaffold(settings, scaffold_id)
     if not scaffold:
         raise HTTPException(status_code=404, detail="Scaffold not found")
@@ -1231,8 +1116,8 @@ def patch_dbt_scaffold(
 def apply_dbt_scaffold(
     scaffold_id: str,
     tenant_id: str,
-    domain_id: str,
 ) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
     scaffold = get_scaffold(settings, scaffold_id)
     if not scaffold:
         raise HTTPException(status_code=404, detail="Scaffold not found")
@@ -1286,29 +1171,6 @@ def apply_dbt_scaffold(
     summary="List insights",
     description="Return recent insights for a domain.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"energy": {"value": "energy_distribution"}},
-            },
-            {
-                "name": "limit",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "integer"},
-                "examples": {"limit": {"value": 200}},
-            },
-            {
-                "name": "cursor",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"cursor": {"value": "aW5zXzEyMw=="}},
-            },
-        ],
         "responses": {
             "200": {
                 "content": {
@@ -1338,7 +1200,8 @@ def apply_dbt_scaffold(
         },
     },
 )
-def insights(domain_id: str | None = None, limit: int = 200, cursor: str | None = None) -> InsightsResponse:
+def insights(tenant_id: str, limit: int = 200, cursor: str | None = None) -> InsightsResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     items = list_insights(settings, domain_id)
     page, next_cursor = _paginate_list(items, cursor, limit, key_fn=lambda item: item["insight_id"])
     return InsightsResponse(insights=page, limit=limit, cursor=cursor, next_cursor=next_cursor)
@@ -1487,44 +1350,15 @@ def insight_detail_with_context(insight_id: str) -> InsightDetailWithContextResp
     summary="Generate insights",
     description="Generate and persist a variance or anomaly insight for the domain.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"energy": {"value": "energy_distribution"}},
-            },
-            {
-                "name": "scenario_id",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"baseline": {"value": "baseline"}},
-            },
-            {
-                "name": "type",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"anomaly": {"value": "anomaly"}},
-            },
-            {
-                "name": "metric_name",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"metric_name": {"value": "total_sales_volume_tmt"}},
-            },
-        ],
     },
 )
 def generate_insights(
-    domain_id: str,
+    tenant_id: str,
     scenario_id: str | None = None,
     type: str = "variance",
     metric_name: str | None = None,
 ) -> InsightDetailResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     if type == "anomaly":
         if not metric_name:
             raise HTTPException(status_code=400, detail="metric_name is required for anomaly generation")
@@ -1634,44 +1468,15 @@ def timeseries(request: TimeSeriesRequest) -> TimeSeriesResponse:
     summary="List actions",
     description="Return actions with optional filters.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"energy": {"value": "energy_distribution"}},
-            },
-            {
-                "name": "status",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"status": {"value": "open"}},
-            },
-            {
-                "name": "limit",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "integer"},
-                "examples": {"limit": {"value": 200}},
-            },
-            {
-                "name": "cursor",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"cursor": {"value": "YWN0XzEyMw=="}},
-            },
-        ]
     },
 )
 def actions(
-    domain_id: str | None = None,
+    tenant_id: str,
     status: str | None = None,
     limit: int = 200,
     cursor: str | None = None,
 ) -> ActionsResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     items = list_actions(settings, domain_id, status)
     page, next_cursor = _paginate_list(items, cursor, limit, key_fn=lambda item: item["action_id"])
     return ActionsResponse(actions=page, limit=limit, cursor=cursor, next_cursor=next_cursor)
@@ -1728,7 +1533,7 @@ def action_detail(action_id: str) -> ActionDetailResponse:
                         "create_action": {
                             "summary": "Create action",
                             "value": {
-                                "domain_id": "energy_distribution",
+                                "tenant_id": "tenant_a",
                                 "headline": "Investigate sales drop in Tenali",
                                 "severity": "medium",
                                 "status": "open",
@@ -1743,7 +1548,10 @@ def action_detail(action_id: str) -> ActionDetailResponse:
     },
 )
 def create_action_endpoint(payload: ActionCreateRequest) -> ActionCreateResponse:
-    action_id = create_action(settings, payload.model_dump())
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    payload_dict = payload.model_dump()
+    payload_dict["domain_id"] = domain_id
+    action_id = create_action(settings, payload_dict)
     return ActionCreateResponse(action_id=action_id, status=payload.status or "open")
 
 
@@ -1839,32 +1647,10 @@ def action_feedback(action_id: str, payload: ActionFeedbackRequest) -> dict:
     summary="List scenarios",
     description="Return scenarios with optional filters.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"energy": {"value": "energy_distribution"}},
-            },
-            {
-                "name": "limit",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "integer"},
-                "examples": {"limit": {"value": 200}},
-            },
-            {
-                "name": "cursor",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"cursor": {"value": "YmFzZWxpbmU="}},
-            },
-        ]
     },
 )
-def scenarios(domain_id: str | None = None, limit: int = 200, cursor: str | None = None) -> ScenariosResponse:
+def scenarios(tenant_id: str, limit: int = 200, cursor: str | None = None) -> ScenariosResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     items = list_scenarios(settings, domain_id)
     page, next_cursor = _paginate_list(items, cursor, limit, key_fn=lambda item: item["scenario_id"])
     return ScenariosResponse(scenarios=page, limit=limit, cursor=cursor, next_cursor=next_cursor)
@@ -1919,7 +1705,7 @@ def scenario_detail(scenario_id: str) -> dict:
                         "create_scenario": {
                             "summary": "Create scenario",
                             "value": {
-                                "domain_id": "energy_distribution",
+                                "tenant_id": "tenant_a",
                                 "name": "Distribution Disruption",
                                 "description": "Simulate loss of supply in Zone A",
                                 "status": "draft",
@@ -1946,7 +1732,10 @@ def scenario_detail(scenario_id: str) -> dict:
     },
 )
 def create_scenario_endpoint(payload: ScenarioCreateRequest) -> dict:
-    scenario_id = create_scenario(settings, payload.model_dump())
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    payload_dict = payload.model_dump()
+    payload_dict["domain_id"] = domain_id
+    scenario_id = create_scenario(settings, payload_dict)
     return {"scenario_id": scenario_id, "status": payload.status or "draft"}
 
 
@@ -2095,57 +1884,6 @@ def compare_scenarios_endpoint(payload: ScenarioCompareRequest) -> ScenarioCompa
     summary="List dimension values",
     description="Return distinct values for a dimension.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "dimension",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"sales_area_name": {"value": "sales_area_name"}},
-            },
-            {
-                "name": "search",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"search": {"value": "ten"}},
-            },
-            {
-                "name": "starts_with",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"starts_with": {"value": "Vi"}},
-            },
-            {
-                "name": "exclude_nulls",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "boolean"},
-                "examples": {"exclude_nulls": {"value": True}},
-            },
-            {
-                "name": "order",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string", "enum": ["asc", "desc"]},
-                "examples": {"order": {"value": "asc"}},
-            },
-            {
-                "name": "limit",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "integer"},
-                "examples": {"limit": {"value": 50}},
-            },
-            {
-                "name": "cursor",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"cursor": {"value": "VmlqYXlhd2FkYQ=="}},
-            },
-        ],
         "responses": {
             "200": {
                 "content": {
@@ -2241,7 +1979,7 @@ def dimension_values(
                         "create_metric": {
                             "summary": "Create metric",
                             "value": {
-                                "domain_id": "energy_distribution",
+                                "tenant_id": "tenant_a",
                                 "metric_name": "total_sales_volume_tmt",
                                 "description": "Total sales volume in TMT",
                                 "type": "sum",
@@ -2261,11 +1999,14 @@ def dimension_values(
 def create_metric(payload: MetricUpsertRequest) -> MetricUpsertResponse:
     if not payload.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
     _require_basic_scope(
         _request_scope(payload.connection_id, payload.database, payload.schema, payload.tables),
         "/metrics",
     )
-    metric_id = upsert_metric(settings, payload.model_dump())
+    payload_dict = payload.model_dump()
+    payload_dict["domain_id"] = domain_id
+    metric_id = upsert_metric(settings, payload_dict)
     return MetricUpsertResponse(metric_id=metric_id, status=payload.status or "suggested")
 
 
@@ -2297,11 +2038,13 @@ def create_metric(payload: MetricUpsertRequest) -> MetricUpsertResponse:
 def patch_metric(metric_id: str, payload: MetricPatchRequest) -> MetricUpsertResponse:
     if not payload.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
     _require_basic_scope(
         _request_scope(payload.connection_id, payload.database, payload.schema, payload.tables),
         "/metrics/{metric_id}",
     )
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+    updates["domain_id"] = domain_id
     update_metric(settings, metric_id, updates)
     status = updates.get("status", "updated")
     return MetricUpsertResponse(metric_id=metric_id, status=status)
@@ -2364,7 +2107,6 @@ def domains() -> dict:
                             "summary": "Glossary and hierarchy notes",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "domain_id": "manufacturing",
                                 "source_type": "business_context",
                                 "source_title": "Operations glossary and hierarchy notes",
                                 "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
@@ -2409,6 +2151,7 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
             "file_ids": len(payload.file_ids or []),
         },
     )
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
     scope = extract_scope_from_metadata(payload.metadata)
     logger.info("context.ingest: scope.parsed | %s", scope)
     _require_scope(scope, "/context/ingest")
@@ -2417,7 +2160,7 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
     context_id = create_context(
         settings,
         tenant_id=payload.tenant_id,
-        domain_id=payload.domain_id,
+        domain_id=domain_id,
         source_type=payload.source_type,
         source_title=source_title,
         raw_text=payload.raw_text,
@@ -2450,7 +2193,6 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
                             "summary": "Upload business context (.txt or .docx)",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "domain_id": "manufacturing",
                                 "source_type": "business_context",
                                 "source_title": "Operations glossary",
                                 "metadata": "{\"connection_id\":\"conn_prod\",\"database\":\"prod_warehouse\",\"schema\":\"public\",\"tables\":[\"fact_production_daily\",\"dim_plant\"]}",
@@ -2465,7 +2207,7 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
 )
 def ingest_context_file(
     tenant_id: str = Form(...),
-    domain_id: str = Form(...),
+    domain_id: str | None = Form(None),
     source_type: str = Form(...),
     source_title: str | None = Form(None),
     metadata: str | None = Form(None),
@@ -2517,13 +2259,14 @@ def ingest_context_file(
             raise HTTPException(status_code=400, detail="metadata must be valid JSON") from exc
     if not parsed_metadata:
         raise HTTPException(status_code=400, detail="metadata is required and must include connection scope")
+    resolved_domain = _resolve_domain_id(tenant_id, domain_id)
     scope = extract_scope_from_metadata(parsed_metadata)
     logger.info("context.ingest-file: scope.parsed | %s", scope)
     _require_scope(scope, "/context/ingest-file")
     file_id = create_context_file(
         settings,
         tenant_id=tenant_id,
-        domain_id=domain_id,
+        domain_id=resolved_domain,
         filename=filename,
         content_type=file.content_type,
         extracted_text=raw_text,
@@ -2546,76 +2289,10 @@ def ingest_context_file(
     summary="List business context entries",
     description="List stored business context entries with cursor pagination.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "tenant_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"tenant_a": {"value": "tenant_a"}},
-            },
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"manufacturing": {"value": "manufacturing"}},
-            },
-            {
-                "name": "source_type",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"business_context": {"value": "business_context"}},
-            },
-            {
-                "name": "status",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"submitted": {"value": "submitted"}},
-            },
-            {
-                "name": "connection_id",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"connection_id": {"value": "conn_prod"}},
-            },
-            {
-                "name": "database",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"database": {"value": "prod_warehouse"}},
-            },
-            {
-                "name": "schema",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"schema": {"value": "public"}},
-            },
-            {
-                "name": "limit",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "integer"},
-                "examples": {"limit": {"value": 200}},
-            },
-            {
-                "name": "cursor",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"cursor": {"value": "MjAyNS0wMS0wMVQwMDowMDowMFo="}},
-            },
-        ]
     },
 )
 def list_context_entries(
     tenant_id: str,
-    domain_id: str,
     source_type: str | None = None,
     status: str | None = None,
     connection_id: str | None = None,
@@ -2624,6 +2301,7 @@ def list_context_entries(
     limit: int = 200,
     cursor: str | None = None,
 ) -> ContextListResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     decoded_cursor = _decode_cursor(cursor) if cursor else None
     entries, next_cursor = list_context(
         settings,
@@ -2656,7 +2334,6 @@ def list_context_entries(
                             "summary": "Extract from stored context",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "domain_id": "manufacturing",
                                 "context_id": "ctx_123",
                                 "extraction_types": [
                                     "abbreviations",
@@ -2709,6 +2386,7 @@ def list_context_entries(
     },
 )
 def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
     logger.info(
         "context.extract: start | %s",
         {
@@ -2721,7 +2399,7 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
     context_row = get_context(settings, payload.context_id)
     if not context_row:
         raise HTTPException(status_code=404, detail="Context not found")
-    if context_row["tenant_id"] != payload.tenant_id or context_row["domain_id"] != payload.domain_id:
+    if context_row["tenant_id"] != payload.tenant_id or context_row["domain_id"] != domain_id:
         raise HTTPException(status_code=400, detail="Context tenant/domain mismatch")
 
     file_texts = get_context_file_texts(settings, payload.context_id)
@@ -2768,7 +2446,7 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
         settings,
         context_id=payload.context_id,
         tenant_id=payload.tenant_id,
-        domain_id=payload.domain_id,
+        domain_id=domain_id,
         payload=extracted,
         llm_model=settings.openai_model,
     )
@@ -2823,8 +2501,8 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
 def get_context_extraction(
     extraction_id: str,
     tenant_id: str,
-    domain_id: str,
 ) -> ContextExtractionResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     extraction_row = get_extraction(settings, extraction_id)
     if not extraction_row:
         raise HTTPException(status_code=404, detail="Extraction not found")
@@ -2857,7 +2535,6 @@ def get_context_extraction(
                             "summary": "Apply all extracted signals",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "domain_id": "manufacturing",
                                 "extraction_id": "ext_123",
                                 "apply": {
                                     "entities": True,
@@ -2900,10 +2577,11 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
             "apply": payload.apply,
         },
     )
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
     extraction_row = get_extraction(settings, payload.extraction_id)
     if not extraction_row:
         raise HTTPException(status_code=404, detail="Extraction not found")
-    if extraction_row["tenant_id"] != payload.tenant_id or extraction_row["domain_id"] != payload.domain_id:
+    if extraction_row["tenant_id"] != payload.tenant_id or extraction_row["domain_id"] != domain_id:
         raise HTTPException(status_code=400, detail="Extraction tenant/domain mismatch")
 
     context_row = get_context(settings, extraction_row.get("context_id"))
@@ -2919,7 +2597,7 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
     updated = apply_extractions(
         settings,
         tenant_id=payload.tenant_id,
-        domain_id=payload.domain_id,
+        domain_id=domain_id,
         payload=extraction_row["payload"],
         apply_flags=payload.apply,
         source_context_id=extraction_row.get("context_id"),
@@ -2968,9 +2646,9 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
 def patch_context(
     context_id: str,
     tenant_id: str,
-    domain_id: str,
     payload: ContextPatchRequest,
 ) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
     context_row = get_context(settings, context_id)
     if not context_row:
         raise HTTPException(status_code=404, detail="Context not found")
@@ -3025,9 +2703,9 @@ def patch_context(
 def patch_context_file(
     file_id: str,
     tenant_id: str,
-    domain_id: str,
     payload: ContextFilePatchRequest,
 ) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
     if payload.metadata is None:
         raise HTTPException(status_code=400, detail="metadata is required")
     file_row = get_context_file(settings, file_id)
@@ -3066,9 +2744,9 @@ def patch_context_file(
 def patch_context_extraction(
     extraction_id: str,
     tenant_id: str,
-    domain_id: str,
     payload: ContextExtractionPatchRequest,
 ) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
     extraction_row = get_extraction(settings, extraction_id)
     if not extraction_row:
         raise HTTPException(status_code=404, detail="Extraction not found")
@@ -3085,45 +2763,6 @@ def patch_context_extraction(
     summary="List entities and hierarchies",
     description="Return tenant-scoped entities and hierarchies for a connection.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {
-                    "energy": {"value": "energy_distribution"},
-                    "manufacturing": {"value": "manufacturing"},
-                },
-            },
-            {
-                "name": "tenant_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"tenant_a": {"value": "tenant_1"}},
-            },
-            {
-                "name": "connection_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"connection_id": {"value": "conn_prod"}},
-            },
-            {
-                "name": "database",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"database": {"value": "prod_warehouse"}},
-            },
-            {
-                "name": "schema",
-                "in": "query",
-                "schema": {"type": "string"},
-                "examples": {"schema": {"value": "public"}},
-            },
-        ],
         "responses": {
             "200": {
                 "content": {
@@ -3158,12 +2797,12 @@ def patch_context_extraction(
     },
 )
 def entities(
-    domain_id: str,
     tenant_id: str,
     connection_id: str,
     database: str,
     schema: str,
 ) -> EntitiesResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     entity_overrides, hierarchy_overrides = load_overrides(
         settings,
         tenant_id,
@@ -3205,7 +2844,8 @@ def entities(
     summary="List entities and hierarchies for all connections",
     description="Return all tenant-scoped entities and hierarchies grouped by connection.",
 )
-def entities_all(domain_id: str, tenant_id: str) -> EntitiesAllResponse:
+def entities_all(tenant_id: str) -> EntitiesAllResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     entity_overrides, hierarchy_overrides = load_overrides_all(settings, tenant_id, domain_id)
     grouped: dict[tuple[str, str, str], dict] = {}
     for entity in entity_overrides:
@@ -3258,11 +2898,11 @@ def entities_all(domain_id: str, tenant_id: str) -> EntitiesAllResponse:
 )
 def hierarchies(
     tenant_id: str,
-    domain_id: str,
     connection_id: str,
     database: str,
     schema: str,
 ) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
     _, hierarchy_overrides = load_overrides(
         settings,
         tenant_id,
@@ -3288,43 +2928,6 @@ def hierarchies(
     summary="Override an entity",
     description="Upsert a tenant-specific entity override (description/join_key/examples).",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "tenant_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"tenant_a": {"value": "tenant_a"}},
-            },
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"domain_id": {"value": "manufacturing"}},
-            },
-            {
-                "name": "connection_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"connection_id": {"value": "conn_prod"}},
-            },
-            {
-                "name": "database",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"database": {"value": "prod_warehouse"}},
-            },
-            {
-                "name": "schema",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"schema": {"value": "public"}},
-            },
-        ],
         "requestBody": {
             "content": {
                 "application/json": {
@@ -3354,13 +2957,13 @@ def hierarchies(
 )
 def update_entity(
     entity_id: str,
-    domain_id: str,
     tenant_id: str,
     connection_id: str,
     database: str,
     schema: str,
     payload: EntityOverrideRequest,
 ) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
     upsert_entity_override(
         settings,
         tenant_id,
@@ -3384,43 +2987,6 @@ def update_entity(
     summary="Override a hierarchy",
     description="Upsert a tenant-specific hierarchy override (levels/description).",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "tenant_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"tenant_a": {"value": "tenant_a"}},
-            },
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"domain_id": {"value": "manufacturing"}},
-            },
-            {
-                "name": "connection_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"connection_id": {"value": "conn_prod"}},
-            },
-            {
-                "name": "database",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"database": {"value": "prod_warehouse"}},
-            },
-            {
-                "name": "schema",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"schema": {"value": "public"}},
-            },
-        ],
         "requestBody": {
             "content": {
                 "application/json": {
@@ -3449,13 +3015,13 @@ def update_entity(
 )
 def update_hierarchy(
     hierarchy_name: str,
-    domain_id: str,
     tenant_id: str,
     connection_id: str,
     database: str,
     schema: str,
     payload: HierarchyOverrideRequest,
 ) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
     upsert_hierarchy_override(
         settings,
         tenant_id,
@@ -3479,12 +3045,13 @@ def update_hierarchy(
     summary="Create or upsert a fact",
 )
 def create_fact(payload: FactsUpsertRequest) -> dict:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
     fact_id = upsert_fact(
         settings,
         {
             "fact_id": None,
             "tenant_id": payload.tenant_id,
-            "domain_id": payload.domain_id,
+            "domain_id": domain_id,
             "connection_id": payload.connection_id,
             "database_name": payload.database,
             "schema_name": payload.schema,
@@ -3508,11 +3075,11 @@ def create_fact(payload: FactsUpsertRequest) -> dict:
 )
 def get_facts(
     tenant_id: str,
-    domain_id: str,
     connection_id: str,
     database: str,
     schema: str,
 ) -> FactsResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     facts = list_facts(settings, tenant_id, domain_id, connection_id, database, schema)
     return FactsResponse(facts=facts)
 
@@ -3523,7 +3090,8 @@ def get_facts(
     tags=["explore"],
     summary="List facts for all connections",
 )
-def get_facts_all(tenant_id: str, domain_id: str) -> FactsAllResponse:
+def get_facts_all(tenant_id: str) -> FactsAllResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     rows = list_facts_all(settings, tenant_id, domain_id)
     grouped: dict[tuple[str, str, str], dict] = {}
     for row in rows:
@@ -3569,12 +3137,13 @@ def remove_fact(fact_id: str) -> dict:
     summary="Create or upsert a dimension",
 )
 def create_dimension(payload: DimensionsUpsertRequest) -> dict:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
     dimension_id = upsert_dimension(
         settings,
         {
             "dimension_id": None,
             "tenant_id": payload.tenant_id,
-            "domain_id": payload.domain_id,
+            "domain_id": domain_id,
             "connection_id": payload.connection_id,
             "database_name": payload.database,
             "schema_name": payload.schema,
@@ -3596,11 +3165,11 @@ def create_dimension(payload: DimensionsUpsertRequest) -> dict:
 )
 def get_dimensions(
     tenant_id: str,
-    domain_id: str,
     connection_id: str,
     database: str,
     schema: str,
 ) -> DimensionsResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     dimensions = list_dimensions(settings, tenant_id, domain_id, connection_id, database, schema)
     return DimensionsResponse(dimensions=dimensions)
 
@@ -3611,7 +3180,8 @@ def get_dimensions(
     tags=["explore"],
     summary="List dimensions for all connections",
 )
-def get_dimensions_all(tenant_id: str, domain_id: str) -> DimensionsAllResponse:
+def get_dimensions_all(tenant_id: str) -> DimensionsAllResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     rows = list_dimensions_all(settings, tenant_id, domain_id)
     grouped: dict[tuple[str, str, str], dict] = {}
     for row in rows:
@@ -3657,10 +3227,11 @@ def remove_dimension(dimension_id: str) -> dict:
     summary="Create a review event",
 )
 def create_review(payload: ReviewCreateRequest) -> ReviewResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
     review_id = create_review_event(
         settings,
         tenant_id=payload.tenant_id,
-        domain_id=payload.domain_id,
+        domain_id=domain_id,
         connection_id=payload.connection_id,
         database_name=payload.database,
         schema_name=payload.schema,
@@ -3681,12 +3252,12 @@ def create_review(payload: ReviewCreateRequest) -> ReviewResponse:
 )
 def list_review(
     tenant_id: str,
-    domain_id: str,
     connection_id: str,
     database: str,
     schema: str,
     artifact_type: str | None = None,
 ) -> ReviewListResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     reviews = list_review_events(
         settings,
         tenant_id,
@@ -3718,11 +3289,11 @@ def patch_review(review_id: str, payload: ReviewPatchRequest) -> dict:
 )
 def review_summary(
     tenant_id: str,
-    domain_id: str,
     connection_id: str,
     database: str,
     schema: str,
 ) -> ReviewSummaryResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
     scoped_scan = load_latest_scan_for_scope(
         settings, tenant_id, domain_id, connection_id, database, schema
     )
@@ -3829,43 +3400,6 @@ def review_summary(
     summary="List dbt models",
     description="Return models and columns from dbt manifest.json, scoped by optional database/schema filters.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "connection_id",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"connection_id": {"value": "conn_prod"}},
-            },
-            {
-                "name": "database",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"database": {"value": "prod_warehouse"}},
-            },
-            {
-                "name": "schema",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"schema": {"value": "public"}},
-            },
-            {
-                "name": "limit",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "integer"},
-                "examples": {"limit": {"value": 200}},
-            },
-            {
-                "name": "cursor",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"cursor": {"value": "ZmFjdF9ocGNsX3NhbGVzX2RhaWx5"}},
-            },
-        ],
         "responses": {
             "200": {
                 "content": {
@@ -3980,7 +3514,6 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
                             "summary": "Scan multiple connections",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "domain_id": "manufacturing",
                                 "connections": [
                                     {
                                         "connection_id": "conn_prod",
@@ -4064,8 +3597,10 @@ def onboard_scan_connection(
     request: OnboardScanMultiConnectionRequest,
     generate_dbt: bool = True,
 ) -> OnboardScanConnectionResponse:
-    tenant_id = request.tenant_id or settings.default_tenant_id
-    domain_id = request.domain_id or settings.default_domain_id
+    tenant_id = request.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, request.domain_id)
     _log_scan_step(
         "start",
         {
@@ -4318,29 +3853,6 @@ def _merge_entity_candidates(
     summary="Map schema to ontology",
     description="Suggest entity mappings from schema columns to the selected domain ontology.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"manufacturing": {"value": "manufacturing"}},
-            },
-            {
-                "name": "tenant_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"tenant_a": {"value": "tenant_a"}},
-            },
-            {
-                "name": "use_llm",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "boolean"},
-                "examples": {"use_llm": {"value": True}},
-            },
-        ],
         "requestBody": {
             "content": {
                 "application/json": {
@@ -4363,17 +3875,17 @@ def _merge_entity_candidates(
 )
 def onboard_map(
     request: OnboardScanRequest,
-    domain_id: str,
     use_llm: bool = True,
-    tenant_id: str | None = None,
 ) -> OnboardMapResponse:
+    tenant_id = request.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, None)
     schema_value = request.schema or (request.schemas[0] if request.schemas else None)
     _require_scope(
         _request_scope(request.connection_id, request.database, schema_value, request.tables),
         "/onboard/map",
     )
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="tenant_id is required")
     schema_payload = load_latest_scan_for_scope(
         settings,
         tenant_id,
@@ -4439,12 +3951,12 @@ def onboard_map(
 )
 def onboard_map_history(
     tenant_id: str,
-    domain_id: str,
     connection_id: str,
     database: str,
     schema: str,
     limit: int = 20,
 ) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
     runs = list_entity_mappings(
         settings,
         tenant_id,
@@ -4549,15 +4061,6 @@ def _merge_models(rule_facts: list[dict], rule_dims: list[dict], llm_payload: di
     summary="Infer facts and dimensions",
     description="Suggest candidate dbt facts and dimensions from scanned schema and ontology.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "examples": {"manufacturing": {"value": "manufacturing"}},
-            }
-        ],
         "requestBody": {
             "content": {
                 "application/json": {
@@ -4614,7 +4117,7 @@ def _merge_models(rule_facts: list[dict], rule_dims: list[dict], llm_payload: di
         },
     },
 )
-def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> InferModelsResponse:
+def infer_models(request: InferModelsRequest) -> InferModelsResponse:
     schema_value = request.schema or (request.schemas[0] if request.schemas else None)
     _require_scope(
         _request_scope(request.connection_id, request.database, schema_value, request.tables),
@@ -4622,6 +4125,7 @@ def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> I
     )
     if not request.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(request.tenant_id, None)
     schema_payload = load_latest_scan_for_scope(
         settings,
         request.tenant_id,
@@ -4652,22 +4156,6 @@ def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> I
     summary="Suggest metrics",
     description="Generate suggested measures, time columns, and entity mappings.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "domain_id",
-                "in": "query",
-                "required": True,
-                "schema": {"type": "string"},
-                "examples": {"energy": {"value": "energy_distribution"}},
-            },
-            {
-                "name": "persist",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "boolean"},
-                "examples": {"persist": {"value": True}},
-            }
-        ],
         "requestBody": {
             "content": {
                 "application/json": {
@@ -4735,7 +4223,7 @@ def infer_models(request: InferModelsRequest, domain_id: str | None = None) -> I
         },
     },
 )
-def suggested_metrics(request: OnboardScanRequest, domain_id: str, persist: bool = False) -> SuggestedMetricsResponse:
+def suggested_metrics(request: OnboardScanRequest, persist: bool = False) -> SuggestedMetricsResponse:
     schema_value = request.schema or (request.schemas[0] if request.schemas else None)
     _require_scope(
         _request_scope(request.connection_id, request.database, schema_value, request.tables),
@@ -4743,6 +4231,7 @@ def suggested_metrics(request: OnboardScanRequest, domain_id: str, persist: bool
     )
     if not request.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(request.tenant_id, None)
     schema_payload = load_latest_scan_for_scope(
         settings,
         request.tenant_id,
@@ -4910,8 +4399,9 @@ def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[
     if request.question:
         logger.info("resolving question: %s", request.question)
         glossary = None
-        if request.tenant_id and request.domain_id:
-            glossary = fetch_glossary_terms(settings, request.tenant_id, request.domain_id)
+        if request.tenant_id:
+            domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+            glossary = fetch_glossary_terms(settings, request.tenant_id, domain_id)
         resolved = resolve_question(request.question, catalog, settings, glossary=glossary)
         logger.info("resolver output: %s", resolved)
         metrics = resolved.get("metrics", [])
@@ -5131,7 +4621,6 @@ def _extract_top_n(question: str | None) -> int | None:
                             "value": {
                                 "question": "Top 5 sales areas by sales volume for MS in Q2 FY 2024-2025.",
                                 "tenant_id": "tenant_a",
-                                "domain_id": "manufacturing",
                                 "connection_id": "conn_prod",
                                 "database": "prod_warehouse",
                                 "schema": "public",
@@ -5145,7 +4634,6 @@ def _extract_top_n(question: str | None) -> int | None:
                             "value": {
                                 "question": "HPCL vs BPCL market share for MS in UTTAR PRADESH during FY 2024-2025.",
                                 "tenant_id": "tenant_a",
-                                "domain_id": "manufacturing",
                                 "connection_id": "conn_prod",
                                 "database": "prod_warehouse",
                                 "schema": "public",
@@ -5159,7 +4647,6 @@ def _extract_top_n(question: str | None) -> int | None:
                             "value": {
                                 "question": "Which sales areas are below required run rate this month?",
                                 "tenant_id": "tenant_a",
-                                "domain_id": "manufacturing",
                                 "connection_id": "conn_prod",
                                 "database": "prod_warehouse",
                                 "schema": "public",
@@ -5206,8 +4693,9 @@ def query(request: QueryRequest) -> QueryResult:
         "/query",
     )
     glossary = None
-    if request.tenant_id and request.domain_id:
-        glossary = fetch_glossary_terms(settings, request.tenant_id, request.domain_id)
+    if request.tenant_id:
+        domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+        glossary = fetch_glossary_terms(settings, request.tenant_id, domain_id)
     metric_names, dimensions, filters = _resolve_metrics(request)
     if not metric_names and request.question:
         question = request.question.lower()

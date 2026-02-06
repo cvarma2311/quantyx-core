@@ -74,6 +74,14 @@ ALTER TABLE public.quantyx_context_extractions
 ALTER TABLE public.quantyx_context_extractions
   ADD COLUMN IF NOT EXISTS notes TEXT NULL;
 
+CREATE TABLE IF NOT EXISTS public.quantyx_tenant_domains (
+  tenant_id TEXT PRIMARY KEY,
+  domain_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 ALTER TABLE public.quantyx_metrics_registry
   ADD COLUMN IF NOT EXISTS tenant_id TEXT NULL;
 

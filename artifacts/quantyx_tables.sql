@@ -199,6 +199,15 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_connection_scopes_db
   ON public.quantyx_connection_scopes (database_name, schema_name);
 
 
+CREATE TABLE IF NOT EXISTS public.quantyx_tenant_domains (
+  tenant_id TEXT PRIMARY KEY,
+  domain_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+
 CREATE TABLE IF NOT EXISTS public.quantyx_metrics_registry (
   metric_id TEXT PRIMARY KEY,
   tenant_id TEXT NULL,
