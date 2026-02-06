@@ -74,40 +74,6 @@ ALTER TABLE public.quantyx_context_extractions
 ALTER TABLE public.quantyx_context_extractions
   ADD COLUMN IF NOT EXISTS notes TEXT NULL;
 
-CREATE TABLE IF NOT EXISTS public.quantyx_dbt_config (
-  config_id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
-  domain_id TEXT NOT NULL,
-  connection_id TEXT NULL,
-  dbt_project_path TEXT NOT NULL,
-  profile_name TEXT NOT NULL,
-  target_name TEXT NOT NULL,
-  profiles_dir TEXT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_quantyx_dbt_config_lookup
-  ON public.quantyx_dbt_config (tenant_id, domain_id, connection_id, updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS public.quantyx_dbt_scaffolds (
-  scaffold_id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
-  domain_id TEXT NOT NULL,
-  connection_id TEXT NOT NULL,
-  database_name TEXT NOT NULL,
-  schema_name TEXT NOT NULL,
-  tables JSONB NOT NULL DEFAULT '[]'::jsonb,
-  context_id TEXT NULL,
-  status TEXT NOT NULL DEFAULT 'draft',
-  payload JSONB NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_quantyx_dbt_scaffolds_lookup
-  ON public.quantyx_dbt_scaffolds (tenant_id, domain_id, connection_id, created_at DESC);
-
 ALTER TABLE public.quantyx_metrics_registry
   ADD COLUMN IF NOT EXISTS tenant_id TEXT NULL;
 
@@ -123,79 +89,16 @@ ALTER TABLE public.quantyx_metrics_registry
 CREATE INDEX IF NOT EXISTS idx_quantyx_metrics_registry_scope
   ON public.quantyx_metrics_registry (tenant_id, domain_id, connection_id, database_name, schema_name);
 
-CREATE TABLE IF NOT EXISTS public.quantyx_entity_mappings (
-  mapping_id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
-  domain_id TEXT NOT NULL,
-  connection_id TEXT NOT NULL,
-  database_name TEXT NOT NULL,
-  schema_name TEXT NOT NULL,
-  tables JSONB NOT NULL DEFAULT '[]'::jsonb,
-  candidates JSONB NOT NULL,
-  low_confidence_candidates JSONB NOT NULL,
-  low_confidence_threshold NUMERIC NOT NULL,
-  status TEXT NOT NULL DEFAULT 'draft',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+ALTER TABLE public.quantyx_entity_mappings
+  ADD COLUMN IF NOT EXISTS candidates JSONB,
+  ADD COLUMN IF NOT EXISTS low_confidence_candidates JSONB,
+  ADD COLUMN IF NOT EXISTS low_confidence_threshold NUMERIC,
+  ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS tables JSONB;
 
-CREATE INDEX IF NOT EXISTS idx_quantyx_entity_mappings_scope
-  ON public.quantyx_entity_mappings (tenant_id, domain_id, connection_id, created_at DESC);
+UPDATE public.quantyx_entity_mappings
+  SET tables = COALESCE(tables, '[]'::jsonb)
+  WHERE tables IS NULL;
 
-CREATE TABLE IF NOT EXISTS public.quantyx_facts_registry (
-  fact_id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
-  domain_id TEXT NOT NULL,
-  connection_id TEXT NOT NULL,
-  database_name TEXT NOT NULL,
-  schema_name TEXT NOT NULL,
-  name TEXT NOT NULL,
-  grain TEXT NULL,
-  time_column TEXT NULL,
-  measures TEXT[] NOT NULL DEFAULT '{}'::text[],
-  dimensions TEXT[] NOT NULL DEFAULT '{}'::text[],
-  description TEXT NULL,
-  status TEXT NOT NULL DEFAULT 'draft',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_quantyx_facts_registry_scope
-  ON public.quantyx_facts_registry (tenant_id, domain_id, connection_id, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS public.quantyx_dimensions_registry (
-  dimension_id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
-  domain_id TEXT NOT NULL,
-  connection_id TEXT NOT NULL,
-  database_name TEXT NOT NULL,
-  schema_name TEXT NOT NULL,
-  name TEXT NOT NULL,
-  keys TEXT[] NOT NULL DEFAULT '{}'::text[],
-  attributes TEXT[] NOT NULL DEFAULT '{}'::text[],
-  description TEXT NULL,
-  status TEXT NOT NULL DEFAULT 'draft',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_quantyx_dimensions_registry_scope
-  ON public.quantyx_dimensions_registry (tenant_id, domain_id, connection_id, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS public.quantyx_review_events (
-  review_id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
-  domain_id TEXT NOT NULL,
-  connection_id TEXT NOT NULL,
-  database_name TEXT NOT NULL,
-  schema_name TEXT NOT NULL,
-  artifact_type TEXT NOT NULL,
-  artifact_id TEXT NOT NULL,
-  status TEXT NOT NULL,
-  notes TEXT NULL,
-  payload JSONB NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_quantyx_review_events_scope
-  ON public.quantyx_review_events (tenant_id, domain_id, connection_id, artifact_type, created_at DESC);
+ALTER TABLE public.quantyx_entity_mappings
+  ALTER COLUMN tables SET DEFAULT '[]'::jsonb;
