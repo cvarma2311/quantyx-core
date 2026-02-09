@@ -299,6 +299,9 @@ Optional:
 
 ## Storage schema
 
+Apply via:
+- `./scripts/create_quantyx_tables.sh`
+
 ### 1) Scope table (separate from jobs)
 
 ```sql
