@@ -374,6 +374,17 @@ Connection-scoped onboarding and multi-context apply details are defined in
 ### 3.1 POST /onboard/scan-connection
 Scan multiple user-provided connections and return schema profiles with cursor pagination.
 
+Async variant:
+
+```
+POST /onboard/scan-connection/async
+```
+
+Response (202):
+```json
+{ "job_id": "job_123", "status": "queued" }
+```
+
 Request:
 ```json
 {
@@ -440,6 +451,7 @@ Response:
 Notes:
 - Currently supported for `db_type=postgres`.
 - `sample_rows` is capped at 100 for safety.
+- Use the async endpoint for large schemas and poll `GET /jobs/{job_id}`.
 
 ### 3.2 POST /context/ingest
 Store customer-provided business context (glossary, abbreviations, table/column notes, hierarchies, and example questions).
@@ -540,6 +552,17 @@ Response:
 ### 3.6 POST /onboard/map?domain_id=...&tenant_id=...&use_llm=...
 Suggest ontology mappings from schema columns to the selected domain pack.
 
+Async variant:
+
+```
+POST /onboard/map/async
+```
+
+Response (202):
+```json
+{ "job_id": "job_124", "status": "queued" }
+```
+
 Request:
 ```json
 {
@@ -568,9 +591,21 @@ Response:
 
 Notes:
 - Set `use_llm=true` to include LLM-assisted suggestions when `OPENAI_API_KEY` is configured.
+- Use the async endpoint for large schemas and poll `GET /jobs/{job_id}`.
 
 ### 3.7 POST /onboard/infer-models?domain_id=...
 Infer candidate dbt facts and dimensions from schema scan + ontology.
+
+Async variant:
+
+```
+POST /onboard/infer-models/async
+```
+
+Response (202):
+```json
+{ "job_id": "job_125", "status": "queued" }
+```
 
 Request:
 ```json
@@ -610,6 +645,17 @@ Response:
 
 ### 3.8 POST /metrics/suggested?domain_id=...&persist=true
 Return auto-generated metrics (status = suggested), including a low-confidence bucket.
+
+Async variant:
+
+```
+POST /metrics/suggested/async
+```
+
+Response (202):
+```json
+{ "job_id": "job_126", "status": "queued" }
+```
 
 Request:
 ```json
@@ -861,6 +907,210 @@ Admin-only. Apply reviewed scaffold to dbt project and compile.
 Response:
 ```json
 { "ok": true, "status": "applied" }
+```
+
+---
+
+## 3a) Jobs APIs (Async)
+
+These endpoints support long-running onboarding tasks (scan, map, infer, metrics).
+All job status values are ENUM: `queued`, `running`, `completed`, `failed`, `canceled`.
+
+### 3a.1 POST /jobs
+Submit a job using the same payload as the synchronous endpoint.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "job_type": "scan_connection",
+  "payload": {
+    "tenant_id": "tenant_a",
+    "connections": [
+      {
+        "connection_id": "conn_prod",
+        "db_type": "postgres",
+        "host": "db.company.com",
+        "port": 5432,
+        "user": "readonly_user",
+        "password": "******",
+        "sample_rows": 100,
+        "databases": [
+          {
+            "name": "prod_warehouse",
+            "schemas": [
+              { "name": "public", "tables": ["fact_production_daily"] }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "idempotency_key": "client-123"
+}
+```
+
+Response (202):
+```json
+{ "job_id": "job_123", "status": "queued" }
+```
+
+Idempotency example (same idempotency_key returns existing job):
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "job_type": "scan_connection",
+  "payload": {
+    "tenant_id": "tenant_a",
+    "connections": [
+      {
+        "connection_id": "conn_prod",
+        "db_type": "postgres",
+        "host": "db.company.com",
+        "port": 5432,
+        "user": "readonly_user",
+        "password": "******",
+        "sample_rows": 100,
+        "databases": [
+          { "name": "prod_warehouse", "schemas": [{ "name": "public" }] }
+        ]
+      }
+    ]
+  },
+  "idempotency_key": "client-123"
+}
+```
+
+Response (202):
+```json
+{ "job_id": "job_123", "status": "queued" }
+```
+
+Response on repeated submit with same idempotency_key:
+```json
+{ "job_id": "job_123", "status": "queued" }
+```
+
+### 3a.2 GET /jobs/{job_id}
+Get the current job status (poll).
+
+Response:
+```json
+{
+  "job_id": "job_123",
+  "job_type": "scan_connection",
+  "status": "running",
+  "progress_pct": 35,
+  "progress_stage": "scan.schema:public",
+  "scope_id": "scope_456",
+  "error_message": null
+}
+```
+
+### 3a.3 GET /jobs/{job_id}/result
+Fetch results once completed.
+
+If still running: returns 202 with status and no result payload.
+
+Pending (202):
+```json
+{
+  "job_id": "job_123",
+  "status": "running",
+  "result": null
+}
+```
+
+Completed:
+```json
+{
+  "job_id": "job_123",
+  "status": "completed",
+  "result": { "connections": [] }
+}
+```
+
+Failed:
+```json
+{
+  "job_id": "job_123",
+  "status": "failed",
+  "error_message": "Connection timeout",
+  "result": null
+}
+```
+
+Canceled:
+```json
+{
+  "job_id": "job_123",
+  "status": "canceled",
+  "error_message": "Canceled by user request",
+  "result": null
+}
+```
+
+### 3a.4 GET /jobs
+List jobs for a tenant.
+
+Request:
+```
+GET /jobs?tenant_id=tenant_a&status=running&limit=50
+```
+
+Filter by job_type + cursor:
+```
+GET /jobs?tenant_id=tenant_a&job_type=scan_connection&status=running&limit=50&cursor=2025-02-14T10:01:00Z
+```
+
+Response:
+```json
+{
+  "jobs": [
+    {
+      "job_id": "job_123",
+      "job_type": "scan_connection",
+      "status": "running",
+      "scope_id": "scope_456",
+      "created_at": "2025-02-14T10:00:00Z",
+      "updated_at": "2025-02-14T10:01:00Z"
+    }
+  ],
+  "limit": 50,
+  "cursor": null,
+  "next_cursor": null
+}
+```
+
+### 3a.5 POST /jobs/{job_id}/cancel
+Cancel a queued or running job.
+
+Response:
+```json
+{ "job_id": "job_123", "status": "canceled" }
+```
+
+Cancel while running (same response shape):
+```json
+{ "job_id": "job_123", "status": "canceled" }
+```
+
+Async endpoint examples:
+
+```
+POST /onboard/scan-connection/async
+POST /onboard/map/async
+POST /onboard/infer-models/async
+POST /metrics/suggested/async
+```
+
+All async endpoints return:
+```json
+{ "job_id": "job_123", "status": "queued" }
 ```
 
 ---

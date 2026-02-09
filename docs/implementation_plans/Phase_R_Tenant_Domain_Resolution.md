@@ -131,6 +131,131 @@ Affected endpoints (examples):
 
 **All will resolve domain_id based on tenant_id.**
 
+#### Swagger example updates (representative)
+
+POST /tenant/domain
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing"
+}
+```
+
+GET /tenant/domain?tenant_id=tenant_a
+
+POST /onboard/scan-connection
+```json
+{
+  "tenant_id": "tenant_a",
+  "connections": [
+    {
+      "connection_id": "conn_prod",
+      "db_type": "postgres",
+      "host": "db.company.com",
+      "port": 5432,
+      "user": "readonly_user",
+      "password": "******",
+      "sample_rows": 100,
+      "databases": [
+        {
+          "name": "prod_warehouse",
+          "schemas": [
+            {
+              "name": "public",
+              "tables": ["fact_sales"],
+              "limit": 20
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+POST /onboard/map
+```json
+{
+  "tenant_id": "tenant_a",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "tables": ["fact_sales"]
+}
+```
+
+POST /onboard/infer-models
+```json
+{
+  "tenant_id": "tenant_a",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "tables": ["fact_sales"],
+  "grain": "day",
+  "use_llm": true
+}
+```
+
+POST /metrics/suggested
+```json
+{
+  "tenant_id": "tenant_a",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "tables": ["fact_sales"]
+}
+```
+
+POST /metrics
+```json
+{
+  "tenant_id": "tenant_a",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "tables": ["fact_sales"],
+  "metric_name": "total_sales",
+  "type": "sum",
+  "sql": "{{ ref('fact_sales') }}.sales_amount",
+  "grain": "day",
+  "dimensions": ["sales_area_name"]
+}
+```
+
+GET /metrics?tenant_id=tenant_a&connection_id=conn_prod&database=prod_warehouse&schema=public
+
+POST /facts
+```json
+{
+  "tenant_id": "tenant_a",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "name": "fact_sales",
+  "grain": "day",
+  "time_column": "sales_date",
+  "measures": ["sales_amount"],
+  "dimensions": ["sales_area_name"]
+}
+```
+
+POST /dimensions
+```json
+{
+  "tenant_id": "tenant_a",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "name": "dim_customer",
+  "keys": ["customer_id"],
+  "attributes": ["customer_name", "region_name"]
+}
+```
+
+GET /review/summary?tenant_id=tenant_a&connection_id=conn_prod&database=prod_warehouse&schema=public
+
 ### 5.2 Remove tenant_id from POST query params
 
 Rules:
@@ -210,4 +335,3 @@ Body:
 ```
 
 Domain resolved from `quantyx_tenant_domains`.
-

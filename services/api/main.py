@@ -6,14 +6,16 @@ import base64
 import io
 import json
 import logging
+import os
 import time
 import re
+import threading
 import uuid
 import zipfile
 import xml.etree.ElementTree as ElementTree
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
 
 from services.ai.catalog import load_catalog_with_registry, resolve_ref
 from services.ai.config import load_settings
@@ -121,6 +123,15 @@ from services.ai.context_apply import apply_extractions
 from services.ai.glossary import fetch_glossary_terms
 from services.ai.sql_builder import Filter, build_query
 from services.ai.tenant_domain import get_tenant_domain, upsert_tenant_domain
+from services.ai.jobs_store import (
+    claim_next_job,
+    create_job,
+    get_job,
+    get_job_result as fetch_job_result,
+    list_jobs as fetch_jobs,
+    update_job_progress,
+    update_job_status,
+)
 from services.api.schemas import (
     EntitiesResponse,
     EntitiesAllResponse,
@@ -199,6 +210,12 @@ from services.api.schemas import (
     TimeSeriesRequest,
     TimeSeriesResponse,
     InsightDetailWithContextResponse,
+    JobCancelResponse,
+    JobCreateRequest,
+    JobCreateResponse,
+    JobListResponse,
+    JobResultResponse,
+    JobStatusResponse,
 )
 from services.api.validators import (
     extract_scope_from_metadata,
@@ -218,6 +235,97 @@ app = FastAPI(title="quantyx-core-services API", version="0.1.0")
 settings = load_settings()
 catalog = load_catalog_with_registry(settings, settings.metrics_catalog_path)
 LOW_CONFIDENCE_THRESHOLD = 0.7
+JOB_TYPES = {"scan_connection", "map_entities", "infer_models", "metrics_suggested"}
+_job_worker_stop = threading.Event()
+_job_worker_thread: threading.Thread | None = None
+
+
+def _load_job_payload(payload: dict | str | None) -> dict:
+    if payload is None:
+        return {}
+    if isinstance(payload, str):
+        return json.loads(payload)
+    return payload
+
+
+def _execute_job(job: dict) -> dict:
+    job_type = job.get("job_type")
+    payload = _load_job_payload(job.get("request_payload"))
+    if job_type == "scan_connection":
+        generate_dbt = payload.pop("generate_dbt", True)
+        request = OnboardScanMultiConnectionRequest(**payload)
+        response = _run_scan_connection(
+            request,
+            generate_dbt,
+            progress_cb=lambda pct, stage: update_job_progress(settings, job.get("job_id"), pct, stage),
+        )
+        return response.model_dump()
+    if job_type == "map_entities":
+        use_llm = payload.pop("use_llm", True)
+        request = OnboardScanRequest(**payload)
+        response = onboard_map(request, use_llm=use_llm)
+        return response.model_dump()
+    if job_type == "infer_models":
+        request = InferModelsRequest(**payload)
+        response = infer_models(request)
+        return response.model_dump()
+    if job_type == "metrics_suggested":
+        persist = payload.pop("persist", True)
+        request = OnboardScanRequest(**payload)
+        response = suggested_metrics(request, persist=persist)
+        return response.model_dump()
+    raise ValueError(f"Unsupported job_type: {job_type}")
+
+
+def _job_worker_loop() -> None:
+    poll_seconds = float(os.getenv("JOB_WORKER_POLL_SEC", "2"))
+    logger.info("Job worker started (poll=%ss)", poll_seconds)
+    while not _job_worker_stop.is_set():
+        job = claim_next_job(settings)
+        if not job:
+            _job_worker_stop.wait(poll_seconds)
+            continue
+        job_id = job.get("job_id")
+        try:
+            current = get_job(settings, job_id)
+            if current and current.get("status") == "canceled":
+                continue
+            update_job_progress(settings, job_id, progress_pct=0, progress_stage="started")
+            result = _execute_job(job)
+            current = get_job(settings, job_id)
+            if current and current.get("status") == "canceled":
+                update_job_status(
+                    settings,
+                    job_id,
+                    "canceled",
+                    result_payload=None,
+                    error_message=current.get("error_message") or "Canceled by user request",
+                )
+                continue
+            update_job_progress(settings, job_id, progress_pct=100, progress_stage="completed")
+            update_job_status(settings, job_id, "completed", result_payload=result, error_message=None)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Job failed: %s", job_id)
+            update_job_status(settings, job_id, "failed", result_payload=None, error_message=str(exc))
+    logger.info("Job worker stopped")
+
+
+@app.on_event("startup")
+def _start_job_worker() -> None:
+    enabled = os.getenv("JOB_WORKER_ENABLED", "true").lower() not in {"0", "false", "no"}
+    global _job_worker_thread
+    if not enabled:
+        logger.info("Job worker disabled via JOB_WORKER_ENABLED")
+        return
+    if _job_worker_thread and _job_worker_thread.is_alive():
+        return
+    _job_worker_thread = threading.Thread(target=_job_worker_loop, name="job-worker", daemon=True)
+    _job_worker_thread.start()
+
+
+@app.on_event("shutdown")
+def _stop_job_worker() -> None:
+    _job_worker_stop.set()
 ALLOWED_METRIC_TYPES = {"sum", "average", "avg", "ratio", "derived"}
 T = TypeVar("T")
 
@@ -385,6 +493,264 @@ def _log_scan_step(step: str, details: dict | None = None) -> None:
 )
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.post(
+    "/jobs",
+    response_model=JobCreateResponse,
+    status_code=202,
+    tags=["jobs"],
+    summary="Submit async job",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "scan_job": {
+                            "summary": "Scan connection job",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "domain_id": "manufacturing",
+                                "job_type": "scan_connection",
+                                "payload": {
+                                    "tenant_id": "tenant_a",
+                                    "connections": [
+                                        {
+                                            "connection_id": "conn_prod",
+                                            "db_type": "postgres",
+                                            "host": "db.company.com",
+                                            "port": 5432,
+                                            "user": "readonly_user",
+                                            "password": "******",
+                                            "sample_rows": 100,
+                                            "databases": [
+                                                {
+                                                    "name": "prod_warehouse",
+                                                    "schemas": [
+                                                        {"name": "public", "tables": ["fact_production_daily"]}
+                                                    ],
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                },
+                                "idempotency_key": "client-123",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "202": {
+                "content": {
+                    "application/json": {"examples": {"queued": {"value": {"job_id": "job_123", "status": "queued"}}}}
+                }
+            }
+        },
+    },
+)
+def submit_job(request: JobCreateRequest) -> JobCreateResponse:
+    if request.job_type not in JOB_TYPES:
+        raise HTTPException(status_code=400, detail="Unsupported job_type")
+    payload = dict(request.payload or {})
+    if payload.get("tenant_id") and payload["tenant_id"] != request.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id mismatch in payload")
+    payload.setdefault("tenant_id", request.tenant_id)
+    domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+    if request.job_type == "scan_connection":
+        payload.setdefault("domain_id", domain_id)
+    job = create_job(
+        settings,
+        tenant_id=request.tenant_id,
+        domain_id=domain_id,
+        job_type=request.job_type,
+        payload=payload,
+        idempotency_key=request.idempotency_key,
+    )
+    return JobCreateResponse(job_id=job["job_id"], status=job["status"])
+
+
+@app.get(
+    "/jobs/{job_id}",
+    response_model=JobStatusResponse,
+    tags=["jobs"],
+    summary="Get job status",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "running": {
+                                "value": {
+                                    "job_id": "job_123",
+                                    "job_type": "scan_connection",
+                                    "status": "running",
+                                    "progress_pct": 35,
+                                    "progress_stage": "scan.schema:public",
+                                    "scope_id": "scope_456",
+                                    "error_message": None,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_job_status(job_id: str) -> JobStatusResponse:
+    job = get_job(settings, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JobStatusResponse(**job)
+
+
+@app.get(
+    "/jobs/{job_id}/result",
+    response_model=JobResultResponse,
+    tags=["jobs"],
+    summary="Get job result",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "completed": {
+                                "value": {
+                                    "job_id": "job_123",
+                                    "status": "completed",
+                                    "result": {"connections": []},
+                                }
+                            },
+                            "failed": {
+                                "value": {
+                                    "job_id": "job_123",
+                                    "status": "failed",
+                                    "error_message": "Connection timeout",
+                                    "result": None,
+                                }
+                            },
+                        }
+                    }
+                }
+            },
+            "202": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "pending": {"value": {"job_id": "job_123", "status": "running", "result": None}}
+                        }
+                    }
+                }
+            },
+        }
+    },
+)
+def get_job_result(job_id: str, response: Response) -> JobResultResponse:
+    job = fetch_job_result(settings, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    status_value = job.get("status")
+    if status_value in {"queued", "running"}:
+        response.status_code = 202
+        return JobResultResponse(job_id=job_id, status=status_value, result=None, error_message=None)
+    if status_value in {"failed", "canceled"}:
+        return JobResultResponse(
+            job_id=job_id,
+            status=status_value,
+            result=None,
+            error_message=job.get("error_message"),
+        )
+    return JobResultResponse(
+        job_id=job_id,
+        status=status_value,
+        result=job.get("result_payload"),
+        error_message=None,
+    )
+
+
+@app.get(
+    "/jobs",
+    response_model=JobListResponse,
+    tags=["jobs"],
+    summary="List jobs",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "jobs": {
+                                "value": {
+                                    "jobs": [
+                                        {
+                                            "job_id": "job_123",
+                                            "job_type": "scan_connection",
+                                            "status": "running",
+                                            "scope_id": "scope_456",
+                                            "created_at": "2025-02-14T10:00:00Z",
+                                            "updated_at": "2025-02-14T10:01:00Z",
+                                        }
+                                    ],
+                                    "limit": 50,
+                                    "cursor": None,
+                                    "next_cursor": None,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_jobs(
+    tenant_id: str,
+    job_type: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> JobListResponse:
+    payload = fetch_jobs(
+        settings,
+        tenant_id=tenant_id,
+        job_type=job_type,
+        status=status,
+        limit=limit,
+        cursor=cursor,
+    )
+    return JobListResponse(**payload)
+
+
+@app.post(
+    "/jobs/{job_id}/cancel",
+    response_model=JobCancelResponse,
+    tags=["jobs"],
+    summary="Cancel job",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {"canceled": {"value": {"job_id": "job_123", "status": "canceled"}}}
+                    }
+                }
+            }
+        }
+    },
+)
+def cancel_job(job_id: str) -> JobCancelResponse:
+    job = get_job(settings, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    status_value = job.get("status")
+    if status_value in {"queued", "running"}:
+        update_job_status(settings, job_id, "canceled", result_payload=None, error_message="Canceled by user request")
+        status_value = "canceled"
+    return JobCancelResponse(job_id=job_id, status=status_value)
 
 
 @app.post(
@@ -3500,18 +3866,18 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
 
 
 @app.post(
-    "/onboard/scan-connection",
-    response_model=OnboardScanConnectionResponse,
+    "/onboard/scan-connection/async",
+    response_model=JobCreateResponse,
+    status_code=202,
     tags=["onboard"],
-    summary="Scan provided connections",
-    description="Scan tables and columns for multiple connections (sample_rows capped at 100).",
+    summary="Scan provided connections (async)",
     openapi_extra={
         "requestBody": {
             "content": {
                 "application/json": {
                     "examples": {
-                        "scan_connections": {
-                            "summary": "Scan multiple connections",
+                        "scan_connections_async": {
+                            "summary": "Scan multiple connections (async)",
                             "value": {
                                 "tenant_id": "tenant_a",
                                 "connections": [
@@ -3545,62 +3911,51 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
             }
         },
         "responses": {
-            "200": {
+            "202": {
                 "content": {
-                    "application/json": {
-                        "examples": {
-                            "scan_result": {
-                                "summary": "Scan results",
-                                "value": {
-                                    "connections": [
-                                        {
-                                            "connection_id": "conn_prod",
-                                            "databases": [
-                                                {
-                                                    "name": "prod_warehouse",
-                                                    "schemas": [
-                                                        {
-                                                            "name": "public",
-                                                            "tables": [
-                                                                {
-                                                                    "table": "fact_production_daily",
-                                                                    "columns": [
-                                                                        {
-                                                                            "name": "production_date",
-                                                                            "data_type": "date",
-                                                                            "null_frac": 0.0,
-                                                                            "distinct": 365,
-                                                                            "profile": {"min": "2024-01-01", "max": "2024-12-31"},
-                                                                        }
-                                                                    ],
-                                                                }
-                                                            ],
-                                                            "limit": 20,
-                                                            "cursor": None,
-                                                            "next_cursor": "ZmFjdF9wcm9kdWN0aW9uX2RhaWx5",
-                                                        }
-                                                    ],
-                                                }
-                                            ],
-                                        }
-                                    ]
-                                },
-                            }
-                        }
-                    }
+                    "application/json": {"examples": {"queued": {"value": {"job_id": "job_123", "status": "queued"}}}}
                 }
             }
         },
     },
 )
-def onboard_scan_connection(
+def onboard_scan_connection_async(
     request: OnboardScanMultiConnectionRequest,
     generate_dbt: bool = True,
+) -> JobCreateResponse:
+    tenant_id = request.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, request.domain_id)
+    payload = request.model_dump()
+    payload["generate_dbt"] = generate_dbt
+    job = create_job(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        job_type="scan_connection",
+        payload=payload,
+    )
+    return JobCreateResponse(job_id=job["job_id"], status=job["status"])
+
+
+def _run_scan_connection(
+    request: OnboardScanMultiConnectionRequest,
+    generate_dbt: bool,
+    progress_cb: Callable[[int, str], None] | None = None,
 ) -> OnboardScanConnectionResponse:
     tenant_id = request.tenant_id
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(tenant_id, request.domain_id)
+    total_schemas = sum(
+        len(database.schemas)
+        for connection in request.connections
+        for database in connection.databases
+    )
+    scanned_schemas = 0
+    if progress_cb:
+        progress_cb(0, "scan.start")
     _log_scan_step(
         "start",
         {
@@ -3668,6 +4023,10 @@ def onboard_scan_connection(
                     }
                 )
                 scopes.append((database.name, schema.name))
+                scanned_schemas += 1
+                if progress_cb and total_schemas > 0:
+                    pct = int((scanned_schemas / total_schemas) * 80)
+                    progress_cb(min(pct, 80), f"scan.schema:{schema.name}")
             databases_payload.append({"name": database.name, "schemas": schemas_payload})
             _log_scan_step(
                 "database.complete",
@@ -3692,6 +4051,8 @@ def onboard_scan_connection(
         domain_id=domain_id,
     )
     _log_scan_step("persisted.scan", {"tenant_id": tenant_id, "domain_id": domain_id})
+    if progress_cb:
+        progress_cb(85, "scan.persisted")
 
     if generate_dbt:
         try:
@@ -3826,8 +4187,111 @@ def onboard_scan_connection(
             logger.warning("dbt manifest generation skipped: %s", exc)
             _log_scan_step("dbt.error", {"error": str(exc)})
 
+    if progress_cb:
+        progress_cb(100, "scan.complete")
     _log_scan_step("complete", {"tenant_id": tenant_id, "domain_id": domain_id})
     return OnboardScanConnectionResponse(connections=connections_payload)
+
+
+@app.post(
+    "/onboard/scan-connection",
+    response_model=OnboardScanConnectionResponse,
+    tags=["onboard"],
+    summary="Scan provided connections",
+    description="Scan tables and columns for multiple connections (sample_rows capped at 100).",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "scan_connections": {
+                            "summary": "Scan multiple connections",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "connections": [
+                                    {
+                                        "connection_id": "conn_prod",
+                                        "db_type": "postgres",
+                                        "host": "db.company.com",
+                                        "port": 5432,
+                                        "user": "readonly_user",
+                                        "password": "******",
+                                        "sample_rows": 100,
+                                        "databases": [
+                                            {
+                                                "name": "prod_warehouse",
+                                                "schemas": [
+                                                    {
+                                                        "name": "public",
+                                                        "tables": ["fact_production_daily"],
+                                                        "limit": 20,
+                                                        "cursor": None,
+                                                    }
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "scan_result": {
+                                "summary": "Scan results",
+                                "value": {
+                                    "connections": [
+                                        {
+                                            "connection_id": "conn_prod",
+                                            "databases": [
+                                                {
+                                                    "name": "prod_warehouse",
+                                                    "schemas": [
+                                                        {
+                                                            "name": "public",
+                                                            "tables": [
+                                                                {
+                                                                    "table": "fact_production_daily",
+                                                                    "columns": [
+                                                                        {
+                                                                            "name": "production_date",
+                                                                            "data_type": "date",
+                                                                            "null_frac": 0.0,
+                                                                            "distinct": 365,
+                                                                            "profile": {"min": "2024-01-01", "max": "2024-12-31"},
+                                                                        }
+                                                                    ],
+                                                                }
+                                                            ],
+                                                            "limit": 20,
+                                                            "cursor": None,
+                                                            "next_cursor": "ZmFjdF9wcm9kdWN0aW9uX2RhaWx5",
+                                                        }
+                                                    ],
+                                                }
+                                            ],
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def onboard_scan_connection(
+    request: OnboardScanMultiConnectionRequest,
+    generate_dbt: bool = True,
+) -> OnboardScanConnectionResponse:
+    return _run_scan_connection(request, generate_dbt, progress_cb=None)
 
 
 def _merge_entity_candidates(
@@ -3844,6 +4308,60 @@ def _merge_entity_candidates(
         if not existing or candidate.get("confidence", 0) > existing.get("confidence", 0):
             merged[key] = {**candidate, "source": "llm"}
     return list(merged.values())
+
+
+@app.post(
+    "/onboard/map/async",
+    response_model=JobCreateResponse,
+    status_code=202,
+    tags=["onboard"],
+    summary="Map schema to ontology (async)",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "map_async": {
+                            "summary": "Map schema (async)",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "schema": "public",
+                                "tables": ["fact_production_daily", "dim_plant"],
+                                "connection_id": "conn_prod",
+                                "database": "prod_warehouse",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "202": {
+                "content": {
+                    "application/json": {"examples": {"queued": {"value": {"job_id": "job_124", "status": "queued"}}}}
+                }
+            }
+        },
+    },
+)
+def onboard_map_async(
+    request: OnboardScanRequest,
+    use_llm: bool = True,
+) -> JobCreateResponse:
+    tenant_id = request.tenant_id
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, None)
+    payload = request.model_dump()
+    payload["use_llm"] = use_llm
+    job = create_job(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        job_type="map_entities",
+        payload=payload,
+    )
+    return JobCreateResponse(job_id=job["job_id"], status=job["status"])
 
 
 @app.post(
@@ -4055,6 +4573,57 @@ def _merge_models(rule_facts: list[dict], rule_dims: list[dict], llm_payload: di
 
 
 @app.post(
+    "/onboard/infer-models/async",
+    response_model=JobCreateResponse,
+    status_code=202,
+    tags=["onboard"],
+    summary="Infer facts and dimensions (async)",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "infer_async": {
+                            "summary": "Infer models (async)",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "schema": "public",
+                                "tables": ["fact_production_daily", "dim_plant"],
+                                "grain": "day",
+                                "use_llm": False,
+                                "connection_id": "conn_prod",
+                                "database": "prod_warehouse",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "202": {
+                "content": {
+                    "application/json": {"examples": {"queued": {"value": {"job_id": "job_125", "status": "queued"}}}}
+                }
+            }
+        },
+    },
+)
+def infer_models_async(request: InferModelsRequest) -> JobCreateResponse:
+    if not request.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(request.tenant_id, None)
+    payload = request.model_dump()
+    job = create_job(
+        settings,
+        tenant_id=request.tenant_id,
+        domain_id=domain_id,
+        job_type="infer_models",
+        payload=payload,
+    )
+    return JobCreateResponse(job_id=job["job_id"], status=job["status"])
+
+
+@app.post(
     "/onboard/infer-models",
     response_model=InferModelsResponse,
     tags=["onboard"],
@@ -4147,6 +4716,59 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     return InferModelsResponse(facts=facts, dimensions=dims)
+
+
+@app.post(
+    "/metrics/suggested/async",
+    response_model=JobCreateResponse,
+    status_code=202,
+    tags=["onboard"],
+    summary="Suggest metrics (async)",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "metrics_async": {
+                            "summary": "Suggest metrics (async)",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "schema": "public",
+                                "tables": ["fact_production_daily"],
+                                "connection_id": "conn_prod",
+                                "database": "prod_warehouse",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "202": {
+                "content": {
+                    "application/json": {"examples": {"queued": {"value": {"job_id": "job_126", "status": "queued"}}}}
+                }
+            }
+        },
+    },
+)
+def suggested_metrics_async(
+    request: OnboardScanRequest,
+    persist: bool = False,
+) -> JobCreateResponse:
+    if not request.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(request.tenant_id, None)
+    payload = request.model_dump()
+    payload["persist"] = persist
+    job = create_job(
+        settings,
+        tenant_id=request.tenant_id,
+        domain_id=domain_id,
+        job_type="metrics_suggested",
+        payload=payload,
+    )
+    return JobCreateResponse(job_id=job["job_id"], status=job["status"])
 
 
 @app.post(

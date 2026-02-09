@@ -410,7 +410,7 @@ def main() -> int:
 
     # 6) Suggested metrics (persist)
     print("\n[6] Suggested metrics (persist)")
-    print("Step 5 start")
+    print("Step 6 start")
     metrics_payload = {
         "tenant_id": TENANT_ID,
         "schema": schemas[0] if schemas else "public",
@@ -423,11 +423,26 @@ def main() -> int:
     _log_request("POST", suggested_path, metrics_payload)
     suggested = _request("POST", suggested_path, metrics_payload)
     _log_response(suggested)
-    print("Step 5 end")
+    print("Step 6 end")
 
-    # 7) Promote first suggested metric (if present)
-    print("\n[7] Promote a metric")
+    # 7) Metrics catalog (review)
+    print("\n[7] Metrics catalog (review)")
     print("Step 7 start")
+    metrics_path = (
+        f"/metrics?tenant_id={TENANT_ID}"
+        f"&domain_id={DOMAIN_ID}"
+        f"&connection_id={CONNECTION_ID}"
+        f"&database={os.getenv('DEMO_DB_NAME', 'prod_warehouse')}"
+        f"&schema={os.getenv('DEMO_DB_SCHEMA', 'public')}"
+    )
+    _log_request("GET", metrics_path)
+    metrics_response = _request("GET", metrics_path)
+    _log_response(metrics_response)
+    print("Step 7 end")
+
+    # 8) Promote first suggested metric (if present)
+    print("\n[8] Promote a metric")
+    print("Step 8 start")
     if suggested.get("measures"):
         measure = suggested["measures"][0]
         metric_id = f"{DOMAIN_ID}__{measure['table']}__{measure['column']}"
@@ -448,19 +463,19 @@ def main() -> int:
         _log_response(patch_response)
     else:
         print("No measures found to promote.")
-    print("Step 7 end")
+    print("Step 8 end")
 
-    # 8) Apply contracts
-    print("\n[8] Apply contracts")
-    print("Step 8 start")
+    # 9) Apply contracts
+    print("\n[9] Apply contracts")
+    print("Step 9 start")
     _log_request("POST", "/contracts/apply", {})
     apply_response = _request("POST", "/contracts/apply", {})
     _log_response(apply_response)
-    print("Step 8 end")
+    print("Step 9 end")
 
-    # 9) Review summary
-    print("\n[9] Review summary")
-    print("Step 9 start")
+    # 10) Review summary
+    print("\n[10] Review summary")
+    print("Step 10 start")
     review_path = (
         f"/review/summary?tenant_id={TENANT_ID}"
         f"&domain_id={DOMAIN_ID}"
@@ -471,7 +486,7 @@ def main() -> int:
     _log_request("GET", review_path)
     review_response = _request("GET", review_path)
     _log_response(review_response)
-    print("Step 9 end")
+    print("Step 10 end")
 
     print("\n== Demo complete ==")
     return 0

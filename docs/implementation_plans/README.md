@@ -40,6 +40,8 @@ dependency order.
    - `Phase_O_Automated_Dbt_Manifest.md`
 13) Phase P - Automated dbt Scaffolding (LLM-Assisted, Human Review)
    - `Phase_P_Automated_Dbt_Scaffolding.md`
+14) Phase S - Async Onboarding Jobs (Scan, Map, Infer, Metrics)
+   - `Phase_S_Async_Onboarding_Jobs.md`
 
 ## Dependencies (summary)
 

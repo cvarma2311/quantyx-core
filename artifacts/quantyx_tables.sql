@@ -199,6 +199,76 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_connection_scopes_db
   ON public.quantyx_connection_scopes (database_name, schema_name);
 
 
+DO $$
+BEGIN
+  CREATE TYPE public.quantyx_job_status AS ENUM (
+    'queued',
+    'running',
+    'completed',
+    'failed',
+    'canceled'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.quantyx_job_scopes (
+  scope_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NULL,
+  connection_id TEXT NULL,
+  database_name TEXT NULL,
+  schema_name TEXT NULL,
+  tables JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_job_scopes_tenant
+  ON public.quantyx_job_scopes (tenant_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_job_scopes_conn
+  ON public.quantyx_job_scopes (connection_id, database_name, schema_name);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_jobs (
+  job_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  scope_id TEXT NULL REFERENCES public.quantyx_job_scopes(scope_id),
+  job_type TEXT NOT NULL,
+  status public.quantyx_job_status NOT NULL DEFAULT 'queued',
+  progress_pct NUMERIC NULL,
+  progress_stage TEXT NULL,
+  request_payload JSONB NOT NULL,
+  result_payload JSONB NULL,
+  error_message TEXT NULL,
+  idempotency_key TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at TIMESTAMPTZ NULL,
+  completed_at TIMESTAMPTZ NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_jobs_tenant_time
+  ON public.quantyx_jobs (tenant_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_jobs_status
+  ON public.quantyx_jobs (status, created_at ASC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quantyx_jobs_idempotency
+  ON public.quantyx_jobs (tenant_id, job_type, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.quantyx_job_events (
+  event_id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES public.quantyx_jobs(job_id),
+  status public.quantyx_job_status NOT NULL,
+  message TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_job_events_job
+  ON public.quantyx_job_events (job_id, created_at DESC);
+
+
 CREATE TABLE IF NOT EXISTS public.quantyx_tenant_domains (
   tenant_id TEXT PRIMARY KEY,
   domain_id TEXT NOT NULL,

@@ -32,13 +32,18 @@ Goal: provide a runnable demo that shows the full onboarding flow end-to-end.
    - `POST /onboard/infer-models`
    - Uses scan outputs
 
-6) **Suggested metrics**
+6) **Suggested metrics (generate)**
    - `POST /metrics/suggested?persist=true`
+   - Purpose: compute candidate metrics from scan + ontology and optionally persist them
 
-7) **Promote a metric**
+7) **Metrics catalog (review)**
+   - `GET /metrics`
+   - Purpose: list the current catalog (contracts + registry), including suggested/draft/certified
+
+8) **Promote a metric**
    - `PATCH /metrics/{metric_id}`
 
-8) **Apply contracts**
+9) **Apply contracts**
    - `POST /contracts/apply`
 
 ---

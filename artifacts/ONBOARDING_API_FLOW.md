@@ -65,6 +65,30 @@ POST /onboard/scan-connection
 
 Purpose: scan all tables from the customer-provided database and return profiles.
 
+Async variant (recommended for large schemas):
+
+POST /onboard/scan-connection/async
+
+Response:
+```json
+{ "job_id": "job_123", "status": "queued" }
+```
+
+Poll:
+GET /jobs/{job_id}
+
+Fetch results:
+GET /jobs/{job_id}/result
+
+Pending result example (202):
+```json
+{
+  "job_id": "job_123",
+  "status": "running",
+  "result": null
+}
+```
+
 Request:
 ```json
 {
@@ -233,6 +257,30 @@ POST /onboard/map?domain_id=manufacturing&tenant_id=tenant_a
 
 Purpose: map schema columns to ontology (rule + LLM, default `use_llm=true`). Stores a mapping run.
 
+Async variant (recommended for large schemas):
+
+POST /onboard/map/async
+
+Response:
+```json
+{ "job_id": "job_124", "status": "queued" }
+```
+
+Poll:
+GET /jobs/{job_id}
+
+Fetch results:
+GET /jobs/{job_id}/result
+
+Pending result example (202):
+```json
+{
+  "job_id": "job_124",
+  "status": "running",
+  "result": null
+}
+```
+
 Request:
 ```json
 {
@@ -311,6 +359,30 @@ GET /hierarchies?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_p
 POST /onboard/infer-models?domain_id=manufacturing
 
 Purpose: suggest candidate facts and dimensions based on the latest scan for the scope.
+
+Async variant (recommended for large schemas):
+
+POST /onboard/infer-models/async
+
+Response:
+```json
+{ "job_id": "job_125", "status": "queued" }
+```
+
+Poll:
+GET /jobs/{job_id}
+
+Fetch results:
+GET /jobs/{job_id}/result
+
+Pending result example (202):
+```json
+{
+  "job_id": "job_125",
+  "status": "running",
+  "result": null
+}
+```
 
 Request:
 ```json
@@ -417,11 +489,35 @@ Draft models must be reviewed before apply.
 
 ---
 
-## 10) Metrics suggestions + promotion (after facts/dims)
+## 10) Metrics suggestions + catalog review + promotion (after facts/dims)
 
 POST /metrics/suggested?domain_id=manufacturing&persist=true
 
-Purpose: auto-detect measures, time columns, entity candidates and persist to registry (scoped).
+Purpose: generate candidate metrics from scan + ontology and persist them to the registry (scoped).
+
+Async variant (recommended for large schemas):
+
+POST /metrics/suggested/async?persist=true
+
+Response:
+```json
+{ "job_id": "job_126", "status": "queued" }
+```
+
+Poll:
+GET /jobs/{job_id}
+
+Fetch results:
+GET /jobs/{job_id}/result
+
+Pending result example (202):
+```json
+{
+  "job_id": "job_126",
+  "status": "running",
+  "result": null
+}
+```
 
 Request:
 ```json
@@ -431,6 +527,30 @@ Request:
   "tables": ["fact_production_daily"],
   "connection_id": "conn_prod",
   "database": "prod_warehouse"
+}
+```
+
+Then list the catalog (suggested + draft + certified):
+
+GET /metrics?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+
+Response (example):
+```json
+{
+  "metrics": [
+    {
+      "metric_name": "total_sales",
+      "type": "sum",
+      "sql": "{{ ref('fact_sales') }}.sales_amount",
+      "grain": "day",
+      "dimensions": ["sales_area_name"],
+      "tables": ["fact_sales"],
+      "status": "certified"
+    }
+  ],
+  "limit": 200,
+  "cursor": null,
+  "next_cursor": null
 }
 ```
 
@@ -452,28 +572,6 @@ Request:
   "description": "Total production output in TMT",
   "dimensions": ["plant_name", "product_name", "fiscal_year"],
   "status": "certified"
-}
-```
-
-GET /metrics?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
-
-Response (example):
-```json
-{
-  "metrics": [
-    {
-      "metric_name": "total_sales",
-      "type": "sum",
-      "sql": "{{ ref('fact_sales') }}.sales_amount",
-      "grain": "day",
-      "dimensions": ["sales_area_name"],
-      "tables": ["fact_sales"],
-      "status": "certified"
-    }
-  ],
-  "limit": 200,
-  "cursor": null,
-  "next_cursor": null
 }
 ```
 

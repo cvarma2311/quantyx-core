@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
@@ -1372,6 +1373,67 @@ class SuggestedMetricsResponse(BaseModel):
             }
         }
     }
+
+
+class JobStatusEnum(str, Enum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    canceled = "canceled"
+
+
+class JobCreateRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
+    job_type: str = Field(..., examples=["scan_connection"])
+    payload: dict = Field(..., examples=[{"connections": []}])
+    idempotency_key: str | None = Field(None, examples=["client-key-123"])
+
+
+class JobCreateResponse(BaseModel):
+    job_id: str = Field(..., examples=["job_123"])
+    status: JobStatusEnum = Field(..., examples=["queued"])
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    job_type: str
+    status: JobStatusEnum
+    progress_pct: float | None = None
+    progress_stage: str | None = None
+    scope_id: str | None = None
+    error_message: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class JobResultResponse(BaseModel):
+    job_id: str
+    status: JobStatusEnum
+    result: dict | None = None
+    error_message: str | None = None
+
+
+class JobListItem(BaseModel):
+    job_id: str
+    job_type: str
+    status: JobStatusEnum
+    scope_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class JobListResponse(BaseModel):
+    jobs: List[JobListItem]
+    limit: int
+    cursor: str | None = None
+    next_cursor: str | None = None
+
+
+class JobCancelResponse(BaseModel):
+    job_id: str
+    status: JobStatusEnum
 
 
 class MetricUpsertRequest(BaseModel):
