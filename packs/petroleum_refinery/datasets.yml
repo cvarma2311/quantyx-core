@@ -1,0 +1,46 @@
+industry: petroleum_refinery
+version: 1
+
+datasets:
+  - name: dispatch_events
+    source_model: fact_dispatch
+    description: Lorry dispatch and load events by bay, product, and time
+  - name: throughput
+    source_model: fact_throughput
+    description: Metered throughput by location, bay, and product
+  - name: blending_runs
+    source_model: fact_blending
+    description: Blend or recipe execution runs and yields
+  - name: tank_levels
+    source_model: fact_tank_levels
+    description: Inventory levels by tank and product
+  - name: stock_movement
+    source_model: fact_stock_movement
+    description: Stock movement in and out of tanks and terminals
+  - name: zones
+    source_model: dim_zone
+    description: Zone master data
+  - name: locations
+    source_model: dim_location
+    description: Location master data
+  - name: bays
+    source_model: dim_bay
+    description: Bay master data
+  - name: fleets
+    source_model: dim_fleet
+    description: Fleet master data
+  - name: lorries
+    source_model: dim_lorry
+    description: Lorry master data
+  - name: meters
+    source_model: dim_mfm
+    description: Mass flow meter master data
+  - name: products
+    source_model: dim_product
+    description: Product master data (stock_code, product_name)
+  - name: recipes
+    source_model: dim_recipe
+    description: Recipe master data (recipe_name)
+  - name: tanks
+    source_model: dim_tank
+    description: Tank master data

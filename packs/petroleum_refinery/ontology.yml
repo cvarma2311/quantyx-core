@@ -1,0 +1,46 @@
+industry: petroleum_refinery
+version: 1
+
+title: Petroleum Refinery Ontology
+
+entity_types:
+  organizational_unit:
+    examples: [zone, location, bay]
+    description: Operational hierarchy for refinery and terminal locations
+    join_key: bay_name
+  fleet:
+    examples: [fleet]
+    description: Fleet grouping for lorries and transport assets
+    join_key: fleet_id
+  lorry:
+    examples: [lorry, truck]
+    description: Transport unit for dispatch and delivery
+    join_key: lorry_id
+  mass_flow_meter:
+    examples: [mfm, meter]
+    description: Metering device for volume/flow measurements
+    join_key: mfm_id
+  product:
+    examples: [stock_code, product_name]
+    description: Finished product or blend
+    join_key: stock_code
+  recipe:
+    examples: [recipe_name]
+    description: Blend or production recipe
+    join_key: recipe_name
+  tank:
+    examples: [tank]
+    description: Storage tank for inventory
+    join_key: tank_id
+  batch:
+    examples: [batch]
+    description: Production or blending batch identifier
+    join_key: batch_id
+  time:
+    examples: [shift, day, month, fiscal_year]
+    description: Time grains used for analysis
+
+hierarchies:
+  - name: ops_hierarchy
+    levels: [zone, location, bay]
+    description: Operational rollup for refinery and terminal locations

@@ -1,0 +1,17 @@
+industry: petroleum_refinery
+version: 1
+
+policies:
+  - name: exclude_test_locations
+    applies_to: all
+    filter:
+      column: location_name
+      operator: not_in
+      values: ["Test", "Demo"]
+
+  - name: suppress_small_groups
+    applies_to: query
+    filter:
+      column: lorry_id
+      operator: min_group_size
+      values: [5]

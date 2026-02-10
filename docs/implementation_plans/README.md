@@ -42,6 +42,8 @@ dependency order.
    - `Phase_P_Automated_Dbt_Scaffolding.md`
 14) Phase S - Async Onboarding Jobs (Scan, Map, Infer, Metrics)
    - `Phase_S_Async_Onboarding_Jobs.md`
+15) Phase T - Semantic Layer Enhancement (Logical Data Management)
+   - `Phase_T_Semantic_Layer_Enhancement.md`
 
 ## Dependencies (summary)
 

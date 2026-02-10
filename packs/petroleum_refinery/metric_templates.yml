@@ -1,0 +1,33 @@
+industry: petroleum_refinery
+version: 1
+
+templates:
+  - name: throughput_volume
+    type: sum
+    description: Total metered throughput volume
+    measure_hint: volume
+
+  - name: dispatch_count
+    type: count
+    description: Count of dispatch events
+    measure_hint: event
+
+  - name: bay_utilization_pct
+    type: ratio
+    description: Active bay time divided by available time
+    measure_hint: duration
+
+  - name: lorry_turnaround_time
+    type: avg
+    description: Average lorry turnaround duration per dispatch
+    measure_hint: duration
+
+  - name: inventory_days
+    type: ratio
+    description: Inventory on hand divided by average daily throughput
+    measure_hint: volume
+
+  - name: loss_variance_pct
+    type: ratio
+    description: Loss variance between input and output volume
+    measure_hint: volume
