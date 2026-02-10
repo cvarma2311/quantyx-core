@@ -285,3 +285,184 @@ CREATE INDEX IF NOT EXISTS idx_usage_stats_tenant
 - `/query` returns lineage + semantic validation.
 - Discovery endpoints show ownership + freshness.
 - LLM extraction endpoints produce structured JSON with validation.
+
+---
+
+## 9) Minimal Integration Path (Safe Rollout)
+
+### 9.1 Step 1: Contract Storage + Pack Versioning
+- Add `quantyx_pack_versions` + `quantyx_semantic_contracts` tables.
+- Add `packs/<industry>/pack.yml` with version metadata.
+- Add admin API: `POST /packs/apply` to bind a pack version to a tenant.
+
+SQL (Step 1):
+```sql
+CREATE TABLE IF NOT EXISTS public.quantyx_pack_versions (
+  pack_id TEXT PRIMARY KEY,
+  industry TEXT NOT NULL,
+  version TEXT NOT NULL,
+  release_date DATE NOT NULL,
+  breaking_changes TEXT NULL,
+  notes TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pack_versions_unique
+  ON public.quantyx_pack_versions (industry, version);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_semantic_contracts (
+  contract_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  industry TEXT NOT NULL,
+  version TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_contracts_tenant
+  ON public.quantyx_semantic_contracts (tenant_id, industry, created_at DESC);
+```
+
+API (Step 1):
+```
+POST /packs/apply
+```
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "industry": "petroleum_refinery",
+  "version": "1.0.0"
+}
+```
+
+Response:
+```json
+{ "ok": true }
+```
+
+### 9.2 Step 2: Read‑Only Contract Integration
+- Load semantic contracts into catalog responses (`/metrics`, `/datasets`).
+- Add `definition`, `owner`, `freshness` fields from contracts.
+- No query behavior change yet (safe).
+
+API changes (Step 2):
+- `GET /metrics` returns:
+```json
+{
+  "metrics": [
+    {
+      "metric_name": "throughput_volume",
+      "definition": "Total metered throughput volume",
+      "owner": "ops-analytics",
+      "freshness": "daily"
+    }
+  ]
+}
+```
+
+- `GET /datasets` returns:
+```json
+{
+  "datasets": [
+    {
+      "name": "dispatch_events",
+      "description": "Lorry dispatch and load events",
+      "owner": "ops-analytics",
+      "refresh_frequency": "hourly"
+    }
+  ]
+}
+```
+
+### 9.3 Step 3: LLM Extraction (Write‑Only)
+- Add `POST /contracts/semantic/extract`:
+  - run focused LLM prompts
+  - persist structured outputs to `quantyx_semantic_contracts`
+- Add `POST /contracts/semantic/apply`:
+  - apply extracted definitions to active contracts
+- Still no query behavior changes.
+
+API (Step 3):
+
+```
+POST /contracts/semantic/extract
+```
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "industry": "petroleum_refinery",
+  "inputs": {
+    "raw_text": "MFM = mass flow meter. Stock_code identifies product...",
+    "tables": ["fact_dispatch", "dim_product"]
+  },
+  "model": "gpt-4o-mini"
+}
+```
+
+Response:
+```json
+{
+  "contract_id": "contract_123",
+  "status": "extracted"
+}
+```
+
+```
+POST /contracts/semantic/apply
+```
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "contract_id": "contract_123"
+}
+```
+
+Response:
+```json
+{ "ok": true }
+```
+
+### 9.4 Step 4: Policy Enforcement (Behavior Change)
+- Enforce policies at query time (masking, filters, aggregation rules).
+- Add `quantyx_policy_audit` logs.
+- Return `semantic_validation` + `lineage` in `/query` responses.
+
+SQL (Step 4):
+```sql
+CREATE TABLE IF NOT EXISTS public.quantyx_policy_audit (
+  policy_audit_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  query_id TEXT NULL,
+  policy_name TEXT NOT NULL,
+  action TEXT NOT NULL,
+  details JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_audit_tenant
+  ON public.quantyx_policy_audit (tenant_id, created_at DESC);
+```
+
+API change (Step 4):
+```json
+{
+  "rows": [],
+  "semantic_validation": {
+    "definitions": ["throughput_volume"],
+    "assumptions": ["default grain=day"],
+    "policy_applied": ["suppress_small_groups"]
+  },
+  "lineage": {
+    "models": ["fact_dispatch"],
+    "tables": ["public.fact_dispatch"]
+  }
+}
+```

@@ -1,0 +1,13 @@
+Map columns to the provided ontology entity types.
+Return JSON only with schema:
+{
+  "mappings": [
+    { "table": "string", "column": "string", "entity_type": "string", "confidence": 0.0 }
+  ]
+}
+Rules:
+- Choose entity_type only from this list: {entity_types}
+- Confidence between 0.0 and 1.0
+- If confidence < 0.7, include it anyway but keep confidence low.
+Input:
+{tables_and_columns}

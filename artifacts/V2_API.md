@@ -91,10 +91,6 @@ Request:
   "source_title": "Operations glossary and hierarchy notes",
   "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
   "metadata": {
-    "connection_id": "conn_prod",
-    "database": "prod_warehouse",
-    "schema": "public",
-    "tables": ["fact_production_daily", "dim_plant"],
     "columns": ["plant_name", "region_name"]
   }
 }
@@ -114,7 +110,7 @@ tenant_id=tenant_a
 domain_id=manufacturing
 source_type=business_context
 source_title=Operations glossary
-metadata={"connection_id":"conn_prod","database":"prod_warehouse","schema":"public"}
+metadata={"columns":["plant_name","region_name"]}
 file=@context.txt
 ```
 
@@ -123,7 +119,7 @@ Response:
 { "file_id": "file_123", "status": "stored" }
 ```
 
-### 1.4 GET /context?tenant_id=...&domain_id=...&source_type=...&status=...
+### 1.4 GET /context?tenant_id=...&source_type=...&status=...
 List stored business context entries with cursor pagination.
 
 Response:
@@ -220,7 +216,7 @@ Cursor pagination:
 - Response includes `next_cursor` if more items are available.
 - Next request: pass `cursor=<next_cursor>` to fetch the next page.
 
-### 2.2 GET /datasets?domain_id=...&connection_id=...&database=...&schema=...
+### 2.2 GET /datasets?domain_id=...
 List datasets defined in the domain pack.
 
 Response:
@@ -242,7 +238,7 @@ Response:
 Cursor pagination:
 - Use `cursor` + `limit` to page through datasets.
 
-### 2.3 GET /dimensions?connection_id=...&database=...&schema=...
+### 2.3 GET /dimensions?tenant_id=...
 List dimensions from the catalog.
 
 Response:
@@ -286,7 +282,7 @@ Cursor pagination:
 - Response includes `next_cursor` if more values are available.
 - Next request: pass `cursor=<next_cursor>` to fetch the next page.
 
-### 2.5 GET /schema?connection_id=...&database=...&schema=...
+### 2.5 GET /schema?tenant_id=...&domain_id=...
 List dbt models and columns from `manifest.json`.
 
 Response:
@@ -466,10 +462,6 @@ Request:
   "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
   "file_ids": ["file_123", "file_456"],
   "metadata": {
-    "connection_id": "conn_prod",
-    "database": "prod_warehouse",
-    "schema": "public",
-    "tables": ["fact_production_daily", "dim_plant"],
     "columns": ["plant_name", "region_name"]
   }
 }
@@ -566,10 +558,7 @@ Response (202):
 Request:
 ```json
 {
-  "schema": "public",
-  "tables": ["fact_production_daily", "dim_plant"],
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse"
+  "tenant_id": "tenant_a"
 }
 ```
 
@@ -610,13 +599,10 @@ Response (202):
 Request:
 ```json
 {
-  "schema": "public",
-  "tables": ["fact_production_daily", "dim_plant"],
+  "tenant_id": "tenant_a",
   "time_column": "production_date",
   "grain": "day",
-  "use_llm": true,
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse"
+  "use_llm": true
 }
 ```
 
@@ -660,10 +646,7 @@ Response (202):
 Request:
 ```json
 {
-  "schema": "public",
-  "tables": ["fact_hpcl_sales_daily"],
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse"
+  "tenant_id": "tenant_a"
 }
 ```
 
@@ -674,10 +657,7 @@ Step 1: Seed suggestions into the registry
 ```
 POST /metrics/suggested?domain_id=energy_distribution&persist=true
 {
-  "schema": "public",
-  "tables": ["fact_hpcl_sales_daily"],
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse"
+  "tenant_id": "tenant_a"
 }
 ```
 
@@ -749,7 +729,6 @@ Request:
 {
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
   "dbt_project_path": "dbt_projects/dbt_tenant_a",
   "profile_name": "default",
   "target_name": "dev",
@@ -776,7 +755,6 @@ Response:
   "manifest_id": "manifest_123",
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
   "dbt_project_path": "dbt",
   "profile_name": "default",
   "target_name": "dev",
@@ -786,14 +764,13 @@ Response:
 ```
 
 ### 3.12 POST /dbt/config
-Admin-only. Upsert dbt config for a tenant/domain/connection.
+Admin-only. Upsert dbt config for a tenant/domain.
 
 Request:
 ```json
 {
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
   "dbt_project_path": "dbt_projects/dbt_tenant_a",
   "target_name": "dev",
   "profiles_dir": "~/.dbt"
@@ -806,7 +783,6 @@ Response:
   "config_id": "dbt_cfg_123",
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
   "dbt_project_path": "dbt_projects/dbt_tenant_a",
   "profile_name": "tenant_a",
   "target_name": "dev",
@@ -814,8 +790,8 @@ Response:
 }
 ```
 
-### 3.13 GET /dbt/config/latest?tenant_id=...&domain_id=...&connection_id=...
-Admin-only. Fetch latest dbt config for a tenant/domain/connection.
+### 3.13 GET /dbt/config/latest?tenant_id=...&domain_id=...
+Admin-only. Fetch latest dbt config for a tenant/domain.
 
 Response:
 ```json
@@ -823,7 +799,6 @@ Response:
   "config_id": "dbt_cfg_123",
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
   "dbt_project_path": "dbt_projects/dbt_tenant_a",
   "profile_name": "tenant_a",
   "target_name": "dev",
@@ -841,10 +816,6 @@ Request:
 {
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse",
-  "schema": "public",
-  "tables": ["fact_sales", "dim_customer"],
   "context_id": "ctx_123",
   "host": "db.company.com",
   "port": 5432,
@@ -865,7 +836,7 @@ Response:
 }
 ```
 
-### 3.15 GET /dbt/scaffold?tenant_id=...&domain_id=...&connection_id=...
+### 3.15 GET /dbt/scaffold?tenant_id=...&domain_id=...
 Admin-only. List generated dbt scaffolds.
 
 Response:
@@ -874,9 +845,6 @@ Response:
   "scaffolds": [
     {
       "scaffold_id": "scaffold_123",
-      "connection_id": "conn_prod",
-      "database_name": "prod_warehouse",
-      "schema_name": "public",
       "tables": ["fact_sales", "dim_customer"],
       "status": "draft",
       "created_at": "2025-02-14T10:00:00Z"

@@ -510,8 +510,10 @@ CREATE TABLE IF NOT EXISTS public.quantyx_facts_registry (
   table_name TEXT NOT NULL,
   time_column TEXT NULL,
   grain TEXT NULL,
+  measures JSONB NULL,
+  dimensions JSONB NULL,
+  description TEXT NULL,
   status TEXT NOT NULL DEFAULT 'draft',
-  payload JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -577,3 +579,87 @@ CREATE TABLE IF NOT EXISTS public.quantyx_tenant_dbt_projects (
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_tenant_dbt_projects_dir
   ON public.quantyx_tenant_dbt_projects (dbt_project_dir);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_pack_versions (
+  pack_id TEXT PRIMARY KEY,
+  industry TEXT NOT NULL,
+  version TEXT NOT NULL,
+  release_date DATE NOT NULL,
+  breaking_changes TEXT NULL,
+  notes TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pack_versions_unique
+  ON public.quantyx_pack_versions (industry, version);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_semantic_contracts (
+  contract_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  industry TEXT NOT NULL,
+  version TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_contracts_tenant
+  ON public.quantyx_semantic_contracts (tenant_id, industry, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_policy_audit (
+  policy_audit_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  query_id TEXT NULL,
+  policy_name TEXT NOT NULL,
+  action TEXT NOT NULL,
+  details JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_audit_tenant
+  ON public.quantyx_policy_audit (tenant_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_usage_stats (
+  stat_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  artifact_type TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  last_used_at TIMESTAMPTZ NULL,
+  usage_count INTEGER NOT NULL DEFAULT 0,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_stats_tenant
+  ON public.quantyx_usage_stats (tenant_id, artifact_type, usage_count DESC);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_tenant_scopes (
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  tables JSONB NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, domain_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_tenant_scopes_status
+  ON public.quantyx_tenant_scopes (status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_tenant_scope_history (
+  history_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  tables JSONB NULL,
+  status TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

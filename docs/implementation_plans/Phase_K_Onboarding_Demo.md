@@ -57,6 +57,7 @@ Environment variables:
 - `DEMO_TABLES` (required; comma-separated table names)
 - `DEMO_CONTEXT_TEXT` (optional; business context text)
 - `DEMO_CONTEXT_FILE` (optional; path to business context text)
+- `DEMO_SEMANTIC_CONTRACT` (optional; true/false to run semantic contract extraction)
 
 Connection details:
 - `DEMO_DB_HOST`

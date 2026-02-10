@@ -145,10 +145,6 @@ Request:
   "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
   "file_ids": ["file_123", "file_456"],
   "metadata": {
-    "connection_id": "conn_prod",
-    "database": "prod_warehouse",
-    "schema": "public",
-    "tables": ["fact_production_daily", "dim_plant"],
     "columns": ["plant_name", "region_name"]
   }
 }
@@ -174,7 +170,7 @@ tenant_id=tenant_a
 domain_id=manufacturing
 source_type=business_context
 source_title=Ops glossary
-metadata={"connection_id":"conn_prod","database":"prod_warehouse","schema":"public","tables":["fact_production_daily","dim_plant"]}
+metadata={"columns":["plant_name","region_name"]}
 file=@context.txt
 ```
 
@@ -185,6 +181,52 @@ Response:
 
 Expected outcome:
 - We persist all business context text and linked file content for LLM-based extraction and review.
+
+---
+
+## 3a) Semantic contract extraction (optional)
+
+Use this if you want the semantic layer to enrich `/metrics` and `/datasets` with
+definitions and freshness metadata.
+
+POST /contracts/semantic/extract
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "industry": "manufacturing",
+  "inputs": {
+    "raw_text": "MFM = mass flow meter. Stock_code identifies product.",
+    "tables_and_columns": "fact_dispatch: [bay_name, mfm_id, product_name]",
+    "entity_types": ["organizational_unit", "mass_flow_meter", "product"],
+    "metric_candidate": "metric_name=throughput_volume, columns=[mfm_volume, product_name]"
+  },
+  "model": "gpt-4o-mini"
+}
+```
+
+Response:
+```json
+{ "contract_id": "contract_123", "status": "extracted" }
+```
+
+Apply extracted contract:
+
+POST /contracts/semantic/apply
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "contract_id": "contract_123"
+}
+```
+
+Response:
+```json
+{ "ok": true }
+```
 
 ---
 
@@ -284,11 +326,7 @@ Pending result example (202):
 Request:
 ```json
 {
-  "tenant_id": "tenant_a",
-  "schema": "public",
-  "tables": ["fact_production_daily", "dim_plant"],
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse"
+  "tenant_id": "tenant_a"
 }
 ```
 
@@ -296,10 +334,6 @@ Response (example):
 ```json
 {
   "mapping_id": "map_ab12cd34",
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse",
-  "schema": "public",
-  "tables": ["fact_production_daily", "dim_plant"],
   "candidates": [
     {
       "table": "fact_production_daily",
@@ -315,17 +349,17 @@ Response (example):
 
 Optional history:
 
-GET /onboard/map/history?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+GET /onboard/map/history?tenant_id=tenant_a&domain_id=manufacturing
 
 ---
 
 ## 7) Entities + hierarchies (connection-scoped, persisted overrides)
 
-GET /entities?domain_id=manufacturing&tenant_id=tenant_a&connection_id=conn_prod&database=prod_warehouse&schema=public
+GET /entities?domain_id=manufacturing&tenant_id=tenant_a
 
 Purpose: list tenant overrides for entities + hierarchies (no pack fallback after overrides seeded).
 
-PATCH /entities/{entity_id}?domain_id=manufacturing&tenant_id=tenant_a&connection_id=conn_prod&database=prod_warehouse&schema=public
+PATCH /entities/{entity_id}?domain_id=manufacturing&tenant_id=tenant_a
 
 Request:
 ```json
@@ -336,7 +370,7 @@ Request:
 }
 ```
 
-PATCH /hierarchies/{hierarchy_name}?domain_id=manufacturing&tenant_id=tenant_a&connection_id=conn_prod&database=prod_warehouse&schema=public
+PATCH /hierarchies/{hierarchy_name}?domain_id=manufacturing&tenant_id=tenant_a
 
 Request:
 ```json
@@ -350,7 +384,7 @@ Optional:
 
 GET /entities/all?domain_id=manufacturing&tenant_id=tenant_a
 
-GET /hierarchies?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+GET /hierarchies?tenant_id=tenant_a&domain_id=manufacturing
 
 ---
 
@@ -388,10 +422,6 @@ Request:
 ```json
 {
   "tenant_id": "tenant_a",
-  "schema": "public",
-  "tables": ["fact_production_daily", "dim_plant"],
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse",
   "time_column": "production_date",
   "grain": "day",
   "use_llm": true
@@ -405,10 +435,7 @@ POST /facts
 {
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse",
-  "schema": "public",
-  "name": "fact_production_daily",
+  "table_name": "fact_production_daily",
   "grain": "day",
   "time_column": "production_date",
   "measures": ["output_tmt", "downtime_hours"],
@@ -422,9 +449,6 @@ POST /dimensions
 {
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse",
-  "schema": "public",
   "name": "dim_plant",
   "keys": ["plant_id"],
   "attributes": ["plant_name", "region_name"],
@@ -434,9 +458,9 @@ POST /dimensions
 
 List for scope:
 
-GET /facts?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+GET /facts?tenant_id=tenant_a&domain_id=manufacturing
 
-GET /dimensions?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+GET /dimensions?tenant_id=tenant_a&domain_id=manufacturing
 
 ---
 
@@ -454,7 +478,6 @@ Request:
 {
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
   "dbt_project_path": "dbt_projects/dbt_tenant_a",
   "profile_name": "default",
   "target_name": "dev",
@@ -522,17 +545,13 @@ Pending result example (202):
 Request:
 ```json
 {
-  "tenant_id": "tenant_a",
-  "schema": "public",
-  "tables": ["fact_production_daily"],
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse"
+  "tenant_id": "tenant_a"
 }
 ```
 
 Then list the catalog (suggested + draft + certified):
 
-GET /metrics?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+GET /metrics?tenant_id=tenant_a&domain_id=manufacturing
 
 Response (example):
 ```json
@@ -565,9 +584,6 @@ Request:
 {
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse",
-  "schema": "public",
   "display_name": "Total Output (TMT)",
   "description": "Total production output in TMT",
   "dimensions": ["plant_name", "product_name", "fiscal_year"],
@@ -587,9 +603,6 @@ Request:
 {
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse",
-  "schema": "public",
   "metric_name": "total_output_tmt",
   "description": "Total production output in TMT",
   "type": "sum",
@@ -605,7 +618,7 @@ Request:
 
 ## 11) Review summary (all artifacts in one call)
 
-GET /review/summary?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+GET /review/summary?tenant_id=tenant_a&domain_id=manufacturing
 
 Purpose: fetch scan results + entities + hierarchies + facts + dimensions + metrics with review status.
 
@@ -616,9 +629,6 @@ POST /review
 {
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse",
-  "schema": "public",
   "artifact_type": "facts",
   "artifact_id": "fact_123",
   "status": "reviewed",
@@ -642,9 +652,9 @@ Expected outcome:
 ## 13) Validate schema + explore (confirm the semantic layer is ready)
 
 GET /schema
-GET /metrics?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+GET /metrics?tenant_id=tenant_a&domain_id=manufacturing
 GET /datasets?domain_id=manufacturing
-GET /dimensions?tenant_id=tenant_a&domain_id=manufacturing&connection_id=conn_prod&database=prod_warehouse&schema=public
+GET /dimensions?tenant_id=tenant_a&domain_id=manufacturing
 GET /dimension-values?dimension=plant_name&limit=50
 
 Expected outcome:

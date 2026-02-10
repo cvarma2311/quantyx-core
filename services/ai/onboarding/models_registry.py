@@ -23,7 +23,7 @@ def upsert_fact(settings: Settings, payload: dict[str, Any]) -> str:
           connection_id,
           database_name,
           schema_name,
-          name,
+          table_name,
           grain,
           time_column,
           measures,
@@ -36,7 +36,7 @@ def upsert_fact(settings: Settings, payload: dict[str, Any]) -> str:
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
         ON CONFLICT (fact_id)
         DO UPDATE SET
-          name = EXCLUDED.name,
+          table_name = EXCLUDED.table_name,
           grain = EXCLUDED.grain,
           time_column = EXCLUDED.time_column,
           measures = EXCLUDED.measures,
@@ -52,7 +52,7 @@ def upsert_fact(settings: Settings, payload: dict[str, Any]) -> str:
         payload["connection_id"],
         payload["database_name"],
         payload["schema_name"],
-        payload["name"],
+        payload["table_name"],
         payload.get("grain"),
         payload.get("time_column"),
         payload.get("measures", []),
@@ -74,7 +74,7 @@ def list_facts(
 ) -> list[dict]:
     sql = """
         SELECT fact_id, tenant_id, domain_id, connection_id, database_name, schema_name,
-               name, grain, time_column, measures, dimensions, description, status,
+               table_name, grain, time_column, measures, dimensions, description, status,
                created_at, updated_at
           FROM public.quantyx_facts_registry
          WHERE tenant_id = %s
@@ -93,7 +93,7 @@ def list_facts(
 def list_facts_all(settings: Settings, tenant_id: str, domain_id: str) -> list[dict]:
     sql = """
         SELECT fact_id, tenant_id, domain_id, connection_id, database_name, schema_name,
-               name, grain, time_column, measures, dimensions, description, status,
+               table_name, grain, time_column, measures, dimensions, description, status,
                created_at, updated_at
           FROM public.quantyx_facts_registry
          WHERE tenant_id = %s AND domain_id = %s
@@ -107,7 +107,7 @@ def list_facts_all(settings: Settings, tenant_id: str, domain_id: str) -> list[d
 
 def update_fact(settings: Settings, fact_id: str, updates: dict[str, Any]) -> None:
     allowed_fields = {
-        "name",
+        "table_name",
         "grain",
         "time_column",
         "measures",

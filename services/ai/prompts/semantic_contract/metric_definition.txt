@@ -1,0 +1,13 @@
+Given a metric candidate, produce a business definition and grain.
+Return JSON only:
+{
+  "metric_name": "string",
+  "definition": "string",
+  "grain": "string",
+  "dimensions": ["string"]
+}
+Rules:
+- Use only provided context.
+- Do not change metric_name.
+Input:
+{metric_candidate_and_columns}

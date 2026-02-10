@@ -58,6 +58,18 @@ from services.ai.dbt_scaffold import (
     update_scaffold,
 )
 from services.ai.semantic_layer.pack_loader import list_packs, load_pack
+from services.ai.semantic_layer.pack_loader import list_pack_metadata
+from services.ai.semantic_contracts import (
+    get_active_semantic_contract,
+    get_semantic_contract,
+    list_pack_versions,
+    register_pack_version,
+    store_semantic_contract,
+    update_contract_status,
+    validate_semantic_payload,
+)
+from services.ai.context_extraction import extract_context
+from services.ai.semantic_extraction import extract_semantic_contract
 from services.ai.governance import build_lineage
 from services.ai.insights import generate_variance_insight, get_insight, list_insights, persist_insight
 from services.ai.actions import create_action, create_feedback, get_action, list_actions, update_action
@@ -123,6 +135,8 @@ from services.ai.context_apply import apply_extractions
 from services.ai.glossary import fetch_glossary_terms
 from services.ai.sql_builder import Filter, build_query
 from services.ai.tenant_domain import get_tenant_domain, upsert_tenant_domain
+from services.ai.tenant_scope import get_tenant_scope, upsert_tenant_scope
+from services.ai.policy_audit import log_policy_audit
 from services.ai.jobs_store import (
     claim_next_job,
     create_job,
@@ -216,12 +230,21 @@ from services.api.schemas import (
     JobListResponse,
     JobResultResponse,
     JobStatusResponse,
+    PackApplyRequest,
+    PackApplyResponse,
+    PackListResponse,
+    SemanticContractResponse,
+    SemanticContractListResponse,
+    SemanticContractValidateResponse,
+    SemanticExtractRequest,
+    SemanticExtractResponse,
+    SemanticApplyRequest,
+    SemanticApplyResponse,
+    TenantScopeUpsertRequest,
+    TenantScopeResponse,
 )
 from services.api.validators import (
-    extract_scope_from_metadata,
     generate_source_title,
-    scopes_match,
-    validate_scope_fields,
 )
 
 
@@ -238,6 +261,26 @@ LOW_CONFIDENCE_THRESHOLD = 0.7
 JOB_TYPES = {"scan_connection", "map_entities", "infer_models", "metrics_suggested"}
 _job_worker_stop = threading.Event()
 _job_worker_thread: threading.Thread | None = None
+_REF_PATTERN = re.compile(r"\{\{\s*ref\('(?P<name>[^']+)'\)\s*\}\}")
+
+
+def _resolve_scope_values(
+    tenant_id: str,
+    domain_id: str,
+) -> tuple[str, str, str, list[str] | None]:
+    registry = get_tenant_scope(settings, tenant_id, domain_id)
+    connection_id = (registry or {}).get("connection_id")
+    if not connection_id:
+        raise HTTPException(status_code=400, detail="tenant scope not configured")
+
+    scopes = resolve_connection_scope(settings, connection_id)
+    if not scopes:
+        raise HTTPException(status_code=404, detail="tenant scope connection not registered")
+    database_name = scopes[0].get("database_name")
+    schema_name = scopes[0].get("schema_name")
+    if not database_name or not schema_name:
+        raise HTTPException(status_code=400, detail="tenant scope not configured")
+    return (connection_id, database_name, schema_name, registry.get("tables") if registry else None)
 
 
 def _load_job_payload(payload: dict | str | None) -> dict:
@@ -246,6 +289,39 @@ def _load_job_payload(payload: dict | str | None) -> dict:
     if isinstance(payload, str):
         return json.loads(payload)
     return payload
+
+
+def _build_semantic_validation(metrics: list, contract: dict | None) -> dict | None:
+    if not contract:
+        return None
+    payload = contract.get("payload") or {}
+    definitions = []
+    definition_map = {}
+    for item in payload.get("metric_definitions", []) or []:
+        name = item.get("metric_name")
+        if name:
+            definition_map[name] = item.get("definition")
+    for metric in metrics:
+        if metric.name in definition_map:
+            definitions.append(metric.name)
+    assumptions = []
+    grains = {metric.grain for metric in metrics if metric.grain}
+    if grains:
+        assumptions.append(f"default grain={sorted(grains)[0]}")
+    return {"definitions": definitions, "assumptions": assumptions, "policy_applied": []}
+
+
+def _build_lineage(metrics: list) -> dict | None:
+    models = set()
+    tables = set()
+    for metric in metrics:
+        for match in _REF_PATTERN.finditer(metric.sql or ""):
+            model = match.group("name")
+            models.add(model)
+            tables.add(f"{settings.db_schema}.{model}")
+    if not models and not tables:
+        return None
+    return {"models": sorted(models), "tables": sorted(tables)}
 
 
 def _execute_job(job: dict) -> dict:
@@ -360,30 +436,6 @@ def _paginate_list(
     return page, next_cursor
 
 
-def _require_scope(scope: dict | None, endpoint: str) -> None:
-    missing = validate_scope_fields(scope)
-    if missing:
-        detail = (
-            f"{endpoint} requires connection scope fields: "
-            f"{', '.join(missing)}. Include connection_id, database, schema, tables."
-        )
-        raise HTTPException(status_code=400, detail=detail)
-
-
-def _require_basic_scope(scope: dict | None, endpoint: str) -> None:
-    scope = scope or {}
-    missing = []
-    for key in ("connection_id", "database", "schema"):
-        if not scope.get(key):
-            missing.append(key)
-    if missing:
-        detail = (
-            f"{endpoint} requires connection scope fields: "
-            f"{', '.join(missing)}. Include connection_id, database, schema."
-        )
-        raise HTTPException(status_code=400, detail=detail)
-
-
 def _resolve_domain_id(tenant_id: str, request_domain_id: str | None = None) -> str:
     row = get_tenant_domain(settings, tenant_id)
     if row and row.get("domain_id"):
@@ -394,29 +446,6 @@ def _resolve_domain_id(tenant_id: str, request_domain_id: str | None = None) -> 
         )
         return request_domain_id
     raise HTTPException(status_code=400, detail="domain_id not configured for tenant")
-
-
-def _request_scope(
-    connection_id: str | None,
-    database: str | None,
-    schema: str | None,
-    tables: list[str] | None,
-) -> dict:
-    return {
-        "connection_id": connection_id,
-        "database": database,
-        "schema": schema,
-        "tables": tables,
-    }
-
-
-def _metadata_has_scope(metadata: dict | None) -> bool:
-    if not metadata:
-        return False
-    return any(
-        key in metadata
-        for key in ("connection_id", "database", "database_name", "schema", "schema_name", "tables")
-    )
 
 
 def _model_schema_map() -> dict[str, str]:
@@ -495,6 +524,219 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get(
+    "/packs",
+    response_model=PackListResponse,
+    tags=["admin"],
+    summary="List available packs",
+)
+def list_available_packs() -> PackListResponse:
+    packs = list_pack_metadata()
+    if not packs:
+        packs = [{"industry": pack} for pack in list_packs()]
+    return PackListResponse(packs=packs)
+
+
+@app.post(
+    "/packs/apply",
+    response_model=PackApplyResponse,
+    tags=["admin"],
+    summary="Apply a pack version to a tenant",
+)
+def apply_pack(request: PackApplyRequest) -> PackApplyResponse:
+    pack = load_pack(f"packs/{request.industry}")
+    pack_meta = pack.get("pack") or {}
+    version = request.version or pack_meta.get("version") or "1.0.0"
+    register_pack_version(
+        settings,
+        industry=request.industry,
+        version=version,
+        release_date=pack_meta.get("release_date"),
+        breaking_changes=pack_meta.get("breaking_changes"),
+        notes=pack_meta.get("notes"),
+    )
+    payload = {
+        "pack": pack_meta,
+        "ontology": pack.get("ontology", {}),
+        "datasets": pack.get("datasets", {}),
+        "metric_templates": pack.get("metric_templates", {}),
+        "policies": pack.get("policies", {}),
+    }
+    contract_id = store_semantic_contract(
+        settings,
+        tenant_id=request.tenant_id,
+        industry=request.industry,
+        version=version,
+        payload=payload,
+        status="active",
+    )
+    return PackApplyResponse(ok=True, contract_id=contract_id)
+
+
+@app.get(
+    "/contracts/semantic",
+    response_model=SemanticContractResponse,
+    tags=["admin"],
+    summary="Get active semantic contract",
+)
+def get_semantic_contract(
+    tenant_id: str,
+    industry: str,
+) -> SemanticContractResponse:
+    contract = get_active_semantic_contract(settings, tenant_id, industry)
+    if not contract:
+        raise HTTPException(status_code=404, detail="No active contract found")
+    return SemanticContractResponse(**contract)
+
+
+@app.post(
+    "/contracts/semantic/validate",
+    response_model=SemanticContractValidateResponse,
+    tags=["admin"],
+    summary="Validate semantic contract payload",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "validate": {
+                            "summary": "Validate contract payload",
+                            "value": {
+                                "ontology": {"entity_types": {}},
+                                "datasets": {"datasets": []},
+                                "metric_definitions": [],
+                                "dataset_definitions": [],
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "ok": {"value": {"ok": True, "errors": []}},
+                            "error": {"value": {"ok": False, "errors": [{"field": "ontology", "issue": "missing"}]}},
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def validate_semantic_contract(payload: dict) -> SemanticContractValidateResponse:
+    errors = []
+    if "ontology" not in payload:
+        errors.append({"field": "ontology", "issue": "missing"})
+    if "datasets" not in payload:
+        errors.append({"field": "datasets", "issue": "missing"})
+    errors.extend(validate_semantic_payload(payload))
+    if errors:
+        return SemanticContractValidateResponse(ok=False, errors=errors)
+    return SemanticContractValidateResponse(ok=True, errors=[])
+
+
+@app.post(
+    "/contracts/semantic/extract",
+    response_model=SemanticExtractResponse,
+    tags=["admin"],
+    summary="Extract semantic contract elements with LLM",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "extract": {
+                            "summary": "Extract glossary terms",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "industry": "petroleum_refinery",
+                                "inputs": {
+                                    "raw_text": "MFM = mass flow meter. Stock_code identifies product.",
+                                    "tables_and_columns": "fact_dispatch: [bay_name, mfm_id, product_name]",
+                                    "entity_types": ["organizational_unit", "mass_flow_meter", "product"],
+                                    "metric_candidate": "metric_name=throughput_volume, columns=[mfm_volume, product_name]",
+                                },
+                                "model": "gpt-4o-mini",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {"examples": {"extracted": {"value": {"contract_id": "contract_123", "status": "extracted"}}}}
+                }
+            }
+        },
+    },
+)
+def extract_semantic_contract(request: SemanticExtractRequest) -> SemanticExtractResponse:
+    raw_text = (request.inputs or {}).get("raw_text", "")
+    tables_and_columns = (request.inputs or {}).get("tables_and_columns")
+    entity_types = (request.inputs or {}).get("entity_types")
+    metric_candidate_payload = (request.inputs or {}).get("metric_candidate")
+    extraction = extract_semantic_contract(
+        settings,
+        raw_text=raw_text,
+        tables_and_columns=tables_and_columns,
+        entity_types=entity_types,
+        metric_candidate_payload=metric_candidate_payload,
+    )
+    payload = {
+        "business_terms": extraction.get("business_terms", []),
+        "entity_mappings": extraction.get("entity_mappings", []),
+        "metric_definitions": extraction.get("metric_definitions", []),
+    }
+    contract_id = store_semantic_contract(
+        settings,
+        tenant_id=request.tenant_id,
+        industry=request.industry,
+        version="draft",
+        payload=payload,
+        status="draft",
+    )
+    return SemanticExtractResponse(contract_id=contract_id, status="extracted")
+
+
+@app.post(
+    "/contracts/semantic/apply",
+    response_model=SemanticApplyResponse,
+    tags=["admin"],
+    summary="Apply a semantic contract (set active)",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "apply": {
+                            "summary": "Apply contract",
+                            "value": {"tenant_id": "tenant_a", "contract_id": "contract_123"},
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {"examples": {"ok": {"value": {"ok": True}}}}
+                }
+            }
+        },
+    },
+)
+def apply_semantic_contract(request: SemanticApplyRequest) -> SemanticApplyResponse:
+    contract = get_semantic_contract(settings, request.contract_id)
+    if not contract or contract.get("tenant_id") != request.tenant_id:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    update_contract_status(settings, request.contract_id, "active")
+    return SemanticApplyResponse(ok=True)
+
 @app.post(
     "/jobs",
     response_model=JobCreateResponse,
@@ -560,6 +802,16 @@ def submit_job(request: JobCreateRequest) -> JobCreateResponse:
     domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
     if request.job_type == "scan_connection":
         payload.setdefault("domain_id", domain_id)
+    if request.job_type in {"map_entities", "infer_models", "metrics_suggested"}:
+        connection_id, database_name, schema_name, tables = _resolve_scope_values(
+            request.tenant_id,
+            domain_id,
+        )
+        payload["connection_id"] = connection_id
+        payload["database"] = database_name
+        payload["schema"] = schema_name
+        if tables is not None:
+            payload["tables"] = tables
     job = create_job(
         settings,
         tenant_id=request.tenant_id,
@@ -589,7 +841,6 @@ def submit_job(request: JobCreateRequest) -> JobCreateResponse:
                                     "status": "running",
                                     "progress_pct": 35,
                                     "progress_stage": "scan.schema:public",
-                                    "scope_id": "scope_456",
                                     "error_message": None,
                                 }
                             }
@@ -604,6 +855,7 @@ def get_job_status(job_id: str) -> JobStatusResponse:
     job = get_job(settings, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    job.pop("scope_id", None)
     return JobStatusResponse(**job)
 
 
@@ -690,7 +942,6 @@ def get_job_result(job_id: str, response: Response) -> JobResultResponse:
                                             "job_id": "job_123",
                                             "job_type": "scan_connection",
                                             "status": "running",
-                                            "scope_id": "scope_456",
                                             "created_at": "2025-02-14T10:00:00Z",
                                             "updated_at": "2025-02-14T10:01:00Z",
                                         }
@@ -722,6 +973,8 @@ def list_jobs(
         limit=limit,
         cursor=cursor,
     )
+    for item in payload.get("jobs", []):
+        item.pop("scope_id", None)
     return JobListResponse(**payload)
 
 
@@ -781,6 +1034,50 @@ def get_tenant_domain_api(tenant_id: str) -> dict:
     return row
 
 
+@app.post(
+    "/tenant/scope",
+    response_model=dict,
+    tags=["admin"],
+    summary="Set tenant scope",
+    description="Persist the active connection scope for a tenant.",
+)
+def set_tenant_scope(payload: TenantScopeUpsertRequest) -> dict:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    upsert_tenant_scope(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        connection_id=payload.connection_id,
+        database_name=payload.database,
+        schema_name=payload.schema,
+        tables=payload.tables,
+    )
+    return {"ok": True}
+
+
+@app.get(
+    "/tenant/scope",
+    response_model=TenantScopeResponse,
+    tags=["admin"],
+    summary="Get tenant scope",
+    description="Fetch the active connection scope for a tenant.",
+)
+def get_tenant_scope_api(tenant_id: str, domain_id: str | None = None) -> TenantScopeResponse:
+    resolved_domain = _resolve_domain_id(tenant_id, domain_id)
+    row = get_tenant_scope(settings, tenant_id, resolved_domain)
+    if not row:
+        raise HTTPException(status_code=404, detail="Tenant scope not found")
+    return TenantScopeResponse(
+        tenant_id=row.get("tenant_id"),
+        domain_id=row.get("domain_id"),
+        connection_id=row.get("connection_id"),
+        database=row.get("database_name"),
+        schema=row.get("schema_name"),
+        tables=row.get("tables"),
+        status=row.get("status"),
+    )
+
+
 @app.get(
     "/metrics",
     response_model=MetricsResponse,
@@ -824,13 +1121,22 @@ def get_tenant_domain_api(tenant_id: str) -> dict:
 )
 def metrics(
     tenant_id: str,
-    connection_id: str,
-    database: str,
-    schema: str,
     limit: int = 200,
     cursor: str | None = None,
 ) -> MetricsResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
+    contract = get_active_semantic_contract(settings, tenant_id, domain_id)
+    contract_metrics = {}
+    if contract:
+        payload = contract.get("payload") or {}
+        for item in payload.get("metric_definitions", []) or []:
+            name = item.get("metric_name")
+            if name:
+                contract_metrics[name] = item
     payload = []
     metrics_rows = fetch_registry_metrics(
         settings,
@@ -857,6 +1163,8 @@ def metrics(
                 "status": row.get("status"),
                 "owner": row.get("owner"),
                 "version": row.get("version"),
+                "definition": contract_metrics.get(row.get("metric_name"), {}).get("definition"),
+                "freshness": contract_metrics.get(row.get("metric_name"), {}).get("freshness"),
             }
         )
     page, next_cursor = _paginate_list(payload, cursor, limit, key_fn=lambda item: item["metric_name"])
@@ -867,8 +1175,8 @@ def metrics(
     "/metrics/all",
     response_model=dict,
     tags=["explore"],
-    summary="List metrics for all connections",
-    description="Return all tenant-scoped metrics grouped by connection.",
+    summary="List metrics across tenant scope",
+    description="Return all tenant-scoped metrics grouped by resolved scope.",
 )
 def metrics_all(tenant_id: str) -> dict:
     domain_id = _resolve_domain_id(tenant_id, None)
@@ -884,9 +1192,6 @@ def metrics_all(tenant_id: str) -> dict:
         grouped.setdefault(
             key,
             {
-                "connection_id": key[0],
-                "database": key[1],
-                "schema": key[2],
                 "metrics": [],
             },
         )
@@ -913,7 +1218,7 @@ def metrics_all(tenant_id: str) -> dict:
     response_model=DatasetsResponse,
     tags=["explore"],
     summary="List datasets",
-    description="Return datasets defined in the selected domain pack, scoped by optional database/schema filters.",
+    description="Return datasets defined in the selected domain pack, scoped by tenant scope.",
     openapi_extra={
         "responses": {
             "200": {
@@ -944,25 +1249,38 @@ def metrics_all(tenant_id: str) -> dict:
 )
 def datasets(
     tenant_id: str,
-    database: str | None = None,
-    schema: str | None = None,
     limit: int = 200,
     cursor: str | None = None,
-    connection_id: str | None = None,
 ) -> DatasetsResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
-    if connection_id:
-        scopes = resolve_connection_scope(settings, connection_id)
-        if not scopes:
-            raise HTTPException(status_code=404, detail="Unknown connection_id")
-        if not database and not schema and scopes:
-            database = scopes[0].get("database_name")
-            schema = scopes[0].get("schema_name")
+    connection_id, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
+    contract = get_active_semantic_contract(settings, tenant_id, domain_id)
+    contract_datasets = {}
+    if contract:
+        payload = contract.get("payload") or {}
+        for item in payload.get("dataset_definitions", []) or []:
+            name = item.get("name")
+            if name:
+                contract_datasets[name] = item
     pack = load_pack(f"packs/{domain_id}")
     datasets_list = pack.get("datasets", {}).get("datasets", []) or []
     datasets_list = _filter_by_model_attr(datasets_list, schema, key="source_model", attr="schema")
     datasets_list = _filter_by_model_attr(datasets_list, database, key="source_model", attr="database")
-    page, next_cursor = _paginate_list(datasets_list, cursor, limit, key_fn=lambda item: item["name"])
+    enriched = []
+    for item in datasets_list:
+        overlay = contract_datasets.get(item.get("name"), {})
+        enriched.append(
+            {
+                **item,
+                "owner": overlay.get("owner"),
+                "refresh_frequency": overlay.get("refresh_frequency"),
+                "definition": overlay.get("definition") or overlay.get("description"),
+            }
+        )
+    page, next_cursor = _paginate_list(enriched, cursor, limit, key_fn=lambda item: item["name"])
     return DatasetsResponse(datasets=page, limit=limit, cursor=cursor, next_cursor=next_cursor)
 
 
@@ -971,7 +1289,7 @@ def datasets(
     response_model=DimensionsResponse,
     tags=["explore"],
     summary="List dimensions",
-    description="Return dimensions from the metric catalog, scoped by optional database/schema filters.",
+    description="Return dimensions from the metric catalog, scoped by tenant scope.",
     openapi_extra={
         "responses": {
             "200": {
@@ -998,14 +1316,12 @@ def datasets(
         }
     },
 )
-def dimensions(database: str | None = None, schema: str | None = None, connection_id: str | None = None) -> DimensionsResponse:
-    if connection_id:
-        scopes = resolve_connection_scope(settings, connection_id)
-        if not scopes:
-            raise HTTPException(status_code=404, detail="Unknown connection_id")
-        if not database and not schema and scopes:
-            database = scopes[0].get("database_name")
-            schema = scopes[0].get("schema_name")
+def dimensions(tenant_id: str) -> DimensionsResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    _, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     payload = [
         {
             "name": dim.name,
@@ -1137,6 +1453,10 @@ def generate_dbt_manifest(payload: DbtManifestGenerateRequest) -> DbtManifestGen
         raise HTTPException(status_code=400, detail="tenant_id is required")
     tenant_id = payload.tenant_id
     domain_id = _resolve_domain_id(tenant_id, payload.domain_id)
+    connection_id, _, _, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     dbt_project_path = payload.dbt_project_path or resolve_dbt_project_dir(tenant_id)
     upsert_tenant_project_dir(settings, tenant_id, domain_id, dbt_project_path)
     try:
@@ -1153,7 +1473,7 @@ def generate_dbt_manifest(payload: DbtManifestGenerateRequest) -> DbtManifestGen
         settings,
         tenant_id=tenant_id,
         domain_id=domain_id,
-        connection_id=payload.connection_id,
+        connection_id=connection_id,
         dbt_project_path=dbt_project_path,
         profile_name=payload.profile_name,
         target_name=payload.target_name,
@@ -1179,13 +1499,12 @@ def generate_dbt_manifest(payload: DbtManifestGenerateRequest) -> DbtManifestGen
                 "content": {
                     "application/json": {
                         "examples": {
-                                    "latest": {
-                                        "summary": "Latest manifest",
-                                        "value": {
-                                            "manifest_id": "manifest_123",
-                                            "tenant_id": "tenant_a",
-                                            "connection_id": "conn_prod",
-                                            "dbt_project_path": "dbt",
+                            "latest": {
+                                "summary": "Latest manifest",
+                                "value": {
+                                    "manifest_id": "manifest_123",
+                                    "tenant_id": "tenant_a",
+                                    "dbt_project_path": "dbt",
                                     "profile_name": "default",
                                     "target_name": "dev",
                                     "created_at": "2025-02-14T10:00:00Z",
@@ -1210,7 +1529,6 @@ def get_latest_dbt_manifest(
         manifest_id=row["manifest_id"],
         tenant_id=row["tenant_id"],
         domain_id=row["domain_id"],
-        connection_id=row.get("connection_id"),
         dbt_project_path=row["dbt_project_path"],
         profile_name=row["profile_name"],
         target_name=row["target_name"],
@@ -1224,10 +1542,14 @@ def get_latest_dbt_manifest(
     response_model=DbtConfigResponse,
     tags=["admin"],
     summary="Upsert dbt config",
-    description="Store dbt config for a tenant/domain/connection (admin use only).",
+    description="Store dbt config for a tenant/domain (admin use only).",
 )
 def upsert_dbt_config_endpoint(payload: DbtConfigUpsertRequest) -> DbtConfigResponse:
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id, _, _, _ = _resolve_scope_values(
+        payload.tenant_id,
+        domain_id,
+    )
     dbt_project_path = payload.dbt_project_path or resolve_dbt_project_dir(payload.tenant_id)
     profile_name = normalize_profile_name(payload.tenant_id)
     target_name = payload.target_name or settings.dbt_target_name
@@ -1236,7 +1558,7 @@ def upsert_dbt_config_endpoint(payload: DbtConfigUpsertRequest) -> DbtConfigResp
         settings,
         tenant_id=payload.tenant_id,
         domain_id=domain_id,
-        connection_id=payload.connection_id,
+        connection_id=connection_id,
         dbt_project_path=dbt_project_path,
         profile_name=profile_name,
         target_name=target_name,
@@ -1246,7 +1568,6 @@ def upsert_dbt_config_endpoint(payload: DbtConfigUpsertRequest) -> DbtConfigResp
         config_id=config_id,
         tenant_id=payload.tenant_id,
         domain_id=domain_id,
-        connection_id=payload.connection_id,
         dbt_project_path=dbt_project_path,
         profile_name=profile_name,
         target_name=target_name,
@@ -1259,13 +1580,16 @@ def upsert_dbt_config_endpoint(payload: DbtConfigUpsertRequest) -> DbtConfigResp
     response_model=DbtConfigResponse,
     tags=["admin"],
     summary="Fetch latest dbt config",
-    description="Return the latest dbt config for a tenant/domain/connection (admin use only).",
+    description="Return the latest dbt config for a tenant/domain (admin use only).",
 )
 def get_latest_dbt_config_endpoint(
     tenant_id: str,
-    connection_id: str | None = None,
 ) -> DbtConfigResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, _, _, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     config = get_latest_dbt_config(settings, tenant_id, domain_id, connection_id)
     if not config:
         raise HTTPException(status_code=404, detail="dbt config not found")
@@ -1273,7 +1597,6 @@ def get_latest_dbt_config_endpoint(
         config_id=config.get("config_id"),
         tenant_id=config["tenant_id"],
         domain_id=config["domain_id"],
-        connection_id=config.get("connection_id"),
         dbt_project_path=config["dbt_project_path"],
         profile_name=config["profile_name"],
         target_name=config["target_name"],
@@ -1298,10 +1621,6 @@ def get_latest_dbt_config_endpoint(
                             "summary": "Generate scaffold",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "connection_id": "conn_prod",
-                                "database": "prod_warehouse",
-                                "schema": "public",
-                                "tables": ["fact_sales", "dim_customer"],
                                 "context_id": "ctx_123",
                                 "host": "db.company.com",
                                 "port": 5432,
@@ -1317,15 +1636,20 @@ def get_latest_dbt_config_endpoint(
 )
 def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id, database, schema, tables = _resolve_scope_values(
+        payload.tenant_id,
+        domain_id,
+    )
+    tables = tables or []
     scan_result = load_latest_scan_result(settings, payload.tenant_id, domain_id)
     if not scan_result:
         raise HTTPException(status_code=404, detail="No scan results found for tenant/domain")
     tables = _extract_tables_from_scan(
         scan_result,
-        connection_id=payload.connection_id,
-        database=payload.database,
-        schema=payload.schema,
-        tables=payload.tables,
+        connection_id=connection_id,
+        database=database,
+        schema=schema,
+        tables=tables,
     )
     if not tables:
         raise HTTPException(status_code=400, detail="No matching tables found in latest scan")
@@ -1340,8 +1664,8 @@ def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
             context_text = context_row.get("raw_text")
     scaffold_payload = build_scaffold_payload(
         settings,
-        database=payload.database,
-        schema=payload.schema,
+        database=database,
+        schema=schema,
         tables=tables,
         context_text=context_text,
         use_llm=True,
@@ -1358,9 +1682,9 @@ def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
         settings,
         tenant_id=payload.tenant_id,
         domain_id=domain_id,
-        connection_id=payload.connection_id,
-        database=payload.database,
-        schema=payload.schema,
+        connection_id=connection_id,
+        database=database,
+        schema=schema,
         tables=[t.get("table") for t in tables if t.get("table")],
         context_id=payload.context_id,
         payload=scaffold_payload,
@@ -1390,9 +1714,6 @@ def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
                                     "scaffolds": [
                                         {
                                             "scaffold_id": "scaffold_123",
-                                            "connection_id": "conn_prod",
-                                            "database_name": "prod_warehouse",
-                                            "schema_name": "public",
                                             "tables": ["fact_sales", "dim_customer"],
                                             "status": "draft",
                                             "created_at": "2025-02-14T10:00:00Z",
@@ -1409,11 +1730,22 @@ def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
 )
 def list_dbt_scaffolds(
     tenant_id: str,
-    connection_id: str | None = None,
 ) -> DbtScaffoldListResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, _, _, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     scaffolds = list_scaffolds(settings, tenant_id, domain_id, connection_id)
-    return DbtScaffoldListResponse(scaffolds=scaffolds)
+    payload = [
+        {
+            key: value
+            for key, value in item.items()
+            if key not in {"connection_id", "database_name", "schema_name"}
+        }
+        for item in scaffolds
+    ]
+    return DbtScaffoldListResponse(scaffolds=payload)
 
 
 @app.patch(
@@ -1725,6 +2057,7 @@ def generate_insights(
     metric_name: str | None = None,
 ) -> InsightDetailResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
+    _resolve_scope_values(tenant_id, domain_id)
     if type == "anomaly":
         if not metric_name:
             raise HTTPException(status_code=400, detail="metric_name is required for anomaly generation")
@@ -2366,12 +2699,16 @@ def create_metric(payload: MetricUpsertRequest) -> MetricUpsertResponse:
     if not payload.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
-    _require_basic_scope(
-        _request_scope(payload.connection_id, payload.database, payload.schema, payload.tables),
-        "/metrics",
+    connection_id, database, schema, tables = _resolve_scope_values(
+        payload.tenant_id,
+        domain_id,
     )
     payload_dict = payload.model_dump()
     payload_dict["domain_id"] = domain_id
+    payload_dict["connection_id"] = connection_id
+    payload_dict["database"] = database
+    payload_dict["schema"] = schema
+    payload_dict["tables"] = tables
     metric_id = upsert_metric(settings, payload_dict)
     return MetricUpsertResponse(metric_id=metric_id, status=payload.status or "suggested")
 
@@ -2405,12 +2742,16 @@ def patch_metric(metric_id: str, payload: MetricPatchRequest) -> MetricUpsertRes
     if not payload.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
-    _require_basic_scope(
-        _request_scope(payload.connection_id, payload.database, payload.schema, payload.tables),
-        "/metrics/{metric_id}",
+    connection_id, database, schema, tables = _resolve_scope_values(
+        payload.tenant_id,
+        domain_id,
     )
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
     updates["domain_id"] = domain_id
+    updates["connection_id"] = connection_id
+    updates["database"] = database
+    updates["schema"] = schema
+    updates["tables"] = tables
     update_metric(settings, metric_id, updates)
     status = updates.get("status", "updated")
     return MetricUpsertResponse(metric_id=metric_id, status=status)
@@ -2478,10 +2819,6 @@ def domains() -> dict:
                                 "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
                                 "file_ids": ["file_123", "file_456"],
                                 "metadata": {
-                                    "connection_id": "conn_prod",
-                                    "database": "prod_warehouse",
-                                    "schema": "public",
-                                    "tables": ["fact_production_daily", "dim_plant"],
                                     "columns": ["plant_name", "region_name"],
                                 },
                             },
@@ -2518,9 +2855,6 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
         },
     )
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
-    scope = extract_scope_from_metadata(payload.metadata)
-    logger.info("context.ingest: scope.parsed | %s", scope)
-    _require_scope(scope, "/context/ingest")
     source_title = payload.source_title or generate_source_title(payload.raw_text, payload.metadata)
     logger.info("context.ingest: source_title.resolved | %s", {"source_title": source_title})
     context_id = create_context(
@@ -2561,7 +2895,7 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
                                 "tenant_id": "tenant_a",
                                 "source_type": "business_context",
                                 "source_title": "Operations glossary",
-                                "metadata": "{\"connection_id\":\"conn_prod\",\"database\":\"prod_warehouse\",\"schema\":\"public\",\"tables\":[\"fact_production_daily\",\"dim_plant\"]}",
+                                "metadata": "{\"columns\":[\"plant_name\",\"region_name\"]}",
                                 "file": "@context.txt",
                             },
                         }
@@ -2624,11 +2958,8 @@ def ingest_context_file(
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail="metadata must be valid JSON") from exc
     if not parsed_metadata:
-        raise HTTPException(status_code=400, detail="metadata is required and must include connection scope")
+        parsed_metadata = {}
     resolved_domain = _resolve_domain_id(tenant_id, domain_id)
-    scope = extract_scope_from_metadata(parsed_metadata)
-    logger.info("context.ingest-file: scope.parsed | %s", scope)
-    _require_scope(scope, "/context/ingest-file")
     file_id = create_context_file(
         settings,
         tenant_id=tenant_id,
@@ -2661,9 +2992,6 @@ def list_context_entries(
     tenant_id: str,
     source_type: str | None = None,
     status: str | None = None,
-    connection_id: str | None = None,
-    database: str | None = None,
-    schema: str | None = None,
     limit: int = 200,
     cursor: str | None = None,
 ) -> ContextListResponse:
@@ -2675,9 +3003,9 @@ def list_context_entries(
         domain_id=domain_id,
         source_type=source_type,
         status=status,
-        connection_id=connection_id,
-        database=database,
-        schema=schema,
+        connection_id=None,
+        database=None,
+        schema=None,
         limit=limit,
         cursor=decoded_cursor,
     )
@@ -2993,15 +3321,8 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
                             "value": {"source_title": "Ops glossary v2", "status": "processed"},
                         },
                         "update_metadata": {
-                            "summary": "Update metadata (same scope)",
-                            "value": {
-                                "metadata": {
-                                    "connection_id": "conn_prod",
-                                    "database": "prod_warehouse",
-                                    "schema": "public",
-                                    "tables": ["fact_production_daily", "dim_plant"],
-                                }
-                            },
+                            "summary": "Update metadata",
+                            "value": {"metadata": {"columns": ["plant_name", "region_name"]}},
                         },
                     }
                 }
@@ -3020,17 +3341,6 @@ def patch_context(
         raise HTTPException(status_code=404, detail="Context not found")
     if context_row["tenant_id"] != tenant_id or context_row["domain_id"] != domain_id:
         raise HTTPException(status_code=400, detail="Context tenant/domain mismatch")
-
-    if payload.metadata and _metadata_has_scope(payload.metadata):
-        _require_scope(extract_scope_from_metadata(payload.metadata), "/context/{context_id}")
-        existing_scope = {
-            "connection_id": context_row.get("connection_id"),
-            "database": context_row.get("database_name"),
-            "schema": context_row.get("schema_name"),
-            "tables": (context_row.get("metadata") or {}).get("tables"),
-        }
-        if extract_scope_from_metadata(payload.metadata) != existing_scope:
-            raise HTTPException(status_code=400, detail="Context scope cannot be changed")
 
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
     if not updates:
@@ -3051,14 +3361,7 @@ def patch_context(
                     "examples": {
                         "update_file_metadata": {
                             "summary": "Update file metadata",
-                            "value": {
-                                "metadata": {
-                                    "connection_id": "conn_prod",
-                                    "database": "prod_warehouse",
-                                    "schema": "public",
-                                    "tables": ["fact_production_daily", "dim_plant"],
-                                }
-                            },
+                            "value": {"metadata": {"columns": ["plant_name", "region_name"]}},
                         }
                     }
                 }
@@ -3079,10 +3382,6 @@ def patch_context_file(
         raise HTTPException(status_code=404, detail="Context file not found")
     if file_row["tenant_id"] != tenant_id or file_row["domain_id"] != domain_id:
         raise HTTPException(status_code=400, detail="Context file tenant/domain mismatch")
-    if _metadata_has_scope(payload.metadata):
-        _require_scope(extract_scope_from_metadata(payload.metadata), "/context/files/{file_id}")
-        if not scopes_match(file_row.get("metadata"), payload.metadata):
-            raise HTTPException(status_code=400, detail="Context file scope cannot be changed")
     update_context_file_metadata(settings, file_id, payload.metadata)
     return {"ok": True}
 
@@ -3137,9 +3436,6 @@ def patch_context_extraction(
                             "entities": {
                                 "summary": "Entities and hierarchies",
                                 "value": {
-                                    "connection_id": "conn_prod",
-                                    "database": "prod_warehouse",
-                                    "schema": "public",
                                     "entities": [
                                         {
                                             "entity_id": "organizational_unit",
@@ -3164,11 +3460,12 @@ def patch_context_extraction(
 )
 def entities(
     tenant_id: str,
-    connection_id: str,
-    database: str,
-    schema: str,
 ) -> EntitiesResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     entity_overrides, hierarchy_overrides = load_overrides(
         settings,
         tenant_id,
@@ -3195,9 +3492,6 @@ def entities(
         for item in sorted(hierarchy_overrides, key=lambda item: item.get("hierarchy_name", ""))
     ]
     return EntitiesResponse(
-        connection_id=connection_id,
-        database=database,
-        schema=schema,
         entities=entity_page,
         hierarchies=hierarchy_page,
     )
@@ -3219,9 +3513,6 @@ def entities_all(tenant_id: str) -> EntitiesAllResponse:
         grouped.setdefault(
             key,
             {
-                "connection_id": key[0],
-                "database": key[1],
-                "schema": key[2],
                 "entities": [],
                 "hierarchies": [],
             },
@@ -3239,9 +3530,6 @@ def entities_all(tenant_id: str) -> EntitiesAllResponse:
         grouped.setdefault(
             key,
             {
-                "connection_id": key[0],
-                "database": key[1],
-                "schema": key[2],
                 "entities": [],
                 "hierarchies": [],
             },
@@ -3264,11 +3552,12 @@ def entities_all(tenant_id: str) -> EntitiesAllResponse:
 )
 def hierarchies(
     tenant_id: str,
-    connection_id: str,
-    database: str,
-    schema: str,
 ) -> dict:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     _, hierarchy_overrides = load_overrides(
         settings,
         tenant_id,
@@ -3412,16 +3701,20 @@ def update_hierarchy(
 )
 def create_fact(payload: FactsUpsertRequest) -> dict:
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id, database_name, schema_name, tables = _resolve_scope_values(
+        payload.tenant_id,
+        domain_id,
+    )
     fact_id = upsert_fact(
         settings,
         {
             "fact_id": None,
             "tenant_id": payload.tenant_id,
             "domain_id": domain_id,
-            "connection_id": payload.connection_id,
-            "database_name": payload.database,
-            "schema_name": payload.schema,
-            "name": payload.name,
+            "connection_id": connection_id,
+            "database_name": database_name,
+            "schema_name": schema_name,
+            "table_name": payload.table_name,
             "grain": payload.grain,
             "time_column": payload.time_column,
             "measures": payload.measures,
@@ -3441,13 +3734,18 @@ def create_fact(payload: FactsUpsertRequest) -> dict:
 )
 def get_facts(
     tenant_id: str,
-    connection_id: str,
-    database: str,
-    schema: str,
 ) -> FactsResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     facts = list_facts(settings, tenant_id, domain_id, connection_id, database, schema)
-    return FactsResponse(facts=facts)
+    facts_payload = [
+        {key: value for key, value in item.items() if key not in {"connection_id", "database_name", "schema_name"}}
+        for item in facts
+    ]
+    return FactsResponse(facts=facts_payload)
 
 
 @app.get(
@@ -3465,13 +3763,12 @@ def get_facts_all(tenant_id: str) -> FactsAllResponse:
         grouped.setdefault(
             key,
             {
-                "connection_id": key[0],
-                "database": key[1],
-                "schema": key[2],
                 "facts": [],
             },
         )
-        grouped[key]["facts"].append(row)
+        grouped[key]["facts"].append(
+            {key: value for key, value in row.items() if key not in {"connection_id", "database_name", "schema_name"}}
+        )
     return FactsAllResponse(connections=list(grouped.values()))
 
 
@@ -3504,15 +3801,19 @@ def remove_fact(fact_id: str) -> dict:
 )
 def create_dimension(payload: DimensionsUpsertRequest) -> dict:
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id, database_name, schema_name, tables = _resolve_scope_values(
+        payload.tenant_id,
+        domain_id,
+    )
     dimension_id = upsert_dimension(
         settings,
         {
             "dimension_id": None,
             "tenant_id": payload.tenant_id,
             "domain_id": domain_id,
-            "connection_id": payload.connection_id,
-            "database_name": payload.database,
-            "schema_name": payload.schema,
+            "connection_id": connection_id,
+            "database_name": database_name,
+            "schema_name": schema_name,
             "name": payload.name,
             "keys": payload.keys,
             "attributes": payload.attributes,
@@ -3531,13 +3832,18 @@ def create_dimension(payload: DimensionsUpsertRequest) -> dict:
 )
 def get_dimensions(
     tenant_id: str,
-    connection_id: str,
-    database: str,
-    schema: str,
 ) -> DimensionsResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     dimensions = list_dimensions(settings, tenant_id, domain_id, connection_id, database, schema)
-    return DimensionsResponse(dimensions=dimensions)
+    dimensions_payload = [
+        {key: value for key, value in item.items() if key not in {"connection_id", "database_name", "schema_name"}}
+        for item in dimensions
+    ]
+    return DimensionsResponse(dimensions=dimensions_payload)
 
 
 @app.get(
@@ -3555,13 +3861,12 @@ def get_dimensions_all(tenant_id: str) -> DimensionsAllResponse:
         grouped.setdefault(
             key,
             {
-                "connection_id": key[0],
-                "database": key[1],
-                "schema": key[2],
                 "dimensions": [],
             },
         )
-        grouped[key]["dimensions"].append(row)
+        grouped[key]["dimensions"].append(
+            {key: value for key, value in row.items() if key not in {"connection_id", "database_name", "schema_name"}}
+        )
     return DimensionsAllResponse(connections=list(grouped.values()))
 
 
@@ -3594,13 +3899,17 @@ def remove_dimension(dimension_id: str) -> dict:
 )
 def create_review(payload: ReviewCreateRequest) -> ReviewResponse:
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id, database_name, schema_name, tables = _resolve_scope_values(
+        payload.tenant_id,
+        domain_id,
+    )
     review_id = create_review_event(
         settings,
         tenant_id=payload.tenant_id,
         domain_id=domain_id,
-        connection_id=payload.connection_id,
-        database_name=payload.database,
-        schema_name=payload.schema,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
         artifact_type=payload.artifact_type,
         artifact_id=payload.artifact_id,
         status=payload.status,
@@ -3618,12 +3927,13 @@ def create_review(payload: ReviewCreateRequest) -> ReviewResponse:
 )
 def list_review(
     tenant_id: str,
-    connection_id: str,
-    database: str,
-    schema: str,
     artifact_type: str | None = None,
 ) -> ReviewListResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     reviews = list_review_events(
         settings,
         tenant_id,
@@ -3655,11 +3965,12 @@ def patch_review(review_id: str, payload: ReviewPatchRequest) -> dict:
 )
 def review_summary(
     tenant_id: str,
-    connection_id: str,
-    database: str,
-    schema: str,
 ) -> ReviewSummaryResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     scoped_scan = load_latest_scan_for_scope(
         settings, tenant_id, domain_id, connection_id, database, schema
     )
@@ -3764,7 +4075,7 @@ def review_summary(
     response_model=SchemaResponse,
     tags=["explore"],
     summary="List dbt models",
-    description="Return models and columns from dbt manifest.json, scoped by optional database/schema filters.",
+    description="Return models and columns from dbt manifest.json, scoped by tenant scope.",
     openapi_extra={
         "responses": {
             "200": {
@@ -3794,19 +4105,16 @@ def review_summary(
     },
 )
 def schema(
-    connection_id: str | None = None,
-    database: str | None = None,
-    schema: str | None = None,
+    tenant_id: str,
+    domain_id: str | None = None,
     limit: int = 200,
     cursor: str | None = None,
 ) -> SchemaResponse:
-    if connection_id:
-        scopes = resolve_connection_scope(settings, connection_id)
-        if not scopes:
-            raise HTTPException(status_code=404, detail="Unknown connection_id")
-        if not database and not schema and scopes:
-            database = scopes[0].get("database_name")
-            schema = scopes[0].get("schema_name")
+    resolved_domain = _resolve_domain_id(tenant_id, domain_id)
+    _, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        resolved_domain,
+    )
     models = load_manifest_models(settings)
     if database:
         models = [model for model in models if model.get("database") == database]
@@ -3829,7 +4137,7 @@ def schema(
                     "examples": {
                         "scan_public": {
                             "summary": "Scan public schema",
-                            "value": {"schema": "public"},
+                            "value": {"tenant_id": "tenant_a"},
                         }
                     }
                 }
@@ -3861,7 +4169,7 @@ def schema(
     },
 )
 def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
-    tables = scan_schema(settings, request.schema)
+    tables = scan_schema(settings, settings.db_schema)
     return OnboardScanResponse(tables=tables)
 
 
@@ -4325,10 +4633,6 @@ def _merge_entity_candidates(
                             "summary": "Map schema (async)",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "schema": "public",
-                                "tables": ["fact_production_daily", "dim_plant"],
-                                "connection_id": "conn_prod",
-                                "database": "prod_warehouse",
                             },
                         }
                     }
@@ -4352,7 +4656,16 @@ def onboard_map_async(
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database_name, schema_name, tables = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
     payload = request.model_dump()
+    payload["connection_id"] = connection_id
+    payload["database"] = database_name
+    payload["schema"] = schema_name
+    if tables is not None:
+        payload["tables"] = tables
     payload["use_llm"] = use_llm
     job = create_job(
         settings,
@@ -4367,6 +4680,7 @@ def onboard_map_async(
 @app.post(
     "/onboard/map",
     response_model=OnboardMapResponse,
+    response_model_exclude_none=True,
     tags=["onboard"],
     summary="Map schema to ontology",
     description="Suggest entity mappings from schema columns to the selected domain ontology.",
@@ -4379,10 +4693,6 @@ def onboard_map_async(
                             "summary": "Map public schema",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "schema": "public",
-                                "tables": ["fact_production_daily", "dim_plant"],
-                                "connection_id": "conn_prod",
-                                "database": "prod_warehouse",
                             },
                         }
                     }
@@ -4399,24 +4709,21 @@ def onboard_map(
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(tenant_id, None)
-    schema_value = request.schema or (request.schemas[0] if request.schemas else None)
-    _require_scope(
-        _request_scope(request.connection_id, request.database, schema_value, request.tables),
-        "/onboard/map",
+    connection_id, database_name, schema_name, tables = _resolve_scope_values(
+        tenant_id,
+        domain_id,
     )
     schema_payload = load_latest_scan_for_scope(
         settings,
         tenant_id,
         domain_id,
-        request.connection_id,
-        request.database,
-        schema_value,
+        connection_id,
+        database_name,
+        schema_name,
     )
     if not schema_payload:
         raise HTTPException(status_code=400, detail="No scan results found for scope")
     tables = schema_payload.get("tables", [])
-    if request.tables:
-        tables = [table for table in tables if table.get("table") in request.tables]
     ontology = load_pack(f"packs/{domain_id}").get("ontology", {})
     glossary = fetch_glossary_terms(settings, tenant_id, domain_id) if tenant_id else None
     rule_candidates = map_entities(tables, ontology, glossary=glossary)
@@ -4441,20 +4748,16 @@ def onboard_map(
         settings,
         tenant_id,
         domain_id,
-        request.connection_id,
-        request.database,
-        schema_value,
-        request.tables or [table.get("table") for table in tables],
+        connection_id,
+        database_name,
+        schema_name,
+        [table.get("table") for table in tables],
         high_confidence_candidates,
         low_confidence_candidates,
         LOW_CONFIDENCE_THRESHOLD,
     )
     return OnboardMapResponse(
         mapping_id=mapping_id,
-        connection_id=request.connection_id,
-        database=request.database,
-        schema=schema_value,
-        tables=request.tables or [table.get("table") for table in tables],
         candidates=high_confidence_candidates,
         low_confidence_candidates=low_confidence_candidates,
         low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,
@@ -4587,12 +4890,8 @@ def _merge_models(rule_facts: list[dict], rule_dims: list[dict], llm_payload: di
                             "summary": "Infer models (async)",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "schema": "public",
-                                "tables": ["fact_production_daily", "dim_plant"],
                                 "grain": "day",
                                 "use_llm": False,
-                                "connection_id": "conn_prod",
-                                "database": "prod_warehouse",
                             },
                         }
                     }
@@ -4612,7 +4911,16 @@ def infer_models_async(request: InferModelsRequest) -> JobCreateResponse:
     if not request.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(request.tenant_id, None)
+    connection_id, database_name, schema_name, tables = _resolve_scope_values(
+        request.tenant_id,
+        domain_id,
+    )
     payload = request.model_dump()
+    payload["connection_id"] = connection_id
+    payload["database"] = database_name
+    payload["schema"] = schema_name
+    if tables is not None:
+        payload["tables"] = tables
     job = create_job(
         settings,
         tenant_id=request.tenant_id,
@@ -4638,13 +4946,9 @@ def infer_models_async(request: InferModelsRequest) -> JobCreateResponse:
                             "summary": "Infer models",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "schema": "public",
-                                "tables": ["fact_production_daily", "dim_plant"],
                                 "time_column": "production_date",
                                 "grain": "day",
                                 "use_llm": True,
-                                "connection_id": "conn_prod",
-                                "database": "prod_warehouse",
                             },
                         }
                     }
@@ -4687,27 +4991,24 @@ def infer_models_async(request: InferModelsRequest) -> JobCreateResponse:
     },
 )
 def infer_models(request: InferModelsRequest) -> InferModelsResponse:
-    schema_value = request.schema or (request.schemas[0] if request.schemas else None)
-    _require_scope(
-        _request_scope(request.connection_id, request.database, schema_value, request.tables),
-        "/onboard/infer-models",
-    )
     if not request.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(request.tenant_id, None)
+    connection_id, database_name, schema_name, tables = _resolve_scope_values(
+        request.tenant_id,
+        domain_id,
+    )
     schema_payload = load_latest_scan_for_scope(
         settings,
         request.tenant_id,
         domain_id,
-        request.connection_id,
-        request.database,
-        schema_value,
+        connection_id,
+        database_name,
+        schema_name,
     )
     if not schema_payload:
         raise HTTPException(status_code=400, detail="No scan results found for scope")
     tables = schema_payload.get("tables", [])
-    if request.tables:
-        tables = [table for table in tables if table.get("table") in request.tables]
     facts, dims = _infer_models_from_scan(tables, request.time_column, request.grain)
     if request.use_llm:
         try:
@@ -4733,10 +5034,6 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                             "summary": "Suggest metrics (async)",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "schema": "public",
-                                "tables": ["fact_production_daily"],
-                                "connection_id": "conn_prod",
-                                "database": "prod_warehouse",
                             },
                         }
                     }
@@ -4759,7 +5056,16 @@ def suggested_metrics_async(
     if not request.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(request.tenant_id, None)
+    connection_id, database_name, schema_name, tables = _resolve_scope_values(
+        request.tenant_id,
+        domain_id,
+    )
     payload = request.model_dump()
+    payload["connection_id"] = connection_id
+    payload["database"] = database_name
+    payload["schema"] = schema_name
+    if tables is not None:
+        payload["tables"] = tables
     payload["persist"] = persist
     job = create_job(
         settings,
@@ -4786,10 +5092,6 @@ def suggested_metrics_async(
                             "summary": "Suggest metrics for public schema",
                             "value": {
                                 "tenant_id": "tenant_a",
-                                "schema": "public",
-                                "tables": ["fact_hpcl_sales_daily"],
-                                "connection_id": "conn_prod",
-                                "database": "prod_warehouse",
                             },
                         }
                     }
@@ -4846,27 +5148,24 @@ def suggested_metrics_async(
     },
 )
 def suggested_metrics(request: OnboardScanRequest, persist: bool = False) -> SuggestedMetricsResponse:
-    schema_value = request.schema or (request.schemas[0] if request.schemas else None)
-    _require_scope(
-        _request_scope(request.connection_id, request.database, schema_value, request.tables),
-        "/metrics/suggested",
-    )
     if not request.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(request.tenant_id, None)
+    connection_id, database_name, schema_name, tables = _resolve_scope_values(
+        request.tenant_id,
+        domain_id,
+    )
     schema_payload = load_latest_scan_for_scope(
         settings,
         request.tenant_id,
         domain_id,
-        request.connection_id,
-        request.database,
-        schema_value,
+        connection_id,
+        database_name,
+        schema_name,
     )
     if not schema_payload:
         raise HTTPException(status_code=400, detail="No scan results found for scope")
     tables = schema_payload.get("tables", [])
-    if request.tables:
-        tables = [table for table in tables if table.get("table") in request.tables]
     measures = detect_measures(tables)
     low_confidence_measures = [
         measure
@@ -4886,9 +5185,9 @@ def suggested_metrics(request: OnboardScanRequest, persist: bool = False) -> Sug
             settings,
             request.tenant_id,
             domain_id,
-            request.connection_id,
-            request.database,
-            schema_value,
+            connection_id,
+            database_name,
+            schema_name,
             measures,
         )
     return SuggestedMetricsResponse(
@@ -5243,10 +5542,6 @@ def _extract_top_n(question: str | None) -> int | None:
                             "value": {
                                 "question": "Top 5 sales areas by sales volume for MS in Q2 FY 2024-2025.",
                                 "tenant_id": "tenant_a",
-                                "connection_id": "conn_prod",
-                                "database": "prod_warehouse",
-                                "schema": "public",
-                                "tables": ["fact_sales", "dim_sales_area"],
                                 "limit": 100,
                                 "explain": True,
                             },
@@ -5256,10 +5551,6 @@ def _extract_top_n(question: str | None) -> int | None:
                             "value": {
                                 "question": "HPCL vs BPCL market share for MS in UTTAR PRADESH during FY 2024-2025.",
                                 "tenant_id": "tenant_a",
-                                "connection_id": "conn_prod",
-                                "database": "prod_warehouse",
-                                "schema": "public",
-                                "tables": ["fact_sales", "dim_sales_area"],
                                 "limit": 100,
                                 "explain": True,
                             },
@@ -5269,10 +5560,6 @@ def _extract_top_n(question: str | None) -> int | None:
                             "value": {
                                 "question": "Which sales areas are below required run rate this month?",
                                 "tenant_id": "tenant_a",
-                                "connection_id": "conn_prod",
-                                "database": "prod_warehouse",
-                                "schema": "public",
-                                "tables": ["fact_sales", "dim_sales_area"],
                                 "limit": 100,
                                 "explain": True,
                             },
@@ -5310,14 +5597,16 @@ def query(request: QueryRequest) -> QueryResult:
     start_time = time.perf_counter()
     sql_text = None
     row_count = None
-    _require_scope(
-        _request_scope(request.connection_id, request.database, request.schema, request.tables),
-        "/query",
-    )
     glossary = None
+    contract = None
     if request.tenant_id:
         domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+        connection_id, database_name, schema_name, tables = _resolve_scope_values(
+            request.tenant_id,
+            domain_id,
+        )
         glossary = fetch_glossary_terms(settings, request.tenant_id, domain_id)
+        contract = get_active_semantic_contract(settings, request.tenant_id, domain_id)
     metric_names, dimensions, filters = _resolve_metrics(request)
     if not metric_names and request.question:
         question = request.question.lower()
@@ -5521,6 +5810,19 @@ def query(request: QueryRequest) -> QueryResult:
         error_message=None,
     )
 
+    semantic_validation = _build_semantic_validation(metrics, contract)
+    lineage = _build_lineage(metrics)
+    if semantic_validation and request.tenant_id:
+        for policy_name in semantic_validation.get("policy_applied", []):
+            log_policy_audit(
+                settings,
+                tenant_id=request.tenant_id,
+                query_id=None,
+                policy_name=policy_name,
+                action="applied",
+                details={"metrics": metric_names},
+            )
+
     return QueryResult(
         metrics=[metric.name for metric in metrics],
         dimensions=[dim.name for dim in dim_objects if dim.name != "company_name"],
@@ -5528,4 +5830,6 @@ def query(request: QueryRequest) -> QueryResult:
         rows=rows,
         by_company_sql=by_company_sql,
         by_company_rows=by_company_rows,
+        semantic_validation=semantic_validation,
+        lineage=lineage,
     )

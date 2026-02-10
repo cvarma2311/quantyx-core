@@ -33,26 +33,6 @@ class QueryRequest(BaseModel):
         description="Domain identifier for glossary/context enrichment",
         examples=["manufacturing"],
     )
-    connection_id: Optional[str] = Field(
-        None,
-        description="Connection scope identifier",
-        examples=["conn_prod"],
-    )
-    database: Optional[str] = Field(
-        None,
-        description="Database scope name",
-        examples=["prod_warehouse"],
-    )
-    schema: Optional[str] = Field(
-        None,
-        description="Schema scope name",
-        examples=["public"],
-    )
-    tables: Optional[List[str]] = Field(
-        None,
-        description="Tables in scope",
-        examples=[["fact_production_daily", "dim_plant"]],
-    )
     metric: Optional[str] = Field(
         None,
         description="Metric name to query directly",
@@ -109,6 +89,20 @@ class QueryResult(BaseModel):
         None,
         examples=[[{"company_name": "HPCL", "industry_sales_by_company_tmt": 1000.0}]],
     )
+    semantic_validation: Optional[dict] = Field(
+        None,
+        examples=[
+            {
+                "definitions": ["total_sales_volume_tmt"],
+                "assumptions": ["default grain=day"],
+                "policy_applied": [],
+            }
+        ],
+    )
+    lineage: Optional[dict] = Field(
+        None,
+        examples=[{"models": ["fact_sales"], "tables": ["public.fact_sales"]}],
+    )
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -116,6 +110,12 @@ class QueryResult(BaseModel):
                 "dimensions": ["sales_area_name", "fiscal_year"],
                 "sql": "SELECT sales_area_name, SUM(sales_tmt) AS total_sales_volume_tmt FROM ...",
                 "rows": [{"sales_area_name": "Tenali", "total_sales_volume_tmt": 123.4}],
+                "semantic_validation": {
+                    "definitions": ["total_sales_volume_tmt"],
+                    "assumptions": ["default grain=day"],
+                    "policy_applied": [],
+                },
+                "lineage": {"models": ["fact_sales"], "tables": ["public.fact_sales"]},
             }
         }
     }
@@ -296,9 +296,6 @@ class HierarchyOverrideRequest(BaseModel):
 
 
 class EntitiesResponse(BaseModel):
-    connection_id: str | None = Field(None, examples=["conn_prod"])
-    database: str | None = Field(None, examples=["prod_warehouse"])
-    schema: str | None = Field(None, examples=["public"])
     entities: List[dict] = Field(
         examples=[[{"entity_id": "organizational_unit", "join_key": "sales_area_name"}]]
     )
@@ -314,9 +311,6 @@ class EntitiesResponse(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
-                "connection_id": "conn_prod",
-                "database": "prod_warehouse",
-                "schema": "public",
                 "entities": [{"entity_id": "organizational_unit", "join_key": "sales_area_name"}],
                 "hierarchies": [
                     {"name": "sales_org", "levels": ["sbu", "zone", "region", "sales_area"]}
@@ -331,9 +325,6 @@ class EntitiesAllResponse(BaseModel):
         examples=[
             [
                 {
-                    "connection_id": "conn_prod",
-                    "database": "prod_warehouse",
-                    "schema": "public",
                     "entities": [{"entity_id": "organizational_unit"}],
                     "hierarchies": [{"name": "sales_org", "levels": ["zone", "region"]}],
                 }
@@ -345,20 +336,30 @@ class EntitiesAllResponse(BaseModel):
 class FactsUpsertRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["manufacturing"])
-    connection_id: str = Field(..., examples=["conn_prod"])
-    database: str = Field(..., examples=["prod_warehouse"])
-    schema: str = Field(..., examples=["public"])
-    name: str = Field(..., examples=["fact_sales"])
+    table_name: str = Field(..., examples=["fact_sales"])
     grain: str | None = Field(None, examples=["day"])
     time_column: str | None = Field(None, examples=["sales_date"])
     measures: List[str] = Field(default_factory=list, examples=[["sales_amount", "sales_tmt"]])
     dimensions: List[str] = Field(default_factory=list, examples=[["sales_area_name"]])
     description: str | None = Field(None, examples=["Daily sales fact"])
     status: str | None = Field("draft", examples=["reviewed"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "tenant_a",
+                "table_name": "fact_sales",
+                "grain": "day",
+                "time_column": "sales_date",
+                "measures": ["sales_amount", "sales_tmt"],
+                "dimensions": ["sales_area_name"],
+                "status": "draft",
+            }
+        }
+    }
 
 
 class FactsPatchRequest(BaseModel):
-    name: str | None = Field(None, examples=["fact_sales"])
+    table_name: str | None = Field(None, examples=["fact_sales"])
     grain: str | None = Field(None, examples=["day"])
     time_column: str | None = Field(None, examples=["sales_date"])
     measures: List[str] | None = Field(None, examples=[["sales_amount"]])
@@ -373,7 +374,7 @@ class FactsResponse(BaseModel):
             [
                 {
                     "fact_id": "fact_123",
-                    "name": "fact_sales",
+                    "table_name": "fact_sales",
                     "grain": "day",
                     "time_column": "sales_date",
                     "measures": ["sales_amount"],
@@ -390,10 +391,7 @@ class FactsAllResponse(BaseModel):
         examples=[
             [
                 {
-                    "connection_id": "conn_prod",
-                    "database": "prod_warehouse",
-                    "schema": "public",
-                    "facts": [{"fact_id": "fact_123", "name": "fact_sales"}],
+                    "facts": [{"fact_id": "fact_123", "table_name": "fact_sales"}],
                 }
             ]
         ]
@@ -403,9 +401,6 @@ class FactsAllResponse(BaseModel):
 class DimensionsUpsertRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["manufacturing"])
-    connection_id: str = Field(..., examples=["conn_prod"])
-    database: str = Field(..., examples=["prod_warehouse"])
-    schema: str = Field(..., examples=["public"])
     name: str = Field(..., examples=["dim_customer"])
     keys: List[str] = Field(default_factory=list, examples=[["customer_id"]])
     attributes: List[str] = Field(default_factory=list, examples=[["customer_name", "region_name"]])
@@ -442,9 +437,6 @@ class DimensionsAllResponse(BaseModel):
         examples=[
             [
                 {
-                    "connection_id": "conn_prod",
-                    "database": "prod_warehouse",
-                    "schema": "public",
                     "dimensions": [{"dimension_id": "dim_123", "name": "dim_customer"}],
                 }
             ]
@@ -455,9 +447,6 @@ class DimensionsAllResponse(BaseModel):
 class ReviewCreateRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["manufacturing"])
-    connection_id: str = Field(..., examples=["conn_prod"])
-    database: str = Field(..., examples=["prod_warehouse"])
-    schema: str = Field(..., examples=["public"])
     artifact_type: str = Field(..., examples=["entities"])
     artifact_id: str = Field(..., examples=["map_123"])
     status: str = Field(..., examples=["reviewed"], description="Enum: draft, reviewed, applied, rejected")
@@ -928,19 +917,10 @@ class InsightDetailWithContextResponse(BaseModel):
 
 class OnboardScanRequest(BaseModel):
     tenant_id: str | None = Field(None, examples=["tenant_a"])
-    schema: str | None = Field(None, examples=["public"])
-    schemas: List[str] | None = Field(None, examples=[["public", "staging"]])
-    tables: List[str] | None = Field(None, examples=[["fact_production_daily", "dim_plant"]])
-    connection_id: str | None = Field(None, examples=["conn_prod"])
-    database: str | None = Field(None, examples=["prod_warehouse"])
     model_config = {
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "schema": "public",
-                "tables": ["fact_production_daily", "dim_plant"],
-                "connection_id": "conn_prod",
-                "database": "prod_warehouse",
             }
         }
     }
@@ -966,10 +946,6 @@ class OnboardScanResponse(BaseModel):
 
 class OnboardMapResponse(BaseModel):
     mapping_id: str | None = Field(None, examples=["map_ab12cd34"])
-    connection_id: str | None = Field(None, examples=["conn_prod"])
-    database: str | None = Field(None, examples=["prod_warehouse"])
-    schema: str | None = Field(None, examples=["public"])
-    tables: List[str] | None = Field(None, examples=[["fact_sales", "dim_customer"]])
     candidates: List[dict]
     low_confidence_candidates: List[dict]
     low_confidence_threshold: float = Field(
@@ -979,10 +955,6 @@ class OnboardMapResponse(BaseModel):
         "json_schema_extra": {
             "example": {
                 "mapping_id": "map_ab12cd34",
-                "connection_id": "conn_prod",
-                "database": "prod_warehouse",
-                "schema": "public",
-                "tables": ["fact_production_daily", "dim_plant"],
                 "candidates": [
                     {
                         "column": "sales_area_name",
@@ -1011,10 +983,6 @@ class ContextIngestRequest(BaseModel):
         default=None,
         examples=[
             {
-                "connection_id": "conn_prod",
-                "database": "prod_warehouse",
-                "schema": "public",
-                "tables": ["fact_production_daily", "dim_plant"],
                 "columns": ["plant_name", "region_name"],
             }
         ],
@@ -1028,10 +996,6 @@ class ContextIngestRequest(BaseModel):
                 "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area.",
                 "file_ids": ["file_123", "file_456"],
                 "metadata": {
-                    "connection_id": "conn_prod",
-                    "database": "prod_warehouse",
-                    "schema": "public",
-                    "tables": ["fact_production_daily", "dim_plant"],
                     "columns": ["plant_name", "region_name"],
                 },
             }
@@ -1184,29 +1148,26 @@ class ContextApplyResponse(BaseModel):
 class ContextPatchRequest(BaseModel):
     source_title: str | None = Field(None, examples=["Operations glossary v2"])
     raw_text: str | None = Field(None, examples=["Updated glossary content..."])
-    metadata: dict | None = Field(None, examples=[{"connection_id": "conn_prod", "tables": ["fact_sales"]}])
+    metadata: dict | None = Field(None, examples=[{"columns": ["sales_area_name"]}])
     status: str | None = Field(None, examples=["processed"])
     model_config = {
         "json_schema_extra": {
             "example": {
                 "source_title": "Operations glossary v2",
                 "status": "processed",
-                "metadata": {"connection_id": "conn_prod", "database": "prod_warehouse", "schema": "public"},
+                "metadata": {"columns": ["sales_area_name"]},
             }
         }
     }
 
 
 class ContextFilePatchRequest(BaseModel):
-    metadata: dict | None = Field(None, examples=[{"connection_id": "conn_prod", "tables": ["fact_sales"]}])
+    metadata: dict | None = Field(None, examples=[{"columns": ["sales_area_name"]}])
     model_config = {
         "json_schema_extra": {
             "example": {
                 "metadata": {
-                    "connection_id": "conn_prod",
-                    "database": "prod_warehouse",
-                    "schema": "public",
-                    "tables": ["fact_sales"],
+                    "columns": ["sales_area_name"],
                 }
             }
         }
@@ -1318,24 +1279,15 @@ class OnboardScanConnectionResponse(BaseModel):
 
 class InferModelsRequest(BaseModel):
     tenant_id: str | None = Field(None, examples=["tenant_a"])
-    schema: str = Field("public", examples=["public"])
-    schemas: List[str] | None = Field(None, examples=[["public", "staging"]])
-    tables: List[str] | None = Field(None, examples=[["fact_production_daily", "dim_plant"]])
     time_column: str | None = Field(None, examples=["production_date"])
     grain: str | None = Field(None, examples=["day"])
     use_llm: bool = Field(False, examples=[True])
-    connection_id: str | None = Field(None, examples=["conn_prod"])
-    database: str | None = Field(None, examples=["prod_warehouse"])
     model_config = {
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "schema": "public",
-                "tables": ["fact_production_daily", "dim_plant"],
                 "grain": "day",
                 "use_llm": False,
-                "connection_id": "conn_prod",
-                "database": "prod_warehouse",
             }
         }
     }
@@ -1402,7 +1354,6 @@ class JobStatusResponse(BaseModel):
     status: JobStatusEnum
     progress_pct: float | None = None
     progress_stage: str | None = None
-    scope_id: str | None = None
     error_message: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -1419,7 +1370,6 @@ class JobListItem(BaseModel):
     job_id: str
     job_type: str
     status: JobStatusEnum
-    scope_id: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -1436,13 +1386,86 @@ class JobCancelResponse(BaseModel):
     status: JobStatusEnum
 
 
+class PackApplyRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    industry: str = Field(..., examples=["petroleum_refinery"])
+    version: str = Field(..., examples=["1.0.0"])
+
+
+class PackApplyResponse(BaseModel):
+    ok: bool = True
+    contract_id: str | None = None
+
+
+class PackListResponse(BaseModel):
+    packs: List[dict] = Field(
+        examples=[[{"industry": "manufacturing", "version": "1.0.0", "release_date": "2025-02-14"}]]
+    )
+
+
+class SemanticContractResponse(BaseModel):
+    contract_id: str
+    tenant_id: str
+    industry: str
+    version: str
+    payload: dict
+    hash: str
+    status: str
+    created_at: str | None = None
+
+
+class SemanticContractListResponse(BaseModel):
+    contracts: List[dict]
+
+
+class SemanticContractValidateResponse(BaseModel):
+    ok: bool = True
+    errors: List[dict] = Field(default_factory=list)
+
+
+class SemanticExtractRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    industry: str = Field(..., examples=["petroleum_refinery"])
+    inputs: dict = Field(..., examples=[{"raw_text": "MFM = mass flow meter", "tables": ["fact_dispatch"]}])
+    model: str | None = Field(None, examples=["gpt-4o-mini"])
+
+
+class SemanticExtractResponse(BaseModel):
+    contract_id: str
+    status: str
+
+
+class SemanticApplyRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    contract_id: str = Field(..., examples=["contract_123"])
+
+
+class SemanticApplyResponse(BaseModel):
+    ok: bool = True
+
+
+class TenantScopeUpsertRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    connection_id: str = Field(..., examples=["conn_prod"])
+    database: str = Field(..., examples=["prod_warehouse"])
+    schema: str = Field(..., examples=["public"])
+    tables: List[str] | None = Field(None, examples=[["fact_sales", "dim_customer"]])
+
+
+class TenantScopeResponse(BaseModel):
+    tenant_id: str
+    domain_id: str
+    connection_id: str
+    database: str
+    schema: str
+    tables: List[str] | None = None
+    status: str
+
+
 class MetricUpsertRequest(BaseModel):
     tenant_id: str | None = Field(None, examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["energy_distribution"])
-    connection_id: str | None = Field(None, examples=["conn_prod"])
-    database: str | None = Field(None, examples=["prod_warehouse"])
-    schema: str | None = Field(None, examples=["public"])
-    tables: List[str] | None = Field(None, examples=[["fact_hpcl_sales_daily"]])
     metric_name: str = Field(..., examples=["total_sales_volume_tmt"])
     display_name: str | None = Field(None, examples=["Total Sales Volume (TMT)"])
     description: str | None = Field(None, examples=["Total sales volume in TMT"])
@@ -1475,10 +1498,6 @@ class MetricUpsertRequest(BaseModel):
 class MetricPatchRequest(BaseModel):
     tenant_id: str | None = Field(None, examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["energy_distribution"])
-    connection_id: str | None = Field(None, examples=["conn_prod"])
-    database: str | None = Field(None, examples=["prod_warehouse"])
-    schema: str | None = Field(None, examples=["public"])
-    tables: List[str] | None = Field(None, examples=[["fact_hpcl_sales_daily"]])
     metric_name: str | None = Field(None, examples=["total_sales_volume_tmt"])
     display_name: str | None = Field(None, examples=["Total Sales Volume (TMT)"])
     description: str | None = Field(None, examples=["Updated description"])
@@ -1549,7 +1568,6 @@ class ContractValidateResponse(BaseModel):
 class DbtManifestGenerateRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["manufacturing"])
-    connection_id: str | None = Field(None, examples=["conn_prod"])
     dbt_project_path: str | None = Field(None, examples=["dbt"])
     profile_name: str = Field(..., examples=["default"])
     target_name: str = Field(..., examples=["dev"])
@@ -1558,7 +1576,6 @@ class DbtManifestGenerateRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "connection_id": "conn_prod",
                 "dbt_project_path": "dbt",
                 "profile_name": "default",
                 "target_name": "dev",
@@ -1588,7 +1605,6 @@ class DbtManifestGenerateResponse(BaseModel):
 class DbtConfigUpsertRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["manufacturing"])
-    connection_id: str | None = Field(None, examples=["conn_prod"])
     dbt_project_path: str | None = Field(None, examples=["dbt_projects/dbt_tenant_a"])
     target_name: str | None = Field(None, examples=["dev"])
     profiles_dir: str | None = Field(None, examples=["~/.dbt"])
@@ -1596,7 +1612,6 @@ class DbtConfigUpsertRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "connection_id": "conn_prod",
                 "dbt_project_path": "dbt_projects/dbt_tenant_a",
                 "target_name": "dev",
                 "profiles_dir": "~/.dbt",
@@ -1609,7 +1624,6 @@ class DbtConfigResponse(BaseModel):
     config_id: str | None = Field(None, examples=["dbt_cfg_123"])
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str = Field(..., examples=["manufacturing"])
-    connection_id: str | None = Field(None, examples=["conn_prod"])
     dbt_project_path: str = Field(..., examples=["dbt_projects/dbt_tenant_a"])
     profile_name: str = Field(..., examples=["tenant_a"])
     target_name: str = Field(..., examples=["dev"])
@@ -1622,7 +1636,6 @@ class DbtConfigResponse(BaseModel):
                 "config_id": "dbt_cfg_123",
                 "tenant_id": "tenant_a",
                 "domain_id": "manufacturing",
-                "connection_id": "conn_prod",
                 "dbt_project_path": "dbt_projects/dbt_tenant_a",
                 "profile_name": "default",
                 "target_name": "dev",
@@ -1637,10 +1650,6 @@ class DbtConfigResponse(BaseModel):
 class DbtScaffoldRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["manufacturing"])
-    connection_id: str = Field(..., examples=["conn_prod"])
-    database: str = Field(..., examples=["prod_warehouse"])
-    schema: str = Field(..., examples=["public"])
-    tables: List[str] = Field(default_factory=list, examples=[["fact_sales", "dim_customer"]])
     context_id: str | None = Field(None, examples=["ctx_123"])
     model: str | None = Field(None, examples=["gpt-4o-mini"])
     host: str | None = Field(None, examples=["db.company.com"])
@@ -1651,10 +1660,6 @@ class DbtScaffoldRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "connection_id": "conn_prod",
-                "database": "prod_warehouse",
-                "schema": "public",
-                "tables": ["fact_sales", "dim_customer"],
                 "context_id": "ctx_123",
                 "host": "db.company.com",
                 "port": 5432,
@@ -1698,9 +1703,6 @@ class DbtScaffoldListResponse(BaseModel):
                 "scaffolds": [
                     {
                         "scaffold_id": "scaffold_123",
-                        "connection_id": "conn_prod",
-                        "database_name": "prod_warehouse",
-                        "schema_name": "public",
                         "tables": ["fact_sales", "dim_customer"],
                         "status": "draft",
                         "created_at": "2025-02-14T10:00:00Z",
@@ -1722,7 +1724,6 @@ class DbtManifestLatestResponse(BaseModel):
     manifest_id: str = Field(..., examples=["manifest_123"])
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str = Field(..., examples=["manufacturing"])
-    connection_id: str | None = Field(None, examples=["conn_prod"])
     dbt_project_path: str = Field(..., examples=["dbt"])
     profile_name: str = Field(..., examples=["default"])
     target_name: str = Field(..., examples=["dev"])
@@ -1734,7 +1735,6 @@ class DbtManifestLatestResponse(BaseModel):
                 "manifest_id": "manifest_123",
                 "tenant_id": "tenant_a",
                 "domain_id": "manufacturing",
-                "connection_id": "conn_prod",
                 "dbt_project_path": "dbt",
                 "profile_name": "default",
                 "target_name": "dev",

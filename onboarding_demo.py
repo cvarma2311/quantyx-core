@@ -20,6 +20,7 @@ DEMO_DBT_PROJECT = os.getenv("DEMO_DBT_PROJECT", "")
 DEMO_DBT_PROFILE = os.getenv("DEMO_DBT_PROFILE", "default")
 DEMO_DBT_TARGET = os.getenv("DEMO_DBT_TARGET", "dev")
 DEMO_DBT_PROFILES_DIR = os.getenv("DEMO_DBT_PROFILES_DIR", "")
+DEMO_SEMANTIC_CONTRACT = os.getenv("DEMO_SEMANTIC_CONTRACT", "false").lower() in {"1", "true", "yes"}
 
 def _mask_payload(payload: dict | None) -> dict | None:
     if payload is None:
@@ -114,6 +115,10 @@ def run_onboarding(
 
 
 def main() -> int:
+    print("Usage:")
+    print("  DEMO_SEMANTIC_CONTRACT=true to run semantic contract extraction")
+    print("  DEMO_CONTEXT_TEXT/DEMO_CONTEXT_FILE for context ingestion")
+    print("  DEMO_TABLES is required")
     print("== Onboarding Demo ==")
     print(f"API_BASE={API_BASE}")
     print(f"DOMAIN_ID={DOMAIN_ID}")
@@ -124,6 +129,7 @@ def main() -> int:
     print(f"DEMO_DBT_PROJECT={DEMO_DBT_PROJECT or '(auto)'}")
     print(f"DEMO_DBT_PROFILE={DEMO_DBT_PROFILE}")
     print(f"DEMO_DBT_TARGET={DEMO_DBT_TARGET}")
+    print(f"DEMO_SEMANTIC_CONTRACT={DEMO_SEMANTIC_CONTRACT}")
     print("Log detail: verbose")
 
     if not DEMO_TABLES:
@@ -136,7 +142,6 @@ def main() -> int:
         dbt_config_payload = {
             "tenant_id": TENANT_ID,
             "domain_id": DOMAIN_ID,
-            "connection_id": CONNECTION_ID,
             "dbt_project_path": DEMO_DBT_PROJECT or None,
             "profile_name": DEMO_DBT_PROFILE,
             "target_name": DEMO_DBT_TARGET,
@@ -185,7 +190,7 @@ def main() -> int:
     # 1c) List dbt scaffolds (auto-generated)
     print("\n[1c] List dbt scaffolds")
     scaffold_list_path = (
-        f"/dbt/scaffold?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}&connection_id={CONNECTION_ID}"
+        f"/dbt/scaffold?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}"
     )
     _log_request("GET", scaffold_list_path)
     scaffold_list_response = _request("GET", scaffold_list_path)
@@ -207,10 +212,7 @@ def main() -> int:
             "source_title": "Demo business context",
             "metadata": json.dumps(
                 {
-                    "connection_id": CONNECTION_ID,
-                    "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
-                    "schema": os.getenv("DEMO_DB_SCHEMA", "public"),
-                    "tables": DEMO_TABLES,
+                    "columns": ["plant_name", "region_name"],
                 }
             ),
         }
@@ -254,10 +256,7 @@ def main() -> int:
             "raw_text": context_text,
             "file_ids": file_ids or None,
             "metadata": {
-                "connection_id": CONNECTION_ID,
-                "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
-                "schema": os.getenv("DEMO_DB_SCHEMA", "public"),
-                "tables": DEMO_TABLES,
+                "columns": ["plant_name", "region_name"],
             },
         }
         _log_request("POST", "/context/ingest", context_payload)
@@ -288,10 +287,6 @@ def main() -> int:
             list_path = (
                 "/context"
                 f"?tenant_id={TENANT_ID}"
-                f"&domain_id={DOMAIN_ID}"
-                f"&connection_id={CONNECTION_ID}"
-                f"&database={os.getenv('DEMO_DB_NAME', 'prod_warehouse')}"
-                f"&schema={os.getenv('DEMO_DB_SCHEMA', 'public')}"
             )
             _log_request("GET", list_path)
             list_response = _request("GET", list_path)
@@ -319,6 +314,32 @@ def main() -> int:
     else:
         print("No DEMO_CONTEXT_TEXT/DEMO_CONTEXT_FILE provided; skipping context ingestion.")
 
+    # 1d) Optional semantic contract extraction + apply
+    if DEMO_SEMANTIC_CONTRACT:
+        print("\n[1d] Semantic contract extraction")
+        semantic_payload = {
+            "tenant_id": TENANT_ID,
+            "industry": DOMAIN_ID,
+            "inputs": {
+                "raw_text": DEMO_CONTEXT_TEXT or "MFM = mass flow meter.",
+                "tables_and_columns": "fact_dispatch: [bay_name, mfm_id, product_name]",
+                "entity_types": ["organizational_unit", "mass_flow_meter", "product"],
+                "metric_candidate": "metric_name=throughput_volume, columns=[mfm_volume, product_name]",
+            },
+            "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        }
+        _log_request("POST", "/contracts/semantic/extract", semantic_payload)
+        semantic_response = _request("POST", "/contracts/semantic/extract", semantic_payload)
+        _log_response(semantic_response)
+        contract_id = semantic_response.get("contract_id")
+        if contract_id:
+            apply_payload = {"tenant_id": TENANT_ID, "contract_id": contract_id}
+            _log_request("POST", "/contracts/semantic/apply", apply_payload)
+            apply_response = _request("POST", "/contracts/semantic/apply", apply_payload)
+            _log_response(apply_response)
+    else:
+        print("DEMO_SEMANTIC_CONTRACT not enabled; skipping semantic contract extraction.")
+
     # Pull a schema/table set for downstream steps
     print("\n[1a] Extract schema/table list from scan")
     schemas = []
@@ -345,11 +366,6 @@ def main() -> int:
     print("Step 2 start")
     map_payload = {
         "tenant_id": TENANT_ID,
-        "schema": schemas[0] if schemas else "public",
-        "schemas": schemas or None,
-        "tables": tables[:10] or None,
-        "connection_id": CONNECTION_ID,
-        "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
     }
     map_path = f"/onboard/map?domain_id={DOMAIN_ID}&tenant_id={TENANT_ID}&use_llm=false"
     _log_request("POST", map_path, map_payload)
@@ -360,13 +376,7 @@ def main() -> int:
     # 3) Entities + hierarchies (review / override)
     print("\n[3] Entities and hierarchies")
     print("Step 3 start")
-    entities_path = (
-        f"/entities?domain_id={DOMAIN_ID}"
-        f"&tenant_id={TENANT_ID}"
-        f"&connection_id={CONNECTION_ID}"
-        f"&database={os.getenv('DEMO_DB_NAME', 'prod_warehouse')}"
-        f"&schema={os.getenv('DEMO_DB_SCHEMA', 'public')}"
-    )
+    entities_path = f"/entities?tenant_id={TENANT_ID}"
     _log_request("GET", entities_path)
     entities_response = _request("GET", entities_path)
     _log_response(entities_response)
@@ -377,14 +387,9 @@ def main() -> int:
     print("Step 4 start")
     infer_payload = {
         "tenant_id": TENANT_ID,
-        "schema": schemas[0] if schemas else "public",
-        "schemas": schemas or None,
-        "tables": tables[:10] or None,
         "time_column": None,
         "grain": "day",
         "use_llm": False,
-        "connection_id": CONNECTION_ID,
-        "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
     }
     infer_path = f"/onboard/infer-models?domain_id={DOMAIN_ID}"
     _log_request("POST", infer_path, infer_payload)
@@ -397,7 +402,6 @@ def main() -> int:
     manifest_payload = {
         "tenant_id": TENANT_ID,
         "domain_id": DOMAIN_ID,
-        "connection_id": CONNECTION_ID,
         "profile_name": DEMO_DBT_PROFILE,
         "target_name": DEMO_DBT_TARGET,
         "profiles_dir": DEMO_DBT_PROFILES_DIR or None,
@@ -413,11 +417,6 @@ def main() -> int:
     print("Step 6 start")
     metrics_payload = {
         "tenant_id": TENANT_ID,
-        "schema": schemas[0] if schemas else "public",
-        "schemas": schemas or None,
-        "tables": tables[:10] or None,
-        "connection_id": CONNECTION_ID,
-        "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
     }
     suggested_path = f"/metrics/suggested?domain_id={DOMAIN_ID}&persist=true"
     _log_request("POST", suggested_path, metrics_payload)
@@ -431,9 +430,6 @@ def main() -> int:
     metrics_path = (
         f"/metrics?tenant_id={TENANT_ID}"
         f"&domain_id={DOMAIN_ID}"
-        f"&connection_id={CONNECTION_ID}"
-        f"&database={os.getenv('DEMO_DB_NAME', 'prod_warehouse')}"
-        f"&schema={os.getenv('DEMO_DB_SCHEMA', 'public')}"
     )
     _log_request("GET", metrics_path)
     metrics_response = _request("GET", metrics_path)
@@ -452,10 +448,6 @@ def main() -> int:
             "display_name": measure["column"].replace("_", " ").title(),
             "description": f"Auto-promoted metric for {measure['table']}.{measure['column']}",
             "status": "certified",
-            "connection_id": CONNECTION_ID,
-            "database": os.getenv("DEMO_DB_NAME", "prod_warehouse"),
-            "schema": os.getenv("DEMO_DB_SCHEMA", "public"),
-            "tables": [measure["table"]],
         }
         patch_path = f"/metrics/{metric_id}"
         _log_request("PATCH", patch_path, patch_payload)
@@ -479,9 +471,6 @@ def main() -> int:
     review_path = (
         f"/review/summary?tenant_id={TENANT_ID}"
         f"&domain_id={DOMAIN_ID}"
-        f"&connection_id={CONNECTION_ID}"
-        f"&database={os.getenv('DEMO_DB_NAME', 'prod_warehouse')}"
-        f"&schema={os.getenv('DEMO_DB_SCHEMA', 'public')}"
     )
     _log_request("GET", review_path)
     review_response = _request("GET", review_path)

@@ -44,6 +44,8 @@ dependency order.
    - `Phase_S_Async_Onboarding_Jobs.md`
 15) Phase T - Semantic Layer Enhancement (Logical Data Management)
    - `Phase_T_Semantic_Layer_Enhancement.md`
+16) Phase U - Tenant Scope Resolution (Remove Connection Scope from APIs)
+   - `Phase_U_Tenant_Scope_Resolution.md`
 
 ## Dependencies (summary)
 
