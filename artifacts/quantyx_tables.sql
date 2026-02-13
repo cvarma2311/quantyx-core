@@ -325,16 +325,17 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_metrics_registry_scope
 CREATE TABLE IF NOT EXISTS public.quantyx_entity_overrides (
   tenant_id TEXT NOT NULL,
   domain_id TEXT NOT NULL,
-  connection_id TEXT NOT NULL DEFAULT 'global',
-  database_name TEXT NOT NULL DEFAULT 'global',
-  schema_name TEXT NOT NULL DEFAULT 'global',
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
   entity_id TEXT NOT NULL,
   description TEXT,
   join_key TEXT,
   examples TEXT[],
   source_context_id TEXT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id)
+  PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id),
+  CHECK (connection_id <> 'global' AND database_name <> 'global' AND schema_name <> 'global')
 );
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_entity_overrides_domain
@@ -347,15 +348,16 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_entity_overrides_scope
 CREATE TABLE IF NOT EXISTS public.quantyx_hierarchy_overrides (
   tenant_id TEXT NOT NULL,
   domain_id TEXT NOT NULL,
-  connection_id TEXT NOT NULL DEFAULT 'global',
-  database_name TEXT NOT NULL DEFAULT 'global',
-  schema_name TEXT NOT NULL DEFAULT 'global',
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
   hierarchy_name TEXT NOT NULL,
   levels TEXT[] NOT NULL,
   description TEXT,
   source_context_id TEXT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name)
+  PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name),
+  CHECK (connection_id <> 'global' AND database_name <> 'global' AND schema_name <> 'global')
 );
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_hierarchy_overrides_domain

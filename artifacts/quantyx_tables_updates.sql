@@ -2,13 +2,13 @@ ALTER TABLE public.quantyx_entity_overrides
   ADD COLUMN IF NOT EXISTS source_context_id TEXT NULL;
 
 ALTER TABLE public.quantyx_entity_overrides
-  ADD COLUMN IF NOT EXISTS connection_id TEXT DEFAULT 'global';
+  ADD COLUMN IF NOT EXISTS connection_id TEXT;
 
 ALTER TABLE public.quantyx_entity_overrides
-  ADD COLUMN IF NOT EXISTS database_name TEXT DEFAULT 'global';
+  ADD COLUMN IF NOT EXISTS database_name TEXT;
 
 ALTER TABLE public.quantyx_entity_overrides
-  ADD COLUMN IF NOT EXISTS schema_name TEXT DEFAULT 'global';
+  ADD COLUMN IF NOT EXISTS schema_name TEXT;
 
 UPDATE public.quantyx_entity_overrides
   SET connection_id = COALESCE(connection_id, 'global'),
@@ -25,6 +25,10 @@ ALTER TABLE public.quantyx_entity_overrides
   ALTER COLUMN schema_name SET NOT NULL;
 
 ALTER TABLE public.quantyx_entity_overrides
+  ADD CONSTRAINT quantyx_entity_overrides_no_global
+  CHECK (connection_id <> 'global' AND database_name <> 'global' AND schema_name <> 'global');
+
+ALTER TABLE public.quantyx_entity_overrides
   DROP CONSTRAINT IF EXISTS quantyx_entity_overrides_pkey;
 
 ALTER TABLE public.quantyx_entity_overrides
@@ -37,13 +41,13 @@ ALTER TABLE public.quantyx_hierarchy_overrides
   ADD COLUMN IF NOT EXISTS source_context_id TEXT NULL;
 
 ALTER TABLE public.quantyx_hierarchy_overrides
-  ADD COLUMN IF NOT EXISTS connection_id TEXT DEFAULT 'global';
+  ADD COLUMN IF NOT EXISTS connection_id TEXT;
 
 ALTER TABLE public.quantyx_hierarchy_overrides
-  ADD COLUMN IF NOT EXISTS database_name TEXT DEFAULT 'global';
+  ADD COLUMN IF NOT EXISTS database_name TEXT;
 
 ALTER TABLE public.quantyx_hierarchy_overrides
-  ADD COLUMN IF NOT EXISTS schema_name TEXT DEFAULT 'global';
+  ADD COLUMN IF NOT EXISTS schema_name TEXT;
 
 UPDATE public.quantyx_hierarchy_overrides
   SET connection_id = COALESCE(connection_id, 'global'),
@@ -58,6 +62,10 @@ ALTER TABLE public.quantyx_hierarchy_overrides
 
 ALTER TABLE public.quantyx_hierarchy_overrides
   ALTER COLUMN schema_name SET NOT NULL;
+
+ALTER TABLE public.quantyx_hierarchy_overrides
+  ADD CONSTRAINT quantyx_hierarchy_overrides_no_global
+  CHECK (connection_id <> 'global' AND database_name <> 'global' AND schema_name <> 'global');
 
 ALTER TABLE public.quantyx_hierarchy_overrides
   DROP CONSTRAINT IF EXISTS quantyx_hierarchy_overrides_pkey;

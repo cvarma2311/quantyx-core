@@ -3278,14 +3278,18 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
     if extraction_row["tenant_id"] != payload.tenant_id or extraction_row["domain_id"] != domain_id:
         raise HTTPException(status_code=400, detail="Extraction tenant/domain mismatch")
 
+    connection_id, database_name, schema_name, _ = _resolve_scope_values(
+        payload.tenant_id,
+        domain_id,
+    )
     context_row = get_context(settings, extraction_row.get("context_id"))
     logger.info(
         "context.apply: scope.resolved | %s",
         {
             "context_id": extraction_row.get("context_id"),
-            "connection_id": (context_row or {}).get("connection_id"),
-            "database": (context_row or {}).get("database_name"),
-            "schema": (context_row or {}).get("schema_name"),
+            "connection_id": connection_id,
+            "database": database_name,
+            "schema": schema_name,
         },
     )
     updated = apply_extractions(
@@ -3295,9 +3299,9 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
         payload=extraction_row["payload"],
         apply_flags=payload.apply,
         source_context_id=extraction_row.get("context_id"),
-        connection_id=(context_row or {}).get("connection_id"),
-        database_name=(context_row or {}).get("database_name"),
-        schema_name=(context_row or {}).get("schema_name"),
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
     )
     logger.info(
         "context.apply: complete | %s",
