@@ -527,9 +527,11 @@ CREATE TABLE IF NOT EXISTS public.quantyx_dimensions_registry (
   connection_id TEXT NOT NULL,
   database_name TEXT NOT NULL,
   schema_name TEXT NOT NULL,
-  table_name TEXT NOT NULL,
+  name TEXT NOT NULL,
+  keys JSONB NULL,
+  attributes JSONB NULL,
+  description TEXT NULL,
   status TEXT NOT NULL DEFAULT 'draft',
-  payload JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -539,10 +541,13 @@ CREATE TABLE IF NOT EXISTS public.quantyx_review_events (
   tenant_id TEXT NOT NULL,
   domain_id TEXT NOT NULL,
   connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
   artifact_type TEXT NOT NULL,
   artifact_id TEXT NOT NULL,
   status TEXT NOT NULL,
   notes TEXT NULL,
+  payload JSONB NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

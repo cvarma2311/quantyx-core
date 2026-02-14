@@ -226,6 +226,33 @@ UPDATE public.quantyx_entity_mappings
 ALTER TABLE public.quantyx_entity_mappings
   ALTER COLUMN tables SET DEFAULT '[]'::jsonb;
 
+ALTER TABLE public.quantyx_dimensions_registry
+  ADD COLUMN IF NOT EXISTS name TEXT NULL;
+
+ALTER TABLE public.quantyx_dimensions_registry
+  ADD COLUMN IF NOT EXISTS keys JSONB NULL;
+
+ALTER TABLE public.quantyx_dimensions_registry
+  ADD COLUMN IF NOT EXISTS attributes JSONB NULL;
+
+ALTER TABLE public.quantyx_dimensions_registry
+  ADD COLUMN IF NOT EXISTS description TEXT NULL;
+
+ALTER TABLE public.quantyx_dimensions_registry
+  DROP COLUMN IF EXISTS table_name;
+
+ALTER TABLE public.quantyx_dimensions_registry
+  DROP COLUMN IF EXISTS payload;
+
+ALTER TABLE public.quantyx_review_events
+  ADD COLUMN IF NOT EXISTS database_name TEXT NULL;
+
+ALTER TABLE public.quantyx_review_events
+  ADD COLUMN IF NOT EXISTS schema_name TEXT NULL;
+
+ALTER TABLE public.quantyx_review_events
+  ADD COLUMN IF NOT EXISTS payload JSONB NULL;
+
 -- Phase U: Tenant scope resolution compatibility
 ALTER TABLE public.quantyx_job_scopes
   ADD COLUMN IF NOT EXISTS tenant_id TEXT NULL;
