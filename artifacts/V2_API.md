@@ -326,7 +326,195 @@ Cursor pagination:
 - Entities: use `entity_cursor` + `entity_limit`.
 - Hierarchies: use `hierarchy_cursor` + `hierarchy_limit`.
 
-### 2.7 PATCH /entities/{entity_id}?domain_id=...&tenant_id=...
+### 2.7 GET /lineage?tenant_id=...
+Return semantic canvas nodes and edges derived from registries.
+
+Response:
+```json
+{
+  "nodes": [
+    { "id": "dim_plant", "type": "dimension" },
+    { "id": "fact_production_daily", "type": "fact" },
+    { "id": "total_output_tmt", "type": "metric" }
+  ],
+  "edges": [
+    { "from": "dim_plant", "to": "fact_production_daily", "edge_type": "dimension_to_fact" },
+    { "from": "fact_production_daily", "to": "total_output_tmt", "edge_type": "fact_to_metric" }
+  ]
+}
+```
+
+### 2.8 POST /semantic/suggest
+Generate generic facts, dimensions, metrics, and lineage from schema and question types.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "petroleum_refinery",
+  "inputs": {
+    "schema_summary": "fact_dispatch: [dispatch_date, plant_id, product_id, volume_tmt]",
+    "questions": [
+      "Top 5 plants by dispatch volume this month",
+      "Which products are trending down YoY?"
+    ],
+    "glossary": "MFM=Mass Flow Meter, bay=loading bay"
+  },
+  "model": "gpt-4o-mini"
+}
+```
+
+Response:
+```json
+{
+  "facts": [
+    {
+      "table_name": "fact_dispatch_daily",
+      "grain": "day",
+      "time_column": "dispatch_date",
+      "measures": ["volume_tmt"],
+      "dimensions": ["plant_id", "product_id"],
+      "description": "Daily dispatch fact",
+      "status": "draft"
+    }
+  ],
+  "dimensions": [
+    {
+      "name": "dim_plant",
+      "keys": ["plant_id"],
+      "attributes": ["plant_name", "region_name"],
+      "description": "Plant dimension",
+      "status": "draft"
+    }
+  ],
+  "metrics": [
+    {
+      "metric_name": "dispatch_volume_tmt",
+      "type": "sum",
+      "sql": "{{ ref('fact_dispatch_daily') }}.volume_tmt",
+      "grain": "day",
+      "dimensions": ["plant_id", "product_id"],
+      "description": "Total dispatch volume",
+      "status": "suggested"
+    }
+  ],
+  "lineage": {
+    "edges": [
+      { "from": "dim_plant", "to": "fact_dispatch_daily" },
+      { "from": "fact_dispatch_daily", "to": "dispatch_volume_tmt" }
+    ]
+  },
+  "question_types": ["top_n", "trend", "comparison"]
+}
+```
+
+### 2.9 POST /semantic/suggest/apply
+Persist suggested facts, dimensions, metrics, and lineage. Optionally target an existing canvas via `canvas_id`.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "petroleum_refinery",
+  "canvas_id": "canvas_123",
+  "facts": [
+    {
+      "table_name": "fact_dispatch_daily",
+      "grain": "day",
+      "time_column": "dispatch_date",
+      "measures": ["volume_tmt"],
+      "dimensions": ["plant_id", "product_id"],
+      "description": "Daily dispatch fact",
+      "status": "draft"
+    }
+  ],
+  "dimensions": [
+    {
+      "name": "dim_plant",
+      "keys": ["plant_id"],
+      "attributes": ["plant_name", "region_name"],
+      "description": "Plant dimension",
+      "status": "draft"
+    }
+  ],
+  "metrics": [
+    {
+      "metric_name": "dispatch_volume_tmt",
+      "type": "sum",
+      "sql": "{{ ref('fact_dispatch_daily') }}.volume_tmt",
+      "grain": "day",
+      "dimensions": ["plant_id", "product_id"],
+      "description": "Total dispatch volume",
+      "status": "suggested"
+    }
+  ],
+  "lineage": {
+    "edges": [
+      { "from": "dim_plant", "to": "fact_dispatch_daily" },
+      { "from": "fact_dispatch_daily", "to": "dispatch_volume_tmt" }
+    ]
+  },
+  "idempotency_key": "semantic-apply-001"
+}
+```
+
+Response:
+```json
+{
+  "ok": true,
+  "canvas_id": "canvas_123",
+  "facts": 1,
+  "dimensions": 1,
+  "metrics": 1
+}
+```
+
+### 2.10 POST /canvas/save
+Persist a full canvas (nodes + edges) and upsert semantic objects.
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "petroleum_refinery",
+  "name": "Default Semantic Canvas",
+  "description": "Main tenant canvas",
+  "nodes": [
+    { "type": "dimension", "payload": { "name": "dim_plant", "keys": ["plant_id"] } },
+    { "type": "fact", "payload": { "table_name": "fact_dispatch_daily", "grain": "day" } },
+    { "type": "metric", "payload": { "metric_name": "dispatch_volume_tmt", "type": "sum" } }
+  ],
+  "edges": [
+    { "from_id": "dim_plant", "to_id": "fact_dispatch_daily", "edge_type": "dimension_to_fact" },
+    { "from_id": "fact_dispatch_daily", "to_id": "dispatch_volume_tmt", "edge_type": "fact_to_metric" }
+  ],
+  "idempotency_key": "canvas-001"
+}
+```
+
+Response:
+```json
+{ "canvas_id": "canvas_123", "status": "saved" }
+```
+
+### 2.11 PUT /canvas/{canvas_id}
+Replace canvas graph and resync nodes/edges.
+
+Response:
+```json
+{ "canvas_id": "canvas_123", "status": "updated" }
+```
+
+### 2.12 GET /canvas?tenant_id=...
+List canvases for a tenant.
+
+### 2.13 GET /canvas/{canvas_id}?tenant_id=...
+Fetch full canvas graph.
+
+### 2.14 GET /canvas/tree?tenant_id=...
+Return a tenant‑rooted view (root → dimensions → facts → metrics).
+
+### 2.15 PATCH /entities/{entity_id}?domain_id=...&tenant_id=...
 Upsert a tenant-specific entity override.
 
 Request:
@@ -343,7 +531,7 @@ Response:
 { "ok": true }
 ```
 
-### 2.8 PATCH /hierarchies/{hierarchy_name}?domain_id=...&tenant_id=...
+### 2.16 PATCH /hierarchies/{hierarchy_name}?domain_id=...&tenant_id=...
 Upsert a tenant-specific hierarchy override.
 
 Request:

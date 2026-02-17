@@ -1281,13 +1281,13 @@ class InferModelsRequest(BaseModel):
     tenant_id: str | None = Field(None, examples=["tenant_a"])
     time_column: str | None = Field(None, examples=["production_date"])
     grain: str | None = Field(None, examples=["day"])
-    use_llm: bool = Field(False, examples=[True])
+    use_llm: bool = Field(True, examples=[True])
     model_config = {
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
                 "grain": "day",
-                "use_llm": False,
+                "use_llm": True,
             }
         }
     }
@@ -1442,6 +1442,50 @@ class SemanticApplyRequest(BaseModel):
 
 class SemanticApplyResponse(BaseModel):
     ok: bool = True
+
+
+class SemanticSuggestInputs(BaseModel):
+    schema_summary: str | None = Field(None, examples=["fact_dispatch: [dispatch_date, plant_id, product_id, volume_tmt]"])
+    questions: List[str] = Field(default_factory=list, examples=[["Top 5 plants by dispatch volume this month"]])
+    glossary: str | None = Field(None, examples=["MFM=Mass Flow Meter, bay=loading bay"])
+    tables: List[dict] | None = Field(
+        None,
+        examples=[[{"table": "fact_dispatch", "columns": [{"name": "dispatch_date", "data_type": "date"}]}]],
+    )
+
+
+class SemanticSuggestRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str | None = Field(None, examples=["petroleum_refinery"])
+    inputs: SemanticSuggestInputs
+    model: str | None = Field(None, examples=["gpt-4o-mini"])
+
+
+class SemanticSuggestResponse(BaseModel):
+    facts: List[dict] = Field(default_factory=list)
+    dimensions: List[dict] = Field(default_factory=list)
+    metrics: List[dict] = Field(default_factory=list)
+    lineage: dict = Field(default_factory=dict)
+    question_types: List[str] = Field(default_factory=list)
+
+
+class SemanticSuggestApplyRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str | None = Field(None, examples=["petroleum_refinery"])
+    canvas_id: str | None = Field(None, examples=["canvas_123"])
+    facts: List[dict] = Field(default_factory=list)
+    dimensions: List[dict] = Field(default_factory=list)
+    metrics: List[dict] = Field(default_factory=list)
+    lineage: dict = Field(default_factory=dict)
+    idempotency_key: str | None = Field(None, examples=["semantic-apply-001"])
+
+
+class SemanticSuggestApplyResponse(BaseModel):
+    ok: bool = True
+    canvas_id: str | None = None
+    facts: int = 0
+    dimensions: int = 0
+    metrics: int = 0
 
 
 class TenantScopeUpsertRequest(BaseModel):
@@ -1718,6 +1762,60 @@ class DbtScaffoldPatchRequest(BaseModel):
     notes: str | None = Field(None, examples=["Reviewed by analyst"])
     payload: dict | None = Field(None, examples=[{"schema_yaml": "version: 2"}])
     model_config = {"json_schema_extra": {"example": {"status": "reviewed", "notes": "Looks good"}}}
+
+
+
+
+class CanvasNodePayload(BaseModel):
+    type: str = Field(..., examples=["dimension"])
+    payload: dict = Field(default_factory=dict)
+
+
+class CanvasEdgePayload(BaseModel):
+    from_id: str = Field(..., examples=["dim_plant"])
+    to_id: str = Field(..., examples=["fact_production_daily"])
+    edge_type: str = Field(..., examples=["dimension_to_fact"])
+    source: str | None = Field("manual", examples=["manual"])
+    confidence: float | None = Field(None, examples=[0.9])
+
+
+class CanvasSaveRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str | None = Field(None, examples=["petroleum_refinery"])
+    name: str = Field(..., examples=["Default Semantic Canvas"])
+    description: str | None = Field(None, examples=["Main tenant canvas"])
+    nodes: List[CanvasNodePayload] = Field(default_factory=list)
+    edges: List[CanvasEdgePayload] = Field(default_factory=list)
+    root_node_id: str | None = Field(None, examples=["tenant_root"])
+    status: str | None = Field("draft", examples=["reviewed"])
+    idempotency_key: str | None = Field(None, examples=["canvas-001"])
+
+
+class CanvasSaveResponse(BaseModel):
+    canvas_id: str = Field(..., examples=["canvas_123"])
+    status: str = Field(..., examples=["saved"])
+
+
+class CanvasListResponse(BaseModel):
+    canvases: List[dict]
+
+
+class CanvasDetailResponse(BaseModel):
+    canvas_id: str
+    tenant_id: str
+    domain_id: str
+    name: str
+    description: str | None = None
+    graph_json: dict
+    root_node_id: str | None = None
+    status: str
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class CanvasTreeResponse(BaseModel):
+    nodes: List[dict]
+    edges: List[dict]
 
 
 class DbtManifestLatestResponse(BaseModel):

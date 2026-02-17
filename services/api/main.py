@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
 
 from services.ai.catalog import load_catalog_with_registry, resolve_ref
 from services.ai.config import load_settings
-from services.ai.db import run_query
+from services.ai.db import execute_non_query, run_query
 from services.ai.metrics_registry import (
     delete_metric,
     fetch_registry_metrics,
@@ -97,7 +97,7 @@ from services.ai.onboarding.entity_mapping import map_entities
 from services.ai.onboarding.entity_mappings_store import list_entity_mappings, persist_entity_mapping
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
-from services.ai.onboarding.model_inference_llm import llm_infer_models
+from services.ai.semantic_suggest import build_lineage_edges, build_schema_summary, suggest_semantic_model
 from services.ai.onboarding.models_registry import (
     delete_dimension,
     delete_fact,
@@ -240,8 +240,17 @@ from services.api.schemas import (
     SemanticExtractResponse,
     SemanticApplyRequest,
     SemanticApplyResponse,
+    SemanticSuggestRequest,
+    SemanticSuggestResponse,
+    SemanticSuggestApplyRequest,
+    SemanticSuggestApplyResponse,
     TenantScopeUpsertRequest,
     TenantScopeResponse,
+    CanvasSaveRequest,
+    CanvasSaveResponse,
+    CanvasListResponse,
+    CanvasDetailResponse,
+    CanvasTreeResponse,
 )
 from services.api.validators import (
     generate_source_title,
@@ -324,6 +333,198 @@ def _build_lineage(metrics: list) -> dict | None:
     return {"models": sorted(models), "tables": sorted(tables)}
 
 
+def _extract_metric_sources(metric: dict) -> set[str]:
+    sources: set[str] = set()
+    sql = metric.get("sql") or ""
+    for match in _REF_PATTERN.finditer(sql):
+        sources.add(match.group("name"))
+    for key in ("dataset_id", "source_model"):
+        if metric.get(key):
+            sources.add(metric[key])
+    return sources
+
+
+def _build_canvas_lineage(
+    facts: list[dict],
+    dimensions: list[dict],
+    metrics: list[dict],
+) -> dict:
+    nodes = []
+    edges = []
+
+    dimension_keys: dict[str, set[str]] = {}
+    for dim in dimensions:
+        dim_name = dim.get("name")
+        if not dim_name:
+            continue
+        keys = set((dim.get("keys") or []) + (dim.get("attributes") or []))
+        dimension_keys[dim_name] = keys
+        nodes.append({"id": dim_name, "type": "dimension"})
+
+    for fact in facts:
+        fact_name = fact.get("table_name")
+        if not fact_name:
+            continue
+        nodes.append({"id": fact_name, "type": "fact"})
+        fact_dims = set(fact.get("dimensions") or [])
+        for dim_name, keys in dimension_keys.items():
+            if fact_dims & keys:
+                edges.append({"from": dim_name, "to": fact_name, "edge_type": "dimension_to_fact"})
+
+    for metric in metrics:
+        metric_name = metric.get("metric_name")
+        if not metric_name:
+            continue
+        nodes.append({"id": metric_name, "type": "metric"})
+        for source in _extract_metric_sources(metric):
+            edges.append({"from": source, "to": metric_name, "edge_type": "fact_to_metric"})
+
+    return {"nodes": nodes, "edges": edges}
+
+
+def _normalize_grain(grain: str | None) -> str | None:
+    if not grain:
+        return None
+    return grain.strip().lower()
+
+
+def _validate_fact_payload(payload: dict) -> None:
+    measures = payload.get("measures") or []
+    if not isinstance(measures, list) or not measures:
+        raise HTTPException(status_code=400, detail="Fact must include at least one measure")
+
+
+def _validate_dimension_payload(payload: dict) -> None:
+    keys = payload.get("keys") or []
+    if not isinstance(keys, list) or not keys:
+        raise HTTPException(status_code=400, detail="Dimension must include at least one key")
+
+
+def _fact_grain_map(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database_name: str,
+    schema_name: str,
+) -> dict[str, str | None]:
+    rows = list_facts(settings, tenant_id, domain_id, connection_id, database_name, schema_name)
+    return {row.get("table_name"): row.get("grain") for row in rows if row.get("table_name")}
+
+
+def _validate_metric_payload(
+    payload: dict,
+    fact_grains: dict[str, str | None],
+) -> None:
+    metric_type = str(payload.get("type") or "").strip().lower()
+    if not metric_type:
+        raise HTTPException(status_code=400, detail="Metric type is required")
+    if metric_type not in ALLOWED_METRIC_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported metric type: {payload.get('type')}")
+
+    sql = payload.get("sql")
+    if not sql or not isinstance(sql, str):
+        raise HTTPException(status_code=400, detail="Metric sql is required")
+
+    grain = _normalize_grain(payload.get("grain"))
+    if not grain:
+        raise HTTPException(status_code=400, detail="Metric grain is required")
+
+    refs = [match.group("name") for match in _REF_PATTERN.finditer(sql)]
+    fact_refs = [ref for ref in refs if ref.startswith("fact_")]
+    if not fact_refs:
+        raise HTTPException(status_code=400, detail="Metric sql must reference a fact model via ref('fact_*')")
+
+    if metric_type == "ratio" and "/" not in sql:
+        raise HTTPException(status_code=400, detail="Ratio metrics must include numerator/denominator expression")
+
+    metric_rank = GRAIN_ORDER.get(grain)
+    for fact_ref in fact_refs:
+        fact_grain = _normalize_grain(fact_grains.get(fact_ref))
+        if not fact_grain:
+            continue
+        fact_rank = GRAIN_ORDER.get(fact_grain)
+        if metric_rank is not None and fact_rank is not None and metric_rank < fact_rank:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Metric grain '{grain}' cannot be finer than fact grain '{fact_grain}' for {fact_ref}",
+            )
+
+
+def _get_canvas_nodes_and_edges(tenant_id: str, domain_id: str) -> tuple[list[dict], list[dict]]:
+    nodes_rows = run_query(
+        settings,
+        """
+        SELECT n.node_id AS id, n.node_type AS type
+          FROM public.quantyx_canvas_nodes n
+          JOIN public.quantyx_canvases c ON c.canvas_id = n.canvas_id
+         WHERE c.tenant_id = %s AND c.domain_id = %s
+        """,
+        [tenant_id, domain_id],
+    )
+    edges_rows = run_query(
+        settings,
+        """
+        SELECT e.from_id AS "from", e.to_id AS "to", e.edge_type, e.source, e.confidence, e.from_type, e.to_type
+          FROM public.quantyx_canvas_edges e
+          JOIN public.quantyx_canvases c ON c.canvas_id = e.canvas_id
+         WHERE c.tenant_id = %s AND c.domain_id = %s
+        """,
+        [tenant_id, domain_id],
+    )
+
+    seen_nodes: set[tuple[str, str]] = set()
+    nodes: list[dict] = []
+    for row in nodes_rows:
+        node_id = row.get("id")
+        node_type = row.get("type")
+        if not node_id or not node_type:
+            continue
+        key = (node_id, node_type)
+        if key in seen_nodes:
+            continue
+        seen_nodes.add(key)
+        nodes.append({"id": node_id, "type": node_type})
+
+    seen_edges: set[tuple[str, str, str]] = set()
+    edges: list[dict] = []
+    for row in edges_rows:
+        from_id = row.get("from")
+        to_id = row.get("to")
+        edge_type = row.get("edge_type")
+        if not from_id or not to_id or not edge_type:
+            continue
+        key = (from_id, to_id, edge_type)
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
+        edges.append(
+            {
+                "from": from_id,
+                "to": to_id,
+                "edge_type": edge_type,
+                "source": row.get("source"),
+                "confidence": row.get("confidence"),
+                "from_type": row.get("from_type"),
+                "to_type": row.get("to_type"),
+            }
+        )
+
+    return nodes, edges
+
+
+def _ensure_canvas_owned(canvas_id: str, tenant_id: str, domain_id: str) -> None:
+    rows = run_query(
+        settings,
+        "SELECT tenant_id, domain_id FROM public.quantyx_canvases WHERE canvas_id = %s LIMIT 1",
+        [canvas_id],
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    row = rows[0]
+    if row.get("tenant_id") != tenant_id or row.get("domain_id") != domain_id:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+
+
 def _execute_job(job: dict) -> dict:
     job_type = job.get("job_type")
     payload = _load_job_payload(job.get("request_payload"))
@@ -402,7 +603,27 @@ def _start_job_worker() -> None:
 @app.on_event("shutdown")
 def _stop_job_worker() -> None:
     _job_worker_stop.set()
-ALLOWED_METRIC_TYPES = {"sum", "average", "avg", "ratio", "derived"}
+ALLOWED_METRIC_TYPES = {
+    "sum",
+    "average",
+    "avg",
+    "min",
+    "max",
+    "count",
+    "count_distinct",
+    "ratio",
+    "rate",
+    "derived",
+}
+GRAIN_ORDER = {
+    "transaction": 0,
+    "hour": 1,
+    "day": 2,
+    "week": 3,
+    "month": 4,
+    "quarter": 5,
+    "year": 6,
+}
 T = TypeVar("T")
 
 
@@ -736,6 +957,320 @@ def apply_semantic_contract(request: SemanticApplyRequest) -> SemanticApplyRespo
         raise HTTPException(status_code=404, detail="Contract not found")
     update_contract_status(settings, request.contract_id, "active")
     return SemanticApplyResponse(ok=True)
+
+
+@app.post(
+    "/semantic/suggest",
+    response_model=SemanticSuggestResponse,
+    tags=["semantic"],
+    summary="Suggest semantic models",
+    description="Generate generic facts, dimensions, metrics, and lineage from schema and question types.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "suggest": {
+                            "summary": "Suggest semantic model",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "domain_id": "petroleum_refinery",
+                                "inputs": {
+                                    "schema_summary": "fact_dispatch: [dispatch_date, plant_id, product_id, volume_tmt]",
+                                    "questions": [
+                                        "Top 5 plants by dispatch volume this month",
+                                        "Which products are trending down YoY?",
+                                    ],
+                                    "glossary": "MFM=Mass Flow Meter, bay=loading bay",
+                                },
+                                "model": "gpt-4o-mini",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def semantic_suggest(request: SemanticSuggestRequest) -> SemanticSuggestResponse:
+    if not request.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+    inputs = request.inputs
+    schema_summary = inputs.schema_summary
+    tables = inputs.tables
+    if not schema_summary:
+        connection_id, database_name, schema_name, _ = _resolve_scope_values(request.tenant_id, domain_id)
+        schema_payload = load_latest_scan_for_scope(
+            settings,
+            request.tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+        )
+        if not schema_payload:
+            raise HTTPException(status_code=400, detail="No scan results found for scope")
+        tables = schema_payload.get("tables", [])
+        schema_summary = build_schema_summary(tables)
+
+    suggestions = suggest_semantic_model(
+        settings,
+        schema_summary=schema_summary,
+        questions=inputs.questions,
+        glossary=inputs.glossary,
+        domain_id=domain_id,
+        model_override=request.model,
+        tables=tables,
+    )
+    return SemanticSuggestResponse(**suggestions)
+
+
+def _infer_edge_type(from_type: str | None, to_type: str | None) -> str | None:
+    if from_type == "dimension" and to_type == "fact":
+        return "dimension_to_fact"
+    if from_type == "fact" and to_type == "metric":
+        return "fact_to_metric"
+    return None
+
+
+@app.post(
+    "/semantic/suggest/apply",
+    response_model=SemanticSuggestApplyResponse,
+    tags=["semantic"],
+    summary="Persist suggested semantic models",
+    description="Persist facts, dimensions, metrics, and lineage to registries and canvas.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "apply": {
+                            "summary": "Apply semantic suggestions",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "domain_id": "petroleum_refinery",
+                                "facts": [
+                                    {
+                                        "table_name": "fact_dispatch_daily",
+                                        "grain": "day",
+                                        "time_column": "dispatch_date",
+                                        "measures": ["volume_tmt"],
+                                        "dimensions": ["plant_id", "product_id"],
+                                        "description": "Daily dispatch fact",
+                                        "status": "draft",
+                                    }
+                                ],
+                                "dimensions": [
+                                    {
+                                        "name": "dim_plant",
+                                        "keys": ["plant_id"],
+                                        "attributes": ["plant_name", "region_name"],
+                                        "description": "Plant dimension",
+                                        "status": "draft",
+                                    }
+                                ],
+                                "metrics": [
+                                    {
+                                        "metric_name": "dispatch_volume_tmt",
+                                        "type": "sum",
+                                        "sql": "{{ ref('fact_dispatch_daily') }}.volume_tmt",
+                                        "grain": "day",
+                                        "dimensions": ["plant_id", "product_id"],
+                                        "description": "Total dispatch volume",
+                                        "status": "suggested",
+                                    }
+                                ],
+                                "lineage": {
+                                    "edges": [
+                                        {"from": "dim_plant", "to": "fact_dispatch_daily"},
+                                        {"from": "fact_dispatch_daily", "to": "dispatch_volume_tmt"},
+                                    ]
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def semantic_suggest_apply(request: SemanticSuggestApplyRequest) -> SemanticSuggestApplyResponse:
+    if not request.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+    connection_id, database_name, schema_name, _ = _resolve_scope_values(request.tenant_id, domain_id)
+
+    facts = request.facts or []
+    dimensions = request.dimensions or []
+    metrics = request.metrics or []
+    fact_grains = _fact_grain_map(request.tenant_id, domain_id, connection_id, database_name, schema_name)
+    node_alias_to_id: dict[str, str] = {}
+    nodes: list[dict] = []
+
+    for fact in facts:
+        table_name = fact.get("table_name") or fact.get("name")
+        if not table_name:
+            continue
+        fact_payload = {
+            "fact_id": fact.get("fact_id"),
+            "tenant_id": request.tenant_id,
+            "domain_id": domain_id,
+            "connection_id": connection_id,
+            "database_name": database_name,
+            "schema_name": schema_name,
+            "table_name": table_name,
+            "grain": fact.get("grain"),
+            "time_column": fact.get("time_column"),
+            "measures": fact.get("measures", []),
+            "dimensions": fact.get("dimensions", []),
+            "description": fact.get("description"),
+            "status": fact.get("status", "draft"),
+        }
+        _validate_fact_payload(fact_payload)
+        fact_id = upsert_fact(
+            settings,
+            fact_payload,
+        )
+        for alias in (table_name, fact.get("fact_id"), fact_id):
+            if alias:
+                node_alias_to_id[str(alias)] = fact_id
+        if table_name:
+            fact_grains[str(table_name)] = fact.get("grain")
+        nodes.append({"id": fact_id, "type": "fact", "label": table_name})
+
+    for dim in dimensions:
+        name = dim.get("name")
+        if not name:
+            continue
+        dim_payload = {
+            "dimension_id": dim.get("dimension_id"),
+            "tenant_id": request.tenant_id,
+            "domain_id": domain_id,
+            "connection_id": connection_id,
+            "database_name": database_name,
+            "schema_name": schema_name,
+            "name": name,
+            "keys": dim.get("keys", []),
+            "attributes": dim.get("attributes", []),
+            "description": dim.get("description"),
+            "status": dim.get("status", "draft"),
+        }
+        _validate_dimension_payload(dim_payload)
+        dimension_id = upsert_dimension(
+            settings,
+            dim_payload,
+        )
+        for alias in (name, dim.get("dimension_id"), dimension_id):
+            if alias:
+                node_alias_to_id[str(alias)] = dimension_id
+        nodes.append({"id": dimension_id, "type": "dimension", "label": name})
+
+    for metric in metrics:
+        metric_name = metric.get("metric_name")
+        if not metric_name:
+            continue
+        metric_payload = {
+            "metric_id": metric.get("metric_id"),
+            "tenant_id": request.tenant_id,
+            "domain_id": domain_id,
+            "connection_id": connection_id,
+            "database": database_name,
+            "schema": schema_name,
+            "metric_name": metric_name,
+            "display_name": metric.get("display_name"),
+            "description": metric.get("description"),
+            "type": metric.get("type"),
+            "sql": metric.get("sql"),
+            "grain": metric.get("grain"),
+            "dimensions": metric.get("dimensions", []),
+            "unit": metric.get("unit"),
+            "status": metric.get("status", "suggested"),
+            "dataset_id": metric.get("dataset_id"),
+            "source_model": metric.get("source_model"),
+            "source_schema": metric.get("source_schema"),
+            "owner": metric.get("owner"),
+            "version": metric.get("version"),
+        }
+        _validate_metric_payload(metric_payload, fact_grains)
+        metric_id = upsert_metric(
+            settings,
+            metric_payload,
+        )
+        for alias in (metric_name, metric.get("metric_id"), metric_id):
+            if alias:
+                node_alias_to_id[str(alias)] = metric_id
+        nodes.append({"id": metric_id, "type": "metric", "label": metric_name})
+
+    node_types = {node["id"]: node["type"] for node in nodes}
+
+    edges = []
+    lineage_edges = (request.lineage or {}).get("edges", []) if isinstance(request.lineage, dict) else []
+    if not isinstance(lineage_edges, list) or not lineage_edges:
+        lineage_edges = build_lineage_edges(facts, dimensions, metrics)
+    for edge in lineage_edges:
+        from_id = node_alias_to_id.get(str(edge.get("from")), edge.get("from"))
+        to_id = node_alias_to_id.get(str(edge.get("to")), edge.get("to"))
+        if not from_id or not to_id:
+            continue
+        if from_id not in node_types or to_id not in node_types:
+            continue
+        edge_type = edge.get("edge_type") or _infer_edge_type(node_types.get(from_id), node_types.get(to_id))
+        if not edge_type:
+            continue
+        edges.append(
+            {
+                "from": from_id,
+                "to": to_id,
+                "edge_type": edge_type,
+                "source": edge.get("source", "llm"),
+                "confidence": edge.get("confidence"),
+                "from_type": node_types.get(from_id),
+                "to_type": node_types.get(to_id),
+            }
+        )
+
+    canvas_id: str | None = request.canvas_id
+    if nodes or edges:
+        if canvas_id:
+            _ensure_canvas_owned(canvas_id, request.tenant_id, domain_id)
+        if edges:
+            _validate_canvas_edges(nodes, edges)
+        if request.idempotency_key:
+            rows = run_query(
+                settings,
+                """
+                SELECT canvas_id
+                  FROM public.quantyx_canvases
+                 WHERE tenant_id = %s AND domain_id = %s AND idempotency_key = %s
+                 LIMIT 1
+                """,
+                [request.tenant_id, domain_id, request.idempotency_key],
+            )
+            if rows:
+                canvas_id = rows[0]["canvas_id"]
+        if not canvas_id:
+            canvas_id = f"canvas_{uuid.uuid4().hex[:10]}"
+        _persist_canvas_graph(
+            tenant_id=request.tenant_id,
+            domain_id=domain_id,
+            canvas_id=canvas_id,
+            name="AI Suggested Canvas",
+            description="Auto-generated semantic model",
+            root_node_id=None,
+            status="draft",
+            idempotency_key=request.idempotency_key,
+            nodes=nodes,
+            edges=edges,
+        )
+
+    return SemanticSuggestApplyResponse(
+        ok=True,
+        canvas_id=canvas_id,
+        facts=len(facts),
+        dimensions=len(dimensions),
+        metrics=len(metrics),
+    )
 
 @app.post(
     "/jobs",
@@ -1423,6 +1958,593 @@ def governance_lineage(metric_name: str | None = None) -> LineageResponse:
     if metric_name:
         lineage = [entry for entry in lineage if entry.get("metric_name") == metric_name]
     return LineageResponse(lineage=lineage)
+
+
+def _canvas_node_id(node_type: str, payload: dict) -> str | None:
+    if node_type == "dimension":
+        return payload.get("name") or payload.get("dimension_id")
+    if node_type == "fact":
+        return payload.get("table_name") or payload.get("fact_id")
+    if node_type == "metric":
+        return payload.get("metric_name") or payload.get("metric_id")
+    if node_type == "root":
+        return payload.get("id") or payload.get("root_node_id")
+    return None
+
+
+def _persist_canvas_graph(
+    tenant_id: str,
+    domain_id: str,
+    canvas_id: str,
+    name: str,
+    description: str | None,
+    root_node_id: str | None,
+    status: str,
+    idempotency_key: str | None,
+    nodes: list[dict],
+    edges: list[dict],
+) -> None:
+    graph_json = {"nodes": nodes, "edges": edges}
+    sql_canvas = """
+        INSERT INTO public.quantyx_canvases (
+          canvas_id, tenant_id, domain_id, name, description, graph_json, root_node_id, status, idempotency_key, created_at, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, now(), now())
+        ON CONFLICT (canvas_id)
+        DO UPDATE SET
+          name = EXCLUDED.name,
+          description = EXCLUDED.description,
+          graph_json = EXCLUDED.graph_json,
+          root_node_id = EXCLUDED.root_node_id,
+          status = EXCLUDED.status,
+          idempotency_key = EXCLUDED.idempotency_key,
+          updated_at = now()
+    """
+    execute_non_query(
+        settings,
+        sql_canvas,
+        [
+            canvas_id,
+            tenant_id,
+            domain_id,
+            name,
+            description,
+            json.dumps(graph_json),
+            root_node_id,
+            status,
+            idempotency_key,
+        ],
+    )
+
+    execute_non_query(settings, "DELETE FROM public.quantyx_canvas_nodes WHERE canvas_id = %s", [canvas_id])
+    execute_non_query(settings, "DELETE FROM public.quantyx_canvas_edges WHERE canvas_id = %s", [canvas_id])
+
+    for node in nodes:
+        node_type = node.get("type")
+        node_id = node.get("id")
+        if not node_type or not node_id:
+            continue
+        execute_non_query(
+            settings,
+            """
+            INSERT INTO public.quantyx_canvas_nodes (canvas_id, node_type, node_id, created_at)
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT DO NOTHING
+            """,
+            [canvas_id, node_type, node_id],
+        )
+
+    for edge in edges:
+        execute_non_query(
+            settings,
+            """
+            INSERT INTO public.quantyx_canvas_edges (
+              canvas_id, from_type, from_id, to_type, to_id, edge_type, source, confidence, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT DO NOTHING
+            """,
+            [
+                canvas_id,
+                edge.get("from_type"),
+                edge.get("from"),
+                edge.get("to_type"),
+                edge.get("to"),
+                edge.get("edge_type"),
+                edge.get("source", "manual"),
+                edge.get("confidence"),
+            ],
+        )
+
+@app.get(
+    "/lineage",
+    tags=["explore"],
+    summary="Semantic canvas lineage",
+    description="Return nodes and edges for the semantic canvas, derived from registries.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "canvas": {
+                                "summary": "Canvas lineage",
+                                "value": {
+                                    "nodes": [
+                                        {"id": "dim_plant", "type": "dimension"},
+                                        {"id": "fact_production_daily", "type": "fact"},
+                                        {"id": "total_output_tmt", "type": "metric"},
+                                    ],
+                                    "edges": [
+                                        {"from": "dim_plant", "to": "fact_production_daily", "edge_type": "dimension_to_fact"},
+                                        {"from": "fact_production_daily", "to": "total_output_tmt", "edge_type": "fact_to_metric"},
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def semantic_lineage(tenant_id: str) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    canvas_nodes, canvas_edges = _get_canvas_nodes_and_edges(tenant_id, domain_id)
+    if canvas_nodes or canvas_edges:
+        return {"nodes": canvas_nodes, "edges": canvas_edges}
+    connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+    facts = list_facts(settings, tenant_id, domain_id, connection_id, database, schema)
+    dimensions = list_dimensions(settings, tenant_id, domain_id, connection_id, database, schema)
+    metrics_rows = fetch_registry_metrics(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database,
+        schema_name=schema,
+        include_all_statuses=True,
+    )
+    return _build_canvas_lineage(facts, dimensions, metrics_rows)
+
+
+def _validate_canvas_edges(nodes: list[dict], edges: list[dict]) -> None:
+    node_types = {node.get("id"): node.get("type") for node in nodes if node.get("id")}
+    node_ids = set(node_types.keys())
+    valid_types = {"dimension_to_fact", "fact_to_metric", "root_to_dimension"}
+    for edge in edges:
+        edge_type = edge.get("edge_type")
+        from_id = edge.get("from")
+        to_id = edge.get("to")
+        if edge_type not in valid_types:
+            raise HTTPException(status_code=400, detail=f"Invalid edge_type: {edge_type}")
+        if from_id not in node_ids or to_id not in node_ids:
+            raise HTTPException(status_code=400, detail="Edge references unknown node id")
+        from_type = node_types.get(from_id)
+        to_type = node_types.get(to_id)
+        if edge_type == "dimension_to_fact" and (from_type != "dimension" or to_type != "fact"):
+            raise HTTPException(status_code=400, detail="dimension_to_fact edge must connect dimension to fact")
+        if edge_type == "fact_to_metric" and (from_type != "fact" or to_type != "metric"):
+            raise HTTPException(status_code=400, detail="fact_to_metric edge must connect fact to metric")
+        if edge_type == "root_to_dimension" and (from_type != "root" or to_type != "dimension"):
+            raise HTTPException(status_code=400, detail="root_to_dimension edge must connect root to dimension")
+
+
+@app.post(
+    "/canvas/save",
+    response_model=CanvasSaveResponse,
+    tags=["canvas"],
+    summary="Save semantic canvas",
+    description="Persist canvas nodes/edges and upsert semantic objects.",
+)
+def save_canvas(payload: CanvasSaveRequest) -> CanvasSaveResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id, database_name, schema_name, _ = _resolve_scope_values(payload.tenant_id, domain_id)
+
+    if payload.idempotency_key:
+        rows = run_query(
+            settings,
+            """
+            SELECT canvas_id
+              FROM public.quantyx_canvases
+             WHERE tenant_id = %s AND domain_id = %s AND idempotency_key = %s
+             LIMIT 1
+            """,
+            [payload.tenant_id, domain_id, payload.idempotency_key],
+        )
+        if rows:
+            return CanvasSaveResponse(canvas_id=rows[0]["canvas_id"], status="saved")
+
+    nodes = []
+    node_alias_to_id: dict[str, str] = {}
+    fact_grains = _fact_grain_map(payload.tenant_id, domain_id, connection_id, database_name, schema_name)
+    for node in payload.nodes:
+        node_type = node.type
+        node_payload = dict(node.payload or {})
+        node_id = _canvas_node_id(node_type, node_payload)
+        if node_type == "dimension":
+            if not node_payload.get("name") and node_id:
+                node_payload["name"] = node_id
+            _validate_dimension_payload(node_payload)
+            dimension_id = upsert_dimension(
+                settings,
+                {
+                    "dimension_id": node_payload.get("dimension_id"),
+                    "tenant_id": payload.tenant_id,
+                    "domain_id": domain_id,
+                    "connection_id": connection_id,
+                    "database_name": database_name,
+                    "schema_name": schema_name,
+                    "name": node_payload.get("name"),
+                    "keys": node_payload.get("keys", []),
+                    "attributes": node_payload.get("attributes", []),
+                    "description": node_payload.get("description"),
+                    "status": node_payload.get("status", "draft"),
+                },
+            )
+            for alias in (node_payload.get("name"), node_payload.get("dimension_id"), dimension_id):
+                if alias:
+                    node_alias_to_id[str(alias)] = dimension_id
+            nodes.append({"id": dimension_id, "type": "dimension", "label": node_payload.get("name")})
+        elif node_type == "fact":
+            if not node_payload.get("table_name") and node_id:
+                node_payload["table_name"] = node_id
+            _validate_fact_payload(node_payload)
+            fact_id = upsert_fact(
+                settings,
+                {
+                    "fact_id": node_payload.get("fact_id"),
+                    "tenant_id": payload.tenant_id,
+                    "domain_id": domain_id,
+                    "connection_id": connection_id,
+                    "database_name": database_name,
+                    "schema_name": schema_name,
+                    "table_name": node_payload.get("table_name"),
+                    "grain": node_payload.get("grain"),
+                    "time_column": node_payload.get("time_column"),
+                    "measures": node_payload.get("measures", []),
+                    "dimensions": node_payload.get("dimensions", []),
+                    "description": node_payload.get("description"),
+                    "status": node_payload.get("status", "draft"),
+                },
+            )
+            for alias in (node_payload.get("table_name"), node_payload.get("fact_id"), fact_id):
+                if alias:
+                    node_alias_to_id[str(alias)] = fact_id
+            if node_payload.get("table_name"):
+                fact_grains[str(node_payload.get("table_name"))] = node_payload.get("grain")
+            nodes.append({"id": fact_id, "type": "fact", "label": node_payload.get("table_name")})
+        elif node_type == "metric":
+            if not node_payload.get("metric_name") and node_id:
+                node_payload["metric_name"] = node_id
+            _validate_metric_payload(node_payload, fact_grains)
+            metric_id = upsert_metric(
+                settings,
+                {
+                    "metric_id": node_payload.get("metric_id"),
+                    "tenant_id": payload.tenant_id,
+                    "domain_id": domain_id,
+                    "connection_id": connection_id,
+                    "database": database_name,
+                    "schema": schema_name,
+                    "metric_name": node_payload.get("metric_name"),
+                    "display_name": node_payload.get("display_name"),
+                    "description": node_payload.get("description"),
+                    "type": node_payload.get("type"),
+                    "sql": node_payload.get("sql"),
+                    "grain": node_payload.get("grain"),
+                    "dimensions": node_payload.get("dimensions", []),
+                    "unit": node_payload.get("unit"),
+                    "status": node_payload.get("status", "suggested"),
+                    "dataset_id": node_payload.get("dataset_id"),
+                    "source_model": node_payload.get("source_model"),
+                    "source_schema": node_payload.get("source_schema"),
+                    "owner": node_payload.get("owner"),
+                    "version": node_payload.get("version"),
+                },
+            )
+            for alias in (node_payload.get("metric_name"), node_payload.get("metric_id"), metric_id):
+                if alias:
+                    node_alias_to_id[str(alias)] = metric_id
+            nodes.append({"id": metric_id, "type": "metric", "label": node_payload.get("metric_name")})
+        elif node_type == "root":
+            root_id = node_payload.get("id") or node_payload.get("root_node_id") or node_id
+            if not root_id:
+                continue
+            node_alias_to_id[str(root_id)] = str(root_id)
+            nodes.append({"id": str(root_id), "type": "root"})
+        else:
+            continue
+
+    edges = []
+    for edge in payload.edges:
+        from_id = node_alias_to_id.get(edge.from_id, edge.from_id)
+        to_id = node_alias_to_id.get(edge.to_id, edge.to_id)
+        edge_type = edge.edge_type
+        if not from_id or not to_id or not edge_type:
+            continue
+        if edge_type == "dimension_to_fact":
+            from_type = "dimension"
+            to_type = "fact"
+        elif edge_type == "fact_to_metric":
+            from_type = "fact"
+            to_type = "metric"
+        elif edge_type == "root_to_dimension":
+            from_type = "root"
+            to_type = "dimension"
+            if from_id not in {node.get("id") for node in nodes}:
+                nodes.append({"id": from_id, "type": "root"})
+        else:
+            continue
+        edges.append(
+            {
+                "from": from_id,
+                "to": to_id,
+                "edge_type": edge_type,
+                "source": edge.source or "manual",
+                "confidence": edge.confidence,
+                "from_type": from_type,
+                "to_type": to_type,
+            }
+        )
+
+    canvas_id = f"canvas_{uuid.uuid4().hex[:10]}"
+    _validate_canvas_edges(nodes, edges)
+    _persist_canvas_graph(
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        canvas_id=canvas_id,
+        name=payload.name,
+        description=payload.description,
+        root_node_id=payload.root_node_id,
+        status=payload.status or "draft",
+        idempotency_key=payload.idempotency_key,
+        nodes=nodes,
+        edges=edges,
+    )
+    return CanvasSaveResponse(canvas_id=canvas_id, status="saved")
+
+
+@app.put(
+    "/canvas/{canvas_id}",
+    response_model=CanvasSaveResponse,
+    tags=["canvas"],
+    summary="Update semantic canvas",
+    description="Replace canvas graph and resync nodes/edges.",
+)
+def update_canvas(canvas_id: str, payload: CanvasSaveRequest) -> CanvasSaveResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    _ensure_canvas_owned(canvas_id, payload.tenant_id, domain_id)
+    connection_id, database_name, schema_name, _ = _resolve_scope_values(payload.tenant_id, domain_id)
+
+    nodes = []
+    node_alias_to_id: dict[str, str] = {}
+    fact_grains = _fact_grain_map(payload.tenant_id, domain_id, connection_id, database_name, schema_name)
+    for node in payload.nodes:
+        node_type = node.type
+        node_payload = dict(node.payload or {})
+        node_id = _canvas_node_id(node_type, node_payload)
+        if node_type == "dimension":
+            if not node_payload.get("name") and node_id:
+                node_payload["name"] = node_id
+            _validate_dimension_payload(node_payload)
+            dimension_id = upsert_dimension(
+                settings,
+                {
+                    "dimension_id": node_payload.get("dimension_id"),
+                    "tenant_id": payload.tenant_id,
+                    "domain_id": domain_id,
+                    "connection_id": connection_id,
+                    "database_name": database_name,
+                    "schema_name": schema_name,
+                    "name": node_payload.get("name"),
+                    "keys": node_payload.get("keys", []),
+                    "attributes": node_payload.get("attributes", []),
+                    "description": node_payload.get("description"),
+                    "status": node_payload.get("status", "draft"),
+                },
+            )
+            for alias in (node_payload.get("name"), node_payload.get("dimension_id"), dimension_id):
+                if alias:
+                    node_alias_to_id[str(alias)] = dimension_id
+            nodes.append({"id": dimension_id, "type": "dimension", "label": node_payload.get("name")})
+        elif node_type == "fact":
+            if not node_payload.get("table_name") and node_id:
+                node_payload["table_name"] = node_id
+            _validate_fact_payload(node_payload)
+            fact_id = upsert_fact(
+                settings,
+                {
+                    "fact_id": node_payload.get("fact_id"),
+                    "tenant_id": payload.tenant_id,
+                    "domain_id": domain_id,
+                    "connection_id": connection_id,
+                    "database_name": database_name,
+                    "schema_name": schema_name,
+                    "table_name": node_payload.get("table_name"),
+                    "grain": node_payload.get("grain"),
+                    "time_column": node_payload.get("time_column"),
+                    "measures": node_payload.get("measures", []),
+                    "dimensions": node_payload.get("dimensions", []),
+                    "description": node_payload.get("description"),
+                    "status": node_payload.get("status", "draft"),
+                },
+            )
+            for alias in (node_payload.get("table_name"), node_payload.get("fact_id"), fact_id):
+                if alias:
+                    node_alias_to_id[str(alias)] = fact_id
+            if node_payload.get("table_name"):
+                fact_grains[str(node_payload.get("table_name"))] = node_payload.get("grain")
+            nodes.append({"id": fact_id, "type": "fact", "label": node_payload.get("table_name")})
+        elif node_type == "metric":
+            if not node_payload.get("metric_name") and node_id:
+                node_payload["metric_name"] = node_id
+            _validate_metric_payload(node_payload, fact_grains)
+            metric_id = upsert_metric(
+                settings,
+                {
+                    "metric_id": node_payload.get("metric_id"),
+                    "tenant_id": payload.tenant_id,
+                    "domain_id": domain_id,
+                    "connection_id": connection_id,
+                    "database": database_name,
+                    "schema": schema_name,
+                    "metric_name": node_payload.get("metric_name"),
+                    "display_name": node_payload.get("display_name"),
+                    "description": node_payload.get("description"),
+                    "type": node_payload.get("type"),
+                    "sql": node_payload.get("sql"),
+                    "grain": node_payload.get("grain"),
+                    "dimensions": node_payload.get("dimensions", []),
+                    "unit": node_payload.get("unit"),
+                    "status": node_payload.get("status", "suggested"),
+                    "dataset_id": node_payload.get("dataset_id"),
+                    "source_model": node_payload.get("source_model"),
+                    "source_schema": node_payload.get("source_schema"),
+                    "owner": node_payload.get("owner"),
+                    "version": node_payload.get("version"),
+                },
+            )
+            for alias in (node_payload.get("metric_name"), node_payload.get("metric_id"), metric_id):
+                if alias:
+                    node_alias_to_id[str(alias)] = metric_id
+            nodes.append({"id": metric_id, "type": "metric", "label": node_payload.get("metric_name")})
+        elif node_type == "root":
+            root_id = node_payload.get("id") or node_payload.get("root_node_id") or node_id
+            if not root_id:
+                continue
+            node_alias_to_id[str(root_id)] = str(root_id)
+            nodes.append({"id": str(root_id), "type": "root"})
+        else:
+            continue
+
+    edges = []
+    for edge in payload.edges:
+        from_id = node_alias_to_id.get(edge.from_id, edge.from_id)
+        to_id = node_alias_to_id.get(edge.to_id, edge.to_id)
+        edge_type = edge.edge_type
+        if not from_id or not to_id or not edge_type:
+            continue
+        if edge_type == "dimension_to_fact":
+            from_type = "dimension"
+            to_type = "fact"
+        elif edge_type == "fact_to_metric":
+            from_type = "fact"
+            to_type = "metric"
+        elif edge_type == "root_to_dimension":
+            from_type = "root"
+            to_type = "dimension"
+            if from_id not in {node.get("id") for node in nodes}:
+                nodes.append({"id": from_id, "type": "root"})
+        else:
+            continue
+        edges.append(
+            {
+                "from": from_id,
+                "to": to_id,
+                "edge_type": edge_type,
+                "source": edge.source or "manual",
+                "confidence": edge.confidence,
+                "from_type": from_type,
+                "to_type": to_type,
+            }
+        )
+
+    _validate_canvas_edges(nodes, edges)
+    _persist_canvas_graph(
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        canvas_id=canvas_id,
+        name=payload.name,
+        description=payload.description,
+        root_node_id=payload.root_node_id,
+        status=payload.status or "draft",
+        idempotency_key=payload.idempotency_key,
+        nodes=nodes,
+        edges=edges,
+    )
+    return CanvasSaveResponse(canvas_id=canvas_id, status="updated")
+
+
+@app.get(
+    "/canvas",
+    response_model=CanvasListResponse,
+    tags=["canvas"],
+    summary="List canvases",
+)
+def list_canvases(tenant_id: str) -> CanvasListResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    sql = """
+        SELECT canvas_id, tenant_id, domain_id, name, description, root_node_id, status, created_at, updated_at
+          FROM public.quantyx_canvases
+         WHERE tenant_id = %s AND domain_id = %s
+         ORDER BY created_at DESC
+    """
+    rows = run_query(settings, sql, [tenant_id, domain_id])
+    return CanvasListResponse(canvases=rows)
+
+
+@app.get(
+    "/canvas/{canvas_id}",
+    response_model=CanvasDetailResponse,
+    tags=["canvas"],
+    summary="Get canvas",
+)
+def get_canvas(canvas_id: str, tenant_id: str) -> CanvasDetailResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    sql = """
+        SELECT canvas_id, tenant_id, domain_id, name, description, graph_json, root_node_id, status, created_at, updated_at
+          FROM public.quantyx_canvases
+         WHERE canvas_id = %s AND tenant_id = %s AND domain_id = %s
+         LIMIT 1
+    """
+    rows = run_query(settings, sql, [canvas_id, tenant_id, domain_id])
+    if not rows:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    return CanvasDetailResponse(**rows[0])
+
+
+@app.get(
+    "/canvas/tree",
+    response_model=CanvasTreeResponse,
+    tags=["canvas"],
+    summary="Tenant rooted canvas tree",
+)
+def get_canvas_tree(tenant_id: str) -> CanvasTreeResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    root_id = "tenant_root"
+    nodes, edges = _get_canvas_nodes_and_edges(tenant_id, domain_id)
+    if not nodes and not edges:
+        connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+        facts = list_facts(settings, tenant_id, domain_id, connection_id, database, schema)
+        dimensions = list_dimensions(settings, tenant_id, domain_id, connection_id, database, schema)
+        metrics_rows = fetch_registry_metrics(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            connection_id=connection_id,
+            database_name=database,
+            schema_name=schema,
+            include_all_statuses=True,
+        )
+        lineage = _build_canvas_lineage(facts, dimensions, metrics_rows)
+        nodes = lineage.get("nodes", [])
+        edges = lineage.get("edges", [])
+
+    if root_id not in {node.get("id") for node in nodes}:
+        nodes = [{"id": root_id, "type": "root"}] + nodes
+
+    edge_keys = {(edge.get("from"), edge.get("to"), edge.get("edge_type")) for edge in edges}
+    for node in nodes:
+        if node.get("type") != "dimension":
+            continue
+        root_edge = (root_id, node.get("id"), "root_to_dimension")
+        if root_edge in edge_keys:
+            continue
+        edges.append({"from": root_id, "to": node.get("id"), "edge_type": "root_to_dimension"})
+        edge_keys.add(root_edge)
+    return CanvasTreeResponse(nodes=nodes, edges=edges)
+
 
 
 @app.post(
@@ -2709,6 +3831,8 @@ def create_metric(payload: MetricUpsertRequest) -> MetricUpsertResponse:
     payload_dict["database"] = database
     payload_dict["schema"] = schema
     payload_dict["tables"] = tables
+    fact_grains = _fact_grain_map(payload.tenant_id, domain_id, connection_id, database, schema)
+    _validate_metric_payload(payload_dict, fact_grains)
     metric_id = upsert_metric(settings, payload_dict)
     return MetricUpsertResponse(metric_id=metric_id, status=payload.status or "suggested")
 
@@ -2752,6 +3876,32 @@ def patch_metric(metric_id: str, payload: MetricPatchRequest) -> MetricUpsertRes
     updates["database"] = database
     updates["schema"] = schema
     updates["tables"] = tables
+    current_rows = run_query(
+        settings,
+        """
+        SELECT metric_id, metric_name, type, sql, grain
+          FROM public.quantyx_metrics_registry
+         WHERE metric_id = %s
+           AND tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+         LIMIT 1
+        """,
+        [metric_id, payload.tenant_id, domain_id, connection_id, database, schema],
+    )
+    if not current_rows:
+        raise HTTPException(status_code=404, detail="Metric not found")
+    current = current_rows[0]
+    merged_metric = {
+        "metric_name": updates.get("metric_name", current.get("metric_name")),
+        "type": updates.get("type", current.get("type")),
+        "sql": updates.get("sql", current.get("sql")),
+        "grain": updates.get("grain", current.get("grain")),
+    }
+    fact_grains = _fact_grain_map(payload.tenant_id, domain_id, connection_id, database, schema)
+    _validate_metric_payload(merged_metric, fact_grains)
     update_metric(settings, metric_id, updates)
     status = updates.get("status", "updated")
     return MetricUpsertResponse(metric_id=metric_id, status=status)
@@ -3709,6 +4859,7 @@ def create_fact(payload: FactsUpsertRequest) -> dict:
         payload.tenant_id,
         domain_id,
     )
+    _validate_fact_payload(payload.model_dump())
     fact_id = upsert_fact(
         settings,
         {
@@ -3783,6 +4934,18 @@ def get_facts_all(tenant_id: str) -> FactsAllResponse:
 )
 def patch_fact(fact_id: str, payload: FactsPatchRequest) -> dict:
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+    if not updates:
+        return {"ok": True}
+    rows = run_query(
+        settings,
+        "SELECT table_name, measures FROM public.quantyx_facts_registry WHERE fact_id = %s LIMIT 1",
+        [fact_id],
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Fact not found")
+    merged = dict(rows[0])
+    merged.update(updates)
+    _validate_fact_payload(merged)
     update_fact(settings, fact_id, updates)
     return {"ok": True}
 
@@ -3809,6 +4972,7 @@ def create_dimension(payload: DimensionsUpsertRequest) -> dict:
         payload.tenant_id,
         domain_id,
     )
+    _validate_dimension_payload(payload.model_dump())
     dimension_id = upsert_dimension(
         settings,
         {
@@ -3881,6 +5045,18 @@ def get_dimensions_all(tenant_id: str) -> DimensionsAllResponse:
 )
 def patch_dimension(dimension_id: str, payload: DimensionsPatchRequest) -> dict:
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+    if not updates:
+        return {"ok": True}
+    rows = run_query(
+        settings,
+        "SELECT name, keys FROM public.quantyx_dimensions_registry WHERE dimension_id = %s LIMIT 1",
+        [dimension_id],
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Dimension not found")
+    merged = dict(rows[0])
+    merged.update(updates)
+    _validate_dimension_payload(merged)
     update_dimension(settings, dimension_id, updates)
     return {"ok": True}
 
@@ -5016,10 +6192,93 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
     facts, dims = _infer_models_from_scan(tables, request.time_column, request.grain)
     if request.use_llm:
         try:
-            llm_payload = llm_infer_models(settings, tables, domain_id)
-            facts, dims = _merge_models(facts, dims, llm_payload)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            schema_summary = build_schema_summary(tables)
+            suggestions = suggest_semantic_model(
+                settings,
+                schema_summary=schema_summary,
+                questions=[],
+                glossary=None,
+                domain_id=domain_id,
+                model_override=None,
+                tables=tables,
+            )
+            llm_facts = []
+            for fact in suggestions.get("facts", []) or []:
+                name = fact.get("table_name") or fact.get("name")
+                if not name:
+                    continue
+                llm_facts.append(
+                    {
+                        "name": name,
+                        "grain": fact.get("grain"),
+                        "time_column": fact.get("time_column"),
+                        "measures": fact.get("measures", []),
+                        "dimensions": fact.get("dimensions", []),
+                        "description": fact.get("description"),
+                        "status": fact.get("status", "draft"),
+                        "confidence": fact.get("confidence", 0.85),
+                    }
+                )
+            llm_dims = []
+            for dim in suggestions.get("dimensions", []) or []:
+                name = dim.get("name")
+                if not name:
+                    continue
+                llm_dims.append(
+                    {
+                        "name": name,
+                        "keys": dim.get("keys", []),
+                        "attributes": dim.get("attributes", []),
+                        "description": dim.get("description"),
+                        "status": dim.get("status", "draft"),
+                        "confidence": dim.get("confidence", 0.8),
+                    }
+                )
+            facts, dims = _merge_models(facts, dims, {"facts": llm_facts, "dimensions": llm_dims})
+        except ValueError:
+            pass
+    for fact in facts:
+        table_name = fact.get("name")
+        if not table_name:
+            continue
+        upsert_fact(
+            settings,
+            {
+                "fact_id": fact.get("fact_id"),
+                "tenant_id": request.tenant_id,
+                "domain_id": domain_id,
+                "connection_id": connection_id,
+                "database_name": database_name,
+                "schema_name": schema_name,
+                "table_name": table_name,
+                "grain": fact.get("grain"),
+                "time_column": fact.get("time_column"),
+                "measures": fact.get("measures", []),
+                "dimensions": fact.get("dimensions", []),
+                "description": fact.get("description"),
+                "status": fact.get("status", "draft"),
+            },
+        )
+    for dim in dims:
+        name = dim.get("name")
+        if not name:
+            continue
+        upsert_dimension(
+            settings,
+            {
+                "dimension_id": dim.get("dimension_id"),
+                "tenant_id": request.tenant_id,
+                "domain_id": domain_id,
+                "connection_id": connection_id,
+                "database_name": database_name,
+                "schema_name": schema_name,
+                "name": name,
+                "keys": dim.get("keys", []),
+                "attributes": dim.get("attributes", []),
+                "description": dim.get("description"),
+                "status": dim.get("status", "draft"),
+            },
+        )
     return InferModelsResponse(facts=facts, dimensions=dims)
 
 
@@ -5055,7 +6314,7 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
 )
 def suggested_metrics_async(
     request: OnboardScanRequest,
-    persist: bool = False,
+    persist: bool = True,
 ) -> JobCreateResponse:
     if not request.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
@@ -5151,7 +6410,7 @@ def suggested_metrics_async(
         },
     },
 )
-def suggested_metrics(request: OnboardScanRequest, persist: bool = False) -> SuggestedMetricsResponse:
+def suggested_metrics(request: OnboardScanRequest, persist: bool = True) -> SuggestedMetricsResponse:
     if not request.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(request.tenant_id, None)

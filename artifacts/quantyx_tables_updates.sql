@@ -253,6 +253,54 @@ ALTER TABLE public.quantyx_review_events
 ALTER TABLE public.quantyx_review_events
   ADD COLUMN IF NOT EXISTS payload JSONB NULL;
 
+CREATE TABLE IF NOT EXISTS public.quantyx_canvases (
+  canvas_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NULL,
+  graph_json JSONB NOT NULL,
+  root_node_id TEXT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  idempotency_key TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_canvases_tenant
+  ON public.quantyx_canvases (tenant_id, domain_id, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quantyx_canvases_idempotency
+  ON public.quantyx_canvases (tenant_id, domain_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.quantyx_canvas_nodes (
+  canvas_id TEXT NOT NULL REFERENCES public.quantyx_canvases(canvas_id),
+  node_type TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (canvas_id, node_type, node_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_canvas_nodes_node
+  ON public.quantyx_canvas_nodes (node_type, node_id);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_canvas_edges (
+  canvas_id TEXT NOT NULL REFERENCES public.quantyx_canvases(canvas_id),
+  from_type TEXT NOT NULL,
+  from_id TEXT NOT NULL,
+  to_type TEXT NOT NULL,
+  to_id TEXT NOT NULL,
+  edge_type TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'manual',
+  confidence NUMERIC NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (canvas_id, from_type, from_id, to_type, to_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_canvas_edges_canvas
+  ON public.quantyx_canvas_edges (canvas_id, created_at DESC);
+
 -- Phase U: Tenant scope resolution compatibility
 ALTER TABLE public.quantyx_job_scopes
   ADD COLUMN IF NOT EXISTS tenant_id TEXT NULL;

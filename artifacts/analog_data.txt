@@ -1,0 +1,1535 @@
+"table_context": {
+    "table_name": "host_bay_re_assignment",
+    "schema": [
+        {
+            "column": "created_date",
+            "type": "Datetime",
+            "description": "Record creation timestamp for the bay reassignment event."
+        },
+        {
+            "column": "load_number",
+            "type": "Int64",
+            "description": "Tank Truck(TT) load number. Used along with truck_number and date to ensure one alert per day."
+        },
+        {
+            "column": "fan_number",
+            "type": "Utf8",
+            "description": "FAN number associated with the Tank Truck(TT) load. FAN number is unique for each Tank Truck (TT)"
+        },
+        {
+            "column": "truck_number",
+            "type": "Utf8",
+            "description": "Tank Truck (TT) number whose bay was reassigned."
+        },
+        {
+            "column": "customer_name",
+            "type": "Utf8",
+            "description": "Customer name associated with the Tank Truck (TT) load."
+        },
+        {
+            "column": "compartment_number",
+            "type": "Int64",
+            "description": "Compartment number affected during bay reassignment. Each Tank Truck (TT) has multiple Compartments"
+        },
+        {
+            "column": "product_name",
+            "type": "Utf8",
+            "description": "Product being loaded at the time of bay reassignment."
+        },
+        {
+            "column": "required_qty",
+            "type": "Int64",
+            "description": "Planned quantity for the TT load, measured in Litres"
+        },
+        {
+            "column": "loaded_qty",
+            "type": "Int64",
+            "description": "Quantity loaded before bay reassignment, measured in Litres"
+        },
+        {
+            "column": "reassigned_bay",
+            "type": "Utf8",
+            "description": "New bay assigned to the truck after reassignment."
+        },
+        {
+            "column": "bay_reassignment_time",
+            "type": "Datetime",
+            "description": "Timestamp when the bay reassignment occurred."
+        },
+        {
+            "column": "remarks",
+            "type": "Utf8",
+            "description": "Remarks or reason for bay reassignment."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier where the bay reassignment occurred. sap_id is unique for a given location_name"
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Terminal or location name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the terminal."
+        },
+        {
+            "column": "assigned_bay",
+            "type": "Utf8",
+            "description": "Originally assigned bay before reassignment."
+        },
+        {
+            "column": "reassign_loaded_qty",
+            "type": "Int64",
+            "description": "Loaded quantity after bay reassignment, measured in Litres "
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating whether a bay reassignment alert has been created."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date of the bay reassignment event."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Event timestamp used for ordering and alert processing."
+        }
+    ],
+    "data": [
+        {
+            "created_date": "2025-06-07 18:52:00+05:30",
+            "load_number": 847636,
+            "fan_number": "15512239",
+            "truck_number": "TG08U1359",
+            "customer_name": "M/s TSSP 8TH BATTALION SS, KONDAPUR",
+            "compartment_number": 4,
+            "product_name": "BS VI HSD",
+            "required_qty": 6000,
+            "loaded_qty": 0,
+            "reassigned_bay": "15",
+            "bay_reassignment_time": "2025-06-07 19:14:39+05:30",
+            "remarks": "29kl",
+            "sap_id": "1919",
+            "location_name": "SECUNDERABAD TERMINAL",
+            "zone": "SCZ",
+            "assigned_bay": "10",
+            "reassign_loaded_qty": 6001,
+            "alert_created": True,
+            "date": "2025-06-07",
+            "date_time": "2025-06-08 07:27:54.280053+05:30"
+        }
+    ]
+},
+"user_request": (
+    "Identify bay reassignment events for the current operational day and "
+    "raise a 'Bay reassignment' informational alert. Ensure only one alert "
+    "per truck-load per day while updating alert history for multiple "
+    "reassignments, then automatically close the alert."
+)
+"table_context": {
+    "table_name": "host_cancelled_tts",
+    "schema": [
+        {
+            "column": "load_number",
+            "type": "Int64",
+            "description": "TT load number. Used to uniquely identify the cancelled load."
+        },
+        {
+            "column": "truck_number",
+            "type": "Utf8",
+            "description": "Truck (TT) number for which the load was cancelled."
+        },
+        {
+            "column": "created_date",
+            "type": "Datetime",
+            "description": "Record creation timestamp for the cancellation event."
+        },
+        {
+            "column": "customer_name",
+            "type": "Utf8",
+            "description": "Customer name associated with the cancelled TT."
+        },
+        {
+            "column": "product_name",
+            "type": "Utf8",
+            "description": "Product planned for the cancelled load. product_name, recipe_name and stock_name are the same"
+        },
+        {
+            "column": "required_qty",
+            "type": "Int64",
+            "description": "Planned quantity for the cancelled TT."
+        },
+        {
+            "column": "cancelled_by",
+            "type": "Utf8",
+            "description": "User or system identifier who cancelled the TT."
+        },
+        {
+            "column": "cancelled_date",
+            "type": "Datetime",
+            "description": "Timestamp when the TT was cancelled."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier where the cancellation occurred."
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Terminal or location name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the terminal."
+        },
+        {
+            "column": "compartment_number",
+            "type": "Int64",
+            "description": "Compartment number involved in the cancelled TT."
+        },
+        {
+            "column": "remarks",
+            "type": "Utf8",
+            "description": "Reason or remarks for TT cancellation."
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating whether a cancellation alert has already been created."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date of the cancellation event."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Event timestamp used for ordering and alert processing."
+        }
+    ],
+    "data": [
+        {
+            "load_number": 848034,
+            "truck_number": "TG08U1249",
+            "created_date": "2025-06-09 18:28:56+05:30",
+            "customer_name": "M/S ADHOC THE SUB JAIL ACHAMPET",
+            "product_name": "BS VI HSD",
+            "required_qty": 5000,
+            "cancelled_by": "35324580",
+            "cancelled_date": "2025-06-09 18:37:53+05:30",
+            "sap_id": "1919",
+            "location_name": "SECUNDERABAD TERMINAL",
+            "zone": "SCZ",
+            "compartment_number": 4,
+            "remarks": "ULLAGE ISSUE",
+            "alert_created": True,
+            "date": "2025-06-09",
+            "date_time": "2025-06-10 06:42:56.45399+05:30"
+        },
+    ]
+},
+"user_request": (
+    "Identify cancelled TT records for the current operational day and "
+    "ensure only one 'Cancel TT Reported' alert per truck-load per day. "
+    "If an alert already exists, update its alert history with compartment "
+    "and cancellation details, then close the alert."
+)
+"table_context": {
+    "table_name": "host_local_loaded_tts",
+    "schema": [
+        {
+            "column": "bay_number",
+            "type": "Utf8",
+            "description": "Loading bay number where the TT loading was completed."
+        },
+        {
+            "column": "bcu_number",
+            "type": "Utf8",
+            "description": "BCU identifier used during loading."
+        },
+        {
+            "column": "recipe_name",
+            "type": "Utf8",
+            "description": "Product/recipe name loaded into the TT."
+        },
+        {
+            "column": "truck_number",
+            "type": "Utf8",
+            "description": "Truck (TT) number that was loaded."
+        },
+        {
+            "column": "card_number",
+            "type": "Utf8",
+            "description": "Smart card / RFID card number used for the transaction."
+        },
+        {
+            "column": "start_totalizer",
+            "type": "Int64",
+            "description": "Totalizer reading at the start of the loading transaction."
+        },
+        {
+            "column": "end_totalizer",
+            "type": "Int64",
+            "description": "Totalizer reading at the end of the loading transaction."
+        },
+        {
+            "column": "loaded_qty",
+            "type": "Int64",
+            "description": "Total quantity loaded into the TT compartment."
+        },
+        {
+            "column": "transaction_end_time",
+            "type": "Datetime",
+            "description": "Timestamp when the loading transaction was completed."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier where the TT was loaded."
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Depot or terminal name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the depot."
+        },
+        {
+            "column": "compartment_number",
+            "type": "Int64",
+            "description": "Compartment number of the TT that was loaded."
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating whether a 'Local Loaded TT' alert has been created."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date of the loading transaction."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Event timestamp used for alert processing and ordering."
+        }
+    ],
+    "data": [
+        {
+            "bay_number": "03",
+            "bcu_number": "BC-503B",
+            "recipe_name": "BS VI HSD",
+            "truck_number": "Enter data it",
+            "card_number": "eUP15CT4986",
+            "start_totalizer": 177513544,
+            "end_totalizer": 177513696,
+            "loaded_qty": 152,
+            "transaction_end_time": "2025-08-02 22:08:21+05:30",
+            "sap_id": "1155",
+            "location_name": "ROORKEE DEPOT",
+            "zone": "NZ",
+            "compartment_number": 1,
+            "alert_created": True,
+            "date": "2025-08-02",
+            "date_time": "2025-08-02 23:23:01.809008+05:30"
+        }
+    ]
+},
+"user_request": (
+    "Identify locally completed TT loading transactions for the current "
+    "operational day and raise a 'Local TT Loaded' informational alert. "
+    "Ensure only one alert per truck–compartment–day and mark the record "
+    "as processed using the alert_created flag."
+)
+"table_context": {
+    "table_name": "host_manual_fan_printed",
+    "schema": [
+        {
+            "column": "manual_fan_count",
+            "type": "Int64",
+            "description": "Number of FANs generated or printed manually for the operational day."
+        },
+        {
+            "column": "auto_fan_count",
+            "type": "Int64",
+            "description": "Number of FANs generated automatically by the system for the operational day."
+        },
+        {
+            "column": "total_count",
+            "type": "Int64",
+            "description": "Total FAN count for the day (manual + auto)."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date for which FAN counts are recorded."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Timestamp when the FAN count snapshot was generated."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier where FANs were printed."
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Terminal or depot name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the terminal."
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating whether a 'Manual FAN Printed' alert has been created."
+        },
+        {
+            "column": "id",
+            "type": "Int64",
+            "description": "Primary key identifier for the FAN print summary record."
+        }
+    ],
+    "data": [
+        {
+            "manual_fan_count": 2,
+            "auto_fan_count": 177,
+            "total_count": 179,
+            "date": "2025-06-07",
+            "date_time": "2025-06-07 22:11:50.483705+05:30",
+            "sap_id": "1919",
+            "location_name": "SECUNDERABAD TERMINAL",
+            "zone": "SCZ",
+            "alert_created": True,
+            "id": 1
+        }
+    ]
+},
+"user_request": (
+    "Identify days where FANs were printed manually and raise a "
+    "'Manual FAN Printed' informational alert. Use the daily FAN "
+    "count snapshot per SAP location and mark the record as processed "
+    "using the alert_created flag."
+)
+"table_context": {
+    "table_name": "host_mfm_factor",
+    "schema": [
+        {
+            "column": "mfm_number",
+            "type": "Utf8",
+            "description": "Unique identifier for the MFM (Mass Flow Meter)."
+        },
+        {
+            "column": "mfm_description",
+            "type": "Utf8",
+            "description": "Description or name of the MFM."
+        },
+        {
+            "column": "bcu_number",
+            "type": "Utf8",
+            "description": "Batch Controller Unit (BCU) number associated with the MFM."
+        },
+        {
+            "column": "stock_code",
+            "type": "Utf8",
+            "description": "Product stock code being measured. product_name, recipe_name and stock_name are the same"
+        },
+        {
+            "column": "current_k_factor",
+            "type": "Float64",
+            "description": "Current calibration K factor for the MFM."
+        },
+        {
+            "column": "last_k_factor",
+            "type": "Float64",
+            "description": "Previous K factor value for the MFM."
+        },
+        {
+            "column": "last_k_factor_change_date",
+            "type": "Datetime",
+            "description": "Date when the last K factor change was applied."
+        },
+        {
+            "column": "current_meter_factor",
+            "type": "Float64",
+            "description": "Current meter factor for the MFM."
+        },
+        {
+            "column": "last_meter_factor",
+            "type": "Float64",
+            "description": "Previous meter factor for the MFM."
+        },
+        {
+            "column": "last_meter_factor_change_date",
+            "type": "Datetime",
+            "description": "Date when the last meter factor change was applied."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier."
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Terminal or location name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the terminal."
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating if an alert was created for this MFM factor."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date of the record."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Timestamp for event ordering and processing."
+        },
+        {
+            "column": "id",
+            "type": "Int64",
+            "description": "Primary key ID for the record."
+        },
+        {
+            "column": "created_at",
+            "type": "Datetime",
+            "description": "Record creation timestamp."
+        },
+        {
+            "column": "updated_at",
+            "type": "Datetime",
+            "description": "Record update timestamp."
+        },
+        {
+            "column": "entity_id",
+            "type": "Utf8",
+            "description": "Optional entity identifier."
+        }
+    ],
+    "data": [
+        {
+            "mfm_number": "MFM-18",
+            "mfm_description": "GANTRY1",
+            "bcu_number": "BC-06B",
+            "stock_code": "BS VI HSD",
+            "current_k_factor": 1.63,
+            "last_k_factor": null,
+            "last_k_factor_change_date": null,
+            "current_meter_factor": null,
+            "last_meter_factor": null,
+            "last_meter_factor_change_date": null,
+            "sap_id": "1588",
+            "location_name": "VASHI  WHITE OIL TERMINAL",
+            "zone": "WZ",
+            "alert_created": false,
+            "date": "2026-01-27",
+            "date_time": "54:21.0",
+            "id": 12810802,
+            "created_at": "04:12.8",
+            "updated_at": "04:12.8",
+            "entity_id": null
+        }
+    ]
+},
+"user_request": (
+    "Monitor MFM calibration factors. Identify if the current_k_factor or current_meter_factor "
+    "differs significantly from the last recorded values and raise an alert if required. "
+    "Ensure historical tracking of factor changes for each MFM and terminal."
+)
+"table_context": {
+    "table_name": "host_over_loaded_tts",
+    "schema": [
+        {
+            "column": "load_number",
+            "type": "Int64",
+            "description": "TT load number. Used to identify the trip."
+        },
+        {
+            "column": "truck_number",
+            "type": "Utf8",
+            "description": "Truck (TT) number associated with the load."
+        },
+        {
+            "column": "compartment_number",
+            "type": "Int64",
+            "description": "Compartment number of the truck where the product is loaded."
+        },
+        {
+            "column": "product_name",
+            "type": "Utf8",
+            "description": "Product loaded in the truck compartment."
+        },
+        {
+            "column": "required_qty",
+            "type": "Int64",
+            "description": "Planned quantity to be loaded in the compartment."
+        },
+        {
+            "column": "loaded_qty",
+            "type": "Int64",
+            "description": "Actual quantity loaded. Overload alert triggered if this exceeds required_qty."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier for the terminal."
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Terminal or location name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the terminal."
+        },
+        {
+            "column": "created_date",
+            "type": "Datetime",
+            "description": "Timestamp when the overload record was created."
+        },
+        {
+            "column": "bcu_number",
+            "type": "Utf8",
+            "description": "BCU number associated with the truck compartment."
+        },
+        {
+            "column": "bay_number",
+            "type": "Utf8",
+            "description": "Bay number where loading occurred."
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating if an overload alert has been created."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date of the load."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Timestamp for event ordering and alert processing."
+        },
+        {
+            "column": "id",
+            "type": "Int64",
+            "description": "Primary key ID for the record."
+        },
+        {
+            "column": "created_at",
+            "type": "Datetime",
+            "description": "Record creation timestamp."
+        },
+        {
+            "column": "updated_at",
+            "type": "Datetime",
+            "description": "Record update timestamp."
+        },
+        {
+            "column": "entity_id",
+            "type": "Utf8",
+            "description": "Optional entity identifier."
+        }
+    ],
+    "data": [
+        {
+            "load_number": 437633,
+            "truck_number": "HR63C5840",
+            "compartment_number": 5,
+            "product_name": "LDO",
+            "required_qty": 5000,
+            "loaded_qty": 5016,
+            "sap_id": "1128",
+            "location_name": "MATHURA TERMINAL",
+            "zone": "NCZ",
+            "created_date": "2025-05-06 22:51:38+05:30",
+            "bcu_number": "BC-514B",
+            "bay_number": "14",
+            "alert_created": true,
+            "date": "2025-06-07",
+            "date_time": "2025-06-08 02:54:31.560863+05:30",
+            "id": 196,
+            "created_at": "38:51.2",
+            "updated_at": "38:51.2",
+            "entity_id": null
+        }
+    ]
+},
+"user_request": (
+    "Identify TT loads where the loaded quantity exceeds the required quantity. "
+    "Raise an 'Overloaded TT' alert for each compartment exceeding the limit and "
+    "ensure tracking of alerts to avoid duplicates per truck-load per day."
+)
+"table_context": {
+    "table_name": "host_unauthorized_flow",
+    "schema": [
+        {
+            "column": "bay_number",
+            "type": "Utf8",
+            "description": "Bay number where the unauthorized flow was detected."
+        },
+        {
+            "column": "bcu_number",
+            "type": "Utf8",
+            "description": "(Batch Controller  Unit) BCU identifier associated with the bay. Synomymn as Loading point"
+        },
+        {
+            "column": "meter_number",
+            "type": "Int64",
+            "description": "Meter number that recorded the flow."
+        },
+        {
+            "column": "timestamp",
+            "type": "Datetime",
+            "description": "Timestamp when the unauthorized flow occurred."
+        },
+        {
+            "column": "start_totalizer",
+            "type": "Float64",
+            "description": "Meter totalizer value at the start of the flow."
+        },
+        {
+            "column": "end_totalizer",
+            "type": "Float64",
+            "description": "Meter totalizer value at the end of the flow."
+        },
+        {
+            "column": "net_totalizer",
+            "type": "Float64",
+            "description": "Calculated net flow quantity (end_totalizer - start_totalizer)."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier where the unauthorized flow occurred."
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Terminal or location name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the terminal."
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating whether an unauthorized flow alert has been created."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date of the unauthorized flow event."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Event timestamp used for alert ordering and processing."
+        },
+        {
+            "column": "nettotalizer",
+            "type": "Float64",
+            "description": "Duplicate or derived net totalizer value used for validation."
+        },
+        {
+            "column": "id",
+            "type": "Int64",
+            "description": "Primary key identifier for the record."
+        },
+        {
+            "column": "created_at",
+            "type": "Datetime",
+            "description": "Record creation timestamp."
+        },
+        {
+            "column": "updated_at",
+            "type": "Datetime",
+            "description": "Record update timestamp."
+        },
+        {
+            "column": "entity_id",
+            "type": "Utf8",
+            "description": "Optional entity identifier."
+        }
+    ],
+    "data": [
+        {
+            "bay_number": "0A",
+            "bcu_number": "BC-0A-LP1",
+            "meter_number": 1,
+            "timestamp": "2025-06-08 09:30:00+05:30",
+            "start_totalizer": 48.3,
+            "end_totalizer": 48.3,
+            "net_totalizer": 0.0,
+            "sap_id": "1919",
+            "location_name": "",
+            "zone": "",
+            "alert_created": false,
+            "date": "2025-06-08",
+            "date_time": "2025-06-09 08:50:25.149598+05:30",
+            "nettotalizer": 0.0,
+            "id": 7970,
+            "created_at": "59:24.4",
+            "updated_at": "59:24.4",
+            "entity_id": null
+        }
+    ]
+},
+"user_request": (
+    "Detect unauthorized product flow at bays by comparing meter totalizer values. "
+    "If net_totalizer is greater than zero without an authorized loading event, "
+    "raise an 'Unauthorized Flow' alert and ensure only one alert per bay per day."
+)
+"table_context": {
+    "table_name": "host_tas_user_details",
+    "schema": [
+        {
+            "column": "user_name",
+            "type": "Utf8",
+            "description": "User login or employee identifier for TAS access."
+        },
+        {
+            "column": "password_expiry_date",
+            "type": "Date",
+            "description": "Date on which the user's TAS password expires."
+        },
+        {
+            "column": "user_group",
+            "type": "Utf8",
+            "description": "Role or user group assigned to the TAS user (e.g., PLG OFFICER)."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier where the user is mapped."
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Terminal or location name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the terminal."
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating whether a password-expiry alert has been created."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date when the record was evaluated."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Timestamp used for alert processing and ordering."
+        },
+        {
+            "column": "id",
+            "type": "Int64",
+            "description": "Primary key identifier for the user record."
+        },
+        {
+            "column": "created_at",
+            "type": "Datetime",
+            "description": "Record creation timestamp."
+        },
+        {
+            "column": "updated_at",
+            "type": "Datetime",
+            "description": "Record update timestamp."
+        },
+        {
+            "column": "entity_id",
+            "type": "Utf8",
+            "description": "Optional entity identifier."
+        }
+    ],
+    "data": [
+        {
+            "user_name": "31966040",
+            "password_expiry_date": "2025-09-30",
+            "user_group": "PLG OFFICER",
+            "sap_id": "1128",
+            "location_name": "MATHURA TERMINAL",
+            "zone": "NCZ",
+            "alert_created": false,
+            "date": "2025-06-10",
+            "date_time": "2025-06-11 09:26:18.539434+05:30",
+            "id": 10779,
+            "created_at": "52:03.1",
+            "updated_at": "52:03.1",
+            "entity_id": null
+        }
+    ]
+},
+"user_request": (
+    "Monitor TAS user password expiry dates. Identify users whose passwords are "
+    "approaching expiry or already expired and raise a proactive alert to ensure "
+    "continued system access without operational disruption."
+)
+"table_context": {
+    "table_name": "host_suspected_loads",
+    "schema": [
+        {
+            "column": "event_time",
+            "type": "Datetime",
+            "description": "Timestamp when the load was flagged as suspected."
+        },
+        {
+            "column": "bay_number",
+            "type": "Utf8",
+            "description": "Bay number where the suspected loading activity occurred."
+        },
+        {
+            "column": "bcu_number",
+            "type": "Utf8",
+            "description": "BCU identifier associated with the bay."
+        },
+        {
+            "column": "load_number",
+            "type": "Int64",
+            "description": "TT load number flagged as suspected."
+        },
+        {
+            "column": "truck_number",
+            "type": "Utf8",
+            "description": "Truck (TT) number involved in the suspected load."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier where the suspected load occurred."
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Terminal or location name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the terminal."
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating whether a suspected-load alert has been created."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date of the suspected load event."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Timestamp used for alert ordering and processing."
+        },
+        {
+            "column": "id",
+            "type": "Int64",
+            "description": "Primary key identifier for the record."
+        },
+        {
+            "column": "created_at",
+            "type": "Datetime",
+            "description": "Record creation timestamp."
+        },
+        {
+            "column": "updated_at",
+            "type": "Datetime",
+            "description": "Record update timestamp."
+        },
+        {
+            "column": "entity_id",
+            "type": "Utf8",
+            "description": "Optional entity identifier."
+        }
+    ],
+    "data": [
+        {
+            "event_time": "2025-06-27 14:46:00",
+            "bay_number": "16",
+            "bcu_number": "BC-16B",
+            "load_number": 598799,
+            "truck_number": "HR66C6429",
+            "sap_id": "1216",
+            "location_name": "BAHADURGARH TERMINAL",
+            "zone": "NZ",
+            "alert_created": false,
+            "date": "2025-06-27",
+            "date_time": "2025-06-28 00:28:20.166203+05:30",
+            "id": 1,
+            "created_at": "58:18.2",
+            "updated_at": "58:18.2",
+            "entity_id": null
+        }
+    ]
+},
+"user_request": (
+    "Identify suspected loading events at bays based on operational rules. "
+    "Raise a 'Suspected Load' alert for each flagged load while ensuring "
+    "only one alert per load per day to avoid duplication."
+)
+"table_context": {
+    "table_name": "host_live_tank_details",
+    "schema": [
+        {
+            "column": "tank_name",
+            "type": "Utf8",
+            "description": "Display name or identifier of the storage tank."
+        },
+        {
+            "column": "tank_mode",
+            "type": "Utf8",
+            "description": "Current operational mode of the tank (e.g., Active, Dormant, Maintenance)."
+        },
+        {
+            "column": "curr_level",
+            "type": "Float64",
+            "description": "Current product level in the tank."
+        },
+        {
+            "column": "water_level",
+            "type": "Float64",
+            "description": "Measured water level in the tank, if any."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier of the terminal."
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Terminal or depot name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the terminal."
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating whether a tank-related alert has been generated."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date of the tank status snapshot."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Timestamp when the tank details were recorded."
+        },
+        {
+            "column": "id",
+            "type": "Int64",
+            "description": "Primary key identifier for the tank detail record."
+        },
+        {
+            "column": "created_at",
+            "type": "Datetime",
+            "description": "Record creation timestamp."
+        },
+        {
+            "column": "updated_at",
+            "type": "Datetime",
+            "description": "Record update timestamp."
+        },
+        {
+            "column": "entity_id",
+            "type": "Utf8",
+            "description": "Optional entity identifier."
+        },
+        {
+            "column": "tank_code",
+            "type": "Utf8",
+            "description": "Unique tank code used for system-level identification."
+        }
+    ],
+    "data": [
+        {
+            "tank_name": "TK11",
+            "tank_mode": "Dormant",
+            "curr_level": 5809,
+            "water_level": 0,
+            "sap_id": "1155",
+            "location_name": "ROORKEE DEPOT",
+            "zone": "NZ",
+            "alert_created": true,
+            "date": "2025-06-07",
+            "date_time": "2025-06-08 02:53:59.602646+05:30",
+            "id": 11,
+            "created_at": "03:47.5",
+            "updated_at": "03:47.5",
+            "entity_id": null,
+            "tank_code": null
+        }
+    ]
+},
+"user_request": (
+    "Monitor live tank status and levels. Identify abnormal tank conditions such as "
+    "unexpected level changes, water presence, or non-active tanks holding product, "
+    "and raise appropriate alerts to ensure inventory integrity and safety."
+)
+"table_context": {
+    "table_name": "host_day_end_details",
+    "schema": [
+        {
+            "column": "bay_number",
+            "type": "Utf8",
+            "description": "Bay number for which day-end reconciliation is performed."
+        },
+        {
+            "column": "bcu_number",
+            "type": "Utf8",
+            "description": "BCU identifier associated with the bay."
+        },
+        {
+            "column": "stock",
+            "type": "Utf8",
+            "description": "Product stock code reconciled during day end."
+        },
+        {
+            "column": "bcu_start_totalizer",
+            "type": "Int64",
+            "description": "BCU totalizer reading at the start of the day."
+        },
+        {
+            "column": "bcu_end_totalizer",
+            "type": "Int64",
+            "description": "BCU totalizer reading at the end of the day."
+        },
+        {
+            "column": "bcu_net_totalizer",
+            "type": "Int64",
+            "description": "Net quantity from BCU (end - start)."
+        },
+        {
+            "column": "mfm_start_totalizer",
+            "type": "Int64",
+            "description": "MFM totalizer reading at the start of the day."
+        },
+        {
+            "column": "mfm_end_totalizer",
+            "type": "Int64",
+            "description": "MFM totalizer reading at the end of the day."
+        },
+        {
+            "column": "mfm_net_totalizer",
+            "type": "Int64",
+            "description": "Net quantity from MFM (end - start)."
+        },
+        {
+            "column": "invoiced_qty",
+            "type": "Int64",
+            "description": "Total invoiced quantity for the bay and stock."
+        },
+        {
+            "column": "total_tl_qty_loaded",
+            "type": "Int64",
+            "description": "Total TL quantity loaded from the bay."
+        },
+        {
+            "column": "bcu_mfm_net_totalizer_diff",
+            "type": "Int64",
+            "description": "Difference between BCU and MFM net quantities."
+        },
+        {
+            "column": "invoiced_total_tl_qty_diff",
+            "type": "Int64",
+            "description": "Difference between invoiced quantity and total TL loaded quantity."
+        },
+        {
+            "column": "invoiced_bcu_net_qty_diff",
+            "type": "Int64",
+            "description": "Difference between invoiced quantity and BCU net quantity."
+        },
+        {
+            "column": "topup_qty_local_mode",
+            "type": "Int64",
+            "description": "Top-up quantity loaded in local/manual mode."
+        },
+        {
+            "column": "sampling_qty",
+            "type": "Int64",
+            "description": "Quantity used for sampling during the day."
+        },
+        {
+            "column": "sap_id",
+            "type": "Utf8",
+            "description": "SAP location identifier for the terminal."
+        },
+        {
+            "column": "location_name",
+            "type": "Utf8",
+            "description": "Terminal or depot name."
+        },
+        {
+            "column": "zone",
+            "type": "Utf8",
+            "description": "Geographical zone of the terminal."
+        },
+        {
+            "column": "alert_created",
+            "type": "Boolean",
+            "description": "Flag indicating whether a day-end mismatch alert has been created."
+        },
+        {
+            "column": "date",
+            "type": "Date",
+            "description": "Business date for the day-end reconciliation."
+        },
+        {
+            "column": "date_time",
+            "type": "Datetime",
+            "description": "Timestamp when day-end reconciliation was generated."
+        },
+        {
+            "column": "id",
+            "type": "Int64",
+            "description": "Primary key identifier for the day-end record."
+        },
+        {
+            "column": "created_at",
+            "type": "Datetime",
+            "description": "Record creation timestamp."
+        },
+        {
+            "column": "updated_at",
+            "type": "Datetime",
+            "description": "Record update timestamp."
+        },
+        {
+            "column": "entity_id",
+            "type": "Utf8",
+            "description": "Optional entity identifier."
+        }
+    ],
+    "data": [
+        {
+            "bay_number": "01",
+            "bcu_number": "BC-501A",
+            "stock": "BS VI MS",
+            "bcu_start_totalizer": 51486498,
+            "bcu_end_totalizer": 51568097,
+            "bcu_net_totalizer": 81599,
+            "mfm_start_totalizer": 30574928,
+            "mfm_end_totalizer": 30656526,
+            "mfm_net_totalizer": 81598,
+            "invoiced_qty": 81600,
+            "total_tl_qty_loaded": 81602,
+            "bcu_mfm_net_totalizer_diff": 1,
+            "invoiced_total_tl_qty_diff": -2,
+            "invoiced_bcu_net_qty_diff": 1,
+            "topup_qty_local_mode": 0,
+            "sampling_qty": 0,
+            "sap_id": "1155",
+            "location_name": "ROORKEE DEPOT",
+            "zone": "NZ",
+            "alert_created": false,
+            "date": "2025-06-19",
+            "date_time": "2025-06-19 20:22:52.862521+05:30",
+            "id": 53326,
+            "created_at": "55:08.4",
+            "updated_at": "55:08.4",
+            "entity_id": null
+        }
+    ]
+},
+"user_request": (
+    "Perform day-end reconciliation for each bay and stock by comparing BCU, MFM, "
+    "invoiced, and total TL quantities. Identify mismatches beyond acceptable "
+    "tolerance limits and raise a 'Day End Reconciliation Mismatch' alert where required."
+)
+
+"table_context": {
+    "table_name": "host_day_end_summary",
+    "schema": [
+      {
+        "column": "total_loaded_tts",
+        "type": "Int64",
+        "description": "Total number of TT loads successfully completed during the day."
+      },
+      {
+        "column": "total_sick_tts",
+        "type": "Int64",
+        "description": "Total number of TTs marked as sick or unavailable for loading."
+      },
+      {
+        "column": "total_cancelled_tts",
+        "type": "Int64",
+        "description": "Total number of TT loads cancelled during the day."
+      },
+      {
+        "column": "sap_id",
+        "type": "Utf8",
+        "description": "SAP location identifier for the terminal."
+      },
+      {
+        "column": "location_name",
+        "type": "Utf8",
+        "description": "Terminal or depot name."
+      },
+      {
+        "column": "zone",
+        "type": "Utf8",
+        "description": "Geographical zone of the terminal."
+      },
+      {
+        "column": "alert_created",
+        "type": "Boolean",
+        "description": "Flag indicating whether a day-end summary validation alert has been created."
+      },
+      {
+        "column": "date",
+        "type": "Date",
+        "description": "Business date for which the day-end summary is generated."
+      },
+      {
+        "column": "date_time",
+        "type": "Datetime",
+        "description": "Timestamp when the day-end summary record was generated."
+      },
+      {
+        "column": "id",
+        "type": "Int64",
+        "description": "Primary key identifier for the day-end summary record."
+      },
+      {
+        "column": "created_at",
+        "type": "Datetime",
+        "description": "Record creation timestamp."
+      },
+      {
+        "column": "updated_at",
+        "type": "Datetime",
+        "description": "Record update timestamp."
+      },
+      {
+        "column": "entity_id",
+        "type": "Utf8",
+        "description": "Optional entity identifier."
+      }
+    ],
+    "data": [
+      {
+        "total_loaded_tts": 53,
+        "total_sick_tts": 0,
+        "total_cancelled_tts": 0,
+        "sap_id": "1155",
+        "location_name": "ROORKEE DEPOT",
+        "zone": "NZ",
+        "alert_created": false,
+        "date": "2025-06-09",
+        "date_time": "2025-06-10 02:22:39.416982+05:30",
+        "id": 762,
+        "created_at": "22:45.9",
+        "updated_at": "22:45.9",
+        "entity_id": null
+      }
+    ]
+  },
+  "user_request": (
+    "Generate a consolidated day-end operational summary for each terminal by aggregating "
+    "total loaded, sick, and cancelled TTs. Validate overall TT movement counts for the day "
+    "and raise a 'Day End Summary Mismatch' alert if abnormal or inconsistent values are detected."
+  )
+{
+  "table_context": {
+    "table_name": "host_sick_tts",
+    "schema": [
+      {
+        "column": "load_number",
+        "type": "Int64",
+        "description": "Load number associated with the truck trip declared as sick."
+      },
+      {
+        "column": "truck_number",
+        "type": "Utf8",
+        "description": "Truck (TT) registration number."
+      },
+      {
+        "column": "created_date",
+        "type": "Date",
+        "description": "Date when the load record was originally created."
+      },
+      {
+        "column": "customer_name",
+        "type": "Utf8",
+        "description": "Customer or consignee name for the load."
+      },
+      {
+        "column": "compartment_number",
+        "type": "Int64",
+        "description": "Truck compartment number affected by the sick declaration."
+      },
+      {
+        "column": "product_name",
+        "type": "Utf8",
+        "description": "Product intended to be loaded in the compartment."
+      },
+      {
+        "column": "required_qty",
+        "type": "Int64",
+        "description": "Planned or required quantity for the compartment."
+      },
+      {
+        "column": "loaded_qty",
+        "type": "Int64",
+        "description": "Actual quantity loaded before the truck was declared sick."
+      },
+      {
+        "column": "sick_declared_by",
+        "type": "Utf8",
+        "description": "User ID or employee ID who declared the truck as sick."
+      },
+      {
+        "column": "sick_date",
+        "type": "Datetime",
+        "description": "Timestamp when the truck was declared sick."
+      },
+      {
+        "column": "remarks",
+        "type": "Utf8",
+        "description": "Reason or remarks for declaring the truck as sick."
+      },
+      {
+        "column": "sap_id",
+        "type": "Utf8",
+        "description": "SAP location identifier for the terminal."
+      },
+      {
+        "column": "location_name",
+        "type": "Utf8",
+        "description": "Terminal or depot where the truck was declared sick."
+      },
+      {
+        "column": "zone",
+        "type": "Utf8",
+        "description": "Geographical zone of the terminal."
+      },
+      {
+        "column": "bcu_number",
+        "type": "Utf8",
+        "description": "BCU(Batch Control Unit) identifier associated with the bay (if applicable)."
+      },
+      {
+        "column": "bay_number",
+        "type": "Utf8",
+        "description": "Bay number where the truck was positioned."
+      },
+      {
+        "column": "alert_created",
+        "type": "Boolean",
+        "description": "Flag indicating whether a sick TT alert has been created."
+      },
+      {
+        "column": "date",
+        "type": "Date",
+        "description": "Business date for the sick TT record."
+      },
+      {
+        "column": "date_time",
+        "type": "Datetime",
+        "description": "Timestamp when the sick TT record was generated."
+      },
+      {
+        "column": "id",
+        "type": "Int64",
+        "description": "Primary key identifier for the sick TT record."
+      },
+      {
+        "column": "created_at",
+        "type": "Datetime",
+        "description": "Record creation timestamp."
+      },
+      {
+        "column": "updated_at",
+        "type": "Datetime",
+        "description": "Record update timestamp."
+      },
+      {
+        "column": "entity_id",
+        "type": "Utf8",
+        "description": "Optional entity identifier."
+      }
+    ],
+    "data": [
+      {
+        "load_number": 629190,
+        "truck_number": "HR65A8469",
+        "created_date": "2026-01-22",
+        "customer_name": "RIL-Bahadurgarh",
+        "compartment_number": 3,
+        "product_name": "BS VI HSD",
+        "required_qty": 5000,
+        "loaded_qty": 0,
+        "sick_declared_by": "31917340",
+        "sick_date": "2026-01-22 14:22:34+00:00",
+        "remarks": "Overspill sensor not working",
+        "sap_id": "1216",
+        "location_name": "BAHADURGARH TERMINAL",
+        "zone": "NZ",
+        "bcu_number": null,
+        "bay_number": "03",
+        "alert_created": true,
+        "date": "2026-01-22",
+        "date_time": "2026-01-22 20:04:55.162401+00:00",
+        "id": 1,
+        "created_at": "2026-01-22 14:37:08.140429",
+        "updated_at": "2026-01-22 14:37:08.140429",
+        "entity_id": null
+      }
+    ]
+  },
+  "user_request": (
+    "Identify trucks declared as sick during loading operations, capture reasons and quantities affected, "
+    "and raise a 'Sick TT' alert for operational visibility, analysis, and downstream reporting."
+  )
+}
+
+
+

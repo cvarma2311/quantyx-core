@@ -46,6 +46,12 @@ dependency order.
    - `Phase_T_Semantic_Layer_Enhancement.md`
 16) Phase U - Tenant Scope Resolution (Remove Connection Scope from APIs)
    - `Phase_U_Tenant_Scope_Resolution.md`
+17) Phase V - Semantic Canvas Modeling (Dimensions, Facts, Metrics)
+   - `Phase_V_Semantic_Canvas_Modeling.md`
+18) Phase W - Semantic AI Automation (Generic Facts/Dimensions + Lineage)
+   - `Phase_W_Semantic_AI_Automation.md`
+19) Phase X - Canvas Graph Persistence (Multi-Canvas, Rooted Tenant View)
+   - `Phase_X_Canvas_Graph_Persistence.md`
 
 ## Dependencies (summary)
 
@@ -58,3 +64,6 @@ dependency order.
 - Phase H depends on query planner foundations (Phase D/E).
 - Phase J depends on Phase F (insights storage) and Phase D (time-series access).
 - Phase I can begin after Phases D/E are stable.
+- Phase V depends on Phase U (tenant scope resolution) and Phase D (semantic APIs).
+- Phase W depends on Phase V (semantic objects must exist).
+- Phase X depends on Phase V (canvas graph persists semantic objects/lineage).
