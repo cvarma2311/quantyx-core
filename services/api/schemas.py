@@ -969,6 +969,63 @@ class OnboardMapResponse(BaseModel):
     }
 
 
+class MappingApplySelectionMode(str, Enum):
+    all = "all"
+    selected = "selected"
+
+
+class MappingCandidateSelection(BaseModel):
+    table: str = Field(..., examples=["fact_sales"])
+    column: str = Field(..., examples=["sales_area_name"])
+    mapped_entity_type: str = Field(..., examples=["organizational_unit"])
+
+
+class OnboardMapApplyRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str | None = Field(None, examples=["manufacturing"])
+    selection_mode: MappingApplySelectionMode = Field(MappingApplySelectionMode.all)
+    candidates: List[MappingCandidateSelection] = Field(default_factory=list)
+    status: str = Field("draft", examples=["draft"])
+    notes: str | None = Field(None, examples=["Initial apply from mapping run"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "tenant_a",
+                "selection_mode": "all",
+                "candidates": [],
+                "status": "draft",
+                "notes": "Initial apply from mapping run",
+            }
+        }
+    }
+
+
+class OnboardMapApplyResponse(BaseModel):
+    ok: bool = Field(..., examples=[True])
+    mapping_id: str = Field(..., examples=["map_ab12cd34"])
+    applied_count: int = Field(..., examples=[8])
+    skipped_count: int = Field(..., examples=[2])
+    status: str = Field(..., examples=["draft"])
+    review_id: str | None = Field(None, examples=["review_123"])
+    mapping_status: str = Field(..., examples=["applied"])
+
+
+class OnboardMapRunResponse(BaseModel):
+    mapping_id: str = Field(..., examples=["map_ab12cd34"])
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    domain_id: str = Field(..., examples=["manufacturing"])
+    connection_id: str = Field(..., examples=["conn_prod"])
+    database_name: str = Field(..., examples=["prod_warehouse"])
+    schema_name: str = Field(..., examples=["public"])
+    tables: List[str] = Field(default_factory=list)
+    candidates: List[dict] = Field(default_factory=list)
+    low_confidence_candidates: List[dict] = Field(default_factory=list)
+    low_confidence_threshold: float = Field(0.7, examples=[0.7])
+    status: str = Field("draft", examples=["draft"])
+    created_at: str | None = Field(None, examples=["2026-02-18T10:00:00Z"])
+    updated_at: str | None = Field(None, examples=["2026-02-18T10:05:00Z"])
+
+
 class ContextIngestRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
     domain_id: str | None = Field(None, examples=["manufacturing"])

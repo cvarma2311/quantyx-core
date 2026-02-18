@@ -38,9 +38,11 @@ def load_entity_overrides(
             cur.execute(
                 f"""
                 SELECT entity_id, description, join_key, examples,
-                       connection_id, database_name, schema_name
+                       connection_id, database_name, schema_name,
+                       lifecycle_status, source_type, source_run_id, artifact_key, version_no, is_current
                 FROM public.quantyx_entity_overrides
                 WHERE {where_clause}
+                  AND COALESCE(is_current, true) = true
                 """,
                 params,
             )
@@ -62,9 +64,11 @@ def load_entity_overrides_all(settings: Settings, tenant_id: str, domain_id: str
             cur.execute(
                 """
                 SELECT entity_id, description, join_key, examples,
-                       connection_id, database_name, schema_name
+                       connection_id, database_name, schema_name,
+                       lifecycle_status, source_type, source_run_id, artifact_key, version_no, is_current
                 FROM public.quantyx_entity_overrides
                 WHERE tenant_id = %s AND domain_id = %s
+                  AND COALESCE(is_current, true) = true
                 ORDER BY connection_id, database_name, schema_name, entity_id
                 """,
                 (tenant_id, domain_id),
@@ -106,9 +110,11 @@ def load_hierarchy_overrides(
             cur.execute(
                 f"""
                 SELECT hierarchy_name, levels, description,
-                       connection_id, database_name, schema_name
+                       connection_id, database_name, schema_name,
+                       lifecycle_status, source_type, source_run_id, artifact_key, version_no, is_current
                 FROM public.quantyx_hierarchy_overrides
                 WHERE {where_clause}
+                  AND COALESCE(is_current, true) = true
                 """,
                 params,
             )
@@ -130,9 +136,11 @@ def load_hierarchy_overrides_all(settings: Settings, tenant_id: str, domain_id: 
             cur.execute(
                 """
                 SELECT hierarchy_name, levels, description,
-                       connection_id, database_name, schema_name
+                       connection_id, database_name, schema_name,
+                       lifecycle_status, source_type, source_run_id, artifact_key, version_no, is_current
                 FROM public.quantyx_hierarchy_overrides
                 WHERE tenant_id = %s AND domain_id = %s
+                  AND COALESCE(is_current, true) = true
                 ORDER BY connection_id, database_name, schema_name, hierarchy_name
                 """,
                 (tenant_id, domain_id),

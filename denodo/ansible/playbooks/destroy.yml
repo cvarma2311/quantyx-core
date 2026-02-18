@@ -1,0 +1,10 @@
+---
+- name: Remove Denodo container
+  hosts: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    denodo_runtime_action: absent
+  roles:
+    - denodo_runtime

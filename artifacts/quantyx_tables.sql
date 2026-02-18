@@ -298,10 +298,21 @@ CREATE TABLE IF NOT EXISTS public.quantyx_metrics_registry (
   source_model TEXT,
   source_schema TEXT,
   sql TEXT,
-  status TEXT,
   owner TEXT,
   version TEXT,
   deprecated BOOLEAN NOT NULL DEFAULT false,
+  artifact_key TEXT NULL,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  is_current BOOLEAN NOT NULL DEFAULT true,
+  lifecycle_status TEXT NOT NULL DEFAULT 'suggested',
+  source_type TEXT NOT NULL DEFAULT 'system',
+  source_run_id TEXT NULL,
+  change_reason TEXT NULL,
+  approved_by TEXT NULL,
+  approved_at TIMESTAMPTZ NULL,
+  supersedes_version_no INTEGER NULL,
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -320,6 +331,11 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_metrics_registry_domain
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_metrics_registry_scope
   ON public.quantyx_metrics_registry (tenant_id, domain_id, connection_id, database_name, schema_name);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_metrics_registry_current
+  ON public.quantyx_metrics_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
+  WHERE is_current = true;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_metrics_registry_version
+  ON public.quantyx_metrics_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
 
 
 CREATE TABLE IF NOT EXISTS public.quantyx_entity_overrides (
@@ -333,6 +349,19 @@ CREATE TABLE IF NOT EXISTS public.quantyx_entity_overrides (
   join_key TEXT,
   examples TEXT[],
   source_context_id TEXT NULL,
+  artifact_key TEXT NULL,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  is_current BOOLEAN NOT NULL DEFAULT true,
+  lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  source_type TEXT NOT NULL DEFAULT 'system',
+  source_run_id TEXT NULL,
+  change_reason TEXT NULL,
+  approved_by TEXT NULL,
+  approved_at TIMESTAMPTZ NULL,
+  supersedes_version_no INTEGER NULL,
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id),
   CHECK (connection_id <> 'global' AND database_name <> 'global' AND schema_name <> 'global')
@@ -343,6 +372,11 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_entity_overrides_domain
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_entity_overrides_scope
   ON public.quantyx_entity_overrides (tenant_id, domain_id, connection_id, database_name, schema_name);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_entity_overrides_current
+  ON public.quantyx_entity_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
+  WHERE is_current = true;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_entity_overrides_version
+  ON public.quantyx_entity_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
 
 
 CREATE TABLE IF NOT EXISTS public.quantyx_hierarchy_overrides (
@@ -355,6 +389,19 @@ CREATE TABLE IF NOT EXISTS public.quantyx_hierarchy_overrides (
   levels TEXT[] NOT NULL,
   description TEXT,
   source_context_id TEXT NULL,
+  artifact_key TEXT NULL,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  is_current BOOLEAN NOT NULL DEFAULT true,
+  lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  source_type TEXT NOT NULL DEFAULT 'system',
+  source_run_id TEXT NULL,
+  change_reason TEXT NULL,
+  approved_by TEXT NULL,
+  approved_at TIMESTAMPTZ NULL,
+  supersedes_version_no INTEGER NULL,
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name),
   CHECK (connection_id <> 'global' AND database_name <> 'global' AND schema_name <> 'global')
@@ -365,6 +412,11 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_hierarchy_overrides_domain
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_hierarchy_overrides_scope
   ON public.quantyx_hierarchy_overrides (tenant_id, domain_id, connection_id, database_name, schema_name);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_hierarchy_overrides_current
+  ON public.quantyx_hierarchy_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
+  WHERE is_current = true;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_hierarchy_overrides_version
+  ON public.quantyx_hierarchy_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
 
 
 CREATE TABLE IF NOT EXISTS public.quantyx_business_context (
@@ -515,10 +567,26 @@ CREATE TABLE IF NOT EXISTS public.quantyx_facts_registry (
   measures JSONB NULL,
   dimensions JSONB NULL,
   description TEXT NULL,
-  status TEXT NOT NULL DEFAULT 'draft',
+  artifact_key TEXT NULL,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  is_current BOOLEAN NOT NULL DEFAULT true,
+  lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  source_type TEXT NOT NULL DEFAULT 'system',
+  source_run_id TEXT NULL,
+  change_reason TEXT NULL,
+  approved_by TEXT NULL,
+  approved_at TIMESTAMPTZ NULL,
+  supersedes_version_no INTEGER NULL,
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_facts_registry_current
+  ON public.quantyx_facts_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
+  WHERE is_current = true;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_facts_registry_version
+  ON public.quantyx_facts_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
 
 CREATE TABLE IF NOT EXISTS public.quantyx_dimensions_registry (
   dimension_id TEXT PRIMARY KEY,
@@ -531,10 +599,26 @@ CREATE TABLE IF NOT EXISTS public.quantyx_dimensions_registry (
   keys JSONB NULL,
   attributes JSONB NULL,
   description TEXT NULL,
-  status TEXT NOT NULL DEFAULT 'draft',
+  artifact_key TEXT NULL,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  is_current BOOLEAN NOT NULL DEFAULT true,
+  lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  source_type TEXT NOT NULL DEFAULT 'system',
+  source_run_id TEXT NULL,
+  change_reason TEXT NULL,
+  approved_by TEXT NULL,
+  approved_at TIMESTAMPTZ NULL,
+  supersedes_version_no INTEGER NULL,
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_dimensions_registry_current
+  ON public.quantyx_dimensions_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
+  WHERE is_current = true;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_dimensions_registry_version
+  ON public.quantyx_dimensions_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
 
 CREATE TABLE IF NOT EXISTS public.quantyx_review_events (
   review_id TEXT PRIMARY KEY,

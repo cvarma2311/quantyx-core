@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -60,6 +61,33 @@ def _request(method: str, path: str, payload: dict | None = None) -> dict:
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8")
         raise RuntimeError(f"{method} {path} failed: {exc.code} {body}") from exc
+
+
+def _wait_for_job_result(job_id: str, timeout_seconds: int = 180, poll_seconds: int = 3) -> dict:
+    start = time.time()
+    while True:
+        status_path = f"/jobs/{job_id}"
+        _log_request("GET", status_path)
+        status_payload = _request("GET", status_path)
+        _log_response(status_payload)
+        status = status_payload.get("status")
+        if status in {"failed", "canceled"}:
+            result_path = f"/jobs/{job_id}/result"
+            _log_request("GET", result_path)
+            result_payload = _request("GET", result_path)
+            _log_response(result_payload)
+            raise RuntimeError(
+                f"Job {job_id} ended with status={status}: {result_payload.get('error_message')}"
+            )
+        if status == "completed":
+            result_path = f"/jobs/{job_id}/result"
+            _log_request("GET", result_path)
+            result_payload = _request("GET", result_path)
+            _log_response(result_payload)
+            return result_payload.get("result") or {}
+        if time.time() - start > timeout_seconds:
+            raise RuntimeError(f"Timed out waiting for job {job_id}")
+        time.sleep(poll_seconds)
 
 
 def run_onboarding(
@@ -361,16 +389,52 @@ def main() -> int:
     if tables:
         print(f"Tables (sample)={tables[:10]}")
 
-    # 2) Ontology mapping (rules + optional LLM)
-    print("\n[2] Ontology mapping")
+    # 2) Ontology mapping (async)
+    print("\n[2] Ontology mapping (async)")
     print("Step 2 start")
     map_payload = {
         "tenant_id": TENANT_ID,
     }
-    map_path = f"/onboard/map?domain_id={DOMAIN_ID}&tenant_id={TENANT_ID}&use_llm=false"
+    map_path = "/onboard/map/async?use_llm=false"
     _log_request("POST", map_path, map_payload)
-    map_response = _request("POST", map_path, map_payload)
-    _log_response(map_response)
+    map_job = _request("POST", map_path, map_payload)
+    _log_response(map_job)
+    map_job_id = map_job.get("job_id")
+    if not map_job_id:
+        raise RuntimeError("Map async job_id missing in response")
+    map_response = _wait_for_job_result(map_job_id)
+
+    # 2a) Fetch mapping run details
+    mapping_id = map_response.get("mapping_id")
+    if mapping_id:
+        print("\n[2a] Mapping run details")
+        mapping_path = f"/onboard/map/{mapping_id}?tenant_id={TENANT_ID}"
+        _log_request("GET", mapping_path)
+        mapping_response = _request("GET", mapping_path)
+        _log_response(mapping_response)
+
+    # 2b) Apply mapping run to canonical entity overrides
+    if mapping_id:
+        print("\n[2b] Apply mapping run")
+        apply_payload = {
+            "tenant_id": TENANT_ID,
+            "selection_mode": "all",
+            "status": "draft",
+            "notes": "Applied by onboarding demo",
+        }
+        apply_path = f"/onboard/map/{mapping_id}/apply"
+        _log_request("POST", apply_path, apply_payload)
+        apply_response = _request("POST", apply_path, apply_payload)
+        _log_response(apply_response)
+    else:
+        print("Mapping result has no mapping_id; skipping apply step.")
+
+    # 2c) Mapping history
+    print("\n[2c] Mapping history")
+    map_history_path = f"/onboard/map/history?tenant_id={TENANT_ID}&limit=20"
+    _log_request("GET", map_history_path)
+    map_history_response = _request("GET", map_history_path)
+    _log_response(map_history_response)
     print("Step 2 end")
 
     # 3) Entities + hierarchies (review / override)
@@ -382,8 +446,8 @@ def main() -> int:
     _log_response(entities_response)
     print("Step 3 end")
 
-    # 4) Infer facts/dims
-    print("\n[4] Infer facts and dimensions")
+    # 4) Infer facts/dims (async)
+    print("\n[4] Infer facts and dimensions (async)")
     print("Step 4 start")
     infer_payload = {
         "tenant_id": TENANT_ID,
@@ -391,10 +455,24 @@ def main() -> int:
         "grain": "day",
         "use_llm": False,
     }
-    infer_path = f"/onboard/infer-models?domain_id={DOMAIN_ID}"
+    infer_path = f"/onboard/infer-models/async?domain_id={DOMAIN_ID}"
     _log_request("POST", infer_path, infer_payload)
-    infer_response = _request("POST", infer_path, infer_payload)
-    _log_response(infer_response)
+    infer_job = _request("POST", infer_path, infer_payload)
+    _log_response(infer_job)
+    infer_job_id = infer_job.get("job_id")
+    if not infer_job_id:
+        raise RuntimeError("Infer async job_id missing in response")
+    infer_result = _wait_for_job_result(infer_job_id)
+    print("Infer async result summary:")
+    print(json.dumps(infer_result, indent=2))
+    facts_path = f"/facts?tenant_id={TENANT_ID}"
+    _log_request("GET", facts_path)
+    facts_response = _request("GET", facts_path)
+    _log_response(facts_response)
+    dimensions_path = f"/dimensions?tenant_id={TENANT_ID}"
+    _log_request("GET", dimensions_path)
+    dimensions_response = _request("GET", dimensions_path)
+    _log_response(dimensions_response)
     print("Step 4 end")
 
     # 5) Generate dbt manifest
@@ -412,16 +490,22 @@ def main() -> int:
     manifest_response = _request("POST", "/dbt/manifest/generate", manifest_payload)
     _log_response(manifest_response)
 
-    # 6) Suggested metrics (persist)
-    print("\n[6] Suggested metrics (persist)")
+    # 6) Suggested metrics (persist, async)
+    print("\n[6] Suggested metrics (persist, async)")
     print("Step 6 start")
     metrics_payload = {
         "tenant_id": TENANT_ID,
     }
-    suggested_path = f"/metrics/suggested?domain_id={DOMAIN_ID}&persist=true"
+    suggested_path = f"/metrics/suggested/async?domain_id={DOMAIN_ID}&persist=true"
     _log_request("POST", suggested_path, metrics_payload)
-    suggested = _request("POST", suggested_path, metrics_payload)
-    _log_response(suggested)
+    metrics_job = _request("POST", suggested_path, metrics_payload)
+    _log_response(metrics_job)
+    metrics_job_id = metrics_job.get("job_id")
+    if not metrics_job_id:
+        raise RuntimeError("Metrics async job_id missing in response")
+    suggested = _wait_for_job_result(metrics_job_id)
+    print("Suggested metrics async result summary:")
+    print(json.dumps(suggested, indent=2))
     print("Step 6 end")
 
     # 7) Metrics catalog (review)

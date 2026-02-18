@@ -103,11 +103,7 @@ Response (`202`):
 Request (same as `/onboard/map`):
 ```json
 {
-  "tenant_id": "tenant_a",
-  "connection_id": "conn_prod",
-  "database": "prod_warehouse",
-  "schema": "public",
-  "tables": ["fact_production_daily"]
+  "tenant_id": "tenant_a"
 }
 ```
 
@@ -382,7 +378,7 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_job_events_job
 2) Mark job `running` + `started_at`.
 3) Execute logic based on `job_type`:
    - `scan_connection` → same code as `POST /onboard/scan-connection`
-   - `map_entities` → same code as `POST /onboard/map`
+   - `map_entities` → same code as `POST /onboard/map` (must reuse the same service method so `quantyx_entity_mappings` persistence is identical)
    - `infer_models` → same code as `POST /onboard/infer-models`
    - `metrics_suggested` → same code as `POST /metrics/suggested`
 4) Save result JSON in `result_payload`.

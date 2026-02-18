@@ -4,6 +4,7 @@ from typing import Any
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query
+from services.ai.metrics_registry import upsert_metric
 
 
 def _normalize_term(term: str) -> str:
@@ -42,16 +43,27 @@ def apply_extractions(
                   description,
                   join_key,
                   examples,
+                  artifact_key,
+                  lifecycle_status,
+                  source_type,
+                  source_run_id,
                   source_context_id,
+                  is_current,
+                  created_at,
                   updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
                 ON CONFLICT (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id)
                 DO UPDATE SET
                   description = EXCLUDED.description,
                   join_key = EXCLUDED.join_key,
                   examples = EXCLUDED.examples,
+                  artifact_key = EXCLUDED.artifact_key,
+                  lifecycle_status = EXCLUDED.lifecycle_status,
+                  source_type = EXCLUDED.source_type,
+                  source_run_id = EXCLUDED.source_run_id,
                   source_context_id = EXCLUDED.source_context_id,
+                  is_current = EXCLUDED.is_current,
                   updated_at = now()
             """
             execute_non_query(
@@ -67,7 +79,12 @@ def apply_extractions(
                     entity.get("description"),
                     entity.get("join_key"),
                     entity.get("examples"),
+                    entity_id,
+                    "draft",
+                    "llm",
                     source_context_id,
+                    source_context_id,
+                    True,
                 ],
             )
             updated["entities"] += 1
@@ -88,15 +105,26 @@ def apply_extractions(
                   hierarchy_name,
                   levels,
                   description,
+                  artifact_key,
+                  lifecycle_status,
+                  source_type,
+                  source_run_id,
                   source_context_id,
+                  is_current,
+                  created_at,
                   updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
                 ON CONFLICT (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name)
                 DO UPDATE SET
                   levels = EXCLUDED.levels,
                   description = EXCLUDED.description,
+                  artifact_key = EXCLUDED.artifact_key,
+                  lifecycle_status = EXCLUDED.lifecycle_status,
+                  source_type = EXCLUDED.source_type,
+                  source_run_id = EXCLUDED.source_run_id,
                   source_context_id = EXCLUDED.source_context_id,
+                  is_current = EXCLUDED.is_current,
                   updated_at = now()
             """
             execute_non_query(
@@ -111,7 +139,12 @@ def apply_extractions(
                     name,
                     levels,
                     hierarchy.get("description"),
+                    name,
+                    "draft",
+                    "llm",
                     source_context_id,
+                    source_context_id,
+                    True,
                 ],
             )
             updated["hierarchies"] += 1
@@ -215,65 +248,31 @@ def apply_extractions(
             if not metric_name:
                 continue
             metric_id = f"{domain_id}__{metric_name}"
-            sql = """
-                INSERT INTO public.quantyx_metrics_registry (
-                  metric_id,
-                  metric_name,
-                  domain_id,
-                  tenant_id,
-                  connection_id,
-                  database_name,
-                  schema_name,
-                  description,
-                  type,
-                  unit,
-                  grain,
-                  dimensions,
-                  dataset_id,
-                  source_model,
-                  source_schema,
-                  sql,
-                  status,
-                  created_at,
-                  updated_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
-                ON CONFLICT (metric_id)
-                DO UPDATE SET
-                  description = EXCLUDED.description,
-                  type = EXCLUDED.type,
-                  unit = EXCLUDED.unit,
-                  grain = EXCLUDED.grain,
-                  dimensions = EXCLUDED.dimensions,
-                  dataset_id = EXCLUDED.dataset_id,
-                  source_model = EXCLUDED.source_model,
-                  source_schema = EXCLUDED.source_schema,
-                  sql = EXCLUDED.sql,
-                  status = EXCLUDED.status,
-                  updated_at = now()
-            """
-            execute_non_query(
+            upsert_metric(
                 settings,
-                sql,
-                [
-                    metric_id,
-                    metric_name,
-                    domain_id,
-                    tenant_id,
-                    connection_id,
-                    database_name,
-                    schema_name,
-                    metric.get("description"),
-                    metric.get("type"),
-                    metric.get("unit"),
-                    metric.get("grain"),
-                    metric.get("dimensions"),
-                    metric.get("table"),
-                    metric.get("table"),
-                    metric.get("schema"),
-                    metric.get("sql"),
-                    "suggested",
-                ],
+                {
+                    "metric_id": metric_id,
+                    "artifact_key": metric_id,
+                    "metric_name": metric_name,
+                    "domain_id": domain_id,
+                    "tenant_id": tenant_id,
+                    "connection_id": connection_id,
+                    "database": database_name,
+                    "schema": schema_name,
+                    "description": metric.get("description"),
+                    "type": metric.get("type"),
+                    "unit": metric.get("unit"),
+                    "grain": metric.get("grain"),
+                    "dimensions": metric.get("dimensions"),
+                    "dataset_id": metric.get("table"),
+                    "source_model": metric.get("table"),
+                    "source_schema": metric.get("schema"),
+                    "sql": metric.get("sql"),
+                    "lifecycle_status": "suggested",
+                    "source_type": "llm",
+                    "source_run_id": source_context_id,
+                    "is_current": True,
+                },
             )
             updated["metrics"] += 1
 

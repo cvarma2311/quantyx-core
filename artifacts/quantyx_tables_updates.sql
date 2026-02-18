@@ -110,6 +110,7 @@ ALTER TABLE public.quantyx_entity_mappings
   ADD COLUMN IF NOT EXISTS low_confidence_candidates JSONB,
   ADD COLUMN IF NOT EXISTS low_confidence_threshold NUMERIC,
   ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   ADD COLUMN IF NOT EXISTS tables JSONB;
 
 ALTER TABLE public.quantyx_facts_registry
@@ -223,8 +224,42 @@ UPDATE public.quantyx_entity_mappings
   SET tables = COALESCE(tables, '[]'::jsonb)
   WHERE tables IS NULL;
 
+UPDATE public.quantyx_entity_mappings
+  SET candidates = COALESCE(candidates, payload -> 'candidates', '[]'::jsonb)
+  WHERE candidates IS NULL;
+
+UPDATE public.quantyx_entity_mappings
+  SET low_confidence_candidates = COALESCE(low_confidence_candidates, payload -> 'low_confidence_candidates', '[]'::jsonb)
+  WHERE low_confidence_candidates IS NULL;
+
+UPDATE public.quantyx_entity_mappings
+  SET low_confidence_threshold = COALESCE(
+    low_confidence_threshold,
+    CASE
+      WHEN payload ? 'low_confidence_threshold' THEN (payload ->> 'low_confidence_threshold')::NUMERIC
+      ELSE 0.7
+    END
+  )
+  WHERE low_confidence_threshold IS NULL;
+
+UPDATE public.quantyx_entity_mappings
+  SET status = COALESCE(status, 'draft')
+  WHERE status IS NULL;
+
 ALTER TABLE public.quantyx_entity_mappings
   ALTER COLUMN tables SET DEFAULT '[]'::jsonb;
+
+ALTER TABLE public.quantyx_entity_mappings
+  ALTER COLUMN candidates SET DEFAULT '[]'::jsonb;
+
+ALTER TABLE public.quantyx_entity_mappings
+  ALTER COLUMN low_confidence_candidates SET DEFAULT '[]'::jsonb;
+
+ALTER TABLE public.quantyx_entity_mappings
+  ALTER COLUMN low_confidence_threshold SET DEFAULT 0.7;
+
+ALTER TABLE public.quantyx_entity_mappings
+  ALTER COLUMN status SET DEFAULT 'draft';
 
 ALTER TABLE public.quantyx_dimensions_registry
   ADD COLUMN IF NOT EXISTS name TEXT NULL;
@@ -310,3 +345,190 @@ ALTER TABLE public.quantyx_job_scopes
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_dbt_config_tenant_domain
   ON public.quantyx_dbt_config (tenant_id, domain_id, updated_at DESC);
+
+-- Phase Z1: Unified lifecycle/versioning columns (schema-first)
+
+ALTER TABLE public.quantyx_entity_overrides
+  ADD COLUMN IF NOT EXISTS artifact_key TEXT,
+  ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
+  ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
+  ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
+  ADD COLUMN IF NOT EXISTS approved_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS supersedes_version_no INTEGER NULL,
+  ADD COLUMN IF NOT EXISTS created_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS updated_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+UPDATE public.quantyx_entity_overrides
+  SET artifact_key = COALESCE(artifact_key, entity_id)
+  WHERE artifact_key IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_entity_overrides_current
+  ON public.quantyx_entity_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
+  WHERE is_current = true;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_entity_overrides_version
+  ON public.quantyx_entity_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
+
+ALTER TABLE public.quantyx_hierarchy_overrides
+  ADD COLUMN IF NOT EXISTS artifact_key TEXT,
+  ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
+  ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
+  ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
+  ADD COLUMN IF NOT EXISTS approved_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS supersedes_version_no INTEGER NULL,
+  ADD COLUMN IF NOT EXISTS created_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS updated_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+UPDATE public.quantyx_hierarchy_overrides
+  SET artifact_key = COALESCE(artifact_key, hierarchy_name)
+  WHERE artifact_key IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_hierarchy_overrides_current
+  ON public.quantyx_hierarchy_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
+  WHERE is_current = true;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_hierarchy_overrides_version
+  ON public.quantyx_hierarchy_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
+
+ALTER TABLE public.quantyx_facts_registry
+  ADD COLUMN IF NOT EXISTS artifact_key TEXT,
+  ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
+  ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
+  ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
+  ADD COLUMN IF NOT EXISTS approved_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS supersedes_version_no INTEGER NULL,
+  ADD COLUMN IF NOT EXISTS created_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS updated_by TEXT NULL;
+
+UPDATE public.quantyx_facts_registry
+  SET artifact_key = COALESCE(artifact_key, fact_id)
+  WHERE artifact_key IS NULL;
+
+UPDATE public.quantyx_facts_registry
+  SET lifecycle_status = COALESCE(lifecycle_status, 'draft')
+  WHERE lifecycle_status IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_facts_registry_current
+  ON public.quantyx_facts_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
+  WHERE is_current = true;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_facts_registry_version
+  ON public.quantyx_facts_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
+
+ALTER TABLE public.quantyx_dimensions_registry
+  ADD COLUMN IF NOT EXISTS artifact_key TEXT,
+  ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
+  ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
+  ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
+  ADD COLUMN IF NOT EXISTS approved_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS supersedes_version_no INTEGER NULL,
+  ADD COLUMN IF NOT EXISTS created_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS updated_by TEXT NULL;
+
+UPDATE public.quantyx_dimensions_registry
+  SET artifact_key = COALESCE(artifact_key, dimension_id)
+  WHERE artifact_key IS NULL;
+
+UPDATE public.quantyx_dimensions_registry
+  SET lifecycle_status = COALESCE(lifecycle_status, 'draft')
+  WHERE lifecycle_status IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_dimensions_registry_current
+  ON public.quantyx_dimensions_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
+  WHERE is_current = true;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_dimensions_registry_version
+  ON public.quantyx_dimensions_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
+
+ALTER TABLE public.quantyx_metrics_registry
+  ADD COLUMN IF NOT EXISTS artifact_key TEXT,
+  ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'suggested',
+  ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
+  ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
+  ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
+  ADD COLUMN IF NOT EXISTS approved_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ NULL,
+  ADD COLUMN IF NOT EXISTS supersedes_version_no INTEGER NULL,
+  ADD COLUMN IF NOT EXISTS created_by TEXT NULL,
+  ADD COLUMN IF NOT EXISTS updated_by TEXT NULL;
+
+UPDATE public.quantyx_metrics_registry
+  SET artifact_key = COALESCE(artifact_key, metric_id)
+  WHERE artifact_key IS NULL;
+
+UPDATE public.quantyx_metrics_registry
+  SET lifecycle_status = COALESCE(lifecycle_status, 'suggested')
+  WHERE lifecycle_status IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_metrics_registry_current
+  ON public.quantyx_metrics_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
+  WHERE is_current = true;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_metrics_registry_version
+  ON public.quantyx_metrics_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
+
+-- Phase Z hard cutover cleanup (no backward compatibility)
+-- Run after validating latest lifecycle/versioning behavior in production.
+
+-- 1) Enforce artifact_key as required everywhere.
+ALTER TABLE public.quantyx_entity_overrides
+  ALTER COLUMN artifact_key SET NOT NULL;
+
+ALTER TABLE public.quantyx_hierarchy_overrides
+  ALTER COLUMN artifact_key SET NOT NULL;
+
+ALTER TABLE public.quantyx_facts_registry
+  ALTER COLUMN artifact_key SET NOT NULL;
+
+ALTER TABLE public.quantyx_dimensions_registry
+  ALTER COLUMN artifact_key SET NOT NULL;
+
+ALTER TABLE public.quantyx_metrics_registry
+  ALTER COLUMN artifact_key SET NOT NULL;
+
+-- 2) Remove legacy staging table replaced by single-table lifecycle model.
+DROP INDEX IF EXISTS idx_quantyx_entity_mappings_scope;
+DROP TABLE IF EXISTS public.quantyx_entity_mappings;
+
+-- 3) Remove legacy lifecycle alias columns (hard cutover).
+ALTER TABLE public.quantyx_facts_registry DROP COLUMN IF EXISTS status;
+ALTER TABLE public.quantyx_dimensions_registry DROP COLUMN IF EXISTS status;
+ALTER TABLE public.quantyx_metrics_registry DROP COLUMN IF EXISTS status;
+
+-- 4) Optional data pruning for old non-current versions.
+-- Keep the newest 20 non-current versions per artifact key; delete older rows.
+DELETE FROM public.quantyx_metrics_registry t
+ WHERE COALESCE(t.is_current, true) = false
+   AND t.metric_id IN (
+     SELECT metric_id
+       FROM (
+         SELECT metric_id,
+                ROW_NUMBER() OVER (
+                  PARTITION BY tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key
+                  ORDER BY COALESCE(version_no, 1) DESC, COALESCE(updated_at, created_at) DESC
+                ) AS rn
+           FROM public.quantyx_metrics_registry
+          WHERE COALESCE(is_current, true) = false
+       ) ranked
+      WHERE ranked.rn > 20
+   );

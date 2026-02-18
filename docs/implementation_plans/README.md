@@ -53,6 +53,12 @@ dependency order.
 19) Phase X - Canvas Graph Persistence (Multi-Canvas, Rooted Tenant View)
    - `Phase_X_Canvas_Graph_Persistence.md`
 
+20) Phase Y - Entity Mapping Run-to-Apply Workflow (mapping_id)
+   - `Phase_Y_Entity_Mapping_Apply_Workflow.md`
+
+21) Phase Z - Unified Single-Table Lifecycle + Versioning (All Semantic Artifacts)
+   - `Phase_Z_Unified_Artifact_Lifecycle_Versioning.md`
+
 ## Dependencies (summary)
 
 - Phase A is required before Phase B–D (industry packs + ontology loader).
@@ -67,3 +73,5 @@ dependency order.
 - Phase V depends on Phase U (tenant scope resolution) and Phase D (semantic APIs).
 - Phase W depends on Phase V (semantic objects must exist).
 - Phase X depends on Phase V (canvas graph persists semantic objects/lineage).
+- Phase Y depends on Phase S/Q/U (async map runs, connection scope model, tenant scope resolution).
+- Phase Z depends on Phase Y and standardizes lifecycle/versioning across entities, hierarchies, facts, dimensions, and metrics.

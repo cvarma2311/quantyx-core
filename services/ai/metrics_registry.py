@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Any, Iterable
 
 import psycopg2
@@ -18,11 +19,11 @@ def fetch_registry_metrics(
     statuses: Iterable[str] | None = None,
     include_all_statuses: bool = False,
 ) -> list[dict[str, Any]]:
-    filters = ["deprecated = false"]
+    filters = ["deprecated = false", "COALESCE(is_current, true) = true"]
     params: list[object] = []
     if not include_all_statuses:
         allowed = list(statuses) if statuses else ["certified", "active"]
-        filters.append("status = ANY(%s)")
+        filters.append("lifecycle_status = ANY(%s)")
         params.append(allowed)
     if tenant_id:
         filters.append("tenant_id = %s")
@@ -42,7 +43,8 @@ def fetch_registry_metrics(
     where_clause = " AND ".join(filters)
     sql = f"""
     SELECT metric_id, metric_name, display_name, description, type, sql, grain, dimensions,
-           domain_id, tenant_id, connection_id, database_name, schema_name, status, owner, version,
+           domain_id, tenant_id, connection_id, database_name, schema_name, lifecycle_status,
+           source_type, source_run_id, artifact_key, version_no, is_current, owner, version,
            dataset_id, source_model
     FROM public.quantyx_metrics_registry
     WHERE {where_clause}
@@ -55,34 +57,57 @@ def fetch_registry_metrics(
 
 def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
     metric_name = payload["metric_name"]
-    metric_id = payload.get("metric_id") or f"{payload['domain_id']}__{metric_name}"
+    scope = (
+        payload.get("tenant_id"),
+        payload["domain_id"],
+        payload.get("connection_id"),
+        payload.get("database"),
+        payload.get("schema"),
+    )
+    artifact_key = payload.get("artifact_key") or payload.get("metric_id") or f"{payload['domain_id']}__{metric_name}"
+    current_rows = run_query(
+        settings,
+        """
+        SELECT metric_id, version_no
+          FROM public.quantyx_metrics_registry
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+           AND artifact_key = %s
+           AND COALESCE(is_current, true) = true
+         ORDER BY COALESCE(version_no, 1) DESC, updated_at DESC
+         LIMIT 1
+        """,
+        [scope[0], scope[1], scope[2], scope[3], scope[4], artifact_key],
+    )
+    if current_rows:
+        previous = current_rows[0]
+        prev_version = int(previous.get("version_no") or 1)
+        version_no = prev_version + 1
+        metric_id = f"{artifact_key}__v{version_no}_{uuid.uuid4().hex[:6]}"
+        execute_non_query(
+            settings,
+            "UPDATE public.quantyx_metrics_registry SET is_current = false, updated_at = now() WHERE metric_id = %s",
+            [previous.get("metric_id")],
+        )
+        supersedes_version_no = payload.get("supersedes_version_no", prev_version)
+    else:
+        version_no = int(payload.get("version_no") or 1)
+        metric_id = payload.get("metric_id") or artifact_key
+        supersedes_version_no = payload.get("supersedes_version_no")
     display_name = payload.get("display_name") or metric_name
+    lifecycle_status = payload.get("lifecycle_status") or "suggested"
     sql = """
     INSERT INTO public.quantyx_metrics_registry
       (metric_id, metric_name, domain_id, tenant_id, connection_id, database_name, schema_name,
        display_name, description, type, unit, confidence, additive, grain, dimensions, dataset_id,
-       source_model, source_schema, sql, status, owner, version)
+       source_model, source_schema, sql, lifecycle_status, source_type, source_run_id,
+       artifact_key, version_no, is_current, change_reason, approved_by, approved_at,
+       supersedes_version_no, created_by, updated_by, owner, version)
     VALUES
-      (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (metric_id)
-    DO UPDATE SET
-      metric_name = EXCLUDED.metric_name,
-      display_name = EXCLUDED.display_name,
-      description = EXCLUDED.description,
-      type = EXCLUDED.type,
-      unit = EXCLUDED.unit,
-      confidence = EXCLUDED.confidence,
-      additive = EXCLUDED.additive,
-      grain = EXCLUDED.grain,
-      dimensions = EXCLUDED.dimensions,
-      dataset_id = EXCLUDED.dataset_id,
-      source_model = EXCLUDED.source_model,
-      source_schema = EXCLUDED.source_schema,
-      sql = EXCLUDED.sql,
-      status = EXCLUDED.status,
-      owner = EXCLUDED.owner,
-      version = EXCLUDED.version,
-      updated_at = now()
+      (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params = [
         metric_id,
@@ -104,7 +129,18 @@ def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
         payload.get("source_model"),
         payload.get("source_schema"),
         payload.get("sql"),
-        payload.get("status", "suggested"),
+        lifecycle_status,
+        payload.get("source_type", "system"),
+        payload.get("source_run_id"),
+        artifact_key,
+        version_no,
+        payload.get("is_current", True),
+        payload.get("change_reason"),
+        payload.get("approved_by"),
+        payload.get("approved_at"),
+        supersedes_version_no,
+        payload.get("created_by"),
+        payload.get("updated_by"),
         payload.get("owner"),
         payload.get("version"),
     ]
@@ -136,7 +172,18 @@ def update_metric(settings: Settings, metric_id: str, updates: dict[str, Any]) -
         "source_model",
         "source_schema",
         "sql",
-        "status",
+        "lifecycle_status",
+        "source_type",
+        "source_run_id",
+        "artifact_key",
+        "version_no",
+        "is_current",
+        "change_reason",
+        "approved_by",
+        "approved_at",
+        "supersedes_version_no",
+        "created_by",
+        "updated_by",
         "owner",
         "version",
     }
@@ -147,17 +194,60 @@ def update_metric(settings: Settings, metric_id: str, updates: dict[str, Any]) -
             filtered[mapped_key] = value
     if not filtered:
         return
-    columns = []
-    params: list[Any] = []
-    for key, value in filtered.items():
-        columns.append(f"{key} = %s")
-        params.append(value)
-    columns.append("updated_at = now()")
-    params.append(metric_id)
-    sql = f"UPDATE public.quantyx_metrics_registry SET {', '.join(columns)} WHERE metric_id = %s"
-    execute_non_query(settings, sql, params)
+    rows = run_query(
+        settings,
+        """
+        SELECT *
+          FROM public.quantyx_metrics_registry
+         WHERE (metric_id = %s OR artifact_key = %s)
+           AND COALESCE(is_current, true) = true
+         ORDER BY updated_at DESC
+         LIMIT 1
+        """,
+        [metric_id, metric_id],
+    )
+    if not rows:
+        return
+    current = rows[0]
+    merged = dict(current)
+    merged.update(filtered)
+    upsert_metric(
+        settings,
+        {
+            "metric_name": merged.get("metric_name"),
+            "metric_id": merged.get("artifact_key") or merged.get("metric_id"),
+            "tenant_id": merged.get("tenant_id"),
+            "domain_id": merged.get("domain_id"),
+            "connection_id": merged.get("connection_id"),
+            "database": merged.get("database_name"),
+            "schema": merged.get("schema_name"),
+            "display_name": merged.get("display_name"),
+            "description": merged.get("description"),
+            "type": merged.get("type"),
+            "unit": merged.get("unit"),
+            "confidence": merged.get("confidence"),
+            "additive": merged.get("additive"),
+            "grain": merged.get("grain"),
+            "dimensions": merged.get("dimensions"),
+            "dataset_id": merged.get("dataset_id"),
+            "source_model": merged.get("source_model"),
+            "source_schema": merged.get("source_schema"),
+            "sql": merged.get("sql"),
+            "lifecycle_status": merged.get("lifecycle_status", "suggested"),
+            "source_type": merged.get("source_type", "user"),
+            "source_run_id": merged.get("source_run_id"),
+            "artifact_key": merged.get("artifact_key") or merged.get("metric_id"),
+            "change_reason": merged.get("change_reason"),
+            "approved_by": merged.get("approved_by"),
+            "approved_at": merged.get("approved_at"),
+            "created_by": merged.get("created_by"),
+            "updated_by": merged.get("updated_by"),
+            "owner": merged.get("owner"),
+            "version": merged.get("version"),
+        },
+    )
 
 
 def delete_metric(settings: Settings, metric_id: str) -> None:
-    sql = "DELETE FROM public.quantyx_metrics_registry WHERE metric_id = %s"
-    execute_non_query(settings, sql, [metric_id])
+    sql = "DELETE FROM public.quantyx_metrics_registry WHERE metric_id = %s OR artifact_key = %s"
+    execute_non_query(settings, sql, [metric_id, metric_id])

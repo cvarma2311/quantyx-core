@@ -1,0 +1,9 @@
+---
+- import_playbook: build_image.yml
+  vars:
+    denodo_force_rebuild: true
+
+- import_playbook: run_container.yml
+
+- import_playbook: verify.yml
+

@@ -94,7 +94,12 @@ from services.ai.onboarding.schema_scan import scan_schema
 from services.ai.onboarding.connection_scan import scan_connection
 from services.ai.onboarding.measure_detection import detect_measures, detect_time_columns
 from services.ai.onboarding.entity_mapping import map_entities
-from services.ai.onboarding.entity_mappings_store import list_entity_mappings, persist_entity_mapping
+from services.ai.onboarding.entity_mappings_store import (
+    get_entity_mapping,
+    list_entity_mappings,
+    persist_entity_mapping,
+    update_entity_mapping_status,
+)
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
 from services.ai.semantic_suggest import build_lineage_edges, build_schema_summary, suggest_semantic_model
@@ -161,6 +166,9 @@ from services.api.schemas import (
     OnboardScanRequest,
     OnboardScanResponse,
     OnboardMapResponse,
+    OnboardMapApplyRequest,
+    OnboardMapApplyResponse,
+    OnboardMapRunResponse,
     FactsResponse,
     FactsAllResponse,
     FactsUpsertRequest,
@@ -540,7 +548,7 @@ def _execute_job(job: dict) -> dict:
     if job_type == "map_entities":
         use_llm = payload.pop("use_llm", True)
         request = OnboardScanRequest(**payload)
-        response = onboard_map(request, use_llm=use_llm)
+        response = _run_onboard_map(request, use_llm=use_llm)
         return response.model_dump()
     if job_type == "infer_models":
         request = InferModelsRequest(**payload)
@@ -1695,7 +1703,13 @@ def metrics(
                 "grain": row.get("grain"),
                 "dimensions": row.get("dimensions"),
                 "tables": tables,
-                "status": row.get("status"),
+                "status": row.get("lifecycle_status"),
+                "lifecycle_status": row.get("lifecycle_status"),
+                "source_type": row.get("source_type"),
+                "source_run_id": row.get("source_run_id"),
+                "artifact_key": row.get("artifact_key"),
+                "version_no": row.get("version_no"),
+                "is_current": row.get("is_current"),
                 "owner": row.get("owner"),
                 "version": row.get("version"),
                 "definition": contract_metrics.get(row.get("metric_name"), {}).get("definition"),
@@ -1742,7 +1756,13 @@ def metrics_all(tenant_id: str) -> dict:
                 "grain": row.get("grain"),
                 "dimensions": row.get("dimensions"),
                 "tables": tables,
-                "status": row.get("status"),
+                "status": row.get("lifecycle_status"),
+                "lifecycle_status": row.get("lifecycle_status"),
+                "source_type": row.get("source_type"),
+                "source_run_id": row.get("source_run_id"),
+                "artifact_key": row.get("artifact_key"),
+                "version_no": row.get("version_no"),
+                "is_current": row.get("is_current"),
             }
         )
     return {"connections": list(grouped.values())}
@@ -3831,6 +3851,8 @@ def create_metric(payload: MetricUpsertRequest) -> MetricUpsertResponse:
     payload_dict["database"] = database
     payload_dict["schema"] = schema
     payload_dict["tables"] = tables
+    payload_dict["lifecycle_status"] = payload.status or "suggested"
+    payload_dict["source_type"] = "user"
     fact_grains = _fact_grain_map(payload.tenant_id, domain_id, connection_id, database, schema)
     _validate_metric_payload(payload_dict, fact_grains)
     metric_id = upsert_metric(settings, payload_dict)
@@ -3876,20 +3898,25 @@ def patch_metric(metric_id: str, payload: MetricPatchRequest) -> MetricUpsertRes
     updates["database"] = database
     updates["schema"] = schema
     updates["tables"] = tables
+    if updates.get("status") is not None and updates.get("lifecycle_status") is None:
+        updates["lifecycle_status"] = updates.get("status")
+    updates.pop("status", None)
+    updates.setdefault("source_type", "user")
     current_rows = run_query(
         settings,
         """
         SELECT metric_id, metric_name, type, sql, grain
           FROM public.quantyx_metrics_registry
-         WHERE metric_id = %s
+         WHERE (metric_id = %s OR artifact_key = %s)
            AND tenant_id = %s
            AND domain_id = %s
            AND connection_id = %s
            AND database_name = %s
            AND schema_name = %s
+           AND COALESCE(is_current, true) = true
          LIMIT 1
         """,
-        [metric_id, payload.tenant_id, domain_id, connection_id, database, schema],
+        [metric_id, metric_id, payload.tenant_id, domain_id, connection_id, database, schema],
     )
     if not current_rows:
         raise HTTPException(status_code=404, detail="Metric not found")
@@ -3903,7 +3930,7 @@ def patch_metric(metric_id: str, payload: MetricPatchRequest) -> MetricUpsertRes
     fact_grains = _fact_grain_map(payload.tenant_id, domain_id, connection_id, database, schema)
     _validate_metric_payload(merged_metric, fact_grains)
     update_metric(settings, metric_id, updates)
-    status = updates.get("status", "updated")
+    status = updates.get("lifecycle_status", "updated")
     return MetricUpsertResponse(metric_id=metric_id, status=status)
 
 
@@ -4634,6 +4661,12 @@ def entities(
             "description": item.get("description"),
             "join_key": item.get("join_key"),
             "examples": item.get("examples"),
+            "lifecycle_status": item.get("lifecycle_status"),
+            "source_type": item.get("source_type"),
+            "source_run_id": item.get("source_run_id"),
+            "artifact_key": item.get("artifact_key"),
+            "version_no": item.get("version_no"),
+            "is_current": item.get("is_current"),
         }
         for item in sorted(entity_overrides, key=lambda item: item.get("entity_id", ""))
     ]
@@ -4642,6 +4675,12 @@ def entities(
             "name": item.get("hierarchy_name"),
             "levels": item.get("levels", []),
             "description": item.get("description"),
+            "lifecycle_status": item.get("lifecycle_status"),
+            "source_type": item.get("source_type"),
+            "source_run_id": item.get("source_run_id"),
+            "artifact_key": item.get("artifact_key"),
+            "version_no": item.get("version_no"),
+            "is_current": item.get("is_current"),
         }
         for item in sorted(hierarchy_overrides, key=lambda item: item.get("hierarchy_name", ""))
     ]
@@ -4677,6 +4716,12 @@ def entities_all(tenant_id: str) -> EntitiesAllResponse:
                 "description": entity.get("description"),
                 "join_key": entity.get("join_key"),
                 "examples": entity.get("examples"),
+                "lifecycle_status": entity.get("lifecycle_status"),
+                "source_type": entity.get("source_type"),
+                "source_run_id": entity.get("source_run_id"),
+                "artifact_key": entity.get("artifact_key"),
+                "version_no": entity.get("version_no"),
+                "is_current": entity.get("is_current"),
             }
         )
     for hierarchy in hierarchy_overrides:
@@ -4693,6 +4738,12 @@ def entities_all(tenant_id: str) -> EntitiesAllResponse:
                 "name": hierarchy.get("hierarchy_name"),
                 "levels": hierarchy.get("levels", []),
                 "description": hierarchy.get("description"),
+                "lifecycle_status": hierarchy.get("lifecycle_status"),
+                "source_type": hierarchy.get("source_type"),
+                "source_run_id": hierarchy.get("source_run_id"),
+                "artifact_key": hierarchy.get("artifact_key"),
+                "version_no": hierarchy.get("version_no"),
+                "is_current": hierarchy.get("is_current"),
             }
         )
     return EntitiesAllResponse(connections=list(grouped.values()))
@@ -4725,6 +4776,12 @@ def hierarchies(
             "name": item.get("hierarchy_name"),
             "levels": item.get("levels", []),
             "description": item.get("description"),
+            "lifecycle_status": item.get("lifecycle_status"),
+            "source_type": item.get("source_type"),
+            "source_run_id": item.get("source_run_id"),
+            "artifact_key": item.get("artifact_key"),
+            "version_no": item.get("version_no"),
+            "is_current": item.get("is_current"),
         }
         for item in sorted(hierarchy_overrides, key=lambda item: item.get("hierarchy_name", ""))
     ]
@@ -4875,7 +4932,8 @@ def create_fact(payload: FactsUpsertRequest) -> dict:
             "measures": payload.measures,
             "dimensions": payload.dimensions,
             "description": payload.description,
-            "status": payload.status or "draft",
+            "lifecycle_status": payload.status or "draft",
+            "source_type": "user",
         },
     )
     return {"fact_id": fact_id, "status": payload.status or "draft"}
@@ -4896,10 +4954,11 @@ def get_facts(
         domain_id,
     )
     facts = list_facts(settings, tenant_id, domain_id, connection_id, database, schema)
-    facts_payload = [
-        {key: value for key, value in item.items() if key not in {"connection_id", "database_name", "schema_name"}}
-        for item in facts
-    ]
+    facts_payload = []
+    for item in facts:
+        entry = {key: value for key, value in item.items() if key not in {"connection_id", "database_name", "schema_name"}}
+        entry["status"] = entry.get("lifecycle_status")
+        facts_payload.append(entry)
     return FactsResponse(facts=facts_payload)
 
 
@@ -4921,9 +4980,9 @@ def get_facts_all(tenant_id: str) -> FactsAllResponse:
                 "facts": [],
             },
         )
-        grouped[key]["facts"].append(
-            {key: value for key, value in row.items() if key not in {"connection_id", "database_name", "schema_name"}}
-        )
+        entry = {key: value for key, value in row.items() if key not in {"connection_id", "database_name", "schema_name"}}
+        entry["status"] = entry.get("lifecycle_status")
+        grouped[key]["facts"].append(entry)
     return FactsAllResponse(connections=list(grouped.values()))
 
 
@@ -4934,12 +4993,21 @@ def get_facts_all(tenant_id: str) -> FactsAllResponse:
 )
 def patch_fact(fact_id: str, payload: FactsPatchRequest) -> dict:
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+    if updates.get("status") is not None and updates.get("lifecycle_status") is None:
+        updates["lifecycle_status"] = updates.get("status")
+    updates.pop("status", None)
     if not updates:
         return {"ok": True}
     rows = run_query(
         settings,
-        "SELECT table_name, measures FROM public.quantyx_facts_registry WHERE fact_id = %s LIMIT 1",
-        [fact_id],
+        """
+        SELECT table_name, measures
+          FROM public.quantyx_facts_registry
+         WHERE (fact_id = %s OR artifact_key = %s)
+           AND COALESCE(is_current, true) = true
+         LIMIT 1
+        """,
+        [fact_id, fact_id],
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Fact not found")
@@ -4986,7 +5054,8 @@ def create_dimension(payload: DimensionsUpsertRequest) -> dict:
             "keys": payload.keys,
             "attributes": payload.attributes,
             "description": payload.description,
-            "status": payload.status or "draft",
+            "lifecycle_status": payload.status or "draft",
+            "source_type": "user",
         },
     )
     return {"dimension_id": dimension_id, "status": payload.status or "draft"}
@@ -5007,10 +5076,11 @@ def get_dimensions(
         domain_id,
     )
     dimensions = list_dimensions(settings, tenant_id, domain_id, connection_id, database, schema)
-    dimensions_payload = [
-        {key: value for key, value in item.items() if key not in {"connection_id", "database_name", "schema_name"}}
-        for item in dimensions
-    ]
+    dimensions_payload = []
+    for item in dimensions:
+        entry = {key: value for key, value in item.items() if key not in {"connection_id", "database_name", "schema_name"}}
+        entry["status"] = entry.get("lifecycle_status")
+        dimensions_payload.append(entry)
     return DimensionsResponse(dimensions=dimensions_payload)
 
 
@@ -5032,9 +5102,9 @@ def get_dimensions_all(tenant_id: str) -> DimensionsAllResponse:
                 "dimensions": [],
             },
         )
-        grouped[key]["dimensions"].append(
-            {key: value for key, value in row.items() if key not in {"connection_id", "database_name", "schema_name"}}
-        )
+        entry = {key: value for key, value in row.items() if key not in {"connection_id", "database_name", "schema_name"}}
+        entry["status"] = entry.get("lifecycle_status")
+        grouped[key]["dimensions"].append(entry)
     return DimensionsAllResponse(connections=list(grouped.values()))
 
 
@@ -5045,12 +5115,21 @@ def get_dimensions_all(tenant_id: str) -> DimensionsAllResponse:
 )
 def patch_dimension(dimension_id: str, payload: DimensionsPatchRequest) -> dict:
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+    if updates.get("status") is not None and updates.get("lifecycle_status") is None:
+        updates["lifecycle_status"] = updates.get("status")
+    updates.pop("status", None)
     if not updates:
         return {"ok": True}
     rows = run_query(
         settings,
-        "SELECT name, keys FROM public.quantyx_dimensions_registry WHERE dimension_id = %s LIMIT 1",
-        [dimension_id],
+        """
+        SELECT name, keys
+          FROM public.quantyx_dimensions_registry
+         WHERE (dimension_id = %s OR artifact_key = %s)
+           AND COALESCE(is_current, true) = true
+         LIMIT 1
+        """,
+        [dimension_id, dimension_id],
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Dimension not found")
@@ -5798,6 +5877,30 @@ def _merge_entity_candidates(
     return list(merged.values())
 
 
+def _candidate_identity(candidate: dict) -> tuple[str, str, str]:
+    return (
+        str(candidate.get("table") or ""),
+        str(candidate.get("column") or ""),
+        str(candidate.get("mapped_entity_type") or candidate.get("entity_id") or ""),
+    )
+
+
+def _pick_best_candidates_per_entity(candidates: list[dict]) -> tuple[list[dict], int]:
+    by_entity: dict[str, dict] = {}
+    skipped = 0
+    for candidate in candidates:
+        entity_id = str(candidate.get("mapped_entity_type") or candidate.get("entity_id") or "").strip()
+        if not entity_id:
+            skipped += 1
+            continue
+        current = by_entity.get(entity_id)
+        if not current or float(candidate.get("confidence", 0) or 0) > float(current.get("confidence", 0) or 0):
+            by_entity[entity_id] = candidate
+        else:
+            skipped += 1
+    return list(by_entity.values()), skipped
+
+
 @app.post(
     "/onboard/map/async",
     response_model=JobCreateResponse,
@@ -5885,6 +5988,13 @@ def onboard_map(
     request: OnboardScanRequest,
     use_llm: bool = True,
 ) -> OnboardMapResponse:
+    return _run_onboard_map(request, use_llm=use_llm)
+
+
+def _run_onboard_map(
+    request: OnboardScanRequest,
+    use_llm: bool = True,
+) -> OnboardMapResponse:
     tenant_id = request.tenant_id
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
@@ -5952,12 +6062,20 @@ def onboard_map(
 )
 def onboard_map_history(
     tenant_id: str,
-    connection_id: str,
-    database: str,
-    schema: str,
+    connection_id: str | None = None,
+    database: str | None = None,
+    schema: str | None = None,
     limit: int = 20,
 ) -> dict:
     domain_id = _resolve_domain_id(tenant_id, None)
+    if not connection_id or not database or not schema:
+        resolved_connection_id, resolved_database, resolved_schema, _ = _resolve_scope_values(
+            tenant_id,
+            domain_id,
+        )
+        connection_id = connection_id or resolved_connection_id
+        database = database or resolved_database
+        schema = schema or resolved_schema
     runs = list_entity_mappings(
         settings,
         tenant_id,
@@ -5978,6 +6096,151 @@ def onboard_map_history(
         for run in runs
     ]
     return {"runs": summarized}
+
+
+@app.get(
+    "/onboard/map/{mapping_id}",
+    response_model=OnboardMapRunResponse,
+    tags=["onboard"],
+    summary="Get mapping run",
+    description="Return a single mapping run by mapping_id for the active tenant scope.",
+)
+def onboard_map_get(mapping_id: str, tenant_id: str) -> OnboardMapRunResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
+    row = get_entity_mapping(
+        settings,
+        mapping_id=mapping_id,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database,
+        schema_name=schema,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    return OnboardMapRunResponse(
+        mapping_id=row.get("mapping_id"),
+        tenant_id=row.get("tenant_id"),
+        domain_id=row.get("domain_id"),
+        connection_id=row.get("connection_id"),
+        database_name=row.get("database_name"),
+        schema_name=row.get("schema_name"),
+        tables=row.get("tables") or [],
+        candidates=row.get("candidates") or [],
+        low_confidence_candidates=row.get("low_confidence_candidates") or [],
+        low_confidence_threshold=float(row.get("low_confidence_threshold") or LOW_CONFIDENCE_THRESHOLD),
+        status=row.get("status") or "draft",
+        created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
+        updated_at=row.get("updated_at").isoformat() if row.get("updated_at") else None,
+    )
+
+
+@app.post(
+    "/onboard/map/{mapping_id}/apply",
+    response_model=OnboardMapApplyResponse,
+    tags=["onboard"],
+    summary="Apply mapping run to entity overrides",
+    description="Promote mapping candidates from a mapping run into canonical entity overrides.",
+)
+def onboard_map_apply(mapping_id: str, payload: OnboardMapApplyRequest) -> OnboardMapApplyResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id, database_name, schema_name, _ = _resolve_scope_values(
+        payload.tenant_id,
+        domain_id,
+    )
+    mapping = get_entity_mapping(
+        settings,
+        mapping_id=mapping_id,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+
+    candidates = mapping.get("candidates") or []
+    if payload.selection_mode == "selected":
+        if not payload.candidates:
+            raise HTTPException(status_code=400, detail="candidates are required when selection_mode=selected")
+        allowed = {_candidate_identity(item.model_dump()) for item in payload.candidates}
+        candidates = [candidate for candidate in candidates if _candidate_identity(candidate) in allowed]
+
+    selected_total = len(candidates)
+    candidates_to_apply, skipped_count = _pick_best_candidates_per_entity(candidates)
+    for candidate in candidates_to_apply:
+        entity_id = candidate.get("mapped_entity_type") or candidate.get("entity_id")
+        column_name = candidate.get("column")
+        table_name = candidate.get("table")
+        upsert_entity_override(
+            settings,
+            payload.tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+            {
+                "entity_id": entity_id,
+                "description": candidate.get("description")
+                or f"Auto-mapped from {table_name}.{column_name}",
+                "join_key": column_name,
+                "examples": candidate.get("examples") or [column_name],
+                "lifecycle_status": payload.status,
+                "source_type": "user",
+                "source_run_id": mapping_id,
+                "change_reason": payload.notes,
+            },
+        )
+
+    applied_count = len(candidates_to_apply)
+    skipped_count += max(selected_total - applied_count - skipped_count, 0)
+    mapping_status = (
+        "applied" if payload.selection_mode == "all" and skipped_count == 0 else "partially_applied"
+    )
+    update_entity_mapping_status(
+        settings,
+        mapping_id=mapping_id,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        status=mapping_status,
+    )
+    review_id = create_review_event(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        artifact_type="mapping",
+        artifact_id=mapping_id,
+        status="applied",
+        notes=payload.notes,
+        payload={
+            "selection_mode": payload.selection_mode,
+            "requested_candidates": len(payload.candidates),
+            "selected_candidates": selected_total,
+            "applied_count": applied_count,
+            "skipped_count": skipped_count,
+            "entity_status": payload.status,
+        },
+    )
+    return OnboardMapApplyResponse(
+        ok=True,
+        mapping_id=mapping_id,
+        applied_count=applied_count,
+        skipped_count=skipped_count,
+        status=payload.status,
+        review_id=review_id,
+        mapping_status=mapping_status,
+    )
 
 
 def _infer_models_from_scan(
@@ -6256,7 +6519,8 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                 "measures": fact.get("measures", []),
                 "dimensions": fact.get("dimensions", []),
                 "description": fact.get("description"),
-                "status": fact.get("status", "draft"),
+                "lifecycle_status": fact.get("status", "draft"),
+                "source_type": "llm" if request.use_llm else "rule",
             },
         )
     for dim in dims:
@@ -6276,7 +6540,8 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                 "keys": dim.get("keys", []),
                 "attributes": dim.get("attributes", []),
                 "description": dim.get("description"),
-                "status": dim.get("status", "draft"),
+                "lifecycle_status": dim.get("status", "draft"),
+                "source_type": "llm" if request.use_llm else "rule",
             },
         )
     return InferModelsResponse(facts=facts, dimensions=dims)

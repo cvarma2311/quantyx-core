@@ -22,8 +22,10 @@ Goal: provide a runnable demo that shows the full onboarding flow end-to-end.
    - `POST /context/apply`
 
 3) **Ontology mapping**
-   - `POST /onboard/map`
-   - Uses the schema/tables returned from scan
+   - `POST /onboard/map/async`
+   - Poll `GET /jobs/{job_id}` and fetch `GET /jobs/{job_id}/result`
+   - Apply mapping candidates to canonical overrides: `POST /onboard/map/{mapping_id}/apply`
+   - Verify persistence via `GET /onboard/map/history?tenant_id=...`
 
 4) **Entities + hierarchies**
    - `GET /entities` for review

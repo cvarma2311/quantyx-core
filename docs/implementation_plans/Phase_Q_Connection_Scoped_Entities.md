@@ -586,6 +586,9 @@ Return latest mapping runs for the given scope.
 Query params:
 - `tenant_id`, `domain_id`, `connection_id`, `database`, `schema`
 
+Tenant-scope mode behavior:
+- If connection scope params are omitted, resolve active scope from tenant scope registry and return history for that scope.
+
 Response:
 ```json
 {

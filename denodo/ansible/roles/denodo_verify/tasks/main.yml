@@ -1,0 +1,61 @@
+---
+- name: Inspect Denodo container
+  community.docker.docker_container_info:
+    name: "{{ denodo_container_name }}"
+  register: denodo_container_info
+
+- name: Assert Denodo container is running
+  ansible.builtin.assert:
+    that:
+      - denodo_container_info.exists
+      - denodo_container_info.container.State.Running
+    fail_msg: "Denodo container {{ denodo_container_name }} is not running"
+
+- name: Show container runtime state
+  ansible.builtin.debug:
+    msg: >-
+      running={{ denodo_container_info.container.State.Running }},
+      status={{ denodo_container_info.container.State.Status }},
+      restart_count={{ denodo_container_info.container.RestartCount | default(0) }},
+      ports={{ denodo_container_info.container.NetworkSettings.Ports | default({}) }}
+
+- name: Wait for required Denodo ports with diagnostics on failure
+  block:
+    - name: Wait for exposed Denodo ports
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: "{{ item }}"
+        timeout: "{{ denodo_verify_port_timeout }}"
+      loop: "{{ denodo_verify_required_ports }}"
+  rescue:
+    - name: Capture recent Denodo container logs
+      ansible.builtin.command:
+        cmd: "docker logs --tail 250 {{ denodo_container_name }}"
+      register: denodo_recent_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Print recent Denodo logs
+      ansible.builtin.debug:
+        msg: "{{ denodo_recent_logs.stdout | default('no logs captured') }}"
+
+    - name: Fail after port timeout with diagnostic hint
+      ansible.builtin.fail:
+        msg: >-
+          Required Denodo port check failed. See log output above.
+          Verify DENODO_START_CMD and installation/runtime status.
+
+- name: Check optional Denodo ports
+  ansible.builtin.wait_for:
+    host: "127.0.0.1"
+    port: "{{ item }}"
+    timeout: 5
+  loop: "{{ denodo_verify_optional_ports }}"
+  register: denodo_optional_port_checks
+  failed_when: false
+  changed_when: false
+
+- name: Report optional port status
+  ansible.builtin.debug:
+    msg: "Optional port {{ item.item }} status: {{ 'up' if (item.failed is not defined or not item.failed) else 'down' }}"
+  loop: "{{ denodo_optional_port_checks.results | default([]) }}"

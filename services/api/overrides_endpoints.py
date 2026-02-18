@@ -1,10 +1,12 @@
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi import HTTPException
 
 from services.ai.config import Settings
-from services.ai.db import execute_non_query
+from services.ai.db import execute_non_query, run_query
 
 
 def upsert_entity_override(
@@ -18,31 +20,80 @@ def upsert_entity_override(
 ) -> None:
     if not payload.get("entity_id"):
         raise HTTPException(status_code=400, detail="entity_id is required")
+    lifecycle_status = payload.get("lifecycle_status") or payload.get("status") or "draft"
+    artifact_key = payload.get("artifact_key") or payload["entity_id"]
 
-    sql = """
-    INSERT INTO public.quantyx_entity_overrides
-      (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id, description, join_key, examples, updated_at)
-    VALUES
-      (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
-    ON CONFLICT (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id)
-    DO UPDATE SET
-      description = EXCLUDED.description,
-      join_key = EXCLUDED.join_key,
-      examples = EXCLUDED.examples,
-      updated_at = now()
-    """
-    params = (
-        tenant_id,
-        domain_id,
-        connection_id,
-        database_name,
-        schema_name,
-        payload["entity_id"],
-        payload.get("description"),
-        payload.get("join_key"),
-        payload.get("examples"),
+    current_rows = run_query(
+        settings,
+        """
+        SELECT entity_id, version_no
+          FROM public.quantyx_entity_overrides
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+           AND artifact_key = %s
+           AND COALESCE(is_current, true) = true
+         LIMIT 1
+        """,
+        [tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key],
     )
-    execute_non_query(settings, sql, list(params))
+    previous_version = 0
+    if current_rows:
+        previous_version = int(current_rows[0].get("version_no") or 1)
+        execute_non_query(
+            settings,
+            """
+            UPDATE public.quantyx_entity_overrides
+               SET is_current = false,
+                   updated_at = now()
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               AND connection_id = %s
+               AND database_name = %s
+               AND schema_name = %s
+               AND artifact_key = %s
+               AND COALESCE(is_current, true) = true
+            """,
+            [tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key],
+        )
+    version_no = previous_version + 1
+    row_entity_id = artifact_key if version_no == 1 else f"{artifact_key}__v{version_no}_{uuid.uuid4().hex[:6]}"
+    execute_non_query(
+        settings,
+        """
+        INSERT INTO public.quantyx_entity_overrides
+          (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id, description, join_key, examples,
+           artifact_key, version_no, lifecycle_status, source_type, source_run_id, change_reason, approved_by, approved_at,
+           supersedes_version_no, created_by, updated_by, is_current, created_at, updated_at)
+        VALUES
+          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+        """,
+        [
+            tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+            row_entity_id,
+            payload.get("description"),
+            payload.get("join_key"),
+            payload.get("examples"),
+            artifact_key,
+            version_no,
+            lifecycle_status,
+            payload.get("source_type", "system"),
+            payload.get("source_run_id"),
+            payload.get("change_reason"),
+            payload.get("approved_by"),
+            payload.get("approved_at"),
+            payload.get("supersedes_version_no") or (previous_version or None),
+            payload.get("created_by"),
+            payload.get("updated_by"),
+            payload.get("is_current", True),
+        ],
+    )
 
 
 def upsert_hierarchy_override(
@@ -56,26 +107,76 @@ def upsert_hierarchy_override(
 ) -> None:
     if not payload.get("hierarchy_name"):
         raise HTTPException(status_code=400, detail="hierarchy_name is required")
+    lifecycle_status = payload.get("lifecycle_status") or payload.get("status") or "draft"
+    artifact_key = payload.get("artifact_key") or payload["hierarchy_name"]
 
-    sql = """
-    INSERT INTO public.quantyx_hierarchy_overrides
-      (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name, levels, description, updated_at)
-    VALUES
-      (%s, %s, %s, %s, %s, %s, %s, %s, now())
-    ON CONFLICT (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name)
-    DO UPDATE SET
-      levels = EXCLUDED.levels,
-      description = EXCLUDED.description,
-      updated_at = now()
-    """
-    params = (
-        tenant_id,
-        domain_id,
-        connection_id,
-        database_name,
-        schema_name,
-        payload["hierarchy_name"],
-        payload.get("levels", []),
-        payload.get("description"),
+    current_rows = run_query(
+        settings,
+        """
+        SELECT hierarchy_name, version_no
+          FROM public.quantyx_hierarchy_overrides
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+           AND artifact_key = %s
+           AND COALESCE(is_current, true) = true
+         LIMIT 1
+        """,
+        [tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key],
     )
-    execute_non_query(settings, sql, list(params))
+    previous_version = 0
+    if current_rows:
+        previous_version = int(current_rows[0].get("version_no") or 1)
+        execute_non_query(
+            settings,
+            """
+            UPDATE public.quantyx_hierarchy_overrides
+               SET is_current = false,
+                   updated_at = now()
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               AND connection_id = %s
+               AND database_name = %s
+               AND schema_name = %s
+               AND artifact_key = %s
+               AND COALESCE(is_current, true) = true
+            """,
+            [tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key],
+        )
+    version_no = previous_version + 1
+    row_hierarchy_name = artifact_key if version_no == 1 else f"{artifact_key}__v{version_no}_{uuid.uuid4().hex[:6]}"
+    execute_non_query(
+        settings,
+        """
+        INSERT INTO public.quantyx_hierarchy_overrides
+          (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name, levels, description,
+           artifact_key, version_no, lifecycle_status, source_type, source_run_id, change_reason, approved_by, approved_at,
+           supersedes_version_no, created_by, updated_by, is_current, created_at, updated_at)
+        VALUES
+          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+        """,
+        [
+            tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+            row_hierarchy_name,
+            payload.get("levels", []),
+            payload.get("description"),
+            artifact_key,
+            version_no,
+            lifecycle_status,
+            payload.get("source_type", "system"),
+            payload.get("source_run_id"),
+            payload.get("change_reason"),
+            payload.get("approved_by"),
+            payload.get("approved_at"),
+            payload.get("supersedes_version_no") or (previous_version or None),
+            payload.get("created_by"),
+            payload.get("updated_by"),
+            payload.get("is_current", True),
+        ],
+    )

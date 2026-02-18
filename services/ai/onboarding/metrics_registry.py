@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from services.ai.config import Settings
-from services.ai.db import execute_non_query
 from services.ai.dbt_manifest import load_latest_manifest
+from services.ai.metrics_registry import upsert_metric
 
 
 def _load_dbt_model_map(settings: Settings, domain_id: str) -> dict[str, str]:
@@ -47,11 +47,12 @@ def persist_suggested_metrics(
     database_name: str,
     schema_name: str,
     measures: list[dict[str, Any]],
-    status: str = "suggested",
+    lifecycle_status: str = "suggested",
 ) -> None:
     model_map = _load_dbt_model_map(settings, domain_id)
     for measure in measures:
         metric_id = f"{domain_id}__{measure['table']}__{measure['column']}"
+        artifact_key = metric_id
         model_name = _resolve_model_for_table(measure["table"], model_map)
         if model_name:
             dataset_id = model_name
@@ -63,45 +64,32 @@ def persist_suggested_metrics(
             source_model = None
             source_schema = settings.db_schema
             sql_expr = f"SUM({measure['table']}.{measure['column']})"
-        sql = """
-        INSERT INTO public.quantyx_metrics_registry
-          (metric_id, metric_name, domain_id, tenant_id, connection_id, database_name, schema_name,
-           display_name, description, type, unit, confidence, additive, grain, dimensions, dataset_id,
-           source_model, source_schema, sql, status)
-        VALUES
-          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (metric_id)
-        DO UPDATE SET
-          metric_name = EXCLUDED.metric_name,
-          status = EXCLUDED.status,
-          unit = EXCLUDED.unit,
-          confidence = EXCLUDED.confidence,
-          additive = EXCLUDED.additive,
-          source_model = EXCLUDED.source_model,
-          source_schema = EXCLUDED.source_schema,
-          updated_at = now()
-        """
         unit = measure.get("unit") or measure.get("measure_type")
-        params = (
-            metric_id,
-            measure["column"],
-            domain_id,
-            tenant_id,
-            connection_id,
-            database_name,
-            schema_name,
-            measure["column"],
-            f"Auto-detected metric from {measure['table']}.{measure['column']}",
-            "sum",
-            unit,
-            measure.get("confidence"),
-            measure.get("additive"),
-            "unknown",
-            None,
-            dataset_id,
-            source_model,
-            source_schema,
-            sql_expr,
-            status,
+        upsert_metric(
+            settings,
+            {
+                "metric_id": metric_id,
+                "artifact_key": artifact_key,
+                "metric_name": measure["column"],
+                "domain_id": domain_id,
+                "tenant_id": tenant_id,
+                "connection_id": connection_id,
+                "database": database_name,
+                "schema": schema_name,
+                "display_name": measure["column"],
+                "description": f"Auto-detected metric from {measure['table']}.{measure['column']}",
+                "type": "sum",
+                "unit": unit,
+                "confidence": measure.get("confidence"),
+                "additive": measure.get("additive"),
+                "grain": "unknown",
+                "dimensions": None,
+                "dataset_id": dataset_id,
+                "source_model": source_model,
+                "source_schema": source_schema,
+                "sql": sql_expr,
+                "lifecycle_status": lifecycle_status,
+                "source_type": "rule",
+                "is_current": True,
+            },
         )
-        execute_non_query(settings, sql, list(params))

@@ -1,0 +1,57 @@
+---
+- name: Create runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  when: denodo_runtime_action in ["started", "restarted"]
+  loop:
+    - "{{ denodo_runtime_root }}"
+    - "{{ denodo_runtime_data_dir }}"
+    - "{{ denodo_runtime_logs_dir }}"
+    - "{{ denodo_runtime_config_dir }}"
+
+- name: Ensure Denodo container is started
+  community.docker.docker_container:
+    name: "{{ denodo_container_name }}"
+    image: "{{ denodo_image_name }}:{{ denodo_image_tag }}"
+    state: started
+    restart_policy: "{{ denodo_restart_policy }}"
+    published_ports: "{{ denodo_published_ports }}"
+    volumes: "{{ denodo_volume_mounts }}"
+    env: "{{ denodo_env }}"
+  when: denodo_runtime_action == "started"
+
+- name: Restart Denodo container
+  community.docker.docker_container:
+    name: "{{ denodo_container_name }}"
+    image: "{{ denodo_image_name }}:{{ denodo_image_tag }}"
+    state: started
+    restart: true
+    restart_policy: "{{ denodo_restart_policy }}"
+    published_ports: "{{ denodo_published_ports }}"
+    volumes: "{{ denodo_volume_mounts }}"
+    env: "{{ denodo_env }}"
+  when: denodo_runtime_action == "restarted"
+
+- name: Stop Denodo container
+  community.docker.docker_container:
+    name: "{{ denodo_container_name }}"
+    state: stopped
+  when: denodo_runtime_action == "stopped"
+
+- name: Remove Denodo container
+  community.docker.docker_container:
+    name: "{{ denodo_container_name }}"
+    state: absent
+  when: denodo_runtime_action == "absent"
+
+- name: Remove runtime directories when requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  when:
+    - denodo_runtime_action == "absent"
+    - denodo_remove_runtime_on_destroy | bool
+  loop:
+    - "{{ denodo_runtime_root }}"

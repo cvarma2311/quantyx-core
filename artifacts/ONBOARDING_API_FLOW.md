@@ -293,11 +293,11 @@ Expected outcome:
 
 ---
 
-## 6) Entity mapping (connection-scoped, tenant-aware)
+## 6) Entity mapping (async run + apply to overrides)
 
 POST /onboard/map?domain_id=manufacturing&tenant_id=tenant_a
 
-Purpose: map schema columns to ontology (rule + LLM, default `use_llm=true`). Stores a mapping run.
+Purpose: map schema columns to ontology (rule + LLM, default `use_llm=true`) and produce a `mapping_id`.
 
 Async variant (recommended for large schemas):
 
@@ -347,6 +347,22 @@ Response (example):
 }
 ```
 
+After job completion:
+- Fetch mapping payload:
+  - `GET /onboard/map/{mapping_id}?tenant_id=tenant_a`
+- Apply selected/all candidates into canonical entity overrides:
+  - `POST /onboard/map/{mapping_id}/apply`
+
+Apply request (example):
+```json
+{
+  "tenant_id": "tenant_a",
+  "selection_mode": "all",
+  "status": "draft",
+  "notes": "Initial onboarding apply"
+}
+```
+
 Optional history:
 
 GET /onboard/map/history?tenant_id=tenant_a&domain_id=manufacturing
@@ -388,7 +404,7 @@ GET /hierarchies?tenant_id=tenant_a&domain_id=manufacturing
 
 ---
 
-## 8) Infer facts and dimensions (connection-scoped)
+## 8) Infer facts and dimensions (async, persisted to registries)
 
 POST /onboard/infer-models?domain_id=manufacturing
 
@@ -428,39 +444,18 @@ Request:
 }
 ```
 
-Then persist user-confirmed models:
+When the async job completes, inferred artifacts are persisted directly into:
+- `public.quantyx_facts_registry`
+- `public.quantyx_dimensions_registry`
 
-POST /facts
-```json
-{
-  "tenant_id": "tenant_a",
-  "domain_id": "manufacturing",
-  "table_name": "fact_production_daily",
-  "grain": "day",
-  "time_column": "production_date",
-  "measures": ["output_tmt", "downtime_hours"],
-  "dimensions": ["plant_name", "product_name"],
-  "status": "draft"
-}
-```
-
-POST /dimensions
-```json
-{
-  "tenant_id": "tenant_a",
-  "domain_id": "manufacturing",
-  "name": "dim_plant",
-  "keys": ["plant_id"],
-  "attributes": ["plant_name", "region_name"],
-  "status": "draft"
-}
-```
-
-List for scope:
+UI read path after completion:
 
 GET /facts?tenant_id=tenant_a&domain_id=manufacturing
 
 GET /dimensions?tenant_id=tenant_a&domain_id=manufacturing
+
+Note:
+- On first run, these endpoints can be empty before infer-models finishes.
 
 ---
 
@@ -516,7 +511,7 @@ Draft models must be reviewed before apply.
 
 POST /metrics/suggested?domain_id=manufacturing&persist=true
 
-Purpose: generate candidate metrics from scan + ontology and persist them to the registry (scoped).
+Purpose: generate candidate metrics from scan + ontology and persist them directly to `public.quantyx_metrics_registry`.
 
 Async variant (recommended for large schemas):
 
@@ -549,9 +544,12 @@ Request:
 }
 ```
 
-Then list the catalog (suggested + draft + certified):
+After async completion, list the catalog:
 
 GET /metrics?tenant_id=tenant_a&domain_id=manufacturing
+
+Note:
+- On first run, `/metrics` can be empty before metrics-suggested finishes.
 
 Response (example):
 ```json
