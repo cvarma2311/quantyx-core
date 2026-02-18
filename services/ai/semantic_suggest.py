@@ -15,6 +15,13 @@ def _load_prompt(name: str) -> str:
     return (PROMPTS_DIR / name).read_text()
 
 
+def _render_prompt(template: str, values: dict[str, str]) -> str:
+    rendered = template
+    for key, value in values.items():
+        rendered = rendered.replace("{" + key + "}", value)
+    return rendered
+
+
 def _call_llm(
     settings: Settings,
     system_prompt: str,
@@ -205,12 +212,15 @@ def suggest_semantic_model(
         schema_summary = build_schema_summary(tables)
 
     system_prompt = "You create semantic models. Return JSON only."
-    user_prompt = _load_prompt("semantic_suggest.md").format(
-        domain_id=domain_id or "",
-        schema_summary=schema_summary or "",
-        questions="\n".join(questions) if questions else "",
-        glossary=glossary or "",
-        question_types=", ".join(question_types),
+    user_prompt = _render_prompt(
+        _load_prompt("semantic_suggest.md"),
+        {
+            "domain_id": domain_id or "",
+            "schema_summary": schema_summary or "",
+            "questions": "\n".join(questions) if questions else "",
+            "glossary": glossary or "",
+            "question_types": ", ".join(question_types),
+        },
     )
 
     payload: dict[str, Any] | None = None
