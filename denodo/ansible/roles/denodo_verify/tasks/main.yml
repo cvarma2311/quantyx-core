@@ -29,8 +29,10 @@
       loop: "{{ denodo_verify_required_ports }}"
   rescue:
     - name: Capture recent Denodo container logs
-      ansible.builtin.command:
-        cmd: "docker logs --tail 250 {{ denodo_container_name }}"
+      ansible.builtin.shell: |
+        docker logs --tail 250 {{ denodo_container_name }} 2>&1
+      args:
+        executable: /bin/bash
       register: denodo_recent_logs
       changed_when: false
       failed_when: false

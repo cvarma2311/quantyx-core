@@ -5877,6 +5877,16 @@ def _merge_entity_candidates(
     return list(merged.values())
 
 
+def _normalize_mapping_candidate(candidate: dict) -> dict:
+    normalized = dict(candidate)
+    entity_id = normalized.get("entity_id") or normalized.get("mapped_entity_type")
+    if entity_id:
+        normalized["entity_id"] = entity_id
+    if not normalized.get("mapped_entity_type") and entity_id:
+        normalized["mapped_entity_type"] = entity_id
+    return normalized
+
+
 def _candidate_identity(candidate: dict) -> tuple[str, str, str]:
     return (
         str(candidate.get("table") or ""),
@@ -6025,12 +6035,12 @@ def _run_onboard_map(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     candidates = _merge_entity_candidates(rule_candidates, llm_candidates)
     low_confidence_candidates = [
-        candidate
+        _normalize_mapping_candidate(candidate)
         for candidate in candidates
         if candidate.get("confidence", 0) < LOW_CONFIDENCE_THRESHOLD
     ]
     high_confidence_candidates = [
-        candidate
+        _normalize_mapping_candidate(candidate)
         for candidate in candidates
         if candidate.get("confidence", 0) >= LOW_CONFIDENCE_THRESHOLD
     ]
@@ -6048,6 +6058,7 @@ def _run_onboard_map(
     )
     return OnboardMapResponse(
         mapping_id=mapping_id,
+        tenant_id=tenant_id,
         candidates=high_confidence_candidates,
         low_confidence_candidates=low_confidence_candidates,
         low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,

@@ -333,19 +333,35 @@ Request:
 Response (example):
 ```json
 {
+  "tenant_id": "tenant_a",
   "mapping_id": "map_ab12cd34",
   "candidates": [
     {
       "table": "fact_production_daily",
       "column": "plant_name",
+      "entity_id": "facility",
       "mapped_entity_type": "facility",
       "confidence": 0.7
     }
   ],
-  "low_confidence_candidates": [],
+  "low_confidence_candidates": [
+    {
+      "table": "fact_production_daily",
+      "column": "plant_location",
+      "entity_id": "facility",
+      "mapped_entity_type": "facility",
+      "confidence": 0.45
+    }
+  ],
   "low_confidence_threshold": 0.7
 }
 ```
+
+Minimum fields expected by UI from map job result:
+- `tenant_id`
+- `mapping_id`
+- `candidates` (each candidate must include `entity_id`)
+- `low_confidence_candidates` (each candidate must include `entity_id`)
 
 After job completion:
 - Fetch mapping payload:

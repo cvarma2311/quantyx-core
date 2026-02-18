@@ -946,6 +946,7 @@ class OnboardScanResponse(BaseModel):
 
 class OnboardMapResponse(BaseModel):
     mapping_id: str | None = Field(None, examples=["map_ab12cd34"])
+    tenant_id: str | None = Field(None, examples=["tenant_a"])
     candidates: List[dict]
     low_confidence_candidates: List[dict]
     low_confidence_threshold: float = Field(
@@ -955,10 +956,13 @@ class OnboardMapResponse(BaseModel):
         "json_schema_extra": {
             "example": {
                 "mapping_id": "map_ab12cd34",
+                "tenant_id": "tenant_a",
                 "candidates": [
                     {
+                        "table": "fact_sales",
                         "column": "sales_area_name",
                         "entity_id": "organizational_unit",
+                        "mapped_entity_type": "organizational_unit",
                         "confidence": 0.85,
                     }
                 ],

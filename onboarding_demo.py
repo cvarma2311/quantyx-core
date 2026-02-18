@@ -403,6 +403,20 @@ def main() -> int:
     if not map_job_id:
         raise RuntimeError("Map async job_id missing in response")
     map_response = _wait_for_job_result(map_job_id)
+    map_tenant_id = map_response.get("tenant_id")
+    if not map_tenant_id:
+        raise RuntimeError("Map async result missing tenant_id")
+    if map_tenant_id != TENANT_ID:
+        raise RuntimeError(f"Map async tenant_id mismatch: expected={TENANT_ID}, got={map_tenant_id}")
+    for idx, candidate in enumerate(map_response.get("candidates", []) or []):
+        if not candidate.get("entity_id"):
+            raise RuntimeError(f"Map async candidate missing entity_id at index={idx}")
+    for idx, candidate in enumerate(map_response.get("low_confidence_candidates", []) or []):
+        if not candidate.get("entity_id"):
+            raise RuntimeError(f"Map async low_confidence_candidate missing entity_id at index={idx}")
+    print(
+        "Map async result validated: tenant_id + entity_id present in candidates and low_confidence_candidates"
+    )
 
     # 2a) Fetch mapping run details
     mapping_id = map_response.get("mapping_id")

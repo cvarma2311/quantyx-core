@@ -35,7 +35,17 @@ denodo_volume_mounts:
 
 denodo_env:
   TZ: UTC
-  DENODO_START_CMD: "/usr/local/bin/start-denodo-auto"
+  DENODO_START_CMD: >-
+    candidate="";
+    for p in /opt/denodo/bin/denodo_platform /root/denodo/bin/denodo_platform /usr/local/denodo/bin/denodo_platform /denodo/bin/denodo_platform; do
+      if [ -x "$p" ]; then candidate="$p"; break; fi;
+    done;
+    if [ -n "$candidate" ]; then
+      echo "Starting Denodo using: $candidate";
+      "$candidate" start || true;
+    else
+      echo "Could not locate denodo_platform startup script in common paths.";
+    fi
 
 denodo_restart_policy: unless-stopped
 
