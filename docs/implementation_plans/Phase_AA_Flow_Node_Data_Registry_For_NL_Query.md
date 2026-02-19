@@ -377,3 +377,214 @@ DELETE FROM public.quantyx_flow_node_data_registry;
 5. AA5 NL resolver integration
 
 This order allows UI preview readiness first, then NL query routing with minimal risk.
+
+---
+
+## 12) Semantic Binding Layer (Automatic Background Process)
+
+Goal: automatically bind derived-view physical columns to canonical semantics (entities, facts, dimensions, metrics) immediately after a new current row is written to `quantyx_flow_node_data_registry`.
+
+Design principles:
+- background and asynchronous (never block UI materialization flow),
+- deterministic-first (rules + ontology + registries),
+- LLM-assisted only when needed,
+- confidence-gated output with human-review fallback.
+
+### 12.1 New Tables
+
+```sql
+CREATE TABLE IF NOT EXISTS public.quantyx_flow_node_binding_runs (
+  run_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  flow_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  artifact_key TEXT NOT NULL,
+  node_version_no INTEGER NOT NULL,
+  status TEXT NOT NULL,                        -- queued|running|completed|failed|canceled
+  model_name TEXT NULL,
+  trigger_source TEXT NOT NULL DEFAULT 'system', -- system|manual|retry
+  started_at TIMESTAMPTZ NULL,
+  completed_at TIMESTAMPTZ NULL,
+  error_message TEXT NULL,
+  summary JSONB NULL,                          -- counts by confidence/status
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_flow_node_semantic_bindings (
+  binding_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  flow_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  artifact_key TEXT NOT NULL,
+  node_version_no INTEGER NOT NULL,
+  run_id TEXT NOT NULL REFERENCES public.quantyx_flow_node_binding_runs(run_id),
+
+  physical_column TEXT NOT NULL,               -- column in derived view schema
+  semantic_type TEXT NOT NULL,                 -- entity|dimension|fact_measure|metric|time|id|attribute
+  semantic_ref_type TEXT NOT NULL,             -- entity|dimension|fact|metric|ontology_term
+  semantic_ref_id TEXT NOT NULL,               -- entity_id|dimension_id|fact_id|metric_id|ontology_term_id
+  semantic_ref_field TEXT NULL,                -- attribute/key/measure field name when needed
+
+  transform_expression TEXT NULL,              -- expression lineage for derived columns
+  source_binding_ids JSONB NULL,               -- upstream binding ids for propagated columns
+  source_columns JSONB NULL,                   -- upstream physical source columns
+
+  confidence NUMERIC NOT NULL,                 -- 0..1
+  confidence_band TEXT NOT NULL,               -- high|medium|low
+  binding_method TEXT NOT NULL,                -- exact|fuzzy|lineage|ontology|metric_rule|llm
+  binding_status TEXT NOT NULL DEFAULT 'proposed', -- proposed|accepted|rejected|superseded
+  rationale TEXT NULL,
+
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_flow_node_binding_runs_lookup
+  ON public.quantyx_flow_node_binding_runs (tenant_id, domain_id, flow_id, node_id, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_flow_node_binding_current_column
+  ON public.quantyx_flow_node_semantic_bindings (
+    tenant_id, domain_id, artifact_key, node_version_no, physical_column, semantic_ref_type, semantic_ref_id, COALESCE(semantic_ref_field, '')
+  )
+  WHERE binding_status IN ('proposed', 'accepted');
+```
+
+### 12.2 Trigger and Orchestration
+
+Automatic trigger:
+- when a new current version is inserted into `quantyx_flow_node_data_registry`:
+  - create a binding run with `status='queued'`
+  - enqueue async job type: `bind_flow_node_semantics`
+
+Execution model:
+- reuse existing async job worker (`quantyx_jobs`) with a dedicated handler,
+- idempotency key:
+  - `(tenant_id, artifact_key, node_version_no, binding_run_version)`
+- retries:
+  - max N retries with backoff,
+  - mark `failed` with `error_message` if exhausted.
+
+### 12.3 Binding Pipeline (Strong Architecture)
+
+Stage 0: Context load
+- load node metadata (`data_schema`, `sample_records`, `transform_sql`, lineage),
+- load domain pack ontology and glossary,
+- load current canonical registries:
+  - entities/hierarchies
+  - facts/dimensions
+  - metrics
+
+Stage 1: Deterministic candidate generation (no LLM)
+- exact name match:
+  - normalized physical column vs semantic names/aliases,
+- key-pattern rules:
+  - `_id`, `_code`, date/time columns, amount/qty measures,
+- lineage propagation:
+  - if column originates from upstream nodes with known bindings, inherit with high confidence,
+- metric-expression heuristics:
+  - map derived expression columns to metric candidates by expression shape.
+
+Stage 2: Ontology-aware expansion
+- apply domain-pack ontology terms, synonyms, and abbreviations,
+- generate additional candidates with medium confidence,
+- classify semantic type (`dimension`, `fact_measure`, `entity`, `metric`, etc.).
+
+Stage 3: LLM disambiguation (only for unresolved/ambiguous)
+- invoke LLM only when:
+  - top deterministic confidence < threshold, or
+  - multiple close candidates,
+- LLM input:
+  - column name + type + sample values + transform SQL snippet + ontology terms,
+- LLM output:
+  - ranked semantic candidates with rationale and confidence estimate.
+
+Stage 4: Scoring and acceptance
+- unified confidence scoring:
+  - deterministic score
+  - lineage bonus
+  - ontology bonus
+  - LLM confidence adjustment (bounded),
+- confidence bands:
+  - `high >= 0.85` -> auto `accepted`
+  - `0.60 to <0.85` -> `proposed` (review queue)
+  - `<0.60` -> `proposed` low-confidence (not used for auto SQL mapping)
+
+Stage 5: Persist + publish
+- write bindings for this run into `quantyx_flow_node_semantic_bindings`,
+- update run summary (`accepted/proposed/rejected counts`),
+- set run `status='completed'`.
+
+### 12.4 Runtime Use in Ask-NL
+
+When only `tenant_id` is provided:
+1. candidate target selection chooses best node/semantic target,
+2. load latest accepted/proposed bindings for selected node version,
+3. map NL semantic intent -> canonical refs -> physical columns via bindings,
+4. generate SQL only from high-confidence accepted mappings by default,
+5. if required mapping is missing:
+   - fallback to canonical registry path, or
+   - ask one clarification.
+
+### 12.5 Governance and Review Workflow
+
+Add review endpoints:
+- `GET /flows/{flow_id}/nodes/{node_id}/bindings?tenant_id=...`
+- `POST /flows/{flow_id}/nodes/{node_id}/bindings/review`
+  - accept/reject specific bindings
+- `POST /flows/{flow_id}/nodes/{node_id}/bindings/rebind`
+  - manual rerun for updated ontology/metadata
+
+Review actions:
+- accepted binding -> promoted to `binding_status='accepted'`,
+- rejected binding -> `binding_status='rejected'`,
+- replacement writes mark old rows `superseded`.
+
+### 12.6 Default Operational Policy
+
+- Always auto-run binding on new current node version.
+- Default LLM usage:
+  - enabled for ambiguous columns only,
+  - disabled for high-confidence deterministic matches.
+- Maximum binding SLA target:
+  - P95 run completion < 60s per node (configurable).
+- Emit metrics:
+  - run duration
+  - accepted ratio
+  - low-confidence ratio
+  - LLM invocation rate
+  - query-time fallback rate.
+
+### 12.7 Suggested Implementation Steps
+
+AA6: Schema
+- add `quantyx_flow_node_binding_runs`
+- add `quantyx_flow_node_semantic_bindings`
+
+AA7: Binding service
+- create `services/ai/flow_node_binding.py`
+  - run orchestration
+  - deterministic binders
+  - LLM disambiguator
+  - scorer + persistence
+
+AA8: Async integration
+- add job type `bind_flow_node_semantics`
+- enqueue automatically after node materialization write
+
+AA9: Ask-NL mapper integration
+- add binding-aware semantic mapper in query planning path
+
+AA10: Review UX APIs
+- add read/review/rebind endpoints
+- expose binding confidence and rationale in UI
+
+### 12.8 Acceptance Criteria for Semantic Binding Layer
+
+1. New node versions automatically trigger semantic binding runs.
+2. At least 90% of columns in common derived views get `accepted` or medium/high `proposed` bindings without manual edits.
+3. Ask-NL can generate SQL from tenant-only input using bound semantics for derived views.
+4. Low-confidence mappings are isolated and do not silently corrupt generated SQL.
+5. Binding runs are auditable, retryable, and observable.

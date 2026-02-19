@@ -60,6 +60,8 @@ dependency order.
    - `Phase_Z_Unified_Artifact_Lifecycle_Versioning.md`
 22) Phase AA - Flow Node Data Registry for Derived Views + NL Query
    - `Phase_AA_Flow_Node_Data_Registry_For_NL_Query.md`
+23) Phase AB - Ask/NL Query Resolution + Semantic Binding
+   - `Phase_AB_Ask_NL_Query_Resolution_Semantic_Binding.md`
 
 ## Dependencies (summary)
 
