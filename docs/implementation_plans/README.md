@@ -58,6 +58,8 @@ dependency order.
 
 21) Phase Z - Unified Single-Table Lifecycle + Versioning (All Semantic Artifacts)
    - `Phase_Z_Unified_Artifact_Lifecycle_Versioning.md`
+22) Phase AA - Flow Node Data Registry for Derived Views + NL Query
+   - `Phase_AA_Flow_Node_Data_Registry_For_NL_Query.md`
 
 ## Dependencies (summary)
 
@@ -75,3 +77,4 @@ dependency order.
 - Phase X depends on Phase V (canvas graph persists semantic objects/lineage).
 - Phase Y depends on Phase S/Q/U (async map runs, connection scope model, tenant scope resolution).
 - Phase Z depends on Phase Y and standardizes lifecycle/versioning across entities, hierarchies, facts, dimensions, and metrics.
+- Phase AA depends on Phase V/X/Z foundations (flow graph + lifecycle model) and adds query-target metadata for NL routing.

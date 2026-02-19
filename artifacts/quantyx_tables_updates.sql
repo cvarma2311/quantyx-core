@@ -539,3 +539,144 @@ DELETE FROM public.quantyx_metrics_registry t
 -- DELETE FROM public.quantyx_facts_registry;
 -- DELETE FROM public.quantyx_dimensions_registry;
 -- DELETE FROM public.quantyx_metrics_registry;
+
+-- Phase AA: Flow node data registry for derived views + NL query routing
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'quantyx_storage_engine') THEN
+    CREATE TYPE public.quantyx_storage_engine AS ENUM ('parquet');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'quantyx_query_engine') THEN
+    CREATE TYPE public.quantyx_query_engine AS ENUM ('pyiceberg');
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS public.quantyx_flow_node_data_registry (
+  row_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  flow_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  node_type TEXT NOT NULL,
+  artifact_key TEXT NOT NULL,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  is_current BOOLEAN NOT NULL DEFAULT true,
+  storage_engine public.quantyx_storage_engine NOT NULL DEFAULT 'parquet',
+  query_engine public.quantyx_query_engine NOT NULL DEFAULT 'pyiceberg',
+  minio_path TEXT NOT NULL,
+  iceberg_catalog TEXT NULL,
+  iceberg_namespace TEXT NULL,
+  iceberg_table TEXT NULL,
+  pyiceberg_table_fqn TEXT NULL,
+  iceberg_snapshot_id TEXT NULL,
+  data_schema JSONB NOT NULL DEFAULT '[]'::jsonb,
+  sample_records JSONB NULL,
+  row_count BIGINT NULL,
+  partition_spec JSONB NULL,
+  sort_order JSONB NULL,
+  file_format TEXT NOT NULL DEFAULT 'parquet',
+  compression TEXT NULL,
+  physical_stats JSONB NULL,
+  source_node_ids JSONB NULL,
+  source_artifact_keys JSONB NULL,
+  transform_sql TEXT NULL,
+  metadata JSONB NULL,
+  source_run_id TEXT NULL,
+  source_type TEXT NOT NULL DEFAULT 'system',
+  change_reason TEXT NULL,
+  created_by TEXT NULL,
+  updated_by TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.quantyx_flow_node_data_registry
+  ADD COLUMN IF NOT EXISTS tenant_id TEXT,
+  ADD COLUMN IF NOT EXISTS domain_id TEXT,
+  ADD COLUMN IF NOT EXISTS flow_id TEXT,
+  ADD COLUMN IF NOT EXISTS node_id TEXT,
+  ADD COLUMN IF NOT EXISTS node_type TEXT,
+  ADD COLUMN IF NOT EXISTS artifact_key TEXT,
+  ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS storage_engine public.quantyx_storage_engine NOT NULL DEFAULT 'parquet',
+  ADD COLUMN IF NOT EXISTS query_engine public.quantyx_query_engine NOT NULL DEFAULT 'pyiceberg',
+  ADD COLUMN IF NOT EXISTS minio_path TEXT,
+  ADD COLUMN IF NOT EXISTS iceberg_catalog TEXT,
+  ADD COLUMN IF NOT EXISTS iceberg_namespace TEXT,
+  ADD COLUMN IF NOT EXISTS iceberg_table TEXT,
+  ADD COLUMN IF NOT EXISTS pyiceberg_table_fqn TEXT,
+  ADD COLUMN IF NOT EXISTS iceberg_snapshot_id TEXT,
+  ADD COLUMN IF NOT EXISTS data_schema JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS sample_records JSONB,
+  ADD COLUMN IF NOT EXISTS row_count BIGINT,
+  ADD COLUMN IF NOT EXISTS partition_spec JSONB,
+  ADD COLUMN IF NOT EXISTS sort_order JSONB,
+  ADD COLUMN IF NOT EXISTS file_format TEXT NOT NULL DEFAULT 'parquet',
+  ADD COLUMN IF NOT EXISTS compression TEXT,
+  ADD COLUMN IF NOT EXISTS physical_stats JSONB,
+  ADD COLUMN IF NOT EXISTS source_node_ids JSONB,
+  ADD COLUMN IF NOT EXISTS source_artifact_keys JSONB,
+  ADD COLUMN IF NOT EXISTS transform_sql TEXT,
+  ADD COLUMN IF NOT EXISTS metadata JSONB,
+  ADD COLUMN IF NOT EXISTS source_run_id TEXT,
+  ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
+  ADD COLUMN IF NOT EXISTS change_reason TEXT,
+  ADD COLUMN IF NOT EXISTS created_by TEXT,
+  ADD COLUMN IF NOT EXISTS updated_by TEXT,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_flow_node_registry_current
+  ON public.quantyx_flow_node_data_registry (tenant_id, domain_id, artifact_key)
+  WHERE is_current = true;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_flow_node_registry_version
+  ON public.quantyx_flow_node_data_registry (tenant_id, domain_id, artifact_key, version_no);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_flow_node_registry_flow
+  ON public.quantyx_flow_node_data_registry (tenant_id, domain_id, flow_id, node_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_flow_node_registry_pyiceberg_fqn
+  ON public.quantyx_flow_node_data_registry (tenant_id, domain_id, pyiceberg_table_fqn);
+
+COMMENT ON TABLE public.quantyx_flow_node_data_registry IS
+  'Registry of flow node output datasets (versioned) for UI preview and NL query routing.';
+
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.row_id IS 'Primary key row id.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.tenant_id IS 'Tenant identifier.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.domain_id IS 'Domain identifier.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.flow_id IS 'Flow identifier.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.node_id IS 'Node identifier inside flow.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.node_type IS 'Node type: source|fact|dimension|derived_view|join|metric_input.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.artifact_key IS 'Stable logical key: flow_id::node_id.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.version_no IS 'Version number for artifact_key.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.is_current IS 'True for the active version row.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.storage_engine IS 'Physical storage engine enum (default parquet).';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.query_engine IS 'Execution engine enum (default pyiceberg).';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.minio_path IS 'Primary object-storage path for dataset files.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.iceberg_catalog IS 'Iceberg catalog name.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.iceberg_namespace IS 'Iceberg namespace/database.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.iceberg_table IS 'Iceberg table name.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.pyiceberg_table_fqn IS 'Resolved PyIceberg query target (namespace.table).';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.iceberg_snapshot_id IS 'Iceberg snapshot id used for this version.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.data_schema IS 'Canonical output schema as JSON array.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.sample_records IS 'Small sample rows for UI preview.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.row_count IS 'Estimated/actual row count.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.partition_spec IS 'Partition specification metadata.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.sort_order IS 'Sort order metadata.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.file_format IS 'Materialized file format (default parquet).';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.compression IS 'Compression codec.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.physical_stats IS 'Compact stats object: size_bytes, file_count, last_modified_at.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.source_node_ids IS 'Input lineage node ids.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.source_artifact_keys IS 'Input lineage artifact keys.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.transform_sql IS 'SQL used to build this node output.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.metadata IS 'Extensible metadata JSON.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.source_run_id IS 'Job/pipeline run id.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.source_type IS 'Origin of write: system|user|llm|rule.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.change_reason IS 'Human-readable reason for change.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.created_by IS 'Creator principal.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.updated_by IS 'Updater principal.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.created_at IS 'Creation timestamp.';
+COMMENT ON COLUMN public.quantyx_flow_node_data_registry.updated_at IS 'Last update timestamp.';
