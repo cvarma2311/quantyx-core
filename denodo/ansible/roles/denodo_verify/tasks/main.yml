@@ -19,6 +19,23 @@
       restart_count={{ denodo_container_info.container.RestartCount | default(0) }},
       ports={{ denodo_container_info.container.NetworkSettings.Ports | default({}) }}
 
+- name: Probe denodo_platform paths in container
+  ansible.builtin.shell: |
+    docker exec {{ denodo_container_name }} /bin/bash -lc \
+      'for p in /opt/denodo/bin/denodo_platform /root/denodo/bin/denodo_platform /usr/local/denodo/bin/denodo_platform /denodo/bin/denodo_platform /tmp/denodo-installer/denodo-install-9/bin/denodo_platform; do
+         if [ -x "$p" ]; then echo "$p"; fi;
+       done;
+       find /opt /root /usr/local /denodo /tmp -type f -name denodo_platform 2>/dev/null | head -n 20'
+  args:
+    executable: /bin/bash
+  register: denodo_platform_probe
+  changed_when: false
+  failed_when: false
+
+- name: Show denodo_platform probe output
+  ansible.builtin.debug:
+    msg: "{{ denodo_platform_probe.stdout | default('no denodo_platform path found') }}"
+
 - name: Wait for required Denodo ports with diagnostics on failure
   block:
     - name: Wait for exposed Denodo ports

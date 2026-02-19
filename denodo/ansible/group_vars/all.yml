@@ -37,9 +37,12 @@ denodo_env:
   TZ: UTC
   DENODO_START_CMD: >-
     candidate="";
-    for p in /opt/denodo/bin/denodo_platform /root/denodo/bin/denodo_platform /usr/local/denodo/bin/denodo_platform /denodo/bin/denodo_platform; do
+    for p in /opt/denodo/bin/denodo_platform /root/denodo/bin/denodo_platform /usr/local/denodo/bin/denodo_platform /denodo/bin/denodo_platform /tmp/denodo-installer/denodo-install-9/bin/denodo_platform; do
       if [ -x "$p" ]; then candidate="$p"; break; fi;
     done;
+    if [ -z "$candidate" ]; then
+      candidate="$(find /opt /root /usr/local /denodo /tmp -type f -name denodo_platform 2>/dev/null | head -n1)";
+    fi;
     if [ -n "$candidate" ]; then
       echo "Starting Denodo using: $candidate";
       "$candidate" start || true;

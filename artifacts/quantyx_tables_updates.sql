@@ -532,3 +532,10 @@ DELETE FROM public.quantyx_metrics_registry t
        ) ranked
       WHERE ranked.rn > 20
    );
+
+-- Use when you explicitly want to wipe all pre-cutover artifact data.
+-- DELETE FROM public.quantyx_entity_overrides;
+-- DELETE FROM public.quantyx_hierarchy_overrides;
+-- DELETE FROM public.quantyx_facts_registry;
+-- DELETE FROM public.quantyx_dimensions_registry;
+-- DELETE FROM public.quantyx_metrics_registry;

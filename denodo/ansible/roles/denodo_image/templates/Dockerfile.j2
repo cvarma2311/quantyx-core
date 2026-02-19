@@ -24,13 +24,21 @@ for candidate in \
   /opt/denodo/bin/denodo_platform \
   /root/denodo/bin/denodo_platform \
   /usr/local/denodo/bin/denodo_platform \
-  /denodo/bin/denodo_platform; do
+  /denodo/bin/denodo_platform \
+  /tmp/denodo-installer/denodo-install-9/bin/denodo_platform; do
   if [[ -x "$candidate" ]]; then
     echo "Starting Denodo using: $candidate"
     "$candidate" start || true
     exec tail -f /dev/null
   fi
 done
+
+candidate="$(find /opt /root /usr/local /denodo /tmp -type f -name denodo_platform 2>/dev/null | head -n1 || true)"
+if [[ -n "$candidate" ]]; then
+  echo "Starting Denodo using discovered path: $candidate"
+  "$candidate" start || true
+  exec tail -f /dev/null
+fi
 
 echo "Could not locate denodo_platform startup script in common paths."
 echo "Set DENODO_START_CMD to the correct startup command after confirming install path."
@@ -53,4 +61,4 @@ RUN if [ "${DENODO_RUN_INSTALLER_DURING_BUILD}" = "true" ] && [ -n "${DENODO_INS
 
 EXPOSE 9090 9999
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["/bin/bash", "-lc", "if [ -n \"$DENODO_START_CMD\" ]; then echo \"Running DENODO_START_CMD: $DENODO_START_CMD\"; eval \"$DENODO_START_CMD\"; rc=$?; echo \"DENODO_START_CMD exited with code $rc\"; else echo 'Set DENODO_START_CMD to launch Denodo.'; fi; echo 'Container will stay alive for troubleshooting.'; exec tail -f /dev/null"]
+CMD ["/bin/bash", "-lc", "set +e; if [ -n \"$DENODO_START_CMD\" ]; then echo \"Running DENODO_START_CMD: $DENODO_START_CMD\"; eval \"$DENODO_START_CMD\"; rc=$?; echo \"DENODO_START_CMD exited with code $rc\"; else echo 'Set DENODO_START_CMD to launch Denodo.'; fi; echo 'Container will stay alive for troubleshooting.'; exec tail -f /dev/null"]
