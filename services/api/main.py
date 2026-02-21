@@ -15,7 +15,9 @@ import zipfile
 import xml.etree.ElementTree as ElementTree
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, APIRouter, Response
+
+from services.ai.onboarding.api_helpers import get_secret
 
 from services.ai.catalog import load_catalog_with_registry, resolve_ref
 from services.ai.config import load_settings
@@ -32,6 +34,17 @@ from services.ai.connection_registry import (
     register_connection_scopes,
     resolve_connection_scope,
 )
+
+from services.ai.flow_node_registry import (
+    get_flow_exec_details,
+    get_minio_data_path,
+    get_table_schema,
+    get_source_node_ids,
+    generate_custom_sql,
+    read_from_minio,
+    store_flow_node_details
+)
+
 from services.ai.onboarding.scan_store import persist_schema_scan
 from services.ai.onboarding.scan_store import load_latest_scan_result, load_latest_scan_for_scope
 from services.ai.resolver import resolve_question
@@ -259,6 +272,7 @@ from services.api.schemas import (
     CanvasListResponse,
     CanvasDetailResponse,
     CanvasTreeResponse,
+    FlowsNodesRequest
 )
 from services.api.validators import (
     generate_source_title,
@@ -1838,71 +1852,6 @@ def datasets(
     page, next_cursor = _paginate_list(enriched, cursor, limit, key_fn=lambda item: item["name"])
     return DatasetsResponse(datasets=page, limit=limit, cursor=cursor, next_cursor=next_cursor)
 
-
-@app.get(
-    "/dimensions",
-    response_model=DimensionsResponse,
-    tags=["explore"],
-    summary="List dimensions",
-    description="Return dimensions from the metric catalog, scoped by tenant scope.",
-    openapi_extra={
-        "responses": {
-            "200": {
-                "content": {
-                    "application/json": {
-                        "examples": {
-                            "dimensions": {
-                                "summary": "Dimension list",
-                                "value": {
-                                    "dimensions": [
-                                        {
-                                            "name": "sales_area_name",
-                                            "description": "Sales area",
-                                            "data_type": "string",
-                                            "sql": "{{ ref('fact_hpcl_sales_daily') }}.sales_area_name",
-                                        }
-                                    ]
-                                },
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    },
-)
-def dimensions(tenant_id: str) -> DimensionsResponse:
-    domain_id = _resolve_domain_id(tenant_id, None)
-    _, database, schema, _ = _resolve_scope_values(
-        tenant_id,
-        domain_id,
-    )
-    payload = [
-        {
-            "name": dim.name,
-            "description": dim.description,
-            "data_type": dim.data_type,
-            "sql": dim.sql,
-        }
-        for dim in catalog.dimensions.values()
-    ]
-    if schema or database:
-        schema_map = _model_schema_map()
-        database_map = _model_database_map()
-        filtered = []
-        for item in payload:
-            match = re.search(r"\{\{\s*ref\('(?P<name>[^']+)'\)\s*\}\}", item["sql"])
-            if not match:
-                filtered.append(item)
-                continue
-            model_name = match.group("name")
-            if schema and schema_map.get(model_name) != schema:
-                continue
-            if database and database_map.get(model_name) != database:
-                continue
-            filtered.append(item)
-        payload = filtered
-    return DimensionsResponse(dimensions=payload)
 
 
 @app.get(
@@ -5151,6 +5100,62 @@ def remove_dimension(dimension_id: str) -> dict:
 
 
 @app.post(
+    "/flows/nodes",
+    response_model=FlowsNodesRequest,
+    tags=["flows"],
+    summary="Storing user selected nodes details for a flow",
+)
+
+def store_flow_nodes(payload: FlowsNodesRequest):
+    flow_id = payload.flow_id
+    tenant_id = payload.tenant_id
+    domain_id = _resolve_domain_id(payload.tenant_id) or ''
+    node_id = payload.node_id
+
+    flow_data = get_flow_exec_details(settings, flow_id)
+
+    if not flow_data:
+        raise HTTPException(status_code=404, detail="Latest Execution not found")
+
+    if flow_data.get("job_status","") == 'RUNNING':
+        raise HTTPException(status_code=400, detail="Flow is still running. Please try again after execution completed")
+
+    flow_run_id = flow_data.get("flow_run_id", "")
+    # flow_statement_date = flow_data.get("flow_statement_date", "")
+    # flow_name = flow_data.get("flow_name", "")
+
+    catalog_name, minio_path = get_minio_data_path(settings=settings, table_namespace=flow_run_id, table_name=node_id)
+    table_schema = get_table_schema(settings=settings, table_namespace=flow_run_id, table_name=node_id)
+    column_names = [col.get("name") for col in table_schema if "name" in col]
+    source_node_ids = get_source_node_ids(settings=settings, flow_id=flow_id, node_id = node_id)
+    transform_sql = generate_custom_sql(minio_path=minio_path, columns = column_names)
+
+    data_stats = read_from_minio(settings=settings, table_name = node_id, catalog_name=settings.catalog_name, warehouse = settings.minio_bucket_name, namespace = flow_run_id, limit=1)
+    row_count = data_stats.get("row_count", 0)
+    sample_records = data_stats.get("data", [])
+
+    data = {
+        "flow_id": flow_id,
+        "tenant_id": tenant_id,
+        "node_id": node_id,
+        "domain_id": domain_id,
+        "catalog_name": catalog_name,
+        "minio_path": minio_path,
+        "table_schema": table_schema,
+        "source_node_ids": source_node_ids,
+        "transform_sql": transform_sql,
+        "table_namespace": flow_run_id,
+        "table_name": node_id,
+        "sample_records": sample_records,
+        "row_count": row_count
+    }
+
+    store_flow_node_details(settings = settings, payload = data)
+
+    return {"ok": True, "message": "Flow node details stored successfully"}
+
+
+@app.post(
     "/review",
     response_model=ReviewResponse,
     tags=["onboard"],
@@ -5535,6 +5540,7 @@ def _run_scan_connection(
     connections_payload = []
     payload_by_connection: dict[str, list[dict]] = {}
     for connection in request.connections:
+        connection.password = get_secret(connection.password)
         _log_scan_step(
             "connection.begin",
             {"connection_id": connection.connection_id, "db_type": connection.db_type},
@@ -5602,7 +5608,7 @@ def _run_scan_connection(
         connection_payload = {"connection_id": connection.connection_id, "databases": databases_payload}
         connections_payload.append(connection_payload)
         payload_by_connection[connection.connection_id] = databases_payload
-        register_connection(settings, connection.connection_id)
+        register_connection(settings, connection.connection_id, tenant_id, domain_id)
         if scopes:
             register_connection_scopes(settings, connection.connection_id, scopes)
         _log_scan_step(
@@ -5632,6 +5638,7 @@ def _run_scan_connection(
                     tenant_id,
                     template_dir=settings.dbt_project_template,
                 )
+
                 _log_scan_step(
                     "dbt.project.ready",
                     {"connection_id": connection.connection_id, "path": dbt_project_path},
