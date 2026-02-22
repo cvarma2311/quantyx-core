@@ -4,6 +4,7 @@ import uuid
 from typing import Any
 
 import psycopg2
+from psycopg2.extras import Json
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, run_query
@@ -16,6 +17,10 @@ def _make_id(prefix: str) -> str:
 def upsert_fact(settings: Settings, payload: dict[str, Any]) -> str:
     fact_id = payload.get("fact_id") or _make_id("fact")
     lifecycle_status = payload.get("lifecycle_status", "draft")
+    measures = payload.get("measures", [])
+    dimensions = payload.get("dimensions", [])
+    measures_value = Json(measures) if isinstance(measures, (list, dict)) else measures
+    dimensions_value = Json(dimensions) if isinstance(dimensions, (list, dict)) else dimensions
     sql = """
         INSERT INTO public.quantyx_facts_registry (
           fact_id,
@@ -78,8 +83,8 @@ def upsert_fact(settings: Settings, payload: dict[str, Any]) -> str:
         payload["table_name"],
         payload.get("grain"),
         payload.get("time_column"),
-        payload.get("measures", []),
-        payload.get("dimensions", []),
+        measures_value,
+        dimensions_value,
         payload.get("description"),
         payload.get("artifact_key") or fact_id,
         payload.get("version_no", 1),
@@ -230,6 +235,10 @@ def delete_fact(settings: Settings, fact_id: str) -> None:
 def upsert_dimension(settings: Settings, payload: dict[str, Any]) -> str:
     dimension_id = payload.get("dimension_id") or _make_id("dim")
     lifecycle_status = payload.get("lifecycle_status", "draft")
+    keys = payload.get("keys", [])
+    attributes = payload.get("attributes", [])
+    keys_value = Json(keys) if isinstance(keys, (list, dict)) else keys
+    attributes_value = Json(attributes) if isinstance(attributes, (list, dict)) else attributes
     sql = """
         INSERT INTO public.quantyx_dimensions_registry (
           dimension_id,
@@ -257,7 +266,7 @@ def upsert_dimension(settings: Settings, payload: dict[str, Any]) -> str:
           created_at,
           updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
         ON CONFLICT (dimension_id)
         DO UPDATE SET
           name = EXCLUDED.name,
@@ -286,8 +295,8 @@ def upsert_dimension(settings: Settings, payload: dict[str, Any]) -> str:
         payload["database_name"],
         payload["schema_name"],
         payload["name"],
-        payload.get("keys", []),
-        payload.get("attributes", []),
+        keys_value,
+        attributes_value,
         payload.get("description"),
         payload.get("artifact_key") or dimension_id,
         payload.get("version_no", 1),

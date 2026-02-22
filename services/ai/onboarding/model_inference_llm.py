@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.request
 from typing import Any
 
 from services.ai.config import Settings
 
+logger = logging.getLogger(__name__)
 
 def llm_infer_models(
     settings: Settings,
@@ -37,6 +39,11 @@ def llm_infer_models(
         "response_format": {"type": "json_object"},
     }
 
+    logger.debug(
+        "llm.infer_models: request | model=%s tables=%s",
+        settings.openai_model,
+        len(tables),
+    )
     request = urllib.request.Request(
         "https://api.openai.com/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -47,17 +54,23 @@ def llm_infer_models(
         method="POST",
     )
 
-    for _ in range(2):
+    for attempt in range(2):
         with urllib.request.urlopen(request, timeout=30) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = body["choices"][0]["message"]["content"]
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError:
+            logger.warning("llm.infer_models: json decode failed | attempt=%s", attempt + 1)
             continue
         facts = parsed.get("facts", [])
         dimensions = parsed.get("dimensions", [])
         if isinstance(facts, list) and isinstance(dimensions, list):
+            logger.debug(
+                "llm.infer_models: response | facts=%s dims=%s",
+                len(facts),
+                len(dimensions),
+            )
             return {"facts": facts, "dimensions": dimensions}
 
     return {"facts": [], "dimensions": []}

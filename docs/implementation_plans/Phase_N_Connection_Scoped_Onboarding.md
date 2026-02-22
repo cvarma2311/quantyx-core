@@ -77,6 +77,8 @@ Persist extracted artifacts only when user calls /context/apply.
 - For each extracted hierarchy:
   - Upsert into quantyx_hierarchy_overrides
   - Set source_context_id
+  - A **single** context can contain multiple hierarchies (e.g., geography + supply chain).
+  - Multiple contexts can be active at once (Phase AD); Ask uses the union.
 
 ### 4.2 POST /context/apply (glossary + entities)
 - Upsert glossary terms into quantyx_glossary_terms (source_context_id)

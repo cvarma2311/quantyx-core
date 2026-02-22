@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.request
 
 from services.ai.catalog import MetricCatalog
 from services.ai.config import Settings
 
+logger = logging.getLogger(__name__)
 
 def resolve_question(
     question: str,
@@ -32,6 +34,13 @@ def resolve_question(
         "filter_format": {"field": "dimension_name", "operator": "=|!=|>|>=|<|<=|IN|ILIKE", "value": "..."},
     }
 
+    logger.debug(
+        "llm.resolve_question: request | model=%s question_chars=%s metrics=%s dims=%s",
+        settings.openai_model,
+        len(question or ""),
+        len(allowed_metrics or catalog.metric_names()),
+        len(catalog.dimension_names()),
+    )
     payload = {
         "model": settings.openai_model,
         "messages": [
@@ -56,4 +65,5 @@ def resolve_question(
         body = json.loads(response.read().decode("utf-8"))
 
     content = body["choices"][0]["message"]["content"]
+    logger.debug("llm.resolve_question: response | chars=%s", len(content or ""))
     return json.loads(content)

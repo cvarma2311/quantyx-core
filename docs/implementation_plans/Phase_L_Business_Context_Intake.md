@@ -2,6 +2,13 @@
 
 Goal: accept business context text (table/column descriptions, abbreviations, synonyms, hierarchy notes, and sample questions), persist it, and use LLM-assisted processing to enrich ontology, entities, hierarchies, and metric candidates.
 
+Note: multiple contexts per tenant/domain are supported. Multiple active
+contexts and multi-hierarchy handling are specified in
+`docs/implementation_plans/Phase_AD_Multi_Context_Multi_Hierarchy.md`.
+
+Each **single context** can contain multiple hierarchies (e.g., geography,
+supply chain). These are stored and applied independently.
+
 ---
 
 ## Why this exists

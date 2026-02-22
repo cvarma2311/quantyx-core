@@ -1,6 +1,6 @@
 # Phase S: Async Onboarding Jobs (Scan, Map, Infer, Metrics)
 
-Goal: add async job orchestration for long-running onboarding steps (schema scan, entity mapping, model inference, suggested metrics) without breaking existing synchronous APIs.
+Goal: add async job orchestration for long-running onboarding steps (schema scan, entity mapping, model inference, suggested metrics, **context extraction**, **context apply**) without breaking existing synchronous APIs.
 
 This phase introduces:
 - new async endpoints that return `202 Accepted` + `job_id`
@@ -27,6 +27,8 @@ Keep existing endpoints unchanged:
 - `POST /onboard/map`
 - `POST /onboard/infer-models`
 - `POST /metrics/suggested`
+- `POST /context/extract`
+- `POST /context/apply`
 
 Add new async variants with `/async` suffix (or a generic `/jobs` submit) so existing clients do not break.
 
@@ -150,6 +152,39 @@ Response (`202`):
 { "job_id": "job_126", "status": "queued" }
 ```
 
+`POST /context/extract/async`
+
+Request (same as `/context/extract`):
+```json
+{
+  "tenant_id": "tenant_a",
+  "context_id": "ctx_123",
+  "extraction_types": ["abbreviations", "synonyms", "hierarchies", "metric_candidates", "question_intents"]
+}
+```
+
+Response (`202`):
+```json
+{ "job_id": "job_127", "status": "queued" }
+```
+
+`POST /context/apply/async`
+
+Request (same as `/context/apply`):
+```json
+{
+  "tenant_id": "tenant_a",
+  "domain_id": "manufacturing",
+  "extraction_id": "ext_123",
+  "apply": { "entities": true, "hierarchies": true, "glossary": true, "metrics": true }
+}
+```
+
+Response (`202`):
+```json
+{ "job_id": "job_128", "status": "queued" }
+```
+
 ---
 
 ### 3) Job status
@@ -270,6 +305,51 @@ Response:
 ```json
 { "job_id": "job_123", "status": "canceled" }
 ```
+
+---
+
+## Tenant purge (demo reset)
+
+This is not a job, but it is an important supporting operation for demo/test cycles.
+
+`POST /tenant/purge`
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "dry_run": true
+}
+```
+
+Response:
+```json
+{
+  "tenant_id": "tenant_a",
+  "dry_run": true,
+  "deleted": [
+    {"table": "quantyx_business_context", "rows": 2},
+    {"table": "quantyx_context_extractions", "rows": 2},
+    {"table": "quantyx_context_extraction_agents", "rows": 10}
+  ]
+}
+```
+
+Deletion rules:
+- Tables with `tenant_id` are deleted directly.
+- Join-based deletes by `tenant_id`:
+  - `quantyx_context_extraction_agents` via `quantyx_context_extractions.extraction_id`
+  - `quantyx_context_file_links` via `quantyx_context_files.file_id`
+  - `quantyx_job_events` via `quantyx_jobs.job_id`
+  - `quantyx_canvas_nodes` via `quantyx_canvases.canvas_id`
+  - `quantyx_canvas_edges` via `quantyx_canvases.canvas_id`
+  - `quantyx_connection_scopes` via `quantyx_connection_registry.connection_id`
+- Domain-based deletes via `quantyx_tenant_domains.domain_id`:
+  - `quantyx_query_audit`
+  - `quantyx_insight_events`
+
+Note:
+- This should be admin-only in production.
 
 ---
 

@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, run_query
+from psycopg2.extras import Json
 
 
 def create_context(
@@ -50,7 +51,7 @@ def create_context(
             source_type,
             source_title,
             raw_text or "",
-            metadata,
+            Json(metadata),
         ],
     )
     return context_id
@@ -91,7 +92,7 @@ def create_context_file(
             content_type,
             extracted_text,
             file_bytes,
-            metadata or {},
+            Json(metadata or {}),
         ],
     )
     return file_id
@@ -157,6 +158,7 @@ def list_context(
                c.status,
                c.metadata,
                c.created_at,
+               COALESCE(bool_or(a.is_active), false) AS is_active,
                COALESCE(
                  array_agg(DISTINCT e.extraction_type)
                    FILTER (WHERE e.extraction_type IS NOT NULL),
@@ -165,6 +167,13 @@ def list_context(
           FROM public.quantyx_business_context c
           LEFT JOIN public.quantyx_context_extractions e
             ON e.context_id = c.context_id
+          LEFT JOIN public.quantyx_context_scope_active a
+            ON a.context_id = c.context_id
+           AND a.tenant_id = c.tenant_id
+           AND a.domain_id = c.domain_id
+           AND a.connection_id IS NOT DISTINCT FROM c.connection_id
+           AND a.database_name IS NOT DISTINCT FROM c.database_name
+           AND a.schema_name IS NOT DISTINCT FROM c.schema_name
          WHERE {where_clause}
          GROUP BY c.context_id,
                   c.tenant_id,
@@ -186,6 +195,76 @@ def list_context(
         next_cursor = rows[limit - 1]["created_at"].isoformat()
         rows = rows[:limit]
     return rows, next_cursor
+
+
+def set_context_active(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str,
+    context_id: str,
+    connection_id: str | None,
+    database_name: str | None,
+    schema_name: str | None,
+    is_active: bool,
+) -> None:
+    sql = """
+        INSERT INTO public.quantyx_context_scope_active (
+          tenant_id,
+          domain_id,
+          connection_id,
+          database_name,
+          schema_name,
+          context_id,
+          is_active,
+          created_at,
+          updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, now(), now())
+        ON CONFLICT (tenant_id, domain_id, connection_id, database_name, schema_name, context_id)
+        DO UPDATE SET
+          is_active = EXCLUDED.is_active,
+          updated_at = now()
+    """
+    execute_non_query(
+        settings,
+        sql,
+        [
+            tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+            context_id,
+            is_active,
+        ],
+    )
+
+
+def list_active_context_ids(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str | None,
+    database_name: str | None,
+    schema_name: str | None,
+) -> list[str]:
+    sql = """
+        SELECT context_id
+          FROM public.quantyx_context_scope_active
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id IS NOT DISTINCT FROM %s
+           AND database_name IS NOT DISTINCT FROM %s
+           AND schema_name IS NOT DISTINCT FROM %s
+           AND is_active = true
+         ORDER BY updated_at DESC
+    """
+    rows = run_query(
+        settings,
+        sql,
+        [tenant_id, domain_id, connection_id, database_name, schema_name],
+    )
+    return [row["context_id"] for row in rows if row.get("context_id")]
 
 
 def get_context(settings: Settings, context_id: str) -> dict | None:
@@ -251,6 +330,8 @@ def persist_extraction(
     payload: dict[str, Any],
     llm_model: str | None,
     confidence: float | None = None,
+    agent_name: str | None = None,
+    parent_job_id: str | None = None,
 ) -> str:
     extraction_id = f"ext_{uuid4().hex[:12]}"
     sql = """
@@ -262,9 +343,11 @@ def persist_extraction(
           extraction_type,
           payload,
           llm_model,
-          confidence
+          confidence,
+          agent_name,
+          parent_job_id
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     execute_non_query(
         settings,
@@ -275,12 +358,46 @@ def persist_extraction(
             tenant_id,
             domain_id,
             "combined",
-            payload,
+            Json(payload),
             llm_model,
             confidence,
+            agent_name,
+            parent_job_id,
         ],
     )
     return extraction_id
+
+
+def persist_extraction_agent(
+    settings: Settings,
+    extraction_id: str,
+    agent_name: str,
+    payload: dict[str, Any],
+    confidence: float | None = None,
+) -> str:
+    agent_run_id = f"agent_{uuid4().hex[:12]}"
+    sql = """
+        INSERT INTO public.quantyx_context_extraction_agents (
+          agent_run_id,
+          extraction_id,
+          agent_name,
+          payload,
+          confidence
+        )
+        VALUES (%s, %s, %s, %s, %s)
+    """
+    execute_non_query(
+        settings,
+        sql,
+        [
+            agent_run_id,
+            extraction_id,
+            agent_name,
+            Json(payload),
+            confidence,
+        ],
+    )
+    return agent_run_id
 
 
 def update_context(settings: Settings, context_id: str, updates: dict[str, Any]) -> None:
@@ -292,7 +409,10 @@ def update_context(settings: Settings, context_id: str, updates: dict[str, Any])
     params: list[Any] = []
     for key, value in filtered.items():
         columns.append(f"{key} = %s")
-        params.append(value)
+        if key == "metadata":
+            params.append(Json(value))
+        else:
+            params.append(value)
     columns.append("updated_at = now()")
     params.append(context_id)
     sql = f"UPDATE public.quantyx_business_context SET {', '.join(columns)} WHERE context_id = %s"
@@ -305,7 +425,7 @@ def update_context_file_metadata(settings: Settings, file_id: str, metadata: dic
            SET metadata = %s
          WHERE file_id = %s
     """
-    execute_non_query(settings, sql, [metadata, file_id])
+    execute_non_query(settings, sql, [Json(metadata), file_id])
 
 
 def get_extraction(settings: Settings, extraction_id: str) -> dict | None:
@@ -317,6 +437,8 @@ def get_extraction(settings: Settings, extraction_id: str) -> dict | None:
                extraction_type,
                payload,
                llm_model,
+               agent_name,
+               parent_job_id,
                status,
                notes,
                created_at

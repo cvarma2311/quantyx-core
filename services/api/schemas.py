@@ -274,6 +274,7 @@ class EntityOverrideRequest(BaseModel):
     )
     join_key: str | None = Field(None, examples=["sales_area_name"])
     examples: List[str] | None = Field(default=None, examples=[["zone", "region", "sales_area"]])
+    status: str | None = Field(None, examples=["suggested", "certified"])
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -286,11 +287,19 @@ class EntityOverrideRequest(BaseModel):
 
 
 class HierarchyOverrideRequest(BaseModel):
+    context_id: str | None = Field(None, examples=["ctx_123"])
+    hierarchy_group: str | None = Field(None, examples=["geography"])
     levels: List[str] = Field(default_factory=list, examples=[["zone", "region", "sales_area"]])
     description: str | None = Field(None, examples=["Sales organization rollup"])
+    status: str | None = Field(None, examples=["suggested", "certified"])
     model_config = {
         "json_schema_extra": {
-            "example": {"levels": ["zone", "region", "sales_area"], "description": "Sales rollup"}
+            "example": {
+                "context_id": "ctx_123",
+                "hierarchy_group": "geography",
+                "levels": ["zone", "region", "sales_area"],
+                "description": "Sales rollup",
+            }
         }
     }
 
@@ -1094,6 +1103,7 @@ class ContextListResponse(BaseModel):
                         "source_type": "business_context",
                         "source_title": "Operations glossary",
                         "status": "submitted",
+                        "is_active": True,
                         "extraction_types": ["combined"],
                         "created_at": "2025-02-14T10:00:00Z",
                     }
@@ -1114,6 +1124,7 @@ class ContextExtractRequest(BaseModel):
         default_factory=list,
         examples=[["abbreviations", "synonyms", "hierarchies", "metric_candidates", "question_intents"]],
     )
+    mode: str | None = Field(None, examples=["parallel"])
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -1126,6 +1137,7 @@ class ContextExtractRequest(BaseModel):
                     "metric_candidates",
                     "question_intents",
                 ],
+                "mode": "parallel",
             }
         }
     }
@@ -1185,12 +1197,17 @@ class ContextApplyRequest(BaseModel):
         default_factory=dict,
         examples=[{"entities": True, "hierarchies": True, "glossary": True, "metrics": True}],
     )
+    hierarchy_selection: dict | None = Field(
+        None,
+        examples=[{"names": ["geography", "supply_chain"], "apply_all": False}],
+    )
     model_config = {
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
                 "extraction_id": "ext_123",
                 "apply": {"entities": True, "hierarchies": True, "glossary": True, "metrics": True},
+                "hierarchy_selection": {"names": ["geography"], "apply_all": False},
             }
         }
     }
@@ -1210,7 +1227,7 @@ class ContextPatchRequest(BaseModel):
     source_title: str | None = Field(None, examples=["Operations glossary v2"])
     raw_text: str | None = Field(None, examples=["Updated glossary content..."])
     metadata: dict | None = Field(None, examples=[{"columns": ["sales_area_name"]}])
-    status: str | None = Field(None, examples=["processed"])
+    status: str | None = Field(None, examples=["processed", "active", "inactive"])
     model_config = {
         "json_schema_extra": {
             "example": {

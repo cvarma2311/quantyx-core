@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from services.ai.config import Settings
 from services.ai.dbt_manifest import load_latest_manifest
 from services.ai.metrics_registry import upsert_metric
 
+logger = logging.getLogger(__name__)
 
 def _load_dbt_model_map(settings: Settings, domain_id: str) -> dict[str, str]:
     payload = load_latest_manifest(settings, domain_id=domain_id)
@@ -49,6 +51,12 @@ def persist_suggested_metrics(
     measures: list[dict[str, Any]],
     lifecycle_status: str = "suggested",
 ) -> None:
+    logger.debug(
+        "metrics_registry: persist_suggested_metrics start | tenant=%s domain=%s measures=%s",
+        tenant_id,
+        domain_id,
+        len(measures),
+    )
     model_map = _load_dbt_model_map(settings, domain_id)
     for measure in measures:
         metric_id = f"{domain_id}__{measure['table']}__{measure['column']}"
@@ -93,3 +101,4 @@ def persist_suggested_metrics(
                 "is_current": True,
             },
         )
+    logger.debug("metrics_registry: persist_suggested_metrics complete")

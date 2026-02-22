@@ -33,7 +33,9 @@ API | Purpose
 --- | ---
 GET /context/domains | List domain packs
 GET /context/scenarios | List scenarios
-POST /context/set | Set active context
+PATCH /context/{context_id} | Set active context (can be multiple)
+POST /context/extract/async | Extract context (async)
+POST /context/apply/async | Apply context (async)
 
 Backend modules
 
@@ -259,6 +261,7 @@ API | Method | Purpose
 /datasets | POST | Create/edit
 /metrics | POST | Define metrics
 /entities | POST | Define hierarchies
+/tenant/purge | POST | Admin-only: wipe all Quantyx data for a tenant (demo reset)
 
 Backend modules
 

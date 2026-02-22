@@ -591,6 +591,52 @@ CREATE TABLE IF NOT EXISTS public.quantyx_flow_node_data_registry (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Phase AE (Entity mapping agents)
+
+CREATE TABLE IF NOT EXISTS public.quantyx_entity_mapping_agents (
+  agent_run_id TEXT PRIMARY KEY,
+  job_id TEXT NULL,
+  mapping_id TEXT NULL,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  table_name TEXT NULL,
+  chunk_index INTEGER NULL,
+  chunk_label TEXT NULL,
+  request_payload JSONB NOT NULL,
+  response_payload JSONB NULL,
+  error_message TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_entity_mapping_agents_tenant
+  ON public.quantyx_entity_mapping_agents (tenant_id, domain_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_entity_mapping_agents_job
+  ON public.quantyx_entity_mapping_agents (job_id, created_at DESC);
+
+-- Glossary lifecycle status
+ALTER TABLE public.quantyx_glossary_terms
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'suggested';
+
+-- Fact view registry
+CREATE TABLE IF NOT EXISTS public.quantyx_fact_views_registry (
+  view_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  view_name TEXT NOT NULL,
+  source_table TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_fact_views_tenant
+  ON public.quantyx_fact_views_registry (tenant_id, domain_id, created_at DESC);
+
 ALTER TABLE public.quantyx_flow_node_data_registry
   ADD COLUMN IF NOT EXISTS tenant_id TEXT,
   ADD COLUMN IF NOT EXISTS domain_id TEXT,
@@ -680,3 +726,63 @@ COMMENT ON COLUMN public.quantyx_flow_node_data_registry.created_by IS 'Creator 
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.updated_by IS 'Updater principal.';
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.created_at IS 'Creation timestamp.';
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.updated_at IS 'Last update timestamp.';
+
+-- Phase AD: Multi-Context + Multi-Hierarchy support
+
+CREATE TABLE IF NOT EXISTS public.quantyx_context_scope_active (
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NULL,
+  database_name TEXT NULL,
+  schema_name TEXT NULL,
+  context_id TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, context_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_scope_active_context
+  ON public.quantyx_context_scope_active (context_id);
+
+CREATE INDEX IF NOT EXISTS idx_context_scope_active_scope
+  ON public.quantyx_context_scope_active (tenant_id, domain_id, connection_id, database_name, schema_name, is_active);
+
+ALTER TABLE public.quantyx_hierarchy_overrides
+  ADD COLUMN IF NOT EXISTS context_id TEXT,
+  ADD COLUMN IF NOT EXISTS hierarchy_group TEXT;
+
+UPDATE public.quantyx_hierarchy_overrides
+  SET context_id = COALESCE(source_context_id, 'ctx_legacy')
+  WHERE context_id IS NULL;
+
+UPDATE public.quantyx_hierarchy_overrides
+  SET artifact_key = (context_id || '::' || hierarchy_name)
+  WHERE artifact_key IS NULL OR artifact_key = hierarchy_name;
+
+ALTER TABLE public.quantyx_hierarchy_overrides
+  ALTER COLUMN context_id SET NOT NULL;
+
+ALTER TABLE public.quantyx_hierarchy_overrides
+  DROP CONSTRAINT IF EXISTS quantyx_hierarchy_overrides_pkey;
+
+ALTER TABLE public.quantyx_hierarchy_overrides
+  ADD PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, context_id, hierarchy_name);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_hierarchy_overrides_scope
+  ON public.quantyx_hierarchy_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, context_id);
+
+-- Phase AE: Multi-agent extraction fields
+
+ALTER TABLE public.quantyx_context_extractions
+  ADD COLUMN IF NOT EXISTS agent_name TEXT,
+  ADD COLUMN IF NOT EXISTS parent_job_id TEXT;
+
+CREATE TABLE IF NOT EXISTS public.quantyx_context_extraction_agents (
+  agent_run_id TEXT PRIMARY KEY,
+  extraction_id TEXT NOT NULL,
+  agent_name TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  confidence NUMERIC NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

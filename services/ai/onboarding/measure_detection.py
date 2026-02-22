@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _NUMERIC_TYPES = {"integer", "bigint", "smallint", "numeric", "double precision", "real"}
 _DATE_TYPES = {"date", "timestamp", "timestamp without time zone", "timestamp with time zone"}
@@ -27,6 +30,7 @@ _UNIT_HINTS = {
 
 def detect_measures(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
     suggestions = []
+    logger.debug("measure_detection: start | tables=%s", len(tables))
     for table in tables:
         for col in table["columns"]:
             name = col["name"]
@@ -65,13 +69,16 @@ def detect_measures(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 }
             )
 
+    logger.debug("measure_detection: complete | measures=%s", len(suggestions))
     return suggestions
 
 
 def detect_time_columns(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
     suggestions = []
+    logger.debug("measure_detection: time_columns start | tables=%s", len(tables))
     for table in tables:
         for col in table["columns"]:
             if col["data_type"].lower() in _DATE_TYPES:
                 suggestions.append({"table": table["table"], "column": col["name"]})
+    logger.debug("measure_detection: time_columns complete | cols=%s", len(suggestions))
     return suggestions

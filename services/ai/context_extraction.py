@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.request
 from typing import Any
 
 from services.ai.config import Settings
 
+logger = logging.getLogger(__name__)
 
 def _default_extractions(extraction_types: list[str]) -> dict[str, list[dict[str, Any]]]:
     return {key: [] for key in extraction_types}
@@ -53,6 +55,12 @@ def extract_context(
         "response_format": {"type": "json_object"},
     }
 
+    logger.debug(
+        "llm.context_extract: request | model=%s chars=%s types=%s",
+        settings.openai_model,
+        len(raw_text or ""),
+        requested,
+    )
     request = urllib.request.Request(
         "https://api.openai.com/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -63,13 +71,14 @@ def extract_context(
         method="POST",
     )
 
-    for _ in range(2):
+    for attempt in range(2):
         with urllib.request.urlopen(request, timeout=45) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = body["choices"][0]["message"]["content"]
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError:
+            logger.warning("llm.context_extract: json decode failed | attempt=%s", attempt + 1)
             continue
 
         result: dict[str, list[dict[str, Any]]] = _default_extractions(requested)
@@ -77,6 +86,7 @@ def extract_context(
             value = parsed.get(key, [])
             if isinstance(value, list):
                 result[key] = value
+        logger.debug("llm.context_extract: response | keys=%s", list(result.keys()))
         return result
 
     return _default_extractions(requested)

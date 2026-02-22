@@ -5,7 +5,7 @@
 Set the environment variables required for your environment, then start the server:
 
 ```bash
-export QUANTYX_API_BASE=http://127.0.0.1:8787
+export QUANTYX_API_BASE=http://localhost:8787
 export QUANTYX_DOMAIN=manufacturing
 export QUANTYX_TENANT=x_mfg
 export DEMO_DB_HOST=127.0.0.1

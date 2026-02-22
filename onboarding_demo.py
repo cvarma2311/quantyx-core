@@ -16,6 +16,10 @@ TENANT_ID = os.getenv("QUANTYX_TENANT", "x_mfg")
 CONNECTION_ID = os.getenv("DEMO_CONNECTION_ID", "conn_demo")
 DEMO_TABLES = [t.strip() for t in os.getenv("DEMO_TABLES", "").split(",") if t.strip()]
 DEMO_CONTEXT_TEXT = os.getenv("DEMO_CONTEXT_TEXT", "")
+DEMO_CONTEXT_TEXTS = os.getenv("DEMO_CONTEXT_TEXTS", "")
+DEMO_CONTEXT_TITLES = os.getenv("DEMO_CONTEXT_TITLES", "")
+DEMO_ACTIVE_CONTEXT_INDEX = int(os.getenv("DEMO_ACTIVE_CONTEXT_INDEX", "-1"))
+DEMO_ACTIVE_CONTEXT_ALL = os.getenv("DEMO_ACTIVE_CONTEXT_ALL", "").lower() in {"1", "true", "yes"}
 DEMO_CONTEXT_FILE = os.getenv("DEMO_CONTEXT_FILE", "")
 DEMO_DBT_PROJECT = os.getenv("DEMO_DBT_PROJECT", "")
 DEMO_DBT_PROFILE = os.getenv("DEMO_DBT_PROFILE", "default")
@@ -146,6 +150,7 @@ def main() -> int:
     print("Usage:")
     print("  DEMO_SEMANTIC_CONTRACT=true to run semantic contract extraction")
     print("  DEMO_CONTEXT_TEXT/DEMO_CONTEXT_FILE for context ingestion")
+    print("  DEMO_CONTEXT_TEXTS (use '||' to separate multiple contexts)")
     print("  DEMO_TABLES is required")
     print("== Onboarding Demo ==")
     print(f"API_BASE={API_BASE}")
@@ -154,6 +159,10 @@ def main() -> int:
     print(f"CONNECTION_ID={CONNECTION_ID}")
     print(f"DEMO_TABLES={DEMO_TABLES}")
     print(f"DEMO_CONTEXT_FILE={DEMO_CONTEXT_FILE}")
+    print(f"DEMO_CONTEXT_TEXTS={DEMO_CONTEXT_TEXTS}")
+    print(f"DEMO_CONTEXT_TITLES={DEMO_CONTEXT_TITLES}")
+    print(f"DEMO_ACTIVE_CONTEXT_INDEX={DEMO_ACTIVE_CONTEXT_INDEX}")
+    print(f"DEMO_ACTIVE_CONTEXT_ALL={DEMO_ACTIVE_CONTEXT_ALL}")
     print(f"DEMO_DBT_PROJECT={DEMO_DBT_PROJECT or '(auto)'}")
     print(f"DEMO_DBT_PROFILE={DEMO_DBT_PROFILE}")
     print(f"DEMO_DBT_TARGET={DEMO_DBT_TARGET}")
@@ -275,13 +284,24 @@ def main() -> int:
         if upload_response.get("file_id"):
             file_ids.append(upload_response["file_id"])
 
-    if context_text or file_ids:
+    context_entries: list[dict[str, str]] = []
+    if DEMO_CONTEXT_TEXTS:
+        texts = [chunk.strip() for chunk in DEMO_CONTEXT_TEXTS.split("||") if chunk.strip()]
+        titles = [chunk.strip() for chunk in DEMO_CONTEXT_TITLES.split("||") if chunk.strip()]
+        for idx, text in enumerate(texts):
+            title = titles[idx] if idx < len(titles) else f"Demo business context {idx + 1}"
+            context_entries.append({"title": title, "text": text})
+    elif context_text or file_ids:
+        context_entries.append({"title": "Demo business context", "text": context_text})
+
+    context_ids: list[str] = []
+    for entry in context_entries:
         context_payload = {
             "tenant_id": TENANT_ID,
             "domain_id": DOMAIN_ID,
             "source_type": "business_context",
-            "source_title": "Demo business context",
-            "raw_text": context_text,
+            "source_title": entry["title"],
+            "raw_text": entry["text"],
             "file_ids": file_ids or None,
             "metadata": {
                 "columns": ["plant_name", "region_name"],
@@ -291,43 +311,49 @@ def main() -> int:
         context_response = _request("POST", "/context/ingest", context_payload)
         _log_response(context_response)
         context_id = context_response.get("context_id")
+        if not context_id:
+            continue
+        context_ids.append(context_id)
 
-        if context_id:
-            extract_payload = {
-                "tenant_id": TENANT_ID,
-                "domain_id": DOMAIN_ID,
-                "context_id": context_id,
-                "extraction_types": [
-                    "abbreviations",
-                    "synonyms",
-                    "hierarchies",
-                    "metric_candidates",
-                    "question_intents",
-                ],
-            }
-            _log_request("POST", "/context/extract", extract_payload)
-            extract_response = _request("POST", "/context/extract", extract_payload)
-            _log_response(extract_response)
-            extraction_types = sorted((extract_response.get("extractions") or {}).keys())
-            if extraction_types:
-                print(f"Extraction types: {extraction_types}")
-            extraction_id = extract_response.get("extraction_id")
-            list_path = (
-                "/context"
+        extract_payload = {
+            "tenant_id": TENANT_ID,
+            "domain_id": DOMAIN_ID,
+            "context_id": context_id,
+            "extraction_types": [
+                "abbreviations",
+                "synonyms",
+                "hierarchies",
+                "metric_candidates",
+                "question_intents",
+            ],
+        }
+        _log_request("POST", "/context/extract/async", extract_payload)
+        extract_job = _request("POST", "/context/extract/async", extract_payload)
+        _log_response(extract_job)
+        extract_job_id = extract_job.get("job_id")
+        if not extract_job_id:
+            raise RuntimeError("Context extract async job_id missing in response")
+        extract_response = _wait_for_job_result(extract_job_id)
+        extraction_types = sorted((extract_response.get("extractions") or {}).keys())
+        if extraction_types:
+            print(f"Extraction types: {extraction_types}")
+        extraction_id = extract_response.get("extraction_id")
+        list_path = (
+            "/context"
+            f"?tenant_id={TENANT_ID}"
+        )
+        _log_request("GET", list_path)
+        list_response = _request("GET", list_path)
+        _log_response(list_response)
+        if extraction_id:
+            extraction_path = (
+                f"/context/extractions/{extraction_id}"
                 f"?tenant_id={TENANT_ID}"
+                f"&domain_id={DOMAIN_ID}"
             )
-            _log_request("GET", list_path)
-            list_response = _request("GET", list_path)
-            _log_response(list_response)
-            if extraction_id:
-                extraction_path = (
-                    f"/context/extractions/{extraction_id}"
-                    f"?tenant_id={TENANT_ID}"
-                    f"&domain_id={DOMAIN_ID}"
-                )
-                _log_request("GET", extraction_path)
-                extraction_response = _request("GET", extraction_path)
-                _log_response(extraction_response)
+            _log_request("GET", extraction_path)
+            extraction_response = _request("GET", extraction_path)
+            _log_response(extraction_response)
 
             if extraction_id:
                 apply_payload = {
@@ -336,9 +362,34 @@ def main() -> int:
                     "extraction_id": extraction_id,
                     "apply": {"entities": True, "hierarchies": True, "glossary": True, "metrics": True},
                 }
-                _log_request("POST", "/context/apply", apply_payload)
-                apply_response = _request("POST", "/context/apply", apply_payload)
+                _log_request("POST", "/context/apply/async", apply_payload)
+                apply_job = _request("POST", "/context/apply/async", apply_payload)
+                _log_response(apply_job)
+                apply_job_id = apply_job.get("job_id")
+                if not apply_job_id:
+                    raise RuntimeError("Context apply async job_id missing in response")
+                apply_response = _wait_for_job_result(apply_job_id)
                 _log_response(apply_response)
+
+    if context_ids:
+        if DEMO_ACTIVE_CONTEXT_ALL:
+            for context_id in context_ids:
+                patch_path = f"/context/{context_id}?tenant_id={TENANT_ID}"
+                patch_payload = {"status": "active"}
+                _log_request("PATCH", patch_path, patch_payload)
+                patch_response = _request("PATCH", patch_path, patch_payload)
+                _log_response(patch_response)
+        else:
+            active_index = DEMO_ACTIVE_CONTEXT_INDEX
+            if active_index < 0:
+                active_index = len(context_ids) - 1
+            if 0 <= active_index < len(context_ids):
+                active_context_id = context_ids[active_index]
+                patch_path = f"/context/{active_context_id}?tenant_id={TENANT_ID}"
+                patch_payload = {"status": "active"}
+                _log_request("PATCH", patch_path, patch_payload)
+                patch_response = _request("PATCH", patch_path, patch_payload)
+                _log_response(patch_response)
     else:
         print("No DEMO_CONTEXT_TEXT/DEMO_CONTEXT_FILE provided; skipping context ingestion.")
 

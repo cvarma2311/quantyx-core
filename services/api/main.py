@@ -100,6 +100,7 @@ from services.ai.onboarding.entity_mappings_store import (
     persist_entity_mapping,
     update_entity_mapping_status,
 )
+from services.ai.onboarding.entity_mapping_agents import attach_mapping_id_to_agents
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
 from services.ai.semantic_suggest import build_lineage_edges, build_schema_summary, suggest_semantic_model
@@ -127,20 +128,25 @@ from services.ai.context_store import (
     get_context_file,
     get_extraction,
     list_context,
+    list_active_context_ids,
     link_context_files,
     mark_context_processed,
     persist_extraction,
+    persist_extraction_agent,
     get_context_file_texts,
+    set_context_active,
     update_context,
     update_context_file_metadata,
     update_extraction,
 )
 from services.ai.context_extraction import extract_context
+from services.ai.context_merge import merge_extractions
 from services.ai.context_apply import apply_extractions
 from services.ai.glossary import fetch_glossary_terms
 from services.ai.sql_builder import Filter, build_query
 from services.ai.tenant_domain import get_tenant_domain, upsert_tenant_domain
 from services.ai.tenant_scope import get_tenant_scope, upsert_tenant_scope
+from services.ai.tenant_purge import purge_tenant_data
 from services.ai.policy_audit import log_policy_audit
 from services.ai.jobs_store import (
     claim_next_job,
@@ -267,7 +273,8 @@ from services.api.validators import (
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, _log_level, logging.INFO))
 logger = logging.getLogger("quantyx.api")
 
 app = FastAPI(title="quantyx-core-services API", version="0.1.0")
@@ -275,7 +282,7 @@ app = FastAPI(title="quantyx-core-services API", version="0.1.0")
 settings = load_settings()
 catalog = load_catalog_with_registry(settings, settings.metrics_catalog_path)
 LOW_CONFIDENCE_THRESHOLD = 0.7
-JOB_TYPES = {"scan_connection", "map_entities", "infer_models", "metrics_suggested"}
+JOB_TYPES = {"scan_connection", "map_entities", "infer_models", "metrics_suggested", "context_extract", "context_apply"}
 _job_worker_stop = threading.Event()
 _job_worker_thread: threading.Thread | None = None
 _REF_PATTERN = re.compile(r"\{\{\s*ref\('(?P<name>[^']+)'\)\s*\}\}")
@@ -533,6 +540,17 @@ def _ensure_canvas_owned(canvas_id: str, tenant_id: str, domain_id: str) -> None
         raise HTTPException(status_code=404, detail="Canvas not found")
 
 
+def _load_context_text(context_id: str) -> tuple[dict, str, list[str]]:
+    context_row = get_context(settings, context_id)
+    if not context_row:
+        raise HTTPException(status_code=404, detail="Context not found")
+    file_texts = get_context_file_texts(settings, context_id)
+    combined_parts = [context_row["raw_text"]] if context_row.get("raw_text") else []
+    combined_parts.extend(file_texts)
+    combined_text = "\n\n".join([part for part in combined_parts if part])
+    return context_row, combined_text, file_texts
+
+
 def _execute_job(job: dict) -> dict:
     job_type = job.get("job_type")
     payload = _load_job_payload(job.get("request_payload"))
@@ -548,7 +566,7 @@ def _execute_job(job: dict) -> dict:
     if job_type == "map_entities":
         use_llm = payload.pop("use_llm", True)
         request = OnboardScanRequest(**payload)
-        response = _run_onboard_map(request, use_llm=use_llm)
+        response = _run_onboard_map(request, use_llm=use_llm, job_id=job.get("job_id"))
         return response.model_dump()
     if job_type == "infer_models":
         request = InferModelsRequest(**payload)
@@ -557,8 +575,123 @@ def _execute_job(job: dict) -> dict:
     if job_type == "metrics_suggested":
         persist = payload.pop("persist", True)
         request = OnboardScanRequest(**payload)
-        response = suggested_metrics(request, persist=persist)
+        response = suggested_metrics(
+            request,
+            persist=persist,
+            progress_cb=lambda pct, stage: update_job_progress(settings, job.get("job_id"), pct, stage),
+        )
         return response.model_dump()
+    if job_type == "context_extract":
+        request = ContextExtractRequest(**payload)
+        if (request.mode or "").lower() == "parallel":
+            domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+            context_row, combined_text, _ = _load_context_text(request.context_id)
+            if context_row["tenant_id"] != request.tenant_id or context_row["domain_id"] != domain_id:
+                raise HTTPException(status_code=400, detail="Context tenant/domain mismatch")
+
+            requested = set(request.extraction_types or [])
+            agent_map = {
+                "context_glossary": ["abbreviations", "synonyms"],
+                "context_hierarchies": ["hierarchies"],
+                "context_metrics": ["metric_candidates"],
+                "context_questions": ["question_intents"],
+            }
+            agent_payloads: list[dict] = []
+            for agent_name, types in agent_map.items():
+                if requested and not requested.intersection(types):
+                    continue
+                extracted = extract_context(
+                    settings,
+                    raw_text=combined_text,
+                    extraction_types=types,
+                )
+                agent_payloads.append(
+                    {
+                        "agent_name": agent_name,
+                        "payload": extracted,
+                    }
+                )
+            merged = merge_extractions(agent_payloads)
+            extraction_id = persist_extraction(
+                settings,
+                context_id=request.context_id,
+                tenant_id=request.tenant_id,
+                domain_id=domain_id,
+                payload=merged,
+                llm_model=settings.openai_model,
+                agent_name="context_extract_merged",
+                parent_job_id=job.get("job_id"),
+            )
+            for agent in agent_payloads:
+                persist_extraction_agent(
+                    settings,
+                    extraction_id=extraction_id,
+                    agent_name=agent.get("agent_name") or "unknown",
+                    payload=agent.get("payload") or {},
+                )
+            mark_context_processed(settings, request.context_id)
+            return ContextExtractResponse(
+                extraction_id=extraction_id,
+                context_id=request.context_id,
+                extractions=merged,
+            ).model_dump()
+
+        response = extract_context_payload(request)
+        return response.model_dump()
+    if job_type in {"context_glossary", "context_hierarchies", "context_metrics", "context_questions"}:
+        request = ContextExtractRequest(**payload)
+        extraction_type = {
+            "context_glossary": ["abbreviations", "synonyms"],
+            "context_hierarchies": ["hierarchies"],
+            "context_metrics": ["metric_candidates"],
+            "context_questions": ["question_intents"],
+        }[job_type]
+        response = extract_context_payload(
+            ContextExtractRequest(
+                tenant_id=request.tenant_id,
+                domain_id=request.domain_id,
+                context_id=request.context_id,
+                extraction_types=extraction_type,
+                model=request.model,
+            )
+        )
+        return response.model_dump()
+    if job_type == "context_apply":
+        request = ContextApplyRequest(**payload)
+        domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+        extraction_row = get_extraction(settings, request.extraction_id)
+        if not extraction_row:
+            raise HTTPException(status_code=404, detail="Extraction not found")
+        if extraction_row["tenant_id"] != request.tenant_id or extraction_row["domain_id"] != domain_id:
+            raise HTTPException(status_code=400, detail="Extraction tenant/domain mismatch")
+        connection_id, database_name, schema_name, _ = _resolve_scope_values(
+            request.tenant_id,
+            domain_id,
+        )
+        updated = apply_extractions(
+            settings,
+            tenant_id=request.tenant_id,
+            domain_id=domain_id,
+            payload=extraction_row["payload"],
+            apply_flags=request.apply,
+            hierarchy_selection=request.hierarchy_selection,
+            source_context_id=extraction_row.get("context_id"),
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
+        if extraction_row.get("context_id"):
+            set_context_active(
+                settings,
+                tenant_id=request.tenant_id,
+                domain_id=domain_id,
+                context_id=extraction_row["context_id"],
+                connection_id=connection_id,
+                database_name=database_name,
+                schema_name=schema_name,
+                is_active=True,
+            )
+        return ContextApplyResponse(status="applied", updated=updated).model_dump()
     raise ValueError(f"Unsupported job_type: {job_type}")
 
 
@@ -568,14 +701,19 @@ def _job_worker_loop() -> None:
     while not _job_worker_stop.is_set():
         job = claim_next_job(settings)
         if not job:
+            logger.debug("Job worker idle (no queued jobs)")
             _job_worker_stop.wait(poll_seconds)
             continue
         job_id = job.get("job_id")
+        job_type = job.get("job_type")
+        logger.info("Job claimed | job_id=%s job_type=%s", job_id, job_type)
         try:
             current = get_job(settings, job_id)
             if current and current.get("status") == "canceled":
+                logger.info("Job canceled before start | job_id=%s", job_id)
                 continue
             update_job_progress(settings, job_id, progress_pct=0, progress_stage="started")
+            logger.info("Job started | job_id=%s job_type=%s", job_id, job_type)
             result = _execute_job(job)
             current = get_job(settings, job_id)
             if current and current.get("status") == "canceled":
@@ -589,6 +727,7 @@ def _job_worker_loop() -> None:
                 continue
             update_job_progress(settings, job_id, progress_pct=100, progress_stage="completed")
             update_job_status(settings, job_id, "completed", result_payload=result, error_message=None)
+            logger.info("Job completed | job_id=%s job_type=%s", job_id, job_type)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Job failed: %s", job_id)
             update_job_status(settings, job_id, "failed", result_payload=None, error_message=str(exc))
@@ -1399,6 +1538,12 @@ def get_job_status(job_id: str) -> JobStatusResponse:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     job.pop("scope_id", None)
+    created_at = job.get("created_at")
+    if created_at is not None and hasattr(created_at, "isoformat"):
+        job["created_at"] = created_at.isoformat()
+    updated_at = job.get("updated_at")
+    if updated_at is not None and hasattr(updated_at, "isoformat"):
+        job["updated_at"] = updated_at.isoformat()
     return JobStatusResponse(**job)
 
 
@@ -1575,6 +1720,24 @@ def get_tenant_domain_api(tenant_id: str) -> dict:
     if not row:
         raise HTTPException(status_code=404, detail="Tenant domain not found")
     return row
+
+
+@app.post(
+    "/tenant/purge",
+    tags=["admin"],
+    summary="Purge tenant data",
+    description="Delete all rows in public tables that contain tenant_id.",
+)
+def purge_tenant(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    confirm = payload.get("confirm")
+    dry_run = bool(payload.get("dry_run"))
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    if not dry_run and confirm is not True:
+        raise HTTPException(status_code=400, detail="confirm=true is required to purge")
+    results = purge_tenant_data(settings, tenant_id, dry_run=dry_run)
+    return {"ok": True, "dry_run": dry_run, "tenant_id": tenant_id, "tables": results}
 
 
 @app.post(
@@ -4335,6 +4498,26 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
     )
 
 
+@app.post(
+    "/context/extract/async",
+    response_model=JobCreateResponse,
+    tags=["context"],
+    summary="Extract structured context (async)",
+    description="Queue LLM-assisted extraction as a background job.",
+)
+def extract_context_async(payload: ContextExtractRequest) -> JobCreateResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    job = create_job(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        job_type="context_extract",
+        payload=payload.model_dump(),
+        idempotency_key=None,
+    )
+    return JobCreateResponse(job_id=job.get("job_id"), status=job.get("status", "queued"))
+
+
 @app.get(
     "/context/extractions/{extraction_id}",
     response_model=ContextExtractionResponse,
@@ -4415,6 +4598,21 @@ def get_context_extraction(
                                 },
                             },
                         }
+                        ,
+                        "apply_selected_hierarchies": {
+                            "summary": "Apply only selected hierarchies",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "extraction_id": "ext_123",
+                                "apply": {
+                                    "entities": True,
+                                    "hierarchies": True,
+                                    "glossary": True,
+                                    "metrics": True,
+                                },
+                                "hierarchy_selection": {"names": ["geography"], "apply_all": False},
+                            },
+                        }
                     }
                 }
             }
@@ -4475,16 +4673,48 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
         domain_id=domain_id,
         payload=extraction_row["payload"],
         apply_flags=payload.apply,
+        hierarchy_selection=payload.hierarchy_selection,
         source_context_id=extraction_row.get("context_id"),
         connection_id=connection_id,
         database_name=database_name,
         schema_name=schema_name,
     )
+    if extraction_row.get("context_id"):
+        set_context_active(
+            settings,
+            tenant_id=payload.tenant_id,
+            domain_id=domain_id,
+            context_id=extraction_row["context_id"],
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+            is_active=True,
+        )
     logger.info(
         "context.apply: complete | %s",
         {"extraction_id": payload.extraction_id, "updated": updated},
     )
     return ContextApplyResponse(status="applied", updated=updated)
+
+
+@app.post(
+    "/context/apply/async",
+    response_model=JobCreateResponse,
+    tags=["context"],
+    summary="Apply extracted context (async)",
+    description="Queue context apply as a background job.",
+)
+def apply_context_async(payload: ContextApplyRequest) -> JobCreateResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    job = create_job(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        job_type="context_apply",
+        payload=payload.model_dump(),
+        idempotency_key=None,
+    )
+    return JobCreateResponse(job_id=job.get("job_id"), status=job.get("status", "queued"))
 
 
 @app.patch(
@@ -4500,6 +4730,14 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
                         "update_title": {
                             "summary": "Update title and status",
                             "value": {"source_title": "Ops glossary v2", "status": "processed"},
+                        },
+                        "activate_context": {
+                            "summary": "Activate context",
+                            "value": {"status": "active"},
+                        },
+                        "deactivate_context": {
+                            "summary": "Deactivate context",
+                            "value": {"status": "inactive"},
                         },
                         "update_metadata": {
                             "summary": "Update metadata",
@@ -4526,6 +4764,18 @@ def patch_context(
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
     if not updates:
         return {"ok": True}
+    status = updates.get("status")
+    if status in {"active", "inactive"}:
+        set_context_active(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            context_id=context_id,
+            connection_id=context_row.get("connection_id"),
+            database_name=context_row.get("database_name"),
+            schema_name=context_row.get("schema_name"),
+            is_active=status == "active",
+        )
     update_context(settings, context_id, updates)
     return {"ok": True}
 
@@ -4647,6 +4897,14 @@ def entities(
         tenant_id,
         domain_id,
     )
+    active_context_ids = list_active_context_ids(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id,
+        database,
+        schema,
+    )
     entity_overrides, hierarchy_overrides = load_overrides(
         settings,
         tenant_id,
@@ -4654,6 +4912,7 @@ def entities(
         connection_id=connection_id,
         database_name=database,
         schema_name=schema,
+        context_ids=active_context_ids or None,
     )
     entity_page = [
         {
@@ -4675,6 +4934,8 @@ def entities(
             "name": item.get("hierarchy_name"),
             "levels": item.get("levels", []),
             "description": item.get("description"),
+            "context_id": item.get("context_id"),
+            "hierarchy_group": item.get("hierarchy_group"),
             "lifecycle_status": item.get("lifecycle_status"),
             "source_type": item.get("source_type"),
             "source_run_id": item.get("source_run_id"),
@@ -4738,6 +4999,8 @@ def entities_all(tenant_id: str) -> EntitiesAllResponse:
                 "name": hierarchy.get("hierarchy_name"),
                 "levels": hierarchy.get("levels", []),
                 "description": hierarchy.get("description"),
+                "context_id": hierarchy.get("context_id"),
+                "hierarchy_group": hierarchy.get("hierarchy_group"),
                 "lifecycle_status": hierarchy.get("lifecycle_status"),
                 "source_type": hierarchy.get("source_type"),
                 "source_run_id": hierarchy.get("source_run_id"),
@@ -4757,12 +5020,26 @@ def entities_all(tenant_id: str) -> EntitiesAllResponse:
 )
 def hierarchies(
     tenant_id: str,
+    context_id: str | None = None,
+    group_by_context: bool = False,
 ) -> dict:
     domain_id = _resolve_domain_id(tenant_id, None)
     connection_id, database, schema, _ = _resolve_scope_values(
         tenant_id,
         domain_id,
     )
+    active_context_ids: list[str] | None = None
+    if context_id:
+        active_context_ids = [context_id]
+    elif not group_by_context:
+        active_context_ids = list_active_context_ids(
+            settings,
+            tenant_id,
+            domain_id,
+            connection_id,
+            database,
+            schema,
+        )
     _, hierarchy_overrides = load_overrides(
         settings,
         tenant_id,
@@ -4770,12 +5047,37 @@ def hierarchies(
         connection_id=connection_id,
         database_name=database,
         schema_name=schema,
+        context_ids=active_context_ids or None,
     )
+    sorted_rows = sorted(hierarchy_overrides, key=lambda item: item.get("hierarchy_name", ""))
+    if group_by_context:
+        grouped: dict[str, list[dict]] = {}
+        for item in sorted_rows:
+            ctx_id = item.get("context_id") or "unknown"
+            grouped.setdefault(ctx_id, []).append(
+                {
+                    "name": item.get("hierarchy_name"),
+                    "levels": item.get("levels", []),
+                    "description": item.get("description"),
+                    "context_id": item.get("context_id"),
+                    "hierarchy_group": item.get("hierarchy_group"),
+                    "lifecycle_status": item.get("lifecycle_status"),
+                    "source_type": item.get("source_type"),
+                    "source_run_id": item.get("source_run_id"),
+                    "artifact_key": item.get("artifact_key"),
+                    "version_no": item.get("version_no"),
+                    "is_current": item.get("is_current"),
+                }
+            )
+        return {"contexts": [{"context_id": key, "hierarchies": value} for key, value in grouped.items()]}
+
     hierarchies_payload = [
         {
             "name": item.get("hierarchy_name"),
             "levels": item.get("levels", []),
             "description": item.get("description"),
+            "context_id": item.get("context_id"),
+            "hierarchy_group": item.get("hierarchy_group"),
             "lifecycle_status": item.get("lifecycle_status"),
             "source_type": item.get("source_type"),
             "source_run_id": item.get("source_run_id"),
@@ -4783,7 +5085,7 @@ def hierarchies(
             "version_no": item.get("version_no"),
             "is_current": item.get("is_current"),
         }
-        for item in sorted(hierarchy_overrides, key=lambda item: item.get("hierarchy_name", ""))
+        for item in sorted_rows
     ]
     return {"hierarchies": hierarchies_payload}
 
@@ -4842,6 +5144,7 @@ def update_entity(
             "description": payload.description,
             "join_key": payload.join_key,
             "examples": payload.examples,
+            "lifecycle_status": payload.status,
         },
     )
     return {"ok": True}
@@ -4862,6 +5165,7 @@ def update_entity(
                             "value": {
                                 "levels": ["sbu", "zone", "region", "sales_area"],
                                 "description": "Sales organization rollup",
+                                "status": "certified",
                             },
                         }
                     }
@@ -4899,6 +5203,9 @@ def update_hierarchy(
             "hierarchy_name": hierarchy_name,
             "levels": payload.levels,
             "description": payload.description,
+            "context_id": payload.context_id,
+            "hierarchy_group": payload.hierarchy_group,
+            "lifecycle_status": payload.status,
         },
     )
     return {"ok": True}
@@ -5178,6 +5485,31 @@ def create_review(payload: ReviewCreateRequest) -> ReviewResponse:
     return ReviewResponse(review_id=review_id, status=payload.status)
 
 
+@app.post(
+    "/glossary/certify",
+    tags=["admin"],
+    summary="Certify glossary terms",
+    description="Mark glossary terms as certified for a tenant (and optional domain).",
+)
+def certify_glossary(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    domain_id = payload.get("domain_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    params = [tenant_id]
+    sql = """
+        UPDATE public.quantyx_glossary_terms
+           SET lifecycle_status = 'certified',
+               updated_at = now()
+         WHERE tenant_id = %s
+    """
+    if domain_id:
+        sql += " AND domain_id = %s"
+        params.append(domain_id)
+    execute_non_query(settings, sql, params)
+    return {"ok": True}
+
+
 @app.get(
     "/review",
     response_model=ReviewListResponse,
@@ -5230,6 +5562,14 @@ def review_summary(
         tenant_id,
         domain_id,
     )
+    active_context_ids = list_active_context_ids(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id,
+        database,
+        schema,
+    )
     scoped_scan = load_latest_scan_for_scope(
         settings, tenant_id, domain_id, connection_id, database, schema
     )
@@ -5246,6 +5586,7 @@ def review_summary(
         connection_id=connection_id,
         database_name=database,
         schema_name=schema,
+        context_ids=active_context_ids or None,
     )
     facts = list_facts(settings, tenant_id, domain_id, connection_id, database, schema)
     dimensions = list_dimensions(settings, tenant_id, domain_id, connection_id, database, schema)
@@ -5282,8 +5623,10 @@ def review_summary(
             "name": hierarchy.get("hierarchy_name"),
             "levels": hierarchy.get("levels", []),
             "description": hierarchy.get("description"),
+            "context_id": hierarchy.get("context_id"),
+            "hierarchy_group": hierarchy.get("hierarchy_group"),
         }
-        status = review_map.get(("hierarchies", hierarchy.get("hierarchy_name")))
+        status = review_map.get(("hierarchies", hierarchy.get("artifact_key") or hierarchy.get("hierarchy_name")))
         if status:
             entry["status"] = status.get("status")
             entry["review_id"] = status.get("review_id")
@@ -6004,6 +6347,7 @@ def onboard_map(
 def _run_onboard_map(
     request: OnboardScanRequest,
     use_llm: bool = True,
+    job_id: str | None = None,
 ) -> OnboardMapResponse:
     tenant_id = request.tenant_id
     if not tenant_id:
@@ -6030,7 +6374,21 @@ def _run_onboard_map(
     llm_candidates: list[dict] = []
     if use_llm:
         try:
-            llm_candidates = llm_map_entities(settings, tables, ontology, glossary=glossary)
+            llm_candidates = llm_map_entities(
+                settings,
+                tables,
+                ontology,
+                glossary=glossary,
+                agent_context={
+                    "job_id": job_id,
+                    "mapping_id": None,
+                    "tenant_id": tenant_id,
+                    "domain_id": domain_id,
+                    "connection_id": connection_id,
+                    "database_name": database_name,
+                    "schema_name": schema_name,
+                },
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     candidates = _merge_entity_candidates(rule_candidates, llm_candidates)
@@ -6056,6 +6414,8 @@ def _run_onboard_map(
         low_confidence_candidates,
         LOW_CONFIDENCE_THRESHOLD,
     )
+    if job_id:
+        attach_mapping_id_to_agents(settings, job_id=job_id, mapping_id=mapping_id)
     return OnboardMapResponse(
         mapping_id=mapping_id,
         tenant_id=tenant_id,
@@ -6489,7 +6849,7 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                         "measures": fact.get("measures", []),
                         "dimensions": fact.get("dimensions", []),
                         "description": fact.get("description"),
-                        "status": fact.get("status", "draft"),
+                        "status": fact.get("status", "suggested"),
                         "confidence": fact.get("confidence", 0.85),
                     }
                 )
@@ -6504,7 +6864,7 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                         "keys": dim.get("keys", []),
                         "attributes": dim.get("attributes", []),
                         "description": dim.get("description"),
-                        "status": dim.get("status", "draft"),
+                        "status": dim.get("status", "suggested"),
                         "confidence": dim.get("confidence", 0.8),
                     }
                 )
@@ -6530,7 +6890,7 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                 "measures": fact.get("measures", []),
                 "dimensions": fact.get("dimensions", []),
                 "description": fact.get("description"),
-                "lifecycle_status": fact.get("status", "draft"),
+                "lifecycle_status": fact.get("status", "suggested"),
                 "source_type": "llm" if request.use_llm else "rule",
             },
         )
@@ -6551,7 +6911,7 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                 "keys": dim.get("keys", []),
                 "attributes": dim.get("attributes", []),
                 "description": dim.get("description"),
-                "lifecycle_status": dim.get("status", "draft"),
+                "lifecycle_status": dim.get("status", "suggested"),
                 "source_type": "llm" if request.use_llm else "rule",
             },
         )
@@ -6686,9 +7046,15 @@ def suggested_metrics_async(
         },
     },
 )
-def suggested_metrics(request: OnboardScanRequest, persist: bool = True) -> SuggestedMetricsResponse:
+def suggested_metrics(
+    request: OnboardScanRequest,
+    persist: bool = True,
+    progress_cb: Callable[[int, str], None] | None = None,
+) -> SuggestedMetricsResponse:
     if not request.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
+    if progress_cb:
+        progress_cb(5, "resolve_scope")
     domain_id = _resolve_domain_id(request.tenant_id, None)
     connection_id, database_name, schema_name, tables = _resolve_scope_values(
         request.tenant_id,
@@ -6705,7 +7071,18 @@ def suggested_metrics(request: OnboardScanRequest, persist: bool = True) -> Sugg
     if not schema_payload:
         raise HTTPException(status_code=400, detail="No scan results found for scope")
     tables = schema_payload.get("tables", [])
+    logger.info(
+        "metrics_suggested: start | tenant=%s domain=%s tables=%s persist=%s",
+        request.tenant_id,
+        domain_id,
+        len(tables),
+        persist,
+    )
+    if progress_cb:
+        progress_cb(20, "detect_measures")
     measures = detect_measures(tables)
+    if progress_cb:
+        progress_cb(40, "detect_time_columns")
     low_confidence_measures = [
         measure
         for measure in measures
@@ -6717,8 +7094,12 @@ def suggested_metrics(request: OnboardScanRequest, persist: bool = True) -> Sugg
         if measure.get("confidence", 0) >= LOW_CONFIDENCE_THRESHOLD
     ]
     time_columns = detect_time_columns(tables)
+    if progress_cb:
+        progress_cb(55, "map_entities")
     ontology = load_pack(f"packs/{domain_id}").get("ontology", {})
     entity_candidates = map_entities(tables, ontology)
+    if progress_cb:
+        progress_cb(75, "persist_metrics" if persist else "skip_persist")
     if persist:
         persist_suggested_metrics(
             settings,
@@ -6729,6 +7110,8 @@ def suggested_metrics(request: OnboardScanRequest, persist: bool = True) -> Sugg
             schema_name,
             measures,
         )
+    if progress_cb:
+        progress_cb(95, "finalize_response")
     return SuggestedMetricsResponse(
         measures=high_confidence_measures,
         low_confidence_measures=low_confidence_measures,

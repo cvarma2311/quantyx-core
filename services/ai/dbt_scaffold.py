@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import urllib.request
+import time
 import re
 from pathlib import Path
 from typing import Any
@@ -10,6 +13,7 @@ from uuid import uuid4
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, run_query
 
+logger = logging.getLogger(__name__)
 
 def infer_models_from_scan(tables: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     facts: list[dict[str, Any]] = []
@@ -66,6 +70,8 @@ def _llm_generate_scaffold(
 ) -> dict[str, Any] | None:
     if not settings.openai_api_key:
         return None
+    timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", "180"))
+    max_retries = int(os.getenv("OPENAI_RETRIES", "2"))
     system_prompt = (
         "You generate dbt model scaffolding from table metadata. "
         "Return JSON only. Include models with sql, descriptions, and columns."
@@ -97,6 +103,12 @@ def _llm_generate_scaffold(
             ]
         },
     }
+    logger.debug(
+        "llm.dbt_scaffold: request | model=%s tables=%s context_chars=%s",
+        settings.openai_model,
+        len(tables),
+        len(context_text or ""),
+    )
     payload = {
         "model": settings.openai_model,
         "messages": [
@@ -115,8 +127,18 @@ def _llm_generate_scaffold(
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        body = json.loads(response.read().decode("utf-8"))
+    attempt = 0
+    while True:
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            break
+        except Exception:
+            attempt += 1
+            logger.warning("llm.dbt_scaffold: retry | attempt=%s/%s", attempt, max_retries)
+            if attempt > max_retries:
+                return None
+            time.sleep(min(5 * attempt, 15))
     content = body["choices"][0]["message"]["content"]
     try:
         parsed = json.loads(content)
@@ -124,6 +146,7 @@ def _llm_generate_scaffold(
         return None
     if not isinstance(parsed, dict) or "models" not in parsed:
         return None
+    logger.debug("llm.dbt_scaffold: response | models=%s", len(parsed.get("models", []) or []))
     return parsed
 
 
