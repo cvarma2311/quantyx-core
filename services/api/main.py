@@ -7283,17 +7283,59 @@ def _resolve_metrics(
 
     if request.question:
         logger.info("resolving question: %s", request.question)
-        resolved = resolve_question(
-            request.question,
-            catalog,
-            settings,
-            glossary=glossary,
-            allowed_dimensions=allowed_dimensions,
-        )
-        logger.info("resolver output: %s", resolved)
-        metrics = resolved.get("metrics", [])
-        dimensions = resolved.get("dimensions", [])
-        filters = resolved.get("filters", [])
+        deterministic_metrics = _deterministic_metrics_from_question(request.question, catalog)
+        if deterministic_metrics:
+            logger.info("resolver.deterministic_metrics | metrics=%s", deterministic_metrics)
+            metric_fact_cols: set[str] = set()
+            for metric_name in deterministic_metrics:
+                metric = catalog.metrics.get(metric_name)
+                if not metric:
+                    continue
+                metric_fact_cols.update(_fact_columns_for_metric(metric.sql, settings.db_schema))
+            llm_allowed_dimensions = sorted(metric_fact_cols) if metric_fact_cols else allowed_dimensions
+            deterministic_dims = _deterministic_dimensions_from_question(
+                request.question,
+                glossary,
+                llm_allowed_dimensions,
+            )
+            deterministic_filters = _deterministic_date_filters_from_question(
+                request.question,
+                llm_allowed_dimensions,
+            )
+            if deterministic_dims or deterministic_filters:
+                logger.info(
+                    "resolver.deterministic_dims_filters | dimensions=%s filters=%s",
+                    deterministic_dims,
+                    deterministic_filters,
+                )
+                metrics = deterministic_metrics
+                dimensions = deterministic_dims
+                filters = deterministic_filters
+            else:
+                resolved = resolve_question(
+                    request.question,
+                    catalog,
+                    settings,
+                    allowed_metrics=deterministic_metrics,
+                    glossary=glossary,
+                    allowed_dimensions=llm_allowed_dimensions,
+                )
+                logger.info("resolver output (dims/filters): %s", resolved)
+                metrics = deterministic_metrics
+                dimensions = resolved.get("dimensions", [])
+                filters = resolved.get("filters", [])
+        else:
+            resolved = resolve_question(
+                request.question,
+                catalog,
+                settings,
+                glossary=glossary,
+                allowed_dimensions=allowed_dimensions,
+            )
+            logger.info("resolver output: %s", resolved)
+            metrics = resolved.get("metrics", [])
+            dimensions = resolved.get("dimensions", [])
+            filters = resolved.get("filters", [])
         if allowed_dimensions:
             allowed_metrics_set = {m for m in catalog.metric_names()}
             if allowed_metrics_set:
@@ -7312,6 +7354,21 @@ def _resolve_metrics(
         if expanded_dimensions != dimensions:
             logger.info("resolver expanded dimensions from glossary: %s -> %s", dimensions, expanded_dimensions)
             dimensions = expanded_dimensions
+        if allowed_dimensions:
+            allowed_set = {d.lower() for d in allowed_dimensions}
+            filtered_dims = [d for d in dimensions if d.lower() in allowed_set]
+            if filtered_dims != dimensions:
+                logger.info("resolver filtered dimensions to allowed: %s -> %s", dimensions, filtered_dims)
+                dimensions = filtered_dims
+            filtered_filters = []
+            for flt in filters:
+                payload = flt if isinstance(flt, dict) else flt.model_dump()
+                field = payload.get("field")
+                if isinstance(field, str) and field.lower() in allowed_set:
+                    filtered_filters.append(payload)
+            if len(filtered_filters) != len(filters):
+                logger.info("resolver filtered filters to allowed fields: %s -> %s", filters, filtered_filters)
+                filters = filtered_filters
         if not metrics:
             question = request.question.lower()
             if "required run rate" in question:
@@ -7369,6 +7426,16 @@ def _resolve_metrics(
                     restricted_dimensions,
                     expanded_dimensions,
                 )
+            if allowed_dimensions:
+                allowed_set = {d.lower() for d in allowed_dimensions}
+                filtered_dims = [d for d in expanded_dimensions if d.lower() in allowed_set]
+                if filtered_dims != expanded_dimensions:
+                    logger.info(
+                        "resolver filtered dimensions to allowed (restricted): %s -> %s",
+                        expanded_dimensions,
+                        filtered_dims,
+                    )
+                    expanded_dimensions = filtered_dims
             return (
                 resolved.get("metrics", []),
                 expanded_dimensions,
@@ -7514,6 +7581,30 @@ def _expand_relative_date_filters(filters: list[dict]) -> list[dict]:
     return expanded
 
 
+def _coerce_relative_date_filter_fields(
+    filters: list[dict],
+    allowed_dimensions: list[str] | None,
+) -> list[dict]:
+    if not allowed_dimensions:
+        return filters
+    allowed_set = {d.lower() for d in allowed_dimensions}
+    if "process_date" not in allowed_set and "pdate" not in allowed_set and "date_day" not in allowed_set:
+        return filters
+    coerced = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        value = payload.get("value")
+        if isinstance(value, str) and value.strip().lower() == "last week":
+            if "process_date" in allowed_set:
+                payload["field"] = "process_date"
+            elif "pdate" in allowed_set:
+                payload["field"] = "pdate"
+            elif "date_day" in allowed_set:
+                payload["field"] = "date_day"
+        coerced.append(payload)
+    return coerced
+
+
 def _filter_dimension_filters(filters: list[dict], dimension_names: set[str]) -> list[dict]:
     filtered = []
     for flt in filters:
@@ -7648,6 +7739,106 @@ def _normalize_sales_quarter_filters(filters: list[dict], metric_names: list[str
             continue
         normalized.append(flt)
     return normalized
+
+
+def _normalize_text_for_match(text: str) -> list[str]:
+    cleaned = re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+    tokens = [tok for tok in cleaned.split() if tok]
+    return tokens
+
+
+def _deterministic_metrics_from_question(question: str, catalog: MetricCatalog) -> list[str]:
+    if not question:
+        return []
+    stopwords = {
+        "the", "a", "an", "by", "of", "for", "in", "on", "to", "from", "last", "this",
+        "that", "week", "month", "year", "today", "yesterday", "total", "vs", "and",
+    }
+    unit_tokens = {"mt", "tmt", "mmt", "kg", "kgs", "lakh", "cyl", "cyls", "percent", "pct"}
+    q_tokens = [t for t in _normalize_text_for_match(question) if t not in stopwords]
+    if not q_tokens:
+        return []
+
+    scored: list[tuple[float, int, str]] = []
+    for name in catalog.metric_names():
+        m_tokens_raw = _normalize_text_for_match(name)
+        m_tokens = [t for t in m_tokens_raw if t not in stopwords]
+        m_tokens_no_units = [t for t in m_tokens if t not in unit_tokens]
+        base_tokens = m_tokens_no_units or m_tokens
+        if not base_tokens:
+            continue
+        overlap = len(set(base_tokens) & set(q_tokens))
+        score = overlap / max(1, len(set(base_tokens)))
+        if score >= 0.5:
+            scored.append((score, len(base_tokens), name))
+
+    if not scored:
+        return []
+    scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    top_score = scored[0][0]
+    winners = [name for score, _, name in scored if score == top_score]
+    return winners[:1]
+
+
+def _deterministic_dimensions_from_question(
+    question: str,
+    glossary: list[dict] | None,
+    allowed_dimensions: list[str] | None,
+) -> list[str]:
+    if not question or not glossary or not allowed_dimensions:
+        return []
+    question_l = question.lower()
+    question_tokens = set(_normalize_text_for_match(question))
+    allowed_set = {d.lower() for d in allowed_dimensions}
+    resolved: list[str] = []
+    for term in glossary:
+        normalized = term.get("normalized_term") or term.get("term")
+        if not normalized:
+            continue
+        normalized_l = str(normalized).strip().lower()
+        synonyms = [s for s in (term.get("synonyms") or []) if s]
+        synonyms_l = [str(s).strip().lower() for s in synonyms]
+        mention = normalized_l in question_l or normalized_l in question_tokens or any(
+            s in question_l or s in question_tokens for s in synonyms_l
+        )
+        if not mention:
+            continue
+        # include all matching columns from normalized term + synonyms that exist in fact table
+        if normalized_l in allowed_set:
+            resolved.append(normalized_l)
+        for syn_l in synonyms_l:
+            if syn_l in allowed_set:
+                resolved.append(syn_l)
+    # de-dupe preserving order
+    seen = set()
+    result = []
+    for dim in resolved:
+        if dim not in seen:
+            seen.add(dim)
+            result.append(dim)
+    if result:
+        logger.info("resolver.deterministic_dim_match | question=%s dims=%s", question, result)
+    return result
+
+
+def _deterministic_date_filters_from_question(
+    question: str,
+    allowed_dimensions: list[str] | None,
+) -> list[dict]:
+    if not question or not allowed_dimensions:
+        return []
+    question_l = question.lower()
+    if "last week" not in question_l:
+        return []
+    allowed_set = {d.lower() for d in allowed_dimensions}
+    date_field = None
+    for candidate in ("process_date", "pdate", "date_day"):
+        if candidate in allowed_set:
+            date_field = candidate
+            break
+    if not date_field:
+        return []
+    return [{"field": date_field, "operator": "IN", "value": "last week"}]
 
 
 def _extract_top_n(question: str | None) -> int | None:
@@ -7831,6 +8022,13 @@ def _dimension_candidates_for_scope(
 )
 def query(request: QueryRequest) -> QueryResult:
     start_time = time.perf_counter()
+    last_step = start_time
+    def _log_step(name: str) -> None:
+        nonlocal last_step
+        now = time.perf_counter()
+        logger.info("query.timing | step=%s elapsed_ms=%.1f total_ms=%.1f",
+                    name, (now - last_step) * 1000, (now - start_time) * 1000)
+        last_step = now
     sql_text = None
     row_count = None
     glossary = None
@@ -7848,6 +8046,7 @@ def query(request: QueryRequest) -> QueryResult:
         )
         logger.info("query.scope | domain=%s connection=%s db=%s schema=%s tables=%s",
                     domain_id, connection_id, database_name, schema_name, tables)
+        _log_step("scope_resolved")
         _augment_catalog_dimensions_from_facts(
             request.tenant_id,
             domain_id,
@@ -7855,6 +8054,7 @@ def query(request: QueryRequest) -> QueryResult:
             database_name,
             schema_name,
         )
+        _log_step("catalog_augmented")
         facts_for_scope = list_facts(
             settings,
             tenant_id=request.tenant_id,
@@ -7863,11 +8063,13 @@ def query(request: QueryRequest) -> QueryResult:
             database_name=database_name,
             schema_name=schema_name,
         )
+        _log_step("facts_listed")
         for fact in facts_for_scope:
             table_name = fact.get("table_name")
             if table_name:
                 db_dims = _list_fact_table_columns(schema_name, table_name)
                 fact_dims_map[table_name] = set(db_dims)
+        _log_step("fact_columns_loaded")
         dimension_candidates = _dimension_candidates_for_scope(
             request.tenant_id,
             domain_id,
@@ -7876,14 +8078,17 @@ def query(request: QueryRequest) -> QueryResult:
             schema_name,
         )
         logger.info("query.fact_dim_candidates | count=%s dims=%s", len(dimension_candidates), dimension_candidates)
+        _log_step("dimension_candidates")
         glossary = fetch_glossary_terms(settings, request.tenant_id, domain_id)
         logger.info("query.glossary | loaded=%s", len(glossary or []))
         contract = get_active_semantic_contract(settings, request.tenant_id, domain_id)
+        _log_step("glossary_contract")
     metric_names, dimensions, filters = _resolve_metrics(
         request,
         glossary=glossary,
         allowed_dimensions=dimension_candidates,
     )
+    _log_step("resolve_metrics")
     logger.info("query.resolve_metrics | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     if metric_names or dimensions or filters:
         metric_lookup = {name.lower(): name for name in catalog.metrics.keys()}
@@ -7905,6 +8110,7 @@ def query(request: QueryRequest) -> QueryResult:
             metric_names = ["current_run_rate_mmt", "required_run_rate_mmt"]
             dimensions = ["sales_area_name", "month_name", "fiscal_year"]
     logger.info("metrics: %s", metric_names)
+    filters = _coerce_relative_date_filter_fields(filters, dimension_candidates)
     filters = _expand_relative_date_filters(filters)
     filters = _coerce_sbu_filters(filters)
     filters = _coerce_product_filters(filters)
@@ -7912,6 +8118,7 @@ def query(request: QueryRequest) -> QueryResult:
     filters = _normalize_filters(filters, settings)
     filters = _normalize_sales_quarter_filters(filters, metric_names)
     filters = _filter_dimension_filters(filters, set(catalog.dimensions.keys()))
+    _log_step("normalize_inputs")
     logger.info("query.coerced | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     logger.info("dimensions: %s", dimensions)
     logger.info("filters: %s", filters)
@@ -7944,6 +8151,7 @@ def query(request: QueryRequest) -> QueryResult:
             raise HTTPException(status_code=400, detail=f"Unknown metric: {metric_name}")
         metrics.append(catalog.metrics[metric_name])
         metrics_all.append(catalog.metrics[metric_name])
+    _log_step("metrics_loaded")
 
     filter_fields = []
     for flt in filters:
@@ -7960,8 +8168,18 @@ def query(request: QueryRequest) -> QueryResult:
         set(catalog.dimensions.keys()),
         metric_dimension_set,
     )
+    _log_step("alias_coerced")
     logger.info("query.dim_alias | dimensions=%s filters=%s metric_dims=%s",
                 dimensions, filters, sorted(metric_dimension_set))
+    if metric_dimension_set:
+        filtered_dimensions = [dim for dim in dimensions if dim in metric_dimension_set]
+        if filtered_dimensions != dimensions:
+            logger.info(
+                "query.dimensions_filtered_to_fact | before=%s after=%s",
+                dimensions,
+                filtered_dimensions,
+            )
+            dimensions = filtered_dimensions
     filter_fields = []
     for flt in filters:
         payload = flt if isinstance(flt, dict) else flt.model_dump()
@@ -7989,6 +8207,7 @@ def query(request: QueryRequest) -> QueryResult:
         metrics = filtered_metrics
         logger.info("query.filtered_metrics | count=%s names=%s",
                     len(metrics), [m.name for m in metrics])
+    _log_step("metric_filtering")
 
     if request.question and metric_names and len(metrics) != len(metric_names):
         allowed_metrics = [metric.name for metric in metrics]
@@ -8066,6 +8285,7 @@ def query(request: QueryRequest) -> QueryResult:
                 logger.info("query.ad_hoc_dimension | name=%s base_table=%s", dim_name, base_table)
                 continue
         raise HTTPException(status_code=400, detail=f"Unknown dimension: {dim_name}")
+    _log_step("dimension_objects")
 
     built_filters: List[Filter] = []
     for flt in filters:
@@ -8076,6 +8296,7 @@ def query(request: QueryRequest) -> QueryResult:
         built_filters.append(
             Filter(field=payload["field"], operator=payload["operator"], value=normalized_value)
         )
+    _log_step("filter_objects")
 
     try:
         built = build_query(
@@ -8086,12 +8307,14 @@ def query(request: QueryRequest) -> QueryResult:
             schema=settings.db_schema,
             limit=request.limit,
         )
+        _log_step("sql_built")
         sql_text = built.sql
         logger.info("sql: %s", built.sql)
         logger.info("params: %s", built.params)
         rows = run_query(settings, built.sql, built.params)
         row_count = len(rows)
         logger.info("rows: %s", row_count)
+        _log_step("sql_executed")
     except Exception as exc:
         error_message = str(exc)
         execution_ms = int((time.perf_counter() - start_time) * 1000)
