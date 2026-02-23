@@ -101,19 +101,17 @@ def get_chart_request(settings: Settings, chart_id: str) -> dict | None:
 def get_latest_chart_request_by_question(
     settings: Settings,
     tenant_id: str,
-    domain_id: str | None,
     question: str,
 ) -> dict | None:
     sql = """
         SELECT chart_id, tenant_id, domain_id, question, query_payload, status, created_at
           FROM public.quantyx_chart_requests
          WHERE tenant_id = %s
-           AND (%s IS NULL OR domain_id = %s)
            AND lower(question) = lower(%s)
          ORDER BY created_at DESC
          LIMIT 1
     """
-    params = [tenant_id, domain_id, domain_id, question]
+    params = [tenant_id, question]
     conn = psycopg2.connect(
         host=settings.db_host,
         port=settings.db_port,

@@ -1226,6 +1226,8 @@ class ContextExtractionResponse(BaseModel):
     context_id: str = Field(..., examples=["ctx_123"])
     extraction_type: str | None = Field(None, examples=["combined"])
     payload: dict
+    raw_text: Optional[str] = Field(None, examples=["Raw context text"])
+    files: Optional[List[dict]] = Field(None, examples=[[{"file_id": "file_1", "filename": "notes.txt"}]])
     status: str | None = Field(None, examples=["reviewed"])
     notes: str | None = Field(None, examples=["Reviewed by analyst"])
     created_at: str | None = Field(None, examples=["2025-02-14T10:00:00Z"])
@@ -1242,6 +1244,10 @@ class ContextExtractionResponse(BaseModel):
             }
         }
     }
+
+
+class ContextExtractionListResponse(BaseModel):
+    extractions: List[ContextExtractionResponse]
 
 
 class ContextApplyRequest(BaseModel):
