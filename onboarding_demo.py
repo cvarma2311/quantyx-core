@@ -509,6 +509,27 @@ def main() -> int:
     _log_request("GET", entities_path)
     entities_response = _request("GET", entities_path)
     _log_response(entities_response)
+
+    # Optional: update hierarchy override using payload-based API
+    if os.getenv("DEMO_UPDATE_HIERARCHY", "").lower() in {"1", "true", "yes"}:
+        hierarchies = entities_response.get("hierarchies", []) or []
+        if hierarchies:
+            hierarchy_name = hierarchies[0].get("name")
+            if hierarchy_name:
+                hierarchy_payload = {
+                    "tenant_id": TENANT_ID,
+                    "connection_id": CONNECTION_ID,
+                    "database": DB_NAME,
+                    "schema": DB_SCHEMA,
+                    "hierarchy_name": hierarchy_name,
+                    "levels": hierarchies[0].get("levels", []),
+                    "description": hierarchies[0].get("description"),
+                    "status": "certified",
+                }
+                _log_request("PATCH", "/hierarchies", hierarchy_payload)
+                _log_response(_request("PATCH", "/hierarchies", hierarchy_payload))
+        else:
+            print("No hierarchies available to update.")
     print("Step 3 end")
 
     # 4) Infer facts/dims (async)

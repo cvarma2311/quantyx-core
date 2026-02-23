@@ -454,13 +454,19 @@ Request:
 }
 ```
 
-PATCH /hierarchies/{hierarchy_name}?domain_id=manufacturing&tenant_id=tenant_a
+PATCH /hierarchies
 
 Request:
 ```json
 {
+  "tenant_id": "tenant_a",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "hierarchy_name": "Operational Hierarchy",
   "levels": ["division", "plant", "line"],
-  "description": "Operational rollup for plants"
+  "description": "Operational rollup for plants",
+  "status": "certified"
 }
 ```
 

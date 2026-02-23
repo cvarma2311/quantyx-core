@@ -159,7 +159,7 @@ def upsert_hierarchy_override(
            artifact_key, version_no, lifecycle_status, source_type, source_run_id, change_reason, approved_by, approved_at,
            supersedes_version_no, created_by, updated_by, is_current, created_at, updated_at)
         VALUES
-          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
         """,
         [
             tenant_id,

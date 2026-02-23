@@ -81,19 +81,41 @@ def load_catalog_with_registry(settings: Settings, path: str) -> MetricCatalog:
     registry_metrics = fetch_registry_metrics(settings)
     metrics = dict(catalog.metrics)
     for metric in registry_metrics:
-        name = metric.get("metric_name") or metric.get("display_name") or metric["metric_id"]
+        sql = (metric.get("sql") or "").strip()
+        if not sql:
+            # Skip registry metrics with empty SQL (placeholders) so they don't shadow real metrics.
+            continue
+        metric_name = metric.get("metric_name") or metric.get("metric_id")
+        display_name = metric.get("display_name")
+        name = metric_name or display_name or metric["metric_id"]
         dimensions = metric.get("dimensions") or []
-        metrics[name] = Metric(
+        metric_obj = Metric(
             name=name,
             description=metric.get("description") or "",
             metric_type=metric.get("type") or "",
-            sql=metric.get("sql") or "",
+            sql=sql,
             grain=metric.get("grain") or "",
             dimensions=list(dimensions),
             status=metric.get("status"),
             owner=metric.get("owner"),
             version=metric.get("version"),
         )
+        metrics[name] = metric_obj
+        if display_name and display_name != name:
+            existing = metrics.get(display_name)
+            should_replace = existing is None or (not existing.sql and metric_obj.sql)
+            if should_replace:
+                metrics[display_name] = Metric(
+                    name=display_name,
+                    description=metric_obj.description,
+                    metric_type=metric_obj.metric_type,
+                    sql=metric_obj.sql,
+                    grain=metric_obj.grain,
+                    dimensions=list(metric_obj.dimensions),
+                    status=metric_obj.status,
+                    owner=metric_obj.owner,
+                    version=metric_obj.version,
+                )
     return MetricCatalog(metrics=metrics, dimensions=catalog.dimensions)
 
 

@@ -304,6 +304,34 @@ class HierarchyOverrideRequest(BaseModel):
     }
 
 
+class HierarchyUpdateRequest(BaseModel):
+    tenant_id: str = Field(..., examples=["tenant_a"])
+    connection_id: str = Field(..., examples=["conn_prod"])
+    database: str = Field(..., examples=["prod_warehouse"])
+    schema: str = Field(..., examples=["public"])
+    hierarchy_name: str = Field(..., examples=["Geographic Hierarchy"])
+    context_id: str | None = Field(None, examples=["ctx_123"])
+    hierarchy_group: str | None = Field(None, examples=["geography"])
+    levels: List[str] = Field(default_factory=list, examples=[["zone", "region", "sales_area"]])
+    description: str | None = Field(None, examples=["Sales organization rollup"])
+    status: str | None = Field(None, examples=["suggested", "certified"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "tenant_a",
+                "connection_id": "conn_prod",
+                "database": "prod_warehouse",
+                "schema": "public",
+                "hierarchy_name": "Geographic Hierarchy",
+                "context_id": "ctx_123",
+                "hierarchy_group": "geography",
+                "levels": ["zone", "region", "sales_area"],
+                "description": "Sales rollup",
+                "status": "certified",
+            }
+        }
+    }
+
 class EntitiesResponse(BaseModel):
     entities: List[dict] = Field(
         examples=[[{"entity_id": "organizational_unit", "join_key": "sales_area_name"}]]

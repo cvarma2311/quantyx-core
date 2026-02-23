@@ -260,7 +260,7 @@ API | Method | Purpose
 /datasources | GET/POST | Manage sources
 /datasets | POST | Create/edit
 /metrics | POST | Define metrics
-/entities | POST | Define hierarchies
+/hierarchies | PATCH | Update hierarchies (payload)
 /tenant/purge | POST | Admin-only: wipe all Quantyx data for a tenant (demo reset)
 
 Backend modules

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -58,6 +59,41 @@ def _log_step_ids(label: str, **ids: str | None) -> None:
     print(json.dumps(payload, indent=2))
 
 
+def _validate_metric_sql(metric_name: str, sql: str) -> None:
+    if "{{ ref('fact_" not in sql and '{{ ref("fact_' not in sql:
+        raise RuntimeError(
+            f"Metric '{metric_name}' sql must include {{ ref('fact_*') }}; got: {sql}"
+        )
+
+
+def _rewrite_metric_sql_with_fact_ref(sql: str) -> str | None:
+    if "{{ ref('fact_" in sql or '{{ ref("fact_' in sql:
+        return sql
+    pattern = re.compile(r"(?:(?P<schema>[A-Za-z0-9_]+)\.)?(?P<table>[A-Za-z0-9_]+)\.(?P<col>[A-Za-z0-9_]+)")
+    tables = set()
+    for match in pattern.finditer(sql):
+        table = match.group("table")
+        if table and not table.startswith("fact_"):
+            tables.add(table)
+    if not tables:
+        return None
+
+    def _replace(match: re.Match) -> str:
+        table = match.group("table")
+        col = match.group("col")
+        if not table:
+            return match.group(0)
+        if table.startswith("fact_"):
+            return match.group(0)
+        fact_table = f"fact_{table}"
+        return f"{{{{ ref('{fact_table}') }}}}.{col}"
+
+    rewritten = pattern.sub(_replace, sql)
+    if rewritten == sql:
+        return None
+    return rewritten
+
+
 def _request(method: str, path: str, payload: dict | None = None) -> dict:
     url = f"{API_BASE}{path}"
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -73,6 +109,110 @@ def _request(method: str, path: str, payload: dict | None = None) -> dict:
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8")
         raise RuntimeError(f"{method} {path} failed: {exc.code} {body}") from exc
+
+
+def _request_with_logging(
+    method: str,
+    path: str,
+    payload: dict | None = None,
+    *,
+    allow_404: bool = False,
+) -> dict:
+    _log_request(method, path, payload)
+    try:
+        resp = _request(method, path, payload)
+        _log_response(resp)
+        return resp
+    except RuntimeError as exc:
+        print(f"REQUEST FAILED: {method} {path}")
+        if payload is not None:
+            print("Payload:")
+            print(json.dumps(payload, indent=2))
+        print(f"Error: {exc}")
+        if allow_404 and (" 404 " in str(exc) or "404" in str(exc)):
+            return {}
+        raise
+
+
+def _list_jobs(job_type: str, status: str = "completed", limit: int = 1) -> list[dict]:
+    path = f"/jobs?tenant_id={TENANT_ID}&job_type={job_type}&status={status}&limit={limit}"
+    _log_request("GET", path)
+    resp = _request("GET", path)
+    _log_response(resp)
+    jobs = resp.get("jobs", []) or []
+    filtered = []
+    for job in jobs:
+        domain_id = job.get("domain_id")
+        if domain_id and domain_id != DOMAIN_ID:
+            continue
+        filtered.append(job)
+    return filtered
+
+
+def _get_job_result(job_id: str) -> dict:
+    result_path = f"/jobs/{job_id}/result"
+    _log_request("GET", result_path)
+    result_payload = _request("GET", result_path)
+    _log_response(result_payload)
+    return result_payload.get("result") or {}
+
+
+def _extraction_exists(extraction_id: str) -> bool:
+    if not extraction_id:
+        return False
+    try:
+        _log_request("GET", f"/context/extractions/{extraction_id}?tenant_id={TENANT_ID}")
+        _log_response(_request("GET", f"/context/extractions/{extraction_id}?tenant_id={TENANT_ID}"))
+        return True
+    except RuntimeError:
+        return False
+
+
+def _auto_resume_ids() -> dict[str, str]:
+    ids: dict[str, str] = {}
+    try:
+        context_resp = _request("GET", f"/context?tenant_id={TENANT_ID}&limit=1")
+        entries = context_resp.get("entries", []) or []
+        if entries:
+            context_id = entries[0].get("context_id")
+            if context_id:
+                ids["context_id"] = context_id
+    except RuntimeError as exc:
+        print(f"Auto-resume: unable to list context ({exc}); continuing without context_id.")
+
+    try:
+        extract_jobs = _list_jobs("context_extract")
+        if extract_jobs:
+            job_id = extract_jobs[0].get("job_id")
+            if job_id:
+                ids["extract_job_id"] = job_id
+                result = _get_job_result(job_id)
+                extraction_id = result.get("extraction_id")
+                if extraction_id and _extraction_exists(extraction_id):
+                    ids["extraction_id"] = extraction_id
+                result_context_id = result.get("context_id")
+                if result_context_id and "context_id" not in ids:
+                    ids["context_id"] = result_context_id
+    except RuntimeError as exc:
+        print(f"Auto-resume: unable to list context_extract jobs ({exc}); continuing.")
+
+    for job_type, key in [
+        ("scan_connection", "scan_job_id"),
+        ("context_apply", "apply_job_id"),
+        ("map_entities", "map_job_id"),
+        ("infer_models", "infer_job_id"),
+        ("metrics_suggested", "metrics_job_id"),
+    ]:
+        try:
+            jobs = _list_jobs(job_type)
+            if jobs:
+                job_id = jobs[0].get("job_id")
+                if job_id:
+                    ids[key] = job_id
+        except RuntimeError as exc:
+            print(f"Auto-resume: unable to list {job_type} jobs ({exc}); continuing.")
+
+    return ids
 
 
 def _certify_entities_hierarchies(db_name: str, db_schema: str) -> None:
@@ -107,11 +247,26 @@ def _certify_entities_hierarchies(db_name: str, db_schema: str) -> None:
             "hierarchy_group": hierarchy.get("hierarchy_group"),
             "status": "certified",
         }
-        _request(
-            "PATCH",
-            f"/hierarchies/{name}?tenant_id={TENANT_ID}&connection_id={CONNECTION_ID}&database={db_name}&schema={db_schema}",
-            payload,
-        )
+        try:
+            hierarchy_payload = {
+                "tenant_id": TENANT_ID,
+                "connection_id": CONNECTION_ID,
+                "database": db_name,
+                "schema": db_schema,
+                "hierarchy_name": name,
+                **payload,
+            }
+            _request_with_logging(
+                "PATCH",
+                "/hierarchies",
+                hierarchy_payload,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if " 404 " in message or "404" in message:
+                print(f"Skipping missing hierarchy: {name}")
+                continue
+            raise
 
 
 def _certify_facts_dimensions() -> None:
@@ -120,14 +275,24 @@ def _certify_facts_dimensions() -> None:
         fact_id = fact.get("fact_id")
         if not fact_id:
             continue
-        _request("PATCH", f"/facts/{fact_id}", {"status": "certified"})
+        measures = fact.get("measures") or []
+        if not measures:
+            print(f"Skipping fact without measures: {fact_id}")
+            continue
+        try:
+            _request_with_logging("PATCH", f"/facts/{fact_id}", {"status": "certified"})
+        except RuntimeError as exc:
+            print(f"Failed to certify fact {fact_id}: {exc}")
 
     dims_resp = _request("GET", f"/dimensions?tenant_id={TENANT_ID}")
     for dim in dims_resp.get("dimensions", []):
         dim_id = dim.get("dimension_id")
         if not dim_id:
             continue
-        _request("PATCH", f"/dimensions/{dim_id}", {"status": "certified"})
+        try:
+            _request_with_logging("PATCH", f"/dimensions/{dim_id}", {"status": "certified"})
+        except RuntimeError as exc:
+            print(f"Failed to certify dimension {dim_id}: {exc}")
 
 
 def _certify_metrics() -> None:
@@ -141,14 +306,93 @@ def _certify_metrics() -> None:
             metric_id = metric.get("metric_id")
             if not metric_id:
                 continue
-            _request("PATCH", f"/metrics/{metric_id}", {"tenant_id": TENANT_ID, "status": "certified"})
+            sql = (metric.get("sql") or "").strip()
+            if not sql:
+                print(f"Skipping metric with empty sql: {metric_id}")
+                continue
+            if "{{ ref('fact_" not in sql and '{{ ref("fact_' not in sql:
+                rewritten = _rewrite_metric_sql_with_fact_ref(sql)
+                if not rewritten:
+                    print(f"Skipping metric without fact ref: {metric_id}")
+                    continue
+                print(f"Rewriting metric sql to use fact ref: {metric_id}")
+                _request_with_logging(
+                    "PATCH",
+                    f"/metrics/{metric_id}",
+                    {"tenant_id": TENANT_ID, "sql": rewritten},
+                    allow_404=True,
+                )
+            resp = _request_with_logging(
+                "PATCH",
+                f"/metrics/{metric_id}",
+                {"tenant_id": TENANT_ID, "status": "certified"},
+                allow_404=True,
+            )
+            if not resp:
+                print(f"Skipping missing metric: {metric_id}")
+                continue
+        cursor = resp.get("next_cursor")
+        if not cursor:
+            break
+
+
+def _ensure_production_mt_dimensions() -> None:
+    cursor = None
+    while True:
+        path = f"/metrics?tenant_id={TENANT_ID}"
+        if cursor:
+            path += f"&cursor={cursor}"
+        resp = _request("GET", path)
+        for metric in resp.get("metrics", []):
+            metric_id = metric.get("metric_id")
+            metric_name = (metric.get("metric_name") or "").lower()
+            display_name = (metric.get("display_name") or "").lower()
+            if metric_name != "production_mt" and display_name != "production (mt)":
+                continue
+            dimensions = metric.get("dimensions") or []
+            if "process_date" in dimensions:
+                continue
+            new_dimensions = list(dict.fromkeys(dimensions + ["process_date"]))
+            print(f"Updating production_mt dimensions: {metric_id}")
+            _request_with_logging(
+                "PATCH",
+                f"/metrics/{metric_id}",
+                {"tenant_id": TENANT_ID, "dimensions": new_dimensions},
+                allow_404=True,
+            )
+        cursor = resp.get("next_cursor")
+        if not cursor:
+            break
+
+
+def _deprecate_empty_sql_metrics() -> None:
+    cursor = None
+    while True:
+        path = f"/metrics?tenant_id={TENANT_ID}"
+        if cursor:
+            path += f"&cursor={cursor}"
+        resp = _request("GET", path)
+        for metric in resp.get("metrics", []):
+            metric_id = metric.get("metric_id")
+            if not metric_id:
+                continue
+            sql = (metric.get("sql") or "").strip()
+            if sql:
+                continue
+            print(f"Deprecating metric with empty sql: {metric_id}")
+            _request_with_logging(
+                "PATCH",
+                f"/metrics/{metric_id}",
+                {"tenant_id": TENANT_ID, "status": "deprecated"},
+                allow_404=True,
+            )
         cursor = resp.get("next_cursor")
         if not cursor:
             break
 
 
 def _certify_glossary() -> None:
-    _request("POST", "/glossary/certify", {"tenant_id": TENANT_ID, "domain_id": DOMAIN_ID})
+    _request_with_logging("POST", "/glossary/certify", {"tenant_id": TENANT_ID, "domain_id": DOMAIN_ID})
 
 
 def _ensure_fact_view(
@@ -230,11 +474,14 @@ def _register_inferred_facts(
             db_host, db_port, db_name, db_user, db_password, db_schema, table_name
         )
         table_to_fact[table_name] = fact_view
+        grain = fact.get("grain") or "day"
+        if isinstance(grain, list):
+            grain = ", ".join([str(item) for item in grain if item])
         fact_payload = {
             "tenant_id": TENANT_ID,
             "domain_id": DOMAIN_ID,
             "table_name": fact_view,
-            "grain": fact.get("grain") or "day",
+            "grain": grain,
             "time_column": fact.get("time_column"),
             "measures": measures,
             "dimensions": fact.get("dimensions", []),
@@ -319,6 +566,16 @@ def main() -> int:
         choices=["start", "ingest", "extract", "scan", "apply", "map", "infer", "metrics", "ask"],
         help="Resume from a specific phase (requires RESUME_* env vars for skipped steps).",
     )
+    parser.add_argument(
+        "--skip-metrics",
+        action="store_true",
+        help="Skip async metrics suggestion step if already generated.",
+    )
+    parser.add_argument(
+        "--auto-resume",
+        action="store_true",
+        help="Enable auto-resume by querying existing context/jobs.",
+    )
     args = parser.parse_args()
     resume_from = args.resume_from
     phase_order = ["ingest", "extract", "scan", "apply", "map", "infer", "metrics", "ask"]
@@ -365,7 +622,21 @@ def main() -> int:
     map_job_id = None
     infer_job_id = None
     metrics_job_id = None
-    if should_run("ingest"):
+    auto_ids: dict[str, str] = {}
+    if args.auto_resume:
+        auto_ids = _auto_resume_ids()
+        if not context_id:
+            context_id = auto_ids.get("context_id")
+        if not extraction_id:
+            extraction_id = auto_ids.get("extraction_id")
+        scan_job_id = auto_ids.get("scan_job_id")
+        apply_job_id = auto_ids.get("apply_job_id")
+        map_job_id = auto_ids.get("map_job_id")
+        infer_job_id = auto_ids.get("infer_job_id")
+        metrics_job_id = auto_ids.get("metrics_job_id")
+    if should_run("ingest") and context_id and args.auto_resume:
+        _log_step_ids("Context Ingest (auto-resume)", context_id=context_id)
+    elif should_run("ingest"):
         ingest_payload = {
             "tenant_id": TENANT_ID,
             "domain_id": DOMAIN_ID,
@@ -408,7 +679,14 @@ def main() -> int:
     _log_response(_request("POST", "/tenant/scope", scope_payload))
 
     # 2) Context extract (async)
-    if should_run("extract"):
+    if should_run("extract") and extraction_id and args.auto_resume:
+        _log_step_ids(
+            "Context Extract (auto-resume)",
+            context_id=context_id,
+            extraction_id=extraction_id,
+            extract_job_id=auto_ids.get("extract_job_id"),
+        )
+    elif should_run("extract"):
         extract_payload = {
             "tenant_id": TENANT_ID,
             "domain_id": DOMAIN_ID,
@@ -450,7 +728,14 @@ def main() -> int:
         )
 
     # 3) Scan connection (async) - registers connection + scopes
-    if should_run("scan"):
+    if should_run("scan") and scan_job_id and args.auto_resume:
+        _log_step_ids(
+            "Scan Connection (auto-resume)",
+            context_id=context_id,
+            extraction_id=extraction_id,
+            scan_job_id=scan_job_id,
+        )
+    elif should_run("scan"):
         scan_payload: dict[str, Any] = {
             "tenant_id": TENANT_ID,
             "domain_id": DOMAIN_ID,
@@ -508,7 +793,15 @@ def main() -> int:
     _log_response(_request("POST", "/tenant/scope", scope_payload))
 
     # 5) Context apply (async)
-    if should_run("apply"):
+    if should_run("apply") and apply_job_id and args.auto_resume:
+        _log_step_ids(
+            "Context Apply (auto-resume)",
+            context_id=context_id,
+            extraction_id=extraction_id,
+            scan_job_id=scan_job_id,
+            apply_job_id=apply_job_id,
+        )
+    elif should_run("apply"):
         apply_payload = {
             "tenant_id": TENANT_ID,
             "domain_id": DOMAIN_ID,
@@ -531,7 +824,16 @@ def main() -> int:
         )
 
     # 6) Entity mapping (async)
-    if should_run("map"):
+    if should_run("map") and map_job_id and args.auto_resume:
+        _log_step_ids(
+            "Entity Map (auto-resume)",
+            context_id=context_id,
+            extraction_id=extraction_id,
+            scan_job_id=scan_job_id,
+            apply_job_id=apply_job_id,
+            map_job_id=map_job_id,
+        )
+    elif should_run("map"):
         map_path = f"/onboard/map/async?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}&use_llm=true"
         map_payload = {
             "tenant_id": TENANT_ID,
@@ -558,7 +860,31 @@ def main() -> int:
 
     # 7) Infer models (async)
     infer_result: dict[str, Any] = {}
-    if should_run("infer"):
+    resume_infer_job_id = os.getenv("RESUME_INFER_JOB_ID")
+    if should_run("infer") and resume_infer_job_id:
+        infer_job_id = resume_infer_job_id
+        infer_result = _wait_for_job(infer_job_id)
+        _log_step_ids(
+            "Infer Models (resumed)",
+            context_id=context_id,
+            extraction_id=extraction_id,
+            scan_job_id=scan_job_id,
+            apply_job_id=apply_job_id,
+            map_job_id=map_job_id,
+            infer_job_id=infer_job_id,
+        )
+    elif should_run("infer") and infer_job_id and args.auto_resume:
+        infer_result = _get_job_result(infer_job_id)
+        _log_step_ids(
+            "Infer Models (auto-resume)",
+            context_id=context_id,
+            extraction_id=extraction_id,
+            scan_job_id=scan_job_id,
+            apply_job_id=apply_job_id,
+            map_job_id=map_job_id,
+            infer_job_id=infer_job_id,
+        )
+    elif should_run("infer"):
         infer_path = f"/onboard/infer-models/async?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}"
         infer_payload = {
             "tenant_id": TENANT_ID,
@@ -586,7 +912,18 @@ def main() -> int:
         )
 
     # 8) Suggested metrics (async)
-    if should_run("metrics"):
+    if should_run("metrics") and metrics_job_id and args.auto_resume:
+        _log_step_ids(
+            "Metrics Suggested (auto-resume)",
+            context_id=context_id,
+            extraction_id=extraction_id,
+            scan_job_id=scan_job_id,
+            apply_job_id=apply_job_id,
+            map_job_id=map_job_id,
+            infer_job_id=infer_job_id,
+            metrics_job_id=metrics_job_id,
+        )
+    elif should_run("metrics") and not args.skip_metrics:
         metrics_path = f"/metrics/suggested/async?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}&persist=true"
         metrics_payload = {
             "tenant_id": TENANT_ID,
@@ -617,6 +954,17 @@ def main() -> int:
             infer_job_id=infer_job_id,
             metrics_job_id=metrics_job_id,
         )
+    elif should_run("metrics") and args.skip_metrics:
+        _log_step_ids(
+            "Metrics Suggested (skipped)",
+            context_id=context_id,
+            extraction_id=extraction_id,
+            scan_job_id=scan_job_id,
+            apply_job_id=apply_job_id,
+            map_job_id=map_job_id,
+            infer_job_id=infer_job_id,
+            metrics_job_id=os.getenv("RESUME_METRICS_JOB_ID"),
+        )
 
     # 9) Create fact views + register inferred facts (certified)
     table_to_fact = _register_inferred_facts(
@@ -644,11 +992,12 @@ def main() -> int:
         "metric_name": "production_mt",
         "display_name": "Production (MT)",
         "type": "sum",
-        "sql": f"({{ ref('{fact_table}') }}.production_14_2kg * 14.2 + {{ ref('{fact_table}') }}.production_19kg * 19) / 1000",
+        "sql": f"({{{{ ref('{fact_table}') }}}}.production_14_2kg * 14.2 + {{{{ ref('{fact_table}') }}}}.production_19kg * 19) / 1000",
         "grain": "day",
-        "dimensions": ["sap_id", "plant_name"],
+        "dimensions": ["sap_id", "plant_name", "process_date"],
         "status": "suggested",
     }
+    _validate_metric_sql(derived_metric["metric_name"], derived_metric["sql"])
     _log_request("POST", "/metrics", derived_metric)
     _log_response(_request("POST", "/metrics", derived_metric))
 
@@ -656,6 +1005,8 @@ def main() -> int:
     _certify_glossary()
     _certify_entities_hierarchies(db_name, db_schema)
     _certify_facts_dimensions()
+    _ensure_production_mt_dimensions()
+    _deprecate_empty_sql_metrics()
     _certify_metrics()
 
     # 9c) Reload contracts/catalog

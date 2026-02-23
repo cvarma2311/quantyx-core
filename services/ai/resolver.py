@@ -14,6 +14,7 @@ def resolve_question(
     catalog: MetricCatalog,
     settings: Settings,
     allowed_metrics: list[str] | None = None,
+    allowed_dimensions: list[str] | None = None,
     glossary: list[dict] | None = None,
 ) -> dict:
     if not settings.openai_api_key:
@@ -23,13 +24,16 @@ def resolve_question(
         "You are a data metric resolver. "
         "Return JSON with keys: metrics, dimensions, filters. "
         "metrics must be a list of metric names. "
-        "Use only the provided metric and dimension names."
+        "Use only the provided metric and dimension names. "
+        "Glossary synonyms apply to dimensions only, not metrics. "
+        "If a chosen dimension has glossary synonyms that are present in the provided dimensions list, "
+        "include all those synonym dimensions in the response."
     )
 
     user_prompt = {
         "question": question,
         "metrics": allowed_metrics or catalog.metric_names(),
-        "dimensions": catalog.dimension_names(),
+        "dimensions": allowed_dimensions or catalog.dimension_names(),
         "glossary": glossary or [],
         "filter_format": {"field": "dimension_name", "operator": "=|!=|>|>=|<|<=|IN|ILIKE", "value": "..."},
     }
@@ -39,8 +43,9 @@ def resolve_question(
         settings.openai_model,
         len(question or ""),
         len(allowed_metrics or catalog.metric_names()),
-        len(catalog.dimension_names()),
+        len(allowed_dimensions or catalog.dimension_names()),
     )
+    logger.debug("llm.resolve_question: prompt | %s", json.dumps(user_prompt))
     payload = {
         "model": settings.openai_model,
         "messages": [
@@ -66,4 +71,5 @@ def resolve_question(
 
     content = body["choices"][0]["message"]["content"]
     logger.debug("llm.resolve_question: response | chars=%s", len(content or ""))
+    logger.debug("llm.resolve_question: response | %s", content)
     return json.loads(content)

@@ -188,7 +188,8 @@ def build_query(
             metric_sql = f"AVG({metric_sql})"
         metric_sql = _rewrite_metric_sql(metric, metric_sql, schema, alias_map)
         metric_sql = _rewrite_dimension_sql(metric_sql, base_table, base_alias, alias_map)
-        select_parts.append(f"{metric_sql} AS {metric.name}")
+        alias = metric.name.replace('"', '""')
+        select_parts.append(f'{metric_sql} AS "{alias}"')
         metric_tables.update(_collect_tables(metric_sql))
 
     for flt in filters:

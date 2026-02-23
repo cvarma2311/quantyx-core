@@ -17,7 +17,8 @@ import xml.etree.ElementTree as ElementTree
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
 
-from services.ai.catalog import load_catalog_with_registry, resolve_ref
+from services.ai.catalog import Dimension, load_catalog_with_registry, resolve_ref
+from datetime import date as _date, timedelta as _timedelta
 from services.ai.config import load_settings
 from services.ai.db import execute_non_query, run_query
 from services.ai.metrics_registry import (
@@ -162,6 +163,7 @@ from services.api.schemas import (
     EntitiesAllResponse,
     EntityOverrideRequest,
     HierarchyOverrideRequest,
+    HierarchyUpdateRequest,
     MetricsResponse,
     MetricPatchRequest,
     MetricUpsertRequest,
@@ -5211,6 +5213,34 @@ def update_hierarchy(
     return {"ok": True}
 
 
+@app.patch(
+    "/hierarchies",
+    response_model=dict,
+    tags=["context"],
+    summary="Update hierarchy override (payload)",
+    description="Update hierarchy override using JSON payload instead of path/query params.",
+)
+def update_hierarchy_payload(payload: HierarchyUpdateRequest) -> dict:
+    domain_id = _resolve_domain_id(payload.tenant_id, None)
+    upsert_hierarchy_override(
+        settings,
+        payload.tenant_id,
+        domain_id,
+        payload.connection_id,
+        payload.database,
+        payload.schema,
+        {
+            "hierarchy_name": payload.hierarchy_name,
+            "levels": payload.levels,
+            "description": payload.description,
+            "context_id": payload.context_id,
+            "hierarchy_group": payload.hierarchy_group,
+            "lifecycle_status": payload.status,
+        },
+    )
+    return {"ok": True}
+
+
 @app.post(
     "/facts",
     response_model=dict,
@@ -7230,7 +7260,12 @@ def apply_contracts() -> dict:
     return {"metrics": len(catalog.metrics), "dimensions": len(catalog.dimensions)}
 
 
-def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[dict]]:
+def _resolve_metrics(
+    request: QueryRequest,
+    *,
+    glossary: list[dict] | None = None,
+    allowed_dimensions: list[str] | None = None,
+) -> tuple[list[str], list[str], list[dict]]:
     if request.metrics:
         logger.info("request.metrics provided: %s", request.metrics)
         return request.metrics, request.dimensions, [flt.model_dump() for flt in request.filters]
@@ -7241,15 +7276,35 @@ def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[
 
     if request.question:
         logger.info("resolving question: %s", request.question)
-        glossary = None
-        if request.tenant_id:
-            domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
-            glossary = fetch_glossary_terms(settings, request.tenant_id, domain_id)
-        resolved = resolve_question(request.question, catalog, settings, glossary=glossary)
+        resolved = resolve_question(
+            request.question,
+            catalog,
+            settings,
+            glossary=glossary,
+            allowed_dimensions=allowed_dimensions,
+        )
         logger.info("resolver output: %s", resolved)
         metrics = resolved.get("metrics", [])
         dimensions = resolved.get("dimensions", [])
         filters = resolved.get("filters", [])
+        if allowed_dimensions:
+            allowed_metrics_set = {m for m in catalog.metric_names()}
+            if allowed_metrics_set:
+                filtered_metrics = []
+                for metric in metrics:
+                    if metric in allowed_metrics_set:
+                        filtered_metrics.append(metric)
+                if filtered_metrics != metrics:
+                    logger.info("resolver filtered metrics to catalog: %s -> %s", metrics, filtered_metrics)
+                    metrics = filtered_metrics
+        expanded_dimensions = _expand_dimensions_from_glossary(
+            dimensions,
+            glossary,
+            allowed_dimensions,
+        )
+        if expanded_dimensions != dimensions:
+            logger.info("resolver expanded dimensions from glossary: %s -> %s", dimensions, expanded_dimensions)
+            dimensions = expanded_dimensions
         if not metrics:
             question = request.question.lower()
             if "required run rate" in question:
@@ -7283,7 +7338,8 @@ def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[
 
         if metrics and any(metric not in allowed_metrics for metric in metrics):
             if not allowed_metrics:
-                return ([], dimensions, filters)
+                # Defer filtering; downstream will coerce/drop unsupported dims/filters.
+                return (metrics, dimensions, filters)
             logger.info("re-resolving with allowed metrics: %s", allowed_metrics)
             resolved = resolve_question(
                 request.question,
@@ -7291,11 +7347,24 @@ def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[
                 settings,
                 allowed_metrics=allowed_metrics,
                 glossary=glossary,
+                allowed_dimensions=allowed_dimensions,
             )
             logger.info("resolver output (restricted): %s", resolved)
+            restricted_dimensions = resolved.get("dimensions", [])
+            expanded_dimensions = _expand_dimensions_from_glossary(
+                restricted_dimensions,
+                glossary,
+                allowed_dimensions,
+            )
+            if expanded_dimensions != restricted_dimensions:
+                logger.info(
+                    "resolver expanded dimensions from glossary (restricted): %s -> %s",
+                    restricted_dimensions,
+                    expanded_dimensions,
+                )
             return (
                 resolved.get("metrics", []),
-                resolved.get("dimensions", []),
+                expanded_dimensions,
                 resolved.get("filters", []),
             )
 
@@ -7401,6 +7470,17 @@ def _normalize_filters(filters: list[dict], settings: object) -> list[dict]:
     fiscal_year = None
     for flt in filters:
         value = flt.get("value")
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"last week start date", "last week end date"}:
+                today = _date.today()
+                last_week_end = today - _timedelta(days=today.weekday() + 1)
+                last_week_start = last_week_end - _timedelta(days=6)
+                if lowered == "last week start date":
+                    normalized.append({"field": flt["field"], "operator": flt["operator"], "value": last_week_start.isoformat()})
+                else:
+                    normalized.append({"field": flt["field"], "operator": flt["operator"], "value": last_week_end.isoformat()})
+                continue
         if isinstance(value, str) and value.strip().lower() == "this month":
             month_name, fiscal_year = _resolve_this_month(settings)
             if month_name:
@@ -7412,6 +7492,21 @@ def _normalize_filters(filters: list[dict], settings: object) -> list[dict]:
     return normalized
 
 
+def _expand_relative_date_filters(filters: list[dict]) -> list[dict]:
+    expanded: list[dict] = []
+    for flt in filters:
+        value = flt.get("value")
+        if isinstance(value, str) and value.strip().lower() == "last week" and flt.get("operator") == "IN":
+            today = _date.today()
+            last_week_end = today - _timedelta(days=today.weekday() + 1)
+            last_week_start = last_week_end - _timedelta(days=6)
+            expanded.append({"field": flt["field"], "operator": ">=", "value": last_week_start.isoformat()})
+            expanded.append({"field": flt["field"], "operator": "<=", "value": last_week_end.isoformat()})
+            continue
+        expanded.append(flt)
+    return expanded
+
+
 def _filter_dimension_filters(filters: list[dict], dimension_names: set[str]) -> list[dict]:
     filtered = []
     for flt in filters:
@@ -7420,6 +7515,118 @@ def _filter_dimension_filters(filters: list[dict], dimension_names: set[str]) ->
         else:
             logger.info("dropping non-dimension filter: %s", flt)
     return filtered
+
+
+def _coerce_dimension_aliases(
+    dimensions: list[str],
+    filters: list[dict],
+    catalog_dimensions: set[str],
+    metric_dimensions: set[str],
+) -> tuple[list[str], list[dict]]:
+    alias_map: dict[str, str] = {}
+    for dim in dimensions:
+        if dim in metric_dimensions:
+            continue
+        if dim in {"plant", "plant_id"} and ("plant_name" in metric_dimensions or "plant_name" in catalog_dimensions):
+            alias_map[dim] = "plant_name"
+        elif dim in {"plant", "plant_id"} and ("sap_id" in metric_dimensions or "sap_id" in catalog_dimensions):
+            alias_map[dim] = "sap_id"
+        elif dim in {"pdate", "date_day", "date"} and ("process_date" in metric_dimensions or "process_date" in catalog_dimensions):
+            alias_map[dim] = "process_date"
+        elif f"{dim}_name" in metric_dimensions:
+            alias_map[dim] = f"{dim}_name"
+
+    if not alias_map:
+        return dimensions, filters
+
+    coerced_dimensions = [alias_map.get(dim, dim) for dim in dimensions]
+    coerced_filters = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        field = payload.get("field")
+        if isinstance(field, str) and field in alias_map:
+            payload["field"] = alias_map[field]
+        coerced_filters.append(payload)
+    return coerced_dimensions, coerced_filters
+
+
+def _coerce_dimensions_from_glossary(
+    dimensions: list[str],
+    filters: list[dict],
+    glossary: list[dict] | None,
+    fact_columns: set[str],
+) -> tuple[list[str], list[dict]]:
+    if not glossary or not fact_columns:
+        return dimensions, filters
+    synonym_map: dict[str, set[str]] = {}
+    for term in glossary:
+        synonyms = term.get("synonyms") or []
+        normalized = term.get("normalized_term") or term.get("term")
+        if not normalized:
+            continue
+        key = str(normalized).strip().lower()
+        for syn in synonyms:
+            if not syn:
+                continue
+            synonym_map.setdefault(str(syn).strip().lower(), set()).add(key)
+            synonym_map.setdefault(key, set()).add(str(syn).strip().lower())
+    if not synonym_map:
+        return dimensions, filters
+    def _map_dim(dim: str) -> str:
+        if dim in fact_columns:
+            return dim
+        candidates = synonym_map.get(dim.lower(), set())
+        for cand in candidates:
+            if cand in fact_columns:
+                return cand
+        return dim
+    coerced_dimensions = [_map_dim(dim) for dim in dimensions]
+    coerced_filters = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        field = payload.get("field")
+        if isinstance(field, str):
+            payload["field"] = _map_dim(field)
+        coerced_filters.append(payload)
+    return coerced_dimensions, coerced_filters
+
+
+def _expand_dimensions_from_glossary(
+    dimensions: list[str],
+    glossary: list[dict] | None,
+    allowed_dimensions: list[str] | None,
+) -> list[str]:
+    if not glossary or not allowed_dimensions:
+        return dimensions
+    allowed_set = {d.lower() for d in allowed_dimensions}
+    synonym_map: dict[str, set[str]] = {}
+    for term in glossary:
+        synonyms = term.get("synonyms") or []
+        normalized = term.get("normalized_term") or term.get("term")
+        if not normalized:
+            continue
+        key = str(normalized).strip().lower()
+        for syn in synonyms:
+            if not syn:
+                continue
+            synonym_map.setdefault(key, set()).add(str(syn).strip().lower())
+            synonym_map.setdefault(str(syn).strip().lower(), set()).add(key)
+    expanded = []
+    for dim in dimensions:
+        dim_l = dim.lower()
+        if dim_l in allowed_set:
+            expanded.append(dim)
+        for syn in synonym_map.get(dim_l, set()):
+            if syn in allowed_set:
+                expanded.append(syn)
+    # de-dupe while preserving order
+    seen = set()
+    result = []
+    for dim in expanded:
+        if dim not in seen:
+            seen.add(dim)
+            result.append(dim)
+    return result
 
 
 def _normalize_sales_quarter_filters(filters: list[dict], metric_names: list[str]) -> list[dict]:
@@ -7446,6 +7653,106 @@ def _extract_top_n(question: str | None) -> int | None:
     if match:
         return int(match.group(1))
     return 5
+
+
+def _infer_fact_table_from_metric_sql(metric_sql: str) -> str | None:
+    match = re.search(r"ref\('([^']+)'\)", metric_sql or "")
+    if match:
+        return match.group(1)
+    match = re.search(r'ref\\(\"([^\"]+)\"\\)', metric_sql or "")
+    if match:
+        return match.group(1)
+    return None
+
+
+def _list_fact_table_columns(schema_name: str, table_name: str) -> list[str]:
+    if not schema_name or not table_name:
+        return []
+    sql = """
+        SELECT column_name
+          FROM information_schema.columns
+         WHERE table_schema = %s
+           AND table_name = %s
+         ORDER BY ordinal_position
+    """
+    try:
+        rows = run_query(settings, sql, [schema_name, table_name])
+    except Exception:
+        return []
+    return [row.get("column_name") for row in rows if row.get("column_name")]
+
+
+def _fact_columns_for_metric(metric_sql: str, schema_name: str) -> set[str]:
+    fact_table = _infer_fact_table_from_metric_sql(metric_sql)
+    if not fact_table:
+        return set()
+    return set(_list_fact_table_columns(schema_name, fact_table))
+
+
+def _augment_catalog_dimensions_from_facts(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database_name: str,
+    schema_name: str,
+) -> None:
+    if not tenant_id or not domain_id or not connection_id or not database_name or not schema_name:
+        return
+    facts = list_facts(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    if not facts:
+        return
+    added = 0
+    for fact in facts:
+        table_name = fact.get("table_name")
+        if not table_name:
+            continue
+        db_dims = _list_fact_table_columns(schema_name, table_name)
+        if not db_dims:
+            continue
+        for dim in db_dims:
+            if dim in catalog.dimensions:
+                continue
+            catalog.dimensions[dim] = Dimension(
+                name=dim,
+                description=f"Auto-detected from {table_name}",
+                data_type="string",
+                sql=f"{{{{ ref('{table_name}') }}}}.{dim}",
+            )
+            added += 1
+    if added:
+        logger.info("catalog.dimensions augmented from facts | added=%s", added)
+
+
+def _dimension_candidates_for_scope(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database_name: str,
+    schema_name: str,
+) -> list[str]:
+    candidates: set[str] = set()
+    facts = list_facts(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    for fact in facts:
+        table_name = fact.get("table_name")
+        if not table_name:
+            continue
+        db_dims = _list_fact_table_columns(schema_name, table_name)
+        candidates.update(db_dims)
+    return sorted(candidates)
 
 
 @app.post(
@@ -7521,27 +7828,84 @@ def query(request: QueryRequest) -> QueryResult:
     row_count = None
     glossary = None
     contract = None
+    logger.info("query.start | tenant=%s domain=%s question=%s metric=%s metrics=%s dims=%s filters=%s limit=%s",
+                request.tenant_id, request.domain_id, request.question, request.metric, request.metrics,
+                request.dimensions, request.filters, request.limit)
+    fact_dims_map: dict[str, set[str]] = {}
+    dimension_candidates: list[str] | None = None
     if request.tenant_id:
         domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
         connection_id, database_name, schema_name, tables = _resolve_scope_values(
             request.tenant_id,
             domain_id,
         )
+        logger.info("query.scope | domain=%s connection=%s db=%s schema=%s tables=%s",
+                    domain_id, connection_id, database_name, schema_name, tables)
+        _augment_catalog_dimensions_from_facts(
+            request.tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+        )
+        facts_for_scope = list_facts(
+            settings,
+            tenant_id=request.tenant_id,
+            domain_id=domain_id,
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
+        for fact in facts_for_scope:
+            table_name = fact.get("table_name")
+            if table_name:
+                db_dims = _list_fact_table_columns(schema_name, table_name)
+                fact_dims_map[table_name] = set(db_dims)
+        dimension_candidates = _dimension_candidates_for_scope(
+            request.tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+        )
+        logger.info("query.fact_dim_candidates | count=%s dims=%s", len(dimension_candidates), dimension_candidates)
         glossary = fetch_glossary_terms(settings, request.tenant_id, domain_id)
+        logger.info("query.glossary | loaded=%s", len(glossary or []))
         contract = get_active_semantic_contract(settings, request.tenant_id, domain_id)
-    metric_names, dimensions, filters = _resolve_metrics(request)
+    metric_names, dimensions, filters = _resolve_metrics(
+        request,
+        glossary=glossary,
+        allowed_dimensions=dimension_candidates,
+    )
+    logger.info("query.resolve_metrics | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
+    if metric_names or dimensions or filters:
+        metric_lookup = {name.lower(): name for name in catalog.metrics.keys()}
+        dim_lookup = {name.lower(): name for name in catalog.dimensions.keys()}
+        metric_names = [metric_lookup.get(name.lower(), name) for name in metric_names]
+        dimensions = [dim_lookup.get(name.lower(), name) for name in dimensions]
+        normalized_filters = []
+        for flt in filters:
+            payload = flt if isinstance(flt, dict) else flt.model_dump()
+            field = payload.get("field")
+            if isinstance(field, str):
+                payload["field"] = dim_lookup.get(field.lower(), field)
+            normalized_filters.append(payload)
+        filters = normalized_filters
+        logger.info("query.normalized | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     if not metric_names and request.question:
         question = request.question.lower()
         if "required run rate" in question:
             metric_names = ["current_run_rate_mmt", "required_run_rate_mmt"]
             dimensions = ["sales_area_name", "month_name", "fiscal_year"]
     logger.info("metrics: %s", metric_names)
+    filters = _expand_relative_date_filters(filters)
     filters = _coerce_sbu_filters(filters)
     filters = _coerce_product_filters(filters)
     dimensions = _coerce_sbu_dimensions(dimensions, filters)
     filters = _normalize_filters(filters, settings)
     filters = _normalize_sales_quarter_filters(filters, metric_names)
     filters = _filter_dimension_filters(filters, set(catalog.dimensions.keys()))
+    logger.info("query.coerced | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     logger.info("dimensions: %s", dimensions)
     logger.info("filters: %s", filters)
 
@@ -7561,14 +7925,36 @@ def query(request: QueryRequest) -> QueryResult:
             row_count,
             error_message="No metrics resolved",
         )
+        logger.error("query.fail | reason=no_metrics_resolved metrics=%s dimensions=%s filters=%s",
+                     metric_names, dimensions, filters)
         raise HTTPException(status_code=400, detail="No metrics resolved")
 
     metrics = []
+    metrics_all = []
     for metric_name in metric_names:
         if metric_name not in catalog.metrics:
+            logger.error("query.fail | reason=unknown_metric metric=%s", metric_name)
             raise HTTPException(status_code=400, detail=f"Unknown metric: {metric_name}")
         metrics.append(catalog.metrics[metric_name])
+        metrics_all.append(catalog.metrics[metric_name])
 
+    filter_fields = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        filter_fields.append(payload["field"])
+
+    metric_dimension_set = set()
+    for metric in metrics_all:
+        fact_cols = _fact_columns_for_metric(metric.sql, settings.db_schema)
+        metric_dimension_set.update(fact_cols)
+    dimensions, filters = _coerce_dimension_aliases(
+        dimensions,
+        filters,
+        set(catalog.dimensions.keys()),
+        metric_dimension_set,
+    )
+    logger.info("query.dim_alias | dimensions=%s filters=%s metric_dims=%s",
+                dimensions, filters, sorted(metric_dimension_set))
     filter_fields = []
     for flt in filters:
         payload = flt if isinstance(flt, dict) else flt.model_dump()
@@ -7577,11 +7963,25 @@ def query(request: QueryRequest) -> QueryResult:
     if dimensions or filter_fields:
         filtered_metrics = []
         for metric in metrics:
-            if all(dim in metric.dimensions for dim in dimensions) and all(
-                field in metric.dimensions for field in filter_fields
-            ):
+            metric_dims = _fact_columns_for_metric(metric.sql, settings.db_schema)
+            logger.info("query.metric_fact_cols | metric=%s cols=%s", metric.name, sorted(metric_dims))
+            dimensions, filters = _coerce_dimensions_from_glossary(
+                dimensions,
+                filters,
+                glossary,
+                metric_dims,
+            )
+            logger.info("query.glossary_coerced | dimensions=%s filters=%s", dimensions, filters)
+            supported_dims = [dim for dim in dimensions if dim in metric_dims]
+            supported_filters = [flt for flt in filters if flt.get("field") in metric_dims]
+            if supported_dims or supported_filters:
                 filtered_metrics.append(metric)
+                # Narrow dims/filters to what this metric supports.
+                dimensions = supported_dims
+                filters = supported_filters
         metrics = filtered_metrics
+        logger.info("query.filtered_metrics | count=%s names=%s",
+                    len(metrics), [m.name for m in metrics])
 
     if request.question and metric_names and len(metrics) != len(metric_names):
         allowed_metrics = [metric.name for metric in metrics]
@@ -7593,6 +7993,7 @@ def query(request: QueryRequest) -> QueryResult:
                 settings,
                 allowed_metrics=allowed_metrics,
                 glossary=glossary,
+                allowed_dimensions=dimension_candidates,
             )
             metric_names = resolved.get("metrics", [])
             dimensions = _coerce_sbu_dimensions(resolved.get("dimensions", []), resolved.get("filters", []))
@@ -7604,6 +8005,7 @@ def query(request: QueryRequest) -> QueryResult:
             metrics = []
             for metric_name in metric_names:
                 if metric_name not in catalog.metrics:
+                    logger.error("query.fail | reason=unknown_metric_after_reresolve metric=%s", metric_name)
                     raise HTTPException(status_code=400, detail=f"Unknown metric: {metric_name}")
                 metrics.append(catalog.metrics[metric_name])
 
@@ -7616,8 +8018,22 @@ def query(request: QueryRequest) -> QueryResult:
                     ):
                         filtered_metrics.append(metric)
                 metrics = filtered_metrics
+            logger.info("query.filtered_metrics_post_reresolve | count=%s names=%s",
+                        len(metrics), [m.name for m in metrics])
+
+    if not metrics and metrics_all:
+        logger.info("dropping unsupported dimensions/filters for resolved metrics")
+        allowed_dims = set()
+        for metric in metrics_all:
+            allowed_dims.update(metric.dimensions)
+        dimensions = [dim for dim in dimensions if dim in allowed_dims]
+        filters = [flt for flt in filters if flt.get("field") in allowed_dims]
+        metrics = metrics_all
+        logger.info("query.drop_unsupported | dimensions=%s filters=%s metrics=%s",
+                    dimensions, filters, [m.name for m in metrics])
 
     if not metrics:
+        logger.error("query.fail | reason=no_metrics_after_filtering")
         raise HTTPException(
             status_code=400,
             detail="No metrics support the requested dimensions/filters",
@@ -7625,9 +8041,24 @@ def query(request: QueryRequest) -> QueryResult:
 
     dim_objects = []
     for dim_name in dimensions:
-        if dim_name not in catalog.dimensions:
-            raise HTTPException(status_code=400, detail=f"Unknown dimension: {dim_name}")
-        dim_objects.append(catalog.dimensions[dim_name])
+        if dim_name in catalog.dimensions:
+            dim_objects.append(catalog.dimensions[dim_name])
+            continue
+        # Ad-hoc dimension: if it matches a metric dimension, build SQL from metric base table.
+        if dim_name in metric_dimension_set:
+            base_table = _infer_fact_table_from_metric_sql(metrics[0].sql)
+            if base_table:
+                dim_objects.append(
+                    Dimension(
+                        name=dim_name,
+                        description="Ad-hoc dimension from metric",
+                        data_type="string",
+                        sql=f"{{{{ ref('{base_table}') }}}}.{dim_name}",
+                    )
+                )
+                logger.info("query.ad_hoc_dimension | name=%s base_table=%s", dim_name, base_table)
+                continue
+        raise HTTPException(status_code=400, detail=f"Unknown dimension: {dim_name}")
 
     built_filters: List[Filter] = []
     for flt in filters:
@@ -7748,7 +8179,7 @@ def query(request: QueryRequest) -> QueryResult:
     return QueryResult(
         metrics=[metric.name for metric in metrics],
         dimensions=[dim.name for dim in dim_objects if dim.name != "company_name"],
-        sql=built.sql if request.explain else None,
+        sql=built.sql,
         rows=rows,
         by_company_sql=by_company_sql,
         by_company_rows=by_company_rows,

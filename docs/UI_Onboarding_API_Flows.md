@@ -144,6 +144,8 @@ sequenceDiagram
     API-->>UI: apply summary
     UI->>API: GET /entities?tenant_id=...
     API-->>UI: entities/hierarchies
+    UI->>API: PATCH /hierarchies
+    API-->>UI: { ok: true }
 
     UI->>API: POST /onboard/infer-models/async
     API-->>UI: { job_id: infer_job }
