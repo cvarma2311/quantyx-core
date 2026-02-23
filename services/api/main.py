@@ -41,6 +41,7 @@ from services.ai.charts_store import (
     create_chart_request,
     create_chart_event,
     get_chart_request,
+    get_latest_chart_request_by_question,
     update_chart_request,
 )
 from services.ai.schema_loader import load_manifest_models
@@ -583,35 +584,41 @@ def _execute_chart_job(payload: dict) -> dict:
         last_step = now
 
     try:
-        query_payload = payload.get("query_payload") or {}
-        query_request = QueryRequest(**query_payload)
-        result = query(query_request)
-        _mark("query")
+        chart_row = get_chart_request(settings, chart_id)
+        if not chart_row:
+            raise ValueError("Chart request not found")
+        rows = chart_row.get("rows_json") or []
+        if not isinstance(rows, list):
+            raise ValueError("Chart rows_json must be a list")
+        query_payload = chart_row.get("query_payload") or {}
+        metric_names = query_payload.get("metrics") or []
+        dimensions = query_payload.get("dimensions") or []
+        _mark("load_rows")
 
-        chart_type = infer_chart_type(result.dimensions, result.rows, result.metrics)
+        chart_type = infer_chart_type(dimensions, rows, metric_names)
         if not chart_type:
             chart_type = infer_chart_type_with_llm(
-                query_request.question,
-                result.metrics,
-                result.dimensions,
-                result.rows,
+                query_payload.get("question"),
+                metric_names,
+                dimensions,
+                rows,
                 settings,
             )
         _mark("chart_infer")
 
         chart_payload = None
         chart_data = None
-        if chart_type:
-            chart = build_chart_payload(chart_type, result.rows, result.metrics[0], result.dimensions)
+        if chart_type and metric_names:
+            chart = build_chart_payload(chart_type, rows, metric_names[0], dimensions)
             chart_payload = chart.get("chart_payload")
             chart_data = chart.get("data")
         update_chart_request(
             settings,
             chart_id,
             status="ready",
-            sql=result.sql,
-            params=None,
-            rows_json=result.rows,
+            sql=chart_row.get("sql"),
+            params=chart_row.get("params"),
+            rows_json=rows,
             chart_type=chart_type,
             chart_payload=chart_payload,
             chart_data=chart_data,
@@ -8008,6 +8015,18 @@ def _deterministic_date_filters_from_question(
     return [{"field": date_field, "operator": "IN", "value": "last week"}]
 
 
+def _strip_time_filters(filters: list[dict]) -> list[dict]:
+    time_fields = {"process_date", "pdate", "date_day", "date"}
+    stripped = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        field = payload.get("field")
+        if isinstance(field, str) and field.lower() in time_fields:
+            continue
+        stripped.append(payload)
+    return stripped
+
+
 def _extract_top_n(question: str | None) -> int | None:
     if not question:
         return None
@@ -8250,11 +8269,37 @@ def query(request: QueryRequest) -> QueryResult:
         logger.info("query.glossary | loaded=%s", len(glossary or []))
         contract = get_active_semantic_contract(settings, request.tenant_id, domain_id)
         _log_step("glossary_contract")
-    metric_names, dimensions, filters = _resolve_metrics(
-        request,
-        glossary=glossary,
-        allowed_dimensions=dimension_candidates,
-    )
+    cached_payload = None
+    if request.question and request.tenant_id:
+        cached = get_latest_chart_request_by_question(
+            settings,
+            tenant_id=request.tenant_id,
+            domain_id=domain_id if request.tenant_id else None,
+            question=request.question,
+        )
+        if cached and cached.get("query_payload"):
+            cached_payload = cached.get("query_payload")
+            if isinstance(cached_payload, str):
+                try:
+                    cached_payload = json.loads(cached_payload)
+                except json.JSONDecodeError:
+                    cached_payload = None
+            logger.info("query.cache_hit | chart_id=%s", cached.get("chart_id"))
+
+    if cached_payload:
+        metric_names = cached_payload.get("metrics") or []
+        dimensions = cached_payload.get("dimensions") or []
+        filters = cached_payload.get("filters") or []
+        if request.question:
+            # Refresh time filters based on current question
+            filters = _strip_time_filters(filters)
+            filters.extend(_deterministic_date_filters_from_question(request.question, dimension_candidates))
+    else:
+        metric_names, dimensions, filters = _resolve_metrics(
+            request,
+            glossary=glossary,
+            allowed_dimensions=dimension_candidates,
+        )
     _log_step("resolve_metrics")
     logger.info("query.resolve_metrics | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     if metric_names or dimensions or filters:
@@ -8573,9 +8618,50 @@ def query(request: QueryRequest) -> QueryResult:
                 details={"metrics": metric_names},
             )
 
+    chart_id = None
+    if request.question and request.tenant_id:
+        try:
+            domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+            query_payload = {
+                "tenant_id": request.tenant_id,
+                "domain_id": domain_id,
+                "question": request.question,
+                "metrics": [metric.name for metric in metrics],
+                "dimensions": [dim.name for dim in dim_objects if dim.name != "company_name"],
+                "filters": [flt.model_dump() if hasattr(flt, "model_dump") else flt for flt in filters],
+                "limit": request.limit,
+            }
+            chart_row = create_chart_request(
+                settings,
+                tenant_id=request.tenant_id,
+                domain_id=domain_id,
+                question=request.question,
+                query_payload=query_payload,
+                sql=built.sql,
+                params=built.params,
+                rows_json=rows,
+            )
+            create_chart_event(
+                settings,
+                chart_row["chart_id"],
+                "queued",
+                details={"question": request.question},
+            )
+            create_job(
+                settings,
+                tenant_id=request.tenant_id,
+                domain_id=domain_id,
+                job_type="chart_build",
+                payload={"chart_id": chart_row["chart_id"]},
+            )
+            chart_id = chart_row["chart_id"]
+        except Exception:  # noqa: BLE001
+            logger.exception("chart enqueue failed")
+
     return QueryResult(
         metrics=[metric.name for metric in metrics],
         dimensions=[dim.name for dim in dim_objects if dim.name != "company_name"],
+        chart_id=chart_id,
         sql=built.sql,
         rows=rows,
         by_company_sql=by_company_sql,
