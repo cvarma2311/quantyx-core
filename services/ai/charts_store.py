@@ -31,13 +31,16 @@ def create_chart_request(
     domain_id: str | None,
     question: str | None,
     query_payload: dict | None,
+    sql: str | None = None,
+    params: list | None = None,
+    rows_json: list | dict | None = None,
 ) -> dict:
     chart_id = f"chart_{uuid.uuid4().hex[:10]}"
-    sql = """
+    insert_sql = """
         INSERT INTO public.quantyx_chart_requests
-          (chart_id, tenant_id, domain_id, question, query_payload, status)
+          (chart_id, tenant_id, domain_id, question, query_payload, sql, params, rows_json, status)
         VALUES
-          (%s, %s, %s, %s, %s::jsonb, 'queued')
+          (%s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, 'queued')
         RETURNING chart_id, status, created_at, updated_at
     """
     params = [
@@ -46,6 +49,9 @@ def create_chart_request(
         domain_id,
         question,
         _serialize_payload(query_payload),
+        sql,
+        _serialize_payload(params),
+        _serialize_payload(rows_json),
     ]
     conn = psycopg2.connect(
         host=settings.db_host,
@@ -56,7 +62,7 @@ def create_chart_request(
     )
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql, params)
+            cur.execute(insert_sql, params)
             row = cur.fetchone()
         conn.commit()
         return dict(row) if row else {"chart_id": chart_id, "status": "queued"}
@@ -84,6 +90,40 @@ def get_chart_request(settings: Settings, chart_id: str) -> dict | None:
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, [chart_id])
+            row = cur.fetchone()
+        return dict(row) if row else None
+    except psycopg2.errors.UndefinedTable:
+        return None
+    finally:
+        conn.close()
+
+
+def get_latest_chart_request_by_question(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str | None,
+    question: str,
+) -> dict | None:
+    sql = """
+        SELECT chart_id, tenant_id, domain_id, question, query_payload, status, created_at
+          FROM public.quantyx_chart_requests
+         WHERE tenant_id = %s
+           AND (%s IS NULL OR domain_id = %s)
+           AND lower(question) = lower(%s)
+         ORDER BY created_at DESC
+         LIMIT 1
+    """
+    params = [tenant_id, domain_id, domain_id, question]
+    conn = psycopg2.connect(
+        host=settings.db_host,
+        port=settings.db_port,
+        dbname=settings.db_name,
+        user=settings.db_user,
+        password=settings.db_password,
+    )
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, params)
             row = cur.fetchone()
         return dict(row) if row else None
     except psycopg2.errors.UndefinedTable:

@@ -70,6 +70,11 @@ class QueryRequest(BaseModel):
 class QueryResult(BaseModel):
     metrics: List[str] = Field(examples=[["total_sales_volume_tmt"]])
     dimensions: List[str] = Field(examples=[["sales_area_name", "fiscal_year"]])
+    chart_id: Optional[str] = Field(
+        None,
+        description="Chart request id for async chart rendering",
+        examples=["chart_2f7a9c4d"],
+    )
     sql: Optional[str] = Field(
         None,
         examples=[
