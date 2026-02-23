@@ -786,3 +786,38 @@ CREATE TABLE IF NOT EXISTS public.quantyx_context_extraction_agents (
   confidence NUMERIC NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Charts: async chart requests
+
+CREATE TABLE IF NOT EXISTS public.quantyx_chart_requests (
+  chart_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT,
+  question TEXT,
+  query_payload JSONB,
+  sql TEXT,
+  params JSONB,
+  rows_json JSONB,
+  chart_type TEXT,
+  chart_payload JSONB,
+  chart_data JSONB,
+  status TEXT NOT NULL DEFAULT 'queued',
+  error_message TEXT,
+  timing_ms JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_chart_requests_scope
+  ON public.quantyx_chart_requests (tenant_id, domain_id, status, updated_at);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_chart_events (
+  event_id TEXT PRIMARY KEY,
+  chart_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  details JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_chart_events_chart
+  ON public.quantyx_chart_events (chart_id, created_at DESC);

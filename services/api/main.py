@@ -36,6 +36,13 @@ from services.ai.connection_registry import (
 from services.ai.onboarding.scan_store import persist_schema_scan
 from services.ai.onboarding.scan_store import load_latest_scan_result, load_latest_scan_for_scope
 from services.ai.resolver import resolve_question
+from services.ai.charts import build_chart_payload, infer_chart_type, infer_chart_type_with_llm
+from services.ai.charts_store import (
+    create_chart_request,
+    create_chart_event,
+    get_chart_request,
+    update_chart_request,
+)
 from services.ai.schema_loader import load_manifest_models
 from services.ai.dbt_manifest import (
     run_dbt_compile,
@@ -101,7 +108,10 @@ from services.ai.onboarding.entity_mappings_store import (
     persist_entity_mapping,
     update_entity_mapping_status,
 )
-from services.ai.onboarding.entity_mapping_agents import attach_mapping_id_to_agents
+from services.ai.onboarding.entity_mapping_agents import (
+    attach_mapping_id_to_agents,
+    list_entity_mapping_agents,
+)
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
 from services.ai.semantic_suggest import build_lineage_edges, build_schema_summary, suggest_semantic_model
@@ -230,6 +240,8 @@ from services.api.schemas import (
     ActionsResponse,
     ActionDetailResponse,
     ActionCreateResponse,
+    ChartRequest,
+    ChartStatusResponse,
     ScenariosResponse,
     ScenarioCreateRequest,
     ScenarioUpdateRequest,
@@ -553,6 +565,82 @@ def _load_context_text(context_id: str) -> tuple[dict, str, list[str]]:
     return context_row, combined_text, file_texts
 
 
+def _execute_chart_job(payload: dict) -> dict:
+    chart_id = payload.get("chart_id")
+    if not chart_id:
+        raise ValueError("chart_id is required for chart_build job")
+    update_chart_request(settings, chart_id, status="running")
+    create_chart_event(settings, chart_id, "running")
+
+    timing: dict[str, float] = {}
+    start_time = time.perf_counter()
+    last_step = start_time
+
+    def _mark(step: str) -> None:
+        nonlocal last_step
+        now = time.perf_counter()
+        timing[f"{step}_ms"] = (now - last_step) * 1000
+        last_step = now
+
+    try:
+        query_payload = payload.get("query_payload") or {}
+        query_request = QueryRequest(**query_payload)
+        result = query(query_request)
+        _mark("query")
+
+        chart_type = infer_chart_type(result.dimensions, result.rows, result.metrics)
+        if not chart_type:
+            chart_type = infer_chart_type_with_llm(
+                query_request.question,
+                result.metrics,
+                result.dimensions,
+                result.rows,
+                settings,
+            )
+        _mark("chart_infer")
+
+        chart_payload = None
+        chart_data = None
+        if chart_type:
+            chart = build_chart_payload(chart_type, result.rows, result.metrics[0], result.dimensions)
+            chart_payload = chart.get("chart_payload")
+            chart_data = chart.get("data")
+        update_chart_request(
+            settings,
+            chart_id,
+            status="ready",
+            sql=result.sql,
+            params=None,
+            rows_json=result.rows,
+            chart_type=chart_type,
+            chart_payload=chart_payload,
+            chart_data=chart_data,
+            timing_ms=timing,
+        )
+        create_chart_event(
+            settings,
+            chart_id,
+            "ready",
+            details={"chart_type": chart_type},
+        )
+        return {"chart_id": chart_id, "status": "ready"}
+    except Exception as exc:  # noqa: BLE001
+        update_chart_request(
+            settings,
+            chart_id,
+            status="failed",
+            error_message=str(exc),
+            timing_ms=timing,
+        )
+        create_chart_event(
+            settings,
+            chart_id,
+            "failed",
+            details={"error_message": str(exc)},
+        )
+        raise
+
+
 def _execute_job(job: dict) -> dict:
     job_type = job.get("job_type")
     payload = _load_job_payload(job.get("request_payload"))
@@ -694,6 +782,8 @@ def _execute_job(job: dict) -> dict:
                 is_active=True,
             )
         return ContextApplyResponse(status="applied", updated=updated).model_dump()
+    if job_type == "chart_build":
+        return _execute_chart_job(payload)
     raise ValueError(f"Unsupported job_type: {job_type}")
 
 
@@ -6456,6 +6546,56 @@ def _run_onboard_map(
 
 
 @app.get(
+    "/onboard/map",
+    tags=["onboard"],
+    summary="Get latest mapping run",
+    description="Return the latest entity mapping run for the active tenant scope.",
+)
+def onboard_map_latest(
+    tenant_id: str,
+    connection_id: str | None = None,
+    database: str | None = None,
+    schema: str | None = None,
+) -> OnboardMapRunResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    if not connection_id or not database or not schema:
+        resolved_connection_id, resolved_database, resolved_schema, _ = _resolve_scope_values(
+            tenant_id,
+            domain_id,
+        )
+        connection_id = connection_id or resolved_connection_id
+        database = database or resolved_database
+        schema = schema or resolved_schema
+    runs = list_entity_mappings(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id,
+        database,
+        schema,
+        limit=1,
+    )
+    if not runs:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    row = runs[0]
+    return OnboardMapRunResponse(
+        mapping_id=row.get("mapping_id"),
+        tenant_id=row.get("tenant_id"),
+        domain_id=row.get("domain_id"),
+        connection_id=row.get("connection_id"),
+        database_name=row.get("database_name"),
+        schema_name=row.get("schema_name"),
+        tables=row.get("tables") or [],
+        candidates=row.get("candidates") or [],
+        low_confidence_candidates=row.get("low_confidence_candidates") or [],
+        low_confidence_threshold=float(row.get("low_confidence_threshold") or LOW_CONFIDENCE_THRESHOLD),
+        status=row.get("status") or "draft",
+        created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
+        updated_at=row.get("updated_at").isoformat() if row.get("updated_at") else None,
+    )
+
+
+@app.get(
     "/onboard/map/history",
     tags=["onboard"],
     summary="List mapping history",
@@ -6497,6 +6637,40 @@ def onboard_map_history(
         for run in runs
     ]
     return {"runs": summarized}
+
+
+@app.get(
+    "/onboard/map/agents",
+    tags=["onboard"],
+    summary="List mapping agent runs",
+    description="Return recent entity mapping agent runs for the given scope.",
+)
+def onboard_map_agents(
+    tenant_id: str,
+    connection_id: str | None = None,
+    database: str | None = None,
+    schema: str | None = None,
+    limit: int = 50,
+) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    if not connection_id or not database or not schema:
+        resolved_connection_id, resolved_database, resolved_schema, _ = _resolve_scope_values(
+            tenant_id,
+            domain_id,
+        )
+        connection_id = connection_id or resolved_connection_id
+        database = database or resolved_database
+        schema = schema or resolved_schema
+    agents = list_entity_mapping_agents(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database,
+        schema_name=schema,
+        limit=limit,
+    )
+    return {"agents": agents}
 
 
 @app.get(
@@ -8408,4 +8582,68 @@ def query(request: QueryRequest) -> QueryResult:
         by_company_rows=by_company_rows,
         semantic_validation=semantic_validation,
         lineage=lineage,
+    )
+
+
+@app.post(
+    "/charts",
+    response_model=ChartStatusResponse,
+    tags=["charts"],
+    summary="Create async chart request",
+)
+def create_chart(request: ChartRequest) -> ChartStatusResponse:
+    domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+    filters_payload = [flt.model_dump() for flt in (request.filters or [])]
+    query_payload = {
+        "tenant_id": request.tenant_id,
+        "domain_id": domain_id,
+        "question": request.question,
+        "metrics": request.metrics,
+        "dimensions": request.dimensions or [],
+        "filters": filters_payload,
+        "limit": request.limit,
+    }
+    chart_row = create_chart_request(
+        settings,
+        tenant_id=request.tenant_id,
+        domain_id=domain_id,
+        question=request.question,
+        query_payload=query_payload,
+    )
+    create_chart_event(
+        settings,
+        chart_row["chart_id"],
+        "queued",
+        details={"question": request.question},
+    )
+    create_job(
+        settings,
+        tenant_id=request.tenant_id,
+        domain_id=domain_id,
+        job_type="chart_build",
+        payload={"chart_id": chart_row["chart_id"], "query_payload": query_payload},
+    )
+    return ChartStatusResponse(chart_id=chart_row["chart_id"], status=chart_row.get("status", "queued"))
+
+
+@app.get(
+    "/charts/{chart_id}",
+    response_model=ChartStatusResponse,
+    tags=["charts"],
+    summary="Get chart status and payload",
+)
+def get_chart(chart_id: str) -> ChartStatusResponse:
+    row = get_chart_request(settings, chart_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Chart not found")
+    return ChartStatusResponse(
+        chart_id=row["chart_id"],
+        status=row.get("status"),
+        chart_type=row.get("chart_type"),
+        chart_payload=row.get("chart_payload"),
+        data=row.get("chart_data"),
+        sql=row.get("sql"),
+        params=row.get("params"),
+        rows_json=row.get("rows_json"),
+        error_message=row.get("error_message"),
     )
