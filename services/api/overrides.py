@@ -40,6 +40,7 @@ def load_overrides(
     connection_id: str | None = None,
     database_name: str | None = None,
     schema_name: str | None = None,
+    context_ids: list[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     entity_overrides = load_entity_overrides(
         settings,
@@ -56,6 +57,7 @@ def load_overrides(
         connection_id=connection_id,
         database_name=database_name,
         schema_name=schema_name,
+        context_ids=context_ids,
     )
     return entity_overrides, hierarchy_overrides
 

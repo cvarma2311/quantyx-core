@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 import urllib.request
 
 from services.ai.config import Settings
 
+logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).parent / "prompts" / "semantic_contract"
 
@@ -19,6 +21,11 @@ def _load_prompt(name: str) -> str:
 def _call_llm(settings: Settings, system_prompt: str, user_prompt: str) -> dict[str, Any]:
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY is not set")
+    logger.debug(
+        "llm.semantic_extract: request | model=%s prompt_chars=%s",
+        settings.openai_model,
+        len(user_prompt or ""),
+    )
     payload = {
         "model": settings.openai_model,
         "messages": [
@@ -40,6 +47,7 @@ def _call_llm(settings: Settings, system_prompt: str, user_prompt: str) -> dict[
     with urllib.request.urlopen(request, timeout=45) as response:
         body = json.loads(response.read().decode("utf-8"))
     content = body["choices"][0]["message"]["content"]
+    logger.debug("llm.semantic_extract: response | chars=%s", len(content or ""))
     return json.loads(content)
 
 

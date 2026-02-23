@@ -16,6 +16,15 @@ If status is `failed` or `canceled`, show error/failed state from `GET /jobs/{jo
 
 ## 2) Recommended UI Screen Flow
 
+### Screen A0: Context Ingestion + Active Contexts
+- Trigger: `POST /context/ingest`
+- Trigger: `POST /context/extract/async` -> poll `/jobs/{job_id}` + `/jobs/{job_id}/result`
+ - Apply results: `POST /context/apply/async` -> poll `/jobs/{job_id}` + `/jobs/{job_id}/result`
+  - Use `hierarchy_selection` to apply a subset of hierarchies if needed.
+- If multiple contexts exist, let user select **one or more** active contexts:
+  - `PATCH /context/{context_id}?tenant_id=...` with `{ "status": "active" }`
+  - Optionally deactivate with `{ "status": "inactive" }`
+
 ### Screen A: Scan Data Source
 - Trigger: `POST /onboard/scan-connection/async`
 - Poll job + fetch result.
@@ -72,6 +81,12 @@ For list pages (`entities`, `facts`, `dimensions`, `metrics`):
 
 ## 4) Minimal End-to-End API Sequence
 
+0. `POST /context/ingest`
+0a. `POST /context/extract/async`
+0a-1. `GET /jobs/{job_id}` -> `GET /jobs/{job_id}/result`
+0b. `POST /context/apply/async`
+0b-1. `GET /jobs/{job_id}` -> `GET /jobs/{job_id}/result`
+0c. `PATCH /context/{context_id}?tenant_id=...` (set active, repeat for multiple)
 1. `POST /onboard/scan-connection/async`
 2. `GET /jobs/{scan_job_id}` -> `GET /jobs/{scan_job_id}/result`
 3. `POST /onboard/map/async`
@@ -86,6 +101,7 @@ For list pages (`entities`, `facts`, `dimensions`, `metrics`):
 12. `POST /metrics/suggested/async?persist=true`
 13. `GET /jobs/{metrics_job_id}` -> `GET /jobs/{metrics_job_id}/result`
 14. `GET /metrics?tenant_id=...`
+15. `POST /tenant/purge` (optional demo reset)
 
 ---
 
@@ -94,6 +110,7 @@ For list pages (`entities`, `facts`, `dimensions`, `metrics`):
 - Don’t call `GET /entities` immediately after map async completion without calling map apply.
 - Don’t assume `/facts`, `/dimensions`, `/metrics` are non-empty on first run.
 - Don’t skip `GET /jobs/{job_id}/result`; job completion alone is not the final payload.
+- Don’t expose `/tenant/purge` to non-admin users in production.
 
 ---
 
@@ -127,6 +144,8 @@ sequenceDiagram
     API-->>UI: apply summary
     UI->>API: GET /entities?tenant_id=...
     API-->>UI: entities/hierarchies
+    UI->>API: PATCH /hierarchies
+    API-->>UI: { ok: true }
 
     UI->>API: POST /onboard/infer-models/async
     API-->>UI: { job_id: infer_job }
@@ -151,4 +170,6 @@ sequenceDiagram
     API-->>UI: metrics suggestion summary
     UI->>API: GET /metrics?tenant_id=...
     API-->>UI: metrics list
+    UI->>API: POST /tenant/purge (optional)
+    API-->>UI: purge summary
 ```

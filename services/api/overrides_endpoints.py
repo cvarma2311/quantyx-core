@@ -107,8 +107,9 @@ def upsert_hierarchy_override(
 ) -> None:
     if not payload.get("hierarchy_name"):
         raise HTTPException(status_code=400, detail="hierarchy_name is required")
+    context_id = payload.get("context_id") or payload.get("source_context_id") or "ctx_legacy"
     lifecycle_status = payload.get("lifecycle_status") or payload.get("status") or "draft"
-    artifact_key = payload.get("artifact_key") or payload["hierarchy_name"]
+    artifact_key = payload.get("artifact_key") or f"{context_id}::{payload['hierarchy_name']}"
 
     current_rows = run_query(
         settings,
@@ -120,11 +121,12 @@ def upsert_hierarchy_override(
            AND connection_id = %s
            AND database_name = %s
            AND schema_name = %s
+           AND context_id = %s
            AND artifact_key = %s
            AND COALESCE(is_current, true) = true
          LIMIT 1
         """,
-        [tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key],
+        [tenant_id, domain_id, connection_id, database_name, schema_name, context_id, artifact_key],
     )
     previous_version = 0
     if current_rows:
@@ -140,10 +142,11 @@ def upsert_hierarchy_override(
                AND connection_id = %s
                AND database_name = %s
                AND schema_name = %s
+               AND context_id = %s
                AND artifact_key = %s
                AND COALESCE(is_current, true) = true
             """,
-            [tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key],
+            [tenant_id, domain_id, connection_id, database_name, schema_name, context_id, artifact_key],
         )
     version_no = previous_version + 1
     row_hierarchy_name = artifact_key if version_no == 1 else f"{artifact_key}__v{version_no}_{uuid.uuid4().hex[:6]}"
@@ -151,11 +154,12 @@ def upsert_hierarchy_override(
         settings,
         """
         INSERT INTO public.quantyx_hierarchy_overrides
-          (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name, levels, description,
+          (tenant_id, domain_id, connection_id, database_name, schema_name, context_id, hierarchy_name, hierarchy_group,
+           levels, description, source_context_id,
            artifact_key, version_no, lifecycle_status, source_type, source_run_id, change_reason, approved_by, approved_at,
            supersedes_version_no, created_by, updated_by, is_current, created_at, updated_at)
         VALUES
-          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
         """,
         [
             tenant_id,
@@ -163,9 +167,12 @@ def upsert_hierarchy_override(
             connection_id,
             database_name,
             schema_name,
+            context_id,
             row_hierarchy_name,
+            payload.get("hierarchy_group") or payload.get("group"),
             payload.get("levels", []),
             payload.get("description"),
+            payload.get("source_context_id") or context_id,
             artifact_key,
             version_no,
             lifecycle_status,

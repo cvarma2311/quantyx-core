@@ -85,6 +85,7 @@ def load_hierarchy_overrides(
     connection_id: str | None = None,
     database_name: str | None = None,
     schema_name: str | None = None,
+    context_ids: list[str] | None = None,
 ) -> list[dict]:
     conn = psycopg2.connect(
         host=settings.db_host,
@@ -106,10 +107,13 @@ def load_hierarchy_overrides(
             if schema_name:
                 filters.append("schema_name = %s")
                 params.append(schema_name)
+            if context_ids:
+                filters.append("context_id = ANY(%s)")
+                params.append(context_ids)
             where_clause = " AND ".join(filters)
             cur.execute(
                 f"""
-                SELECT hierarchy_name, levels, description,
+                SELECT hierarchy_name, levels, description, hierarchy_group, context_id,
                        connection_id, database_name, schema_name,
                        lifecycle_status, source_type, source_run_id, artifact_key, version_no, is_current
                 FROM public.quantyx_hierarchy_overrides
@@ -135,7 +139,7 @@ def load_hierarchy_overrides_all(settings: Settings, tenant_id: str, domain_id: 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT hierarchy_name, levels, description,
+                SELECT hierarchy_name, levels, description, hierarchy_group, context_id,
                        connection_id, database_name, schema_name,
                        lifecycle_status, source_type, source_run_id, artifact_key, version_no, is_current
                 FROM public.quantyx_hierarchy_overrides

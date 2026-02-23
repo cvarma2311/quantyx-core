@@ -184,6 +184,27 @@ Expected outcome:
 
 ---
 
+## 3b) Multiple contexts + hierarchy sets (recommended)
+
+You can ingest **multiple** context entries for the same tenant/domain to support
+different hierarchy sets (e.g., geography and supply chain).
+
+1) Ingest each context separately (repeat step 3).
+2) Run `/context/extract` for each context.
+3) Apply each extraction.
+4) Set **active** contexts for Ask (can be multiple):
+
+PATCH /context/{context_id}?tenant_id=...
+
+```json
+{ "status": "active" }
+```
+
+Result:
+- Ask uses hierarchies tied to all active contexts.
+
+---
+
 ## 3a) Semantic contract extraction (optional)
 
 Use this if you want the semantic layer to enrich `/metrics` and `/datasets` with
@@ -232,7 +253,7 @@ Response:
 
 ## 4) Extract structured context (LLM)
 
-POST /context/extract
+POST /context/extract/async
 
 Purpose: extract abbreviations, synonyms, hierarchy candidates, metric candidates, and question intents.
 
@@ -250,14 +271,30 @@ Request:
 Response (example):
 ```json
 {
-  "extraction_id": "ext_123",
-  "context_id": "ctx_123",
-  "extractions": {
-    "abbreviations": [{"abbr": "SBU", "definition": "Strategic Business Unit"}],
-    "synonyms": [{"term": "sales area", "synonyms": ["territory"]}],
-    "hierarchies": [{"name": "sales_org", "levels": ["zone", "region", "sales_area"]}],
-    "metric_candidates": [{"metric_name": "output_tmt", "table": "fact_production_daily"}],
-    "question_intents": [{"question": "Which plants are underperforming?", "metrics": ["output_tmt"]}]
+  "job_id": "job_123",
+  "status": "queued"
+}
+```
+
+Poll:
+GET /jobs/{job_id}
+GET /jobs/{job_id}/result
+
+Result payload example:
+```json
+{
+  "job_id": "job_123",
+  "status": "completed",
+  "result": {
+    "extraction_id": "ext_123",
+    "context_id": "ctx_123",
+    "extractions": {
+      "abbreviations": [{"abbr": "SBU", "definition": "Strategic Business Unit"}],
+      "synonyms": [{"term": "sales area", "synonyms": ["territory"]}],
+      "hierarchies": [{"name": "sales_org", "levels": ["zone", "region", "sales_area"]}],
+      "metric_candidates": [{"metric_name": "output_tmt", "table": "fact_production_daily"}],
+      "question_intents": [{"question": "Which plants are underperforming?", "metrics": ["output_tmt"]}]
+    }
   }
 }
 ```
@@ -269,7 +306,7 @@ Expected outcome:
 
 ## 5) Apply extracted context (seed ontology + metrics)
 
-POST /context/apply
+POST /context/apply/async
 
 Purpose: apply context extractions to glossary, entity overrides, hierarchy overrides, and metric suggestions.
 
@@ -279,17 +316,32 @@ Request:
   "tenant_id": "tenant_a",
   "domain_id": "manufacturing",
   "extraction_id": "ext_123",
-  "apply": { "entities": true, "hierarchies": true, "glossary": true, "metrics": true }
+  "apply": { "entities": true, "hierarchies": true, "glossary": true, "metrics": true },
+  "hierarchy_selection": { "names": ["geography", "supply_chain"], "apply_all": false }
 }
 ```
 
 Response (example):
 ```json
-{ "status": "applied", "updated": { "entities": 4, "hierarchies": 1, "metrics": 8 } }
+{ "job_id": "job_456", "status": "queued" }
+```
+
+Poll:
+GET /jobs/{job_id}
+GET /jobs/{job_id}/result
+
+Result payload example:
+```json
+{
+  "job_id": "job_456",
+  "status": "completed",
+  "result": { "status": "applied", "updated": { "entities": 4, "hierarchies": 1, "metrics": 8 } }
+}
 ```
 
 Expected outcome:
 - Ontology, hierarchies, and metric suggestions are enriched with customer context.
+- Multiple hierarchies from the same context can be applied selectively.
 
 ---
 
@@ -402,13 +454,19 @@ Request:
 }
 ```
 
-PATCH /hierarchies/{hierarchy_name}?domain_id=manufacturing&tenant_id=tenant_a
+PATCH /hierarchies
 
 Request:
 ```json
 {
+  "tenant_id": "tenant_a",
+  "connection_id": "conn_prod",
+  "database": "prod_warehouse",
+  "schema": "public",
+  "hierarchy_name": "Operational Hierarchy",
   "levels": ["division", "plant", "line"],
-  "description": "Operational rollup for plants"
+  "description": "Operational rollup for plants",
+  "status": "certified"
 }
 ```
 
@@ -649,6 +707,53 @@ POST /review
   "notes": "Looks good"
 }
 ```
+
+---
+
+## 11a) Tenant data purge (demo reset)
+
+Purpose: wipe all Quantyx data for a tenant so you can re-run onboarding from scratch.
+
+POST /tenant/purge
+
+Request:
+```json
+{
+  "tenant_id": "tenant_a",
+  "dry_run": true
+}
+```
+
+Response:
+```json
+{
+  "tenant_id": "tenant_a",
+  "dry_run": true,
+  "deleted": [
+    {"table": "quantyx_business_context", "rows": 2},
+    {"table": "quantyx_context_extractions", "rows": 2},
+    {"table": "quantyx_context_extraction_agents", "rows": 10},
+    {"table": "quantyx_context_file_links", "rows": 3}
+  ]
+}
+```
+
+Deletion rules:
+- Tables with `tenant_id` are deleted directly.
+- Join-based deletes by `tenant_id`:
+  - `quantyx_context_extraction_agents` via `quantyx_context_extractions.extraction_id`
+  - `quantyx_context_file_links` via `quantyx_context_files.file_id`
+  - `quantyx_job_events` via `quantyx_jobs.job_id`
+  - `quantyx_canvas_nodes` via `quantyx_canvases.canvas_id`
+  - `quantyx_canvas_edges` via `quantyx_canvases.canvas_id`
+  - `quantyx_connection_scopes` via `quantyx_connection_registry.connection_id`
+- Domain-based deletes via `quantyx_tenant_domains.domain_id`:
+  - `quantyx_query_audit`
+  - `quantyx_insight_events`
+
+Notes:
+- Use `dry_run=true` to preview row counts before deletion.
+- This is intended for demo/testing; protect behind admin access in production.
 
 ---
 

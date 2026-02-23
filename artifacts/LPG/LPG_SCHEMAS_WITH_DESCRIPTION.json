@@ -1,0 +1,1802 @@
+[
+    {
+        "table_context": {
+            "table_name": "lpg_cdcms_subsidy_failure_statistics",
+            "schema": [
+                 {
+                    "column_name": "Delivery_Date",
+                    "data_type": "timestamp without time zone",
+                    "description": "refers to the delivery date"
+                },
+                {
+                    "column_name": "Month",
+                    "data_type": "text",
+                    "description": ""
+                    
+                },
+                {
+                    "column_name": "PaymentErrorCode",
+                    "data_type": "bigint",
+                    "description": "refers to the payment error"
+                    
+                },
+                {
+                    "column_name": "Distributor_Code",
+                    "data_type": "bigint",
+                    "description": "refers to the distributor code"
+                },
+                {
+                    "column_name": "Refills",
+                    "data_type": "bigint",
+                    "description": "refers to the no.of refils"
+                },
+                {
+                    "column_name": "Consumers",
+                    "data_type": "bigint",
+                    "description": "refers to the count of consumers"
+                },
+                {
+                    "column_name": "Code",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "PaymentErrorDecription",
+                    "data_type": "text",
+                    "description": "refers to the description related to payment error"
+                },
+                {
+                    "column_name": "PaymentErrorName",
+                    "data_type": "text",
+                    "description": "refers to the payment error name"
+                },
+                {
+                    "column_name": "System_Idx",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "JDEDistributorCode",
+                    "data_type": "bigint",
+                    "description": "refers to the distributor code"
+                },
+                {
+                    "column_name": "DistributorName",
+                    "data_type": "text",
+                    "description": "refers to the distributor name"
+
+                },
+                {
+                    "column_name": "SACode",
+                    "data_type": "bigint",
+                    "description": "refers to the sales area code"
+
+                },
+                {
+                    "column_name": "StateCode",
+                    "data_type": "text",
+                    "description": "refers to the state code"
+
+                },
+                {
+                    "column_name": "DistrictCode",
+                    "data_type": "bigint",
+                    "description": "refers to the district code"
+
+                },
+                {
+                    "column_name": "TalukaCode",
+                    "data_type": "text",
+                    "description": ""
+
+                },
+                {
+                    "column_name": "CityCode",
+                    "data_type": "text",
+                    "description": "refers to the city code"
+
+                },
+                {
+                    "column_name": "ROCode",
+                    "data_type": "bigint",
+                    "description": "refers to the region code"
+
+                },
+                {
+                    "column_name": "SAName",
+                    "data_type": "text",
+                    "description": "refers to the sales area"
+
+                },
+                {
+                    "column_name": "ZOCode",
+                    "data_type": "text",
+                    "description": "refers to the zone code"
+
+                },
+                {
+                    "column_name": "ROName",
+                    "data_type": "text",
+                    "description": "refers to the region name"
+
+                },
+                {
+                    "column_name": "ZOName",
+                    "data_type": "text",
+                    "description": "refers to teh zone name"
+
+                },
+                {
+                    "column_name": "Execution_Date",
+                    "data_type": "timestamp without time zone",
+                    "description": ""
+
+                },
+                {
+                    "column_name": "month_number",
+                    "data_type": "bigint",
+                    "description": ""
+
+                },
+                {
+                    "column_name": "Year",
+                    "data_type": "bigint",
+                    "description": ""
+
+                },
+                {
+                    "column_name": "Financial_Year",
+                    "data_type": "text",
+                    "description": ""
+
+                }
+            ]
+        }
+    },
+    {
+        "table_context": {
+            "table_name": "event_log",
+            "schema": [
+                {
+                    "column_name": "event_log_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "plant_id",
+                    "data_type": "bigint",
+                    "description": "represents the plant unqiue id"
+                },
+                {
+                    "column_name": "system_id",
+                    "data_type": "bigint",
+                    "description": "system id is nothing but the carousal id , carousal means a head which can have 24h,48h like that they can produce 24h --> 24 cylinders per cycle"
+                },
+                {
+                    "column_name": "process_id",
+                    "data_type": "bigint",
+                    "description": "process id indicates the rejection type according to the particular number"
+                },
+                {
+                    "column_name": "machine_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "network_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "device_id",
+                    "data_type": "bigint",
+                    "description": "this represents the heads"
+                },
+                {
+                    "column_name": "process_date",
+                    "data_type": "timestamp without time zone",
+                    "description": "the date when does the cylinder is being processed"
+                },
+                {
+                    "column_name": "cyl_id_no",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "cyl_owner",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "cyl_type",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "process_status",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "process_status32",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "is_sortout",
+                    "data_type": "bigint",
+                    "description": "if this is sort out after resolving the rejection then this will be considered for production "
+                },
+                {
+                    "column_name": "Plant Name",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "sap_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pdate",
+                    "data_type": "date",
+                    "description": ""
+                }
+            ]
+        }
+    },
+    {
+        "table_context": {
+            "table_name": "production_log",
+            "schema": [
+                {
+                    "column_name": "production_log_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "plant_id",
+                    "data_type": "bigint",
+                    "description": "gives the unique plant id which represents particular plant"
+                },
+                {
+                    "column_name": "system_id",
+                    "data_type": "bigint",
+                    "description": "system id is nothing but the carousal id , carousal means a head which can have 24h,48h like that they can produce 24h --> 24 cylinders per cycle"
+                },
+                {
+                    "column_name": "process_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "machine_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "network_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "device_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "process_date",
+                    "data_type": "timestamp without time zone",
+                    "description": ""
+                },
+                {
+                    "column_name": "cyl_id_no",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "cyl_owner",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "cyl_type",
+                    "data_type": "bigint",
+                    "description": "Based on this we consider the cylinder is 14.2kgs or 19 kgs cylinder"
+                },
+                {
+                    "column_name": "cyl_tare",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "residual",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "fill_time",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "check_net",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "process_status",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "process_status32",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pp01_machine_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pp01_process_status",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pp02_machine_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pp02_process_status",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pp03_machine_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pp03_process_status",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pp04_machine_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pp04_process_status",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "sequence_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "is_sortout",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pp05_machine_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pp05_process_status",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "Plant Name",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "sap_id",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pdate",
+                    "data_type": "date",
+                    "description": ""
+                }
+            ]
+        }
+    },
+    {
+        "table_context": {
+            "table_name": "lpg_todays_cdcms_sales_summary",
+            "schema": [
+                            {
+                    "column_name": "JDEDistributorCode",
+                    "data_type": "bigint",
+                    "description": "Here We have the distributor number where we will map and get the plant_id accordingly "
+                },
+                {
+                    "column_name": "ConsumerType",
+                    "data_type": "text",
+                    "description": "refers to the consumer_type (NPMUY/PMUY)"
+                },
+                {
+                    "column_name": "IsPrepaid",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "CylType",
+                    "data_type": "text",
+                    "description": "refers to the cylinder type"
+                },
+                {
+                    "column_name": "OrderSourceCode",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "Pending_0D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_1D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_2D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_3D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_4D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_5D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_6D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_7D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_8D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_9D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_10D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_11D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_12D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_13D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_14D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_15D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "Pending_Beyond15D",
+                    "data_type": "bigint",
+                    "description": "pending means the delivery delay of the cylinders according with the day"
+                },
+                {
+                    "column_name": "BookingReceivedYesterday",
+                    "data_type": "bigint",
+                    "description": "refers to the booking received yesterday"
+                },
+                {
+                    "column_name": "TotalSalesYesterday",
+                    "data_type": "bigint",
+                    "description": "refers to the yesterday total sales"
+                },
+                {
+                    "column_name": "BookingReceivedToday",
+                    "data_type": "bigint",
+                    "description": "refers to the booking received today"
+                },
+                {
+                    "column_name": "TotalSalesToday",
+                    "data_type": "bigint",
+                    "description": "refers to the today total sales"
+                },
+                {
+                    "column_name": "SACode",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "StateCode",
+                    "data_type": "text",
+                    "description": "refers to the state code"
+                },
+                {
+                    "column_name": "DistrictCode",
+                    "data_type": "bigint",
+                    "description": "referes to the district code"
+                },
+                {
+                    "column_name": "TalukaCode",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "CityCode",
+                    "data_type": "text",
+                    "description": "refers to the city code"
+                },
+                {
+                    "column_name": "ROCode",
+                    "data_type": "bigint",
+                    "description": "refers to the region code"
+                },
+                {
+                    "column_name": "SAName",
+                    "data_type": "text",
+                    "description": "refers to the sales area name"
+                },
+                {
+                    "column_name": "ZOCode",
+                    "data_type": "text",
+                    "description": "refers to the zone code"
+                },
+                {
+                    "column_name": "ROName",
+                    "data_type": "text",
+                    "description": "refers to the region"
+                },
+                {
+                    "column_name": "ZOName",
+                    "data_type": "text",
+                    "description": "refers to the zone"
+                },
+                {
+                    "column_name": "OrderSourceName",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "Total_Pending",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "pending_1_3_days",
+                    "data_type": "bigint",
+                    "description": "pending count of particular day range"
+                },
+                {
+                    "column_name": "pending_4_7_days",
+                    "data_type": "bigint",
+                    "description": "pending count of particular day range"
+                },
+                {
+                    "column_name": "pending_8_15_days",
+                    "data_type": "bigint",
+                    "description": "pending count of particular day range"
+                },
+                {
+                    "column_name": "Execution_Date",
+                    "data_type": "timestamp without time zone",
+                    "description": ""
+                },
+                {
+                    "column_name": "Month",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "Execution_Year",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "Month_Year",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "Month_Number",
+                    "data_type": "bigint",
+                    "description": ""
+                },
+                {
+                    "column_name": "Financial_Year",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "DistributorName",
+                    "data_type": "text",
+                    "description": "refers to the distributor name"
+                },
+                {
+                    "column_name": "sales_volume",
+                    "data_type": "double precision",
+                    "description": "refers to the sales volume"
+                },
+                {
+                    "column_name": "bookings_volume",
+                    "data_type": "double precision",
+                    "description": "refers to the booking volumne"
+                },
+                {
+                    "column_name": "pendings_volume",
+                    "data_type": "double precision",
+                    "description": "refers to the pendings volume"
+                }
+            ]
+        }
+    },
+    {
+        "table_context": {
+            "table_name": "lpg_plant_operations_masters",
+            "schema": [
+                {
+                    "column_name": "id",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "sap_id",
+                    "data_type": "text",
+                    "description": "this is the plant id of each unique plant"
+                },
+                {
+                    "column_name": "plant_name",
+                    "data_type": "text",
+                    "description": "refers to the plant name"
+                },
+                {
+                    "column_name": "plant",
+                    "data_type": "text",
+                    "description": "refers to the plant"
+                },
+                {
+                    "column_name": "zone",
+                    "data_type": "text",
+                    "description": "refers to the zone"
+                },
+                {
+                    "column_name": "host_ip",
+                    "data_type": "text",
+                    "description": ""
+                },
+                {
+                    "column_name": "db_user",
+                    "data_type": "text",
+                    "description": "user credentials of particular plant"
+                },
+                {
+                    "column_name": "db_password",
+                    "data_type": "text",
+                    "description": "user credentials of particular plant"
+                },
+                {
+                    "column_name": "db_database",
+                    "data_type": "text",
+                    "description": "user credentials of particular plant"
+                },
+                {
+                    "column_name": "PlantName",
+                    "data_type": "text",
+                    "description": "refers to the plant name"
+                },
+                {
+                    "column_name": "region",
+                    "data_type": "text",
+                    "description": "refers to the region"
+                },
+                {
+                    "column_name": "SiteArea",
+                    "data_type": "text",
+                    "description": "refers to the site area"
+                },
+                {
+                    "column_name": "carousel_type",
+                    "data_type": "character varying",
+                    "description": ""
+                }
+            ]
+        }
+    },
+    {
+        "table_context": {
+            "table_name": "lpg_cdcms_last_three_months_summary",
+            "schema": [
+                        {
+                "column_name": "JDEDistributorCode",
+                "data_type": "bigint",
+                "description": "Here We have the distributor number where we will map and get the plant_id accordingly"
+            },
+            {
+                "column_name": "ConsumerType",
+                "data_type": "text",
+                "description": "refers to the consumers type(NPMUY/PMUY)"
+            },
+            {
+                "column_name": "IsPrepaid",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "CylType",
+                "data_type": "text",
+                "description": "refers to the cylinder type"
+            },
+            {
+                "column_name": "OrderSourceCode",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "Pending_0D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_1D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_2D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_3D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_4D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_5D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_6D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_7D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_8D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_9D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_10D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_11D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_12D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_13D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_14D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_15D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "Pending_Beyond15D",
+                "data_type": "bigint",
+                "description": "pending means the delivery delay of the cylinders according with the day"
+            },
+            {
+                "column_name": "BookingReceivedYesterday",
+                "data_type": "bigint",
+                "description": "refers to the booking received yesterday"
+            },
+            {
+                "column_name": "TotalSalesYesterday",
+                "data_type": "bigint",
+                "description": "refers to the today total sales"
+            },
+            {
+                "column_name": "BookingReceivedToday",
+                "data_type": "bigint",
+                "description": "refers to the today bookings received"
+            },
+            {
+                "column_name": "TotalSalesToday",
+                "data_type": "bigint",
+                "description": "refers to the today total sales"
+            },
+            {
+                "column_name": "SACode",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "StateCode",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "DistrictCode",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "TalukaCode",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "CityCode",
+                "data_type": "text",
+                "description": "refers to the city code"
+            },
+            {
+                "column_name": "ROCode",
+                "data_type": "bigint",
+                "description": "refers to the region code"
+            },
+            {
+                "column_name": "SAName",
+                "data_type": "text",
+                "description": "refers to the sales area"
+            },
+            {
+                "column_name": "ZOCode",
+                "data_type": "text",
+                "description": "refers to teh zone code"
+            },
+            {
+                "column_name": "ROName",
+                "data_type": "text",
+                "description": "refers to the region"
+            },
+            {
+                "column_name": "ZOName",
+                "data_type": "text",
+                "description": "refers to the zone"
+            },
+            {
+                "column_name": "OrderSourceName",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "Total_Pending",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "pending_1_3_days",
+                "data_type": "bigint",
+                "description": "pending count of particular day range"
+            },
+            {
+                "column_name": "pending_4_7_days",
+                "data_type": "bigint",
+                "description": "pending count of particular day range"
+            },
+            {
+                "column_name": "pending_8_15_days",
+                "data_type": "bigint",
+                "description": "pending count of particular day range"
+            },
+            {
+                "column_name": "Execution_Date",
+                "data_type": "timestamp without time zone",
+                "description": ""
+            },
+            {
+                "column_name": "Month",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "Execution_Year",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "Month_Year",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "Month_Number",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "Financial_Year",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "DistributorName",
+                "data_type": "text",
+                "description": "refers to the distributor name"
+            },
+            {
+                "column_name": "sales_volume",
+                "data_type": "double precision",
+                "description": "refers to the sales volumne"
+            },
+            {
+                "column_name": "bookings_volume",
+                "data_type": "double precision",
+                "description": "refers to the bookings volume"
+            },
+            {
+                "column_name": "pendings_volume",
+                "data_type": "double precision",
+                "description": "refers to the pendings_volume"
+            }
+            ]
+        }
+    },
+    {
+        "table_context": {
+            "table_name": "lpg_plant_operations",
+            "schema": [
+            {
+                "column_name": "carousel",
+                "data_type": "character varying",
+                "description": "unique carosal id each plant may have 1 to 3 carousals (24h ,48h,72h)"
+            },
+            {
+                "column_name": "filling_head",
+                "data_type": "character varying",
+                "description": "represents the type of head"
+            },
+            {
+                "column_name": "process_date",
+                "data_type": "timestamp with time zone",
+                "description": "tells the process date "
+            },
+            {
+                "column_name": "sap_id",
+                "data_type": "character varying",
+                "description": "plant id "
+            },
+            {
+                "column_name": "location_name",
+                "data_type": "character varying",
+                "description": "plant name"
+            },
+            {
+                "column_name": "zone",
+                "data_type": "character varying",
+                "description": "refers to the zone"
+            },
+            {
+                "column_name": "region",
+                "data_type": "character varying",
+                "description": "refers to the region"
+            },
+            {
+                "column_name": "sales_area",
+                "data_type": "character varying",
+                "description": "refers to the sales_area"
+            },
+            {
+                "column_name": "normal_net_hours",
+                "data_type": "numeric",
+                "description": "working hours"
+            },
+            {
+                "column_name": "normal_total_production",
+                "data_type": "numeric",
+                "description": "production at normal working hours"
+            },
+            {
+                "column_name": "normal_productivity",
+                "data_type": "numeric",
+                "description": "productivity in hour basis in working hours"
+            },
+            {
+                "column_name": "break_net_hours",
+                "data_type": "numeric",
+                "description": "break hours"
+            },
+            {
+                "column_name": "break_total_production",
+                "data_type": "numeric",
+                "description": "production at break hours"
+            },
+            {
+                "column_name": "break_productivity",
+                "data_type": "numeric",
+                "description": "productivity at break hours"
+            },
+            {
+                "column_name": "overtime_net_hours",
+                "data_type": "numeric",
+                "description": "overtime hours"
+            },
+            {
+                "column_name": "overtime_total_production",
+                "data_type": "numeric",
+                "description": "total production at overtime hours"
+            },
+            {
+                "column_name": "overtime_productivity",
+                "data_type": "numeric",
+                "description": "productivity at overtime hours"
+            },
+            {
+                "column_name": "total_net_hours",
+                "data_type": "numeric",
+                "description": "total hours"
+            },
+            {
+                "column_name": "total_production",
+                "data_type": "numeric",
+                "description": "total production of cylinder count"
+            },
+            {
+                "column_name": "total_productivity",
+                "data_type": "numeric",
+                "description": "total production per hour"
+            },
+            {
+                "column_name": "cs_handled",
+                "data_type": "numeric",
+                "description": "this is a type of rejection here CS which has been considered as faulty cilinder"
+            },
+            {
+                "column_name": "cs_sortout",
+                "data_type": "numeric",
+                "description": "here they repair that faulty cylinder and then they will update"
+            },
+            {
+                "column_name": "cs_rejection",
+                "data_type": "numeric",
+                "description": "percentage of cs rejection"
+            },
+            {
+                "column_name": "gd_handled",
+                "data_type": "numeric",
+                "description": "this is a type of rejection here GD which has been considered as faulty cilinder"
+            },
+            {
+                "column_name": "gd_sortout",
+                "data_type": "numeric",
+                "description": "here they repair that faulty cylinder and then they will update"
+            },
+            {
+                "column_name": "gd_rejection",
+                "data_type": "numeric",
+                "description": "percentage of gd rejection"
+            },
+            {
+                "column_name": "pt_handled",
+                "data_type": "numeric",
+                "description": "this is a type of rejection here GD which has been considered as faulty cilinder"
+            },
+            {
+                "column_name": "pt_sortout",
+                "data_type": "numeric",
+                "description": "here they repair that faulty cylinder and then they will update"
+            },
+            {
+                "column_name": "pt_rejection",
+                "data_type": "numeric",
+                "description": "percentage of pt rejection"
+            },
+            {
+                "column_name": "production_14_2kg",
+                "data_type": "numeric",
+                "description": "production count of 14.2 kgs"
+            },
+            {
+                "column_name": "production_19kg",
+                "data_type": "numeric",
+                "description": "production count of 19kgs"
+            },
+            {
+                "column_name": "id",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "created_at",
+                "data_type": "timestamp without time zone",
+                "description": ""
+            },
+            {
+                "column_name": "updated_at",
+                "data_type": "timestamp without time zone",
+                "description": ""
+            },
+            {
+                "column_name": "entity_id",
+                "data_type": "character varying",
+                "description": ""
+            }
+            ]
+        }
+    },
+    {
+        "table_context": {
+            "table_name": "lpg_monthly_cdcms_sales_summary",
+            "schema": [
+            {
+                "column_name": "DistributorName",
+                "data_type": "text",
+                "description": "Refers to the distributor name"
+            },
+            {
+                "column_name": "ZOName",
+                "data_type": "text",
+                "description": "Refers to the zone name"
+            },
+            {
+                "column_name": "ROName",
+                "data_type": "text",
+                "description": "Refers to the Region"
+            },
+            {
+                "column_name": "SAName",
+                "data_type": "text",
+                "description": "Refers to the sales area"
+            },
+            {
+                "column_name": "ConsumerType",
+                "data_type": "text",
+                "description": "Type of consumer (NPMUY/PMUY)"
+            },
+            {
+                "column_name": "CylType",
+                "data_type": "text",
+                "description": "type of cylinder"
+            },
+            {
+                "column_name": "Month",
+                "data_type": "text",
+                "description": "Refers to which month"
+            },
+            {
+                "column_name": "Execution_Year",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "Month_Number",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "Financial_Year",
+                "data_type": "text",
+                "description": "refers to the financial_year"
+            },
+            {
+                "column_name": "TotalSalesYesterday",
+                "data_type": "bigint",
+                "description": "refers to the yesterday sales number"
+            },
+            {
+                "column_name": "BookingReceivedYesterday",
+                "data_type": "bigint",
+                "description": "refers to the yesterday bookings received"
+            },
+            {
+                "column_name": "sales_volume",
+                "data_type": "double precision",
+                "description": "refers to the sales volumne"
+            },
+            {
+                "column_name": "bookings_volume",
+                "data_type": "double precision",
+                "description": "refers to the booking volumne"
+            },
+            {
+                "column_name": "Quarter",
+                "data_type": "text",
+                "description": ""
+            }
+            ]
+        }
+    },
+    {
+        "table_context": {
+            "table_name": "lpg_distributor_mapping",
+                    "schema": [
+            {
+                "column_name": "ukid",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "recon_account",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "explosive_lic_c_exp_dt",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "postal_code",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "region",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "customer",
+                "data_type": "bigint",
+                "description": "Id of the distributor to map"
+            },
+            {
+                "column_name": "second_tel_no",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "agreementexpirydate",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "highwaynomkcomne",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "mrn",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "county",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "cust_type",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "outlet_format",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "sold_to_party",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "deliv_plant",
+                "data_type": "bigint",
+                "description": "plant_id to map"
+            },
+            {
+                "column_name": "highway_no",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "district",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "dealer_loc",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "sales_area",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "mandt",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "customer.1",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "sales_org",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "dist_channel",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "division",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "jde_customer",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "attribute4",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "created_date",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "primpriceptportcat19",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "secpriceprloccat",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "ukid.1",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "jde_customer.1",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "commisioning_date",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "attribute7",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "attribute8",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "condition_grp_3",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "condition_grp_4",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "condition_grp_5",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "new_nh_num",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "mandt.1",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "customer_number",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "explosive_lic_exp_dt",
+                "data_type": "numeric",
+                "description": ""
+            },
+            {
+                "column_name": "sales_grp",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "changed_date",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "changed_time",
+                "data_type": "bigint",
+                "description": ""
+            },
+            {
+                "column_name": "address1",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "address2",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "address3",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "address4",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "address5",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "taluka",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "industryclassification",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "email_id",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "legal_entity",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "inactive.1",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "condition_grp_1",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "condition_grp_2",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "isec",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "all_sales_area_block",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "syncdt.1",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "cust_classification",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "type_of_facility",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "name1",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "sales_off",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "sales_district",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "customer_group2",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "customer_group5",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "currency",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "customer_grp",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "term_payment_key",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "explosive_licence",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "explosive_licence_cng",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "inactive",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "autoreceiptsexecutionlist",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "syncdt",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "inco1",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "peso_class_a_capacity",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "peso_class_b_capacity",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "peso_license_cng_capacity",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "customer_delivery_block",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "country",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "name1.1",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "name2",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "city",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "town_code",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "gstin",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "sort_field",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "street_and_house_number",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "first_telephone_number",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "attribute1",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "advt_caste",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "adct_gender",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "advt_ph",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "advt_social_cat",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "advt_period",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "attribute10",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "differential_reference_code",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "permanent_account_number",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "customer_account_group",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "cond_grp",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "mkt_class_lpg",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "mkt_type_lpg",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "mkt_type_retail",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "mkt_class_retail",
+                "data_type": "text",
+                "description": ""
+            },
+            {
+                "column_name": "outlet_type",
+                "data_type": "text",
+                "description": ""
+            }
+        ]
+        }
+    }
+]

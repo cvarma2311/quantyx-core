@@ -19,7 +19,8 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, APIRouter, R
 
 from services.ai.onboarding.api_helpers import get_secret
 
-from services.ai.catalog import load_catalog_with_registry, resolve_ref
+from services.ai.catalog import Dimension, load_catalog_with_registry, resolve_ref
+from datetime import date as _date, timedelta as _timedelta
 from services.ai.config import load_settings
 from services.ai.db import execute_non_query, run_query
 from services.ai.metrics_registry import (
@@ -113,6 +114,7 @@ from services.ai.onboarding.entity_mappings_store import (
     persist_entity_mapping,
     update_entity_mapping_status,
 )
+from services.ai.onboarding.entity_mapping_agents import attach_mapping_id_to_agents
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
 from services.ai.semantic_suggest import build_lineage_edges, build_schema_summary, suggest_semantic_model
@@ -140,20 +142,25 @@ from services.ai.context_store import (
     get_context_file,
     get_extraction,
     list_context,
+    list_active_context_ids,
     link_context_files,
     mark_context_processed,
     persist_extraction,
+    persist_extraction_agent,
     get_context_file_texts,
+    set_context_active,
     update_context,
     update_context_file_metadata,
     update_extraction,
 )
 from services.ai.context_extraction import extract_context
+from services.ai.context_merge import merge_extractions
 from services.ai.context_apply import apply_extractions
 from services.ai.glossary import fetch_glossary_terms
 from services.ai.sql_builder import Filter, build_query
 from services.ai.tenant_domain import get_tenant_domain, upsert_tenant_domain
 from services.ai.tenant_scope import get_tenant_scope, upsert_tenant_scope
+from services.ai.tenant_purge import purge_tenant_data
 from services.ai.policy_audit import log_policy_audit
 from services.ai.jobs_store import (
     claim_next_job,
@@ -169,6 +176,7 @@ from services.api.schemas import (
     EntitiesAllResponse,
     EntityOverrideRequest,
     HierarchyOverrideRequest,
+    HierarchyUpdateRequest,
     MetricsResponse,
     MetricPatchRequest,
     MetricUpsertRequest,
@@ -281,7 +289,8 @@ from services.api.validators import (
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO)
+_log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, _log_level, logging.INFO))
 logger = logging.getLogger("quantyx.api")
 
 app = FastAPI(title="quantyx-core-services API", version="0.1.0")
@@ -289,7 +298,7 @@ app = FastAPI(title="quantyx-core-services API", version="0.1.0")
 settings = load_settings()
 catalog = load_catalog_with_registry(settings, settings.metrics_catalog_path)
 LOW_CONFIDENCE_THRESHOLD = 0.7
-JOB_TYPES = {"scan_connection", "map_entities", "infer_models", "metrics_suggested"}
+JOB_TYPES = {"scan_connection", "map_entities", "infer_models", "metrics_suggested", "context_extract", "context_apply"}
 _job_worker_stop = threading.Event()
 _job_worker_thread: threading.Thread | None = None
 _REF_PATTERN = re.compile(r"\{\{\s*ref\('(?P<name>[^']+)'\)\s*\}\}")
@@ -547,6 +556,17 @@ def _ensure_canvas_owned(canvas_id: str, tenant_id: str, domain_id: str) -> None
         raise HTTPException(status_code=404, detail="Canvas not found")
 
 
+def _load_context_text(context_id: str) -> tuple[dict, str, list[str]]:
+    context_row = get_context(settings, context_id)
+    if not context_row:
+        raise HTTPException(status_code=404, detail="Context not found")
+    file_texts = get_context_file_texts(settings, context_id)
+    combined_parts = [context_row["raw_text"]] if context_row.get("raw_text") else []
+    combined_parts.extend(file_texts)
+    combined_text = "\n\n".join([part for part in combined_parts if part])
+    return context_row, combined_text, file_texts
+
+
 def _execute_job(job: dict) -> dict:
     job_type = job.get("job_type")
     payload = _load_job_payload(job.get("request_payload"))
@@ -562,7 +582,7 @@ def _execute_job(job: dict) -> dict:
     if job_type == "map_entities":
         use_llm = payload.pop("use_llm", True)
         request = OnboardScanRequest(**payload)
-        response = _run_onboard_map(request, use_llm=use_llm)
+        response = _run_onboard_map(request, use_llm=use_llm, job_id=job.get("job_id"))
         return response.model_dump()
     if job_type == "infer_models":
         request = InferModelsRequest(**payload)
@@ -571,8 +591,123 @@ def _execute_job(job: dict) -> dict:
     if job_type == "metrics_suggested":
         persist = payload.pop("persist", True)
         request = OnboardScanRequest(**payload)
-        response = suggested_metrics(request, persist=persist)
+        response = suggested_metrics(
+            request,
+            persist=persist,
+            progress_cb=lambda pct, stage: update_job_progress(settings, job.get("job_id"), pct, stage),
+        )
         return response.model_dump()
+    if job_type == "context_extract":
+        request = ContextExtractRequest(**payload)
+        if (request.mode or "").lower() == "parallel":
+            domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+            context_row, combined_text, _ = _load_context_text(request.context_id)
+            if context_row["tenant_id"] != request.tenant_id or context_row["domain_id"] != domain_id:
+                raise HTTPException(status_code=400, detail="Context tenant/domain mismatch")
+
+            requested = set(request.extraction_types or [])
+            agent_map = {
+                "context_glossary": ["abbreviations", "synonyms"],
+                "context_hierarchies": ["hierarchies"],
+                "context_metrics": ["metric_candidates"],
+                "context_questions": ["question_intents"],
+            }
+            agent_payloads: list[dict] = []
+            for agent_name, types in agent_map.items():
+                if requested and not requested.intersection(types):
+                    continue
+                extracted = extract_context(
+                    settings,
+                    raw_text=combined_text,
+                    extraction_types=types,
+                )
+                agent_payloads.append(
+                    {
+                        "agent_name": agent_name,
+                        "payload": extracted,
+                    }
+                )
+            merged = merge_extractions(agent_payloads)
+            extraction_id = persist_extraction(
+                settings,
+                context_id=request.context_id,
+                tenant_id=request.tenant_id,
+                domain_id=domain_id,
+                payload=merged,
+                llm_model=settings.openai_model,
+                agent_name="context_extract_merged",
+                parent_job_id=job.get("job_id"),
+            )
+            for agent in agent_payloads:
+                persist_extraction_agent(
+                    settings,
+                    extraction_id=extraction_id,
+                    agent_name=agent.get("agent_name") or "unknown",
+                    payload=agent.get("payload") or {},
+                )
+            mark_context_processed(settings, request.context_id)
+            return ContextExtractResponse(
+                extraction_id=extraction_id,
+                context_id=request.context_id,
+                extractions=merged,
+            ).model_dump()
+
+        response = extract_context_payload(request)
+        return response.model_dump()
+    if job_type in {"context_glossary", "context_hierarchies", "context_metrics", "context_questions"}:
+        request = ContextExtractRequest(**payload)
+        extraction_type = {
+            "context_glossary": ["abbreviations", "synonyms"],
+            "context_hierarchies": ["hierarchies"],
+            "context_metrics": ["metric_candidates"],
+            "context_questions": ["question_intents"],
+        }[job_type]
+        response = extract_context_payload(
+            ContextExtractRequest(
+                tenant_id=request.tenant_id,
+                domain_id=request.domain_id,
+                context_id=request.context_id,
+                extraction_types=extraction_type,
+                model=request.model,
+            )
+        )
+        return response.model_dump()
+    if job_type == "context_apply":
+        request = ContextApplyRequest(**payload)
+        domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+        extraction_row = get_extraction(settings, request.extraction_id)
+        if not extraction_row:
+            raise HTTPException(status_code=404, detail="Extraction not found")
+        if extraction_row["tenant_id"] != request.tenant_id or extraction_row["domain_id"] != domain_id:
+            raise HTTPException(status_code=400, detail="Extraction tenant/domain mismatch")
+        connection_id, database_name, schema_name, _ = _resolve_scope_values(
+            request.tenant_id,
+            domain_id,
+        )
+        updated = apply_extractions(
+            settings,
+            tenant_id=request.tenant_id,
+            domain_id=domain_id,
+            payload=extraction_row["payload"],
+            apply_flags=request.apply,
+            hierarchy_selection=request.hierarchy_selection,
+            source_context_id=extraction_row.get("context_id"),
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
+        if extraction_row.get("context_id"):
+            set_context_active(
+                settings,
+                tenant_id=request.tenant_id,
+                domain_id=domain_id,
+                context_id=extraction_row["context_id"],
+                connection_id=connection_id,
+                database_name=database_name,
+                schema_name=schema_name,
+                is_active=True,
+            )
+        return ContextApplyResponse(status="applied", updated=updated).model_dump()
     raise ValueError(f"Unsupported job_type: {job_type}")
 
 
@@ -582,14 +717,19 @@ def _job_worker_loop() -> None:
     while not _job_worker_stop.is_set():
         job = claim_next_job(settings)
         if not job:
+            logger.debug("Job worker idle (no queued jobs)")
             _job_worker_stop.wait(poll_seconds)
             continue
         job_id = job.get("job_id")
+        job_type = job.get("job_type")
+        logger.info("Job claimed | job_id=%s job_type=%s", job_id, job_type)
         try:
             current = get_job(settings, job_id)
             if current and current.get("status") == "canceled":
+                logger.info("Job canceled before start | job_id=%s", job_id)
                 continue
             update_job_progress(settings, job_id, progress_pct=0, progress_stage="started")
+            logger.info("Job started | job_id=%s job_type=%s", job_id, job_type)
             result = _execute_job(job)
             current = get_job(settings, job_id)
             if current and current.get("status") == "canceled":
@@ -603,6 +743,7 @@ def _job_worker_loop() -> None:
                 continue
             update_job_progress(settings, job_id, progress_pct=100, progress_stage="completed")
             update_job_status(settings, job_id, "completed", result_payload=result, error_message=None)
+            logger.info("Job completed | job_id=%s job_type=%s", job_id, job_type)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Job failed: %s", job_id)
             update_job_status(settings, job_id, "failed", result_payload=None, error_message=str(exc))
@@ -1413,6 +1554,12 @@ def get_job_status(job_id: str) -> JobStatusResponse:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     job.pop("scope_id", None)
+    created_at = job.get("created_at")
+    if created_at is not None and hasattr(created_at, "isoformat"):
+        job["created_at"] = created_at.isoformat()
+    updated_at = job.get("updated_at")
+    if updated_at is not None and hasattr(updated_at, "isoformat"):
+        job["updated_at"] = updated_at.isoformat()
     return JobStatusResponse(**job)
 
 
@@ -1589,6 +1736,24 @@ def get_tenant_domain_api(tenant_id: str) -> dict:
     if not row:
         raise HTTPException(status_code=404, detail="Tenant domain not found")
     return row
+
+
+@app.post(
+    "/tenant/purge",
+    tags=["admin"],
+    summary="Purge tenant data",
+    description="Delete all rows in public tables that contain tenant_id.",
+)
+def purge_tenant(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    confirm = payload.get("confirm")
+    dry_run = bool(payload.get("dry_run"))
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    if not dry_run and confirm is not True:
+        raise HTTPException(status_code=400, detail="confirm=true is required to purge")
+    results = purge_tenant_data(settings, tenant_id, dry_run=dry_run)
+    return {"ok": True, "dry_run": dry_run, "tenant_id": tenant_id, "tables": results}
 
 
 @app.post(
@@ -4284,6 +4449,26 @@ def extract_context_payload(payload: ContextExtractRequest) -> ContextExtractRes
     )
 
 
+@app.post(
+    "/context/extract/async",
+    response_model=JobCreateResponse,
+    tags=["context"],
+    summary="Extract structured context (async)",
+    description="Queue LLM-assisted extraction as a background job.",
+)
+def extract_context_async(payload: ContextExtractRequest) -> JobCreateResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    job = create_job(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        job_type="context_extract",
+        payload=payload.model_dump(),
+        idempotency_key=None,
+    )
+    return JobCreateResponse(job_id=job.get("job_id"), status=job.get("status", "queued"))
+
+
 @app.get(
     "/context/extractions/{extraction_id}",
     response_model=ContextExtractionResponse,
@@ -4364,6 +4549,21 @@ def get_context_extraction(
                                 },
                             },
                         }
+                        ,
+                        "apply_selected_hierarchies": {
+                            "summary": "Apply only selected hierarchies",
+                            "value": {
+                                "tenant_id": "tenant_a",
+                                "extraction_id": "ext_123",
+                                "apply": {
+                                    "entities": True,
+                                    "hierarchies": True,
+                                    "glossary": True,
+                                    "metrics": True,
+                                },
+                                "hierarchy_selection": {"names": ["geography"], "apply_all": False},
+                            },
+                        }
                     }
                 }
             }
@@ -4424,16 +4624,48 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
         domain_id=domain_id,
         payload=extraction_row["payload"],
         apply_flags=payload.apply,
+        hierarchy_selection=payload.hierarchy_selection,
         source_context_id=extraction_row.get("context_id"),
         connection_id=connection_id,
         database_name=database_name,
         schema_name=schema_name,
     )
+    if extraction_row.get("context_id"):
+        set_context_active(
+            settings,
+            tenant_id=payload.tenant_id,
+            domain_id=domain_id,
+            context_id=extraction_row["context_id"],
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+            is_active=True,
+        )
     logger.info(
         "context.apply: complete | %s",
         {"extraction_id": payload.extraction_id, "updated": updated},
     )
     return ContextApplyResponse(status="applied", updated=updated)
+
+
+@app.post(
+    "/context/apply/async",
+    response_model=JobCreateResponse,
+    tags=["context"],
+    summary="Apply extracted context (async)",
+    description="Queue context apply as a background job.",
+)
+def apply_context_async(payload: ContextApplyRequest) -> JobCreateResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    job = create_job(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        job_type="context_apply",
+        payload=payload.model_dump(),
+        idempotency_key=None,
+    )
+    return JobCreateResponse(job_id=job.get("job_id"), status=job.get("status", "queued"))
 
 
 @app.patch(
@@ -4449,6 +4681,14 @@ def apply_context(payload: ContextApplyRequest) -> ContextApplyResponse:
                         "update_title": {
                             "summary": "Update title and status",
                             "value": {"source_title": "Ops glossary v2", "status": "processed"},
+                        },
+                        "activate_context": {
+                            "summary": "Activate context",
+                            "value": {"status": "active"},
+                        },
+                        "deactivate_context": {
+                            "summary": "Deactivate context",
+                            "value": {"status": "inactive"},
                         },
                         "update_metadata": {
                             "summary": "Update metadata",
@@ -4475,6 +4715,18 @@ def patch_context(
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
     if not updates:
         return {"ok": True}
+    status = updates.get("status")
+    if status in {"active", "inactive"}:
+        set_context_active(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            context_id=context_id,
+            connection_id=context_row.get("connection_id"),
+            database_name=context_row.get("database_name"),
+            schema_name=context_row.get("schema_name"),
+            is_active=status == "active",
+        )
     update_context(settings, context_id, updates)
     return {"ok": True}
 
@@ -4596,6 +4848,14 @@ def entities(
         tenant_id,
         domain_id,
     )
+    active_context_ids = list_active_context_ids(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id,
+        database,
+        schema,
+    )
     entity_overrides, hierarchy_overrides = load_overrides(
         settings,
         tenant_id,
@@ -4603,6 +4863,7 @@ def entities(
         connection_id=connection_id,
         database_name=database,
         schema_name=schema,
+        context_ids=active_context_ids or None,
     )
     entity_page = [
         {
@@ -4624,6 +4885,8 @@ def entities(
             "name": item.get("hierarchy_name"),
             "levels": item.get("levels", []),
             "description": item.get("description"),
+            "context_id": item.get("context_id"),
+            "hierarchy_group": item.get("hierarchy_group"),
             "lifecycle_status": item.get("lifecycle_status"),
             "source_type": item.get("source_type"),
             "source_run_id": item.get("source_run_id"),
@@ -4687,6 +4950,8 @@ def entities_all(tenant_id: str) -> EntitiesAllResponse:
                 "name": hierarchy.get("hierarchy_name"),
                 "levels": hierarchy.get("levels", []),
                 "description": hierarchy.get("description"),
+                "context_id": hierarchy.get("context_id"),
+                "hierarchy_group": hierarchy.get("hierarchy_group"),
                 "lifecycle_status": hierarchy.get("lifecycle_status"),
                 "source_type": hierarchy.get("source_type"),
                 "source_run_id": hierarchy.get("source_run_id"),
@@ -4706,12 +4971,26 @@ def entities_all(tenant_id: str) -> EntitiesAllResponse:
 )
 def hierarchies(
     tenant_id: str,
+    context_id: str | None = None,
+    group_by_context: bool = False,
 ) -> dict:
     domain_id = _resolve_domain_id(tenant_id, None)
     connection_id, database, schema, _ = _resolve_scope_values(
         tenant_id,
         domain_id,
     )
+    active_context_ids: list[str] | None = None
+    if context_id:
+        active_context_ids = [context_id]
+    elif not group_by_context:
+        active_context_ids = list_active_context_ids(
+            settings,
+            tenant_id,
+            domain_id,
+            connection_id,
+            database,
+            schema,
+        )
     _, hierarchy_overrides = load_overrides(
         settings,
         tenant_id,
@@ -4719,12 +4998,37 @@ def hierarchies(
         connection_id=connection_id,
         database_name=database,
         schema_name=schema,
+        context_ids=active_context_ids or None,
     )
+    sorted_rows = sorted(hierarchy_overrides, key=lambda item: item.get("hierarchy_name", ""))
+    if group_by_context:
+        grouped: dict[str, list[dict]] = {}
+        for item in sorted_rows:
+            ctx_id = item.get("context_id") or "unknown"
+            grouped.setdefault(ctx_id, []).append(
+                {
+                    "name": item.get("hierarchy_name"),
+                    "levels": item.get("levels", []),
+                    "description": item.get("description"),
+                    "context_id": item.get("context_id"),
+                    "hierarchy_group": item.get("hierarchy_group"),
+                    "lifecycle_status": item.get("lifecycle_status"),
+                    "source_type": item.get("source_type"),
+                    "source_run_id": item.get("source_run_id"),
+                    "artifact_key": item.get("artifact_key"),
+                    "version_no": item.get("version_no"),
+                    "is_current": item.get("is_current"),
+                }
+            )
+        return {"contexts": [{"context_id": key, "hierarchies": value} for key, value in grouped.items()]}
+
     hierarchies_payload = [
         {
             "name": item.get("hierarchy_name"),
             "levels": item.get("levels", []),
             "description": item.get("description"),
+            "context_id": item.get("context_id"),
+            "hierarchy_group": item.get("hierarchy_group"),
             "lifecycle_status": item.get("lifecycle_status"),
             "source_type": item.get("source_type"),
             "source_run_id": item.get("source_run_id"),
@@ -4732,7 +5036,7 @@ def hierarchies(
             "version_no": item.get("version_no"),
             "is_current": item.get("is_current"),
         }
-        for item in sorted(hierarchy_overrides, key=lambda item: item.get("hierarchy_name", ""))
+        for item in sorted_rows
     ]
     return {"hierarchies": hierarchies_payload}
 
@@ -4791,6 +5095,7 @@ def update_entity(
             "description": payload.description,
             "join_key": payload.join_key,
             "examples": payload.examples,
+            "lifecycle_status": payload.status,
         },
     )
     return {"ok": True}
@@ -4811,6 +5116,7 @@ def update_entity(
                             "value": {
                                 "levels": ["sbu", "zone", "region", "sales_area"],
                                 "description": "Sales organization rollup",
+                                "status": "certified",
                             },
                         }
                     }
@@ -4848,6 +5154,37 @@ def update_hierarchy(
             "hierarchy_name": hierarchy_name,
             "levels": payload.levels,
             "description": payload.description,
+            "context_id": payload.context_id,
+            "hierarchy_group": payload.hierarchy_group,
+            "lifecycle_status": payload.status,
+        },
+    )
+    return {"ok": True}
+
+
+@app.patch(
+    "/hierarchies",
+    response_model=dict,
+    tags=["context"],
+    summary="Update hierarchy override (payload)",
+    description="Update hierarchy override using JSON payload instead of path/query params.",
+)
+def update_hierarchy_payload(payload: HierarchyUpdateRequest) -> dict:
+    domain_id = _resolve_domain_id(payload.tenant_id, None)
+    upsert_hierarchy_override(
+        settings,
+        payload.tenant_id,
+        domain_id,
+        payload.connection_id,
+        payload.database,
+        payload.schema,
+        {
+            "hierarchy_name": payload.hierarchy_name,
+            "levels": payload.levels,
+            "description": payload.description,
+            "context_id": payload.context_id,
+            "hierarchy_group": payload.hierarchy_group,
+            "lifecycle_status": payload.status,
         },
     )
     return {"ok": True}
@@ -5183,6 +5520,31 @@ def create_review(payload: ReviewCreateRequest) -> ReviewResponse:
     return ReviewResponse(review_id=review_id, status=payload.status)
 
 
+@app.post(
+    "/glossary/certify",
+    tags=["admin"],
+    summary="Certify glossary terms",
+    description="Mark glossary terms as certified for a tenant (and optional domain).",
+)
+def certify_glossary(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    domain_id = payload.get("domain_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    params = [tenant_id]
+    sql = """
+        UPDATE public.quantyx_glossary_terms
+           SET lifecycle_status = 'certified',
+               updated_at = now()
+         WHERE tenant_id = %s
+    """
+    if domain_id:
+        sql += " AND domain_id = %s"
+        params.append(domain_id)
+    execute_non_query(settings, sql, params)
+    return {"ok": True}
+
+
 @app.get(
     "/review",
     response_model=ReviewListResponse,
@@ -5235,6 +5597,14 @@ def review_summary(
         tenant_id,
         domain_id,
     )
+    active_context_ids = list_active_context_ids(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id,
+        database,
+        schema,
+    )
     scoped_scan = load_latest_scan_for_scope(
         settings, tenant_id, domain_id, connection_id, database, schema
     )
@@ -5251,6 +5621,7 @@ def review_summary(
         connection_id=connection_id,
         database_name=database,
         schema_name=schema,
+        context_ids=active_context_ids or None,
     )
     facts = list_facts(settings, tenant_id, domain_id, connection_id, database, schema)
     dimensions = list_dimensions(settings, tenant_id, domain_id, connection_id, database, schema)
@@ -5287,8 +5658,10 @@ def review_summary(
             "name": hierarchy.get("hierarchy_name"),
             "levels": hierarchy.get("levels", []),
             "description": hierarchy.get("description"),
+            "context_id": hierarchy.get("context_id"),
+            "hierarchy_group": hierarchy.get("hierarchy_group"),
         }
-        status = review_map.get(("hierarchies", hierarchy.get("hierarchy_name")))
+        status = review_map.get(("hierarchies", hierarchy.get("artifact_key") or hierarchy.get("hierarchy_name")))
         if status:
             entry["status"] = status.get("status")
             entry["review_id"] = status.get("review_id")
@@ -6011,6 +6384,7 @@ def onboard_map(
 def _run_onboard_map(
     request: OnboardScanRequest,
     use_llm: bool = True,
+    job_id: str | None = None,
 ) -> OnboardMapResponse:
     tenant_id = request.tenant_id
     if not tenant_id:
@@ -6037,7 +6411,21 @@ def _run_onboard_map(
     llm_candidates: list[dict] = []
     if use_llm:
         try:
-            llm_candidates = llm_map_entities(settings, tables, ontology, glossary=glossary)
+            llm_candidates = llm_map_entities(
+                settings,
+                tables,
+                ontology,
+                glossary=glossary,
+                agent_context={
+                    "job_id": job_id,
+                    "mapping_id": None,
+                    "tenant_id": tenant_id,
+                    "domain_id": domain_id,
+                    "connection_id": connection_id,
+                    "database_name": database_name,
+                    "schema_name": schema_name,
+                },
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     candidates = _merge_entity_candidates(rule_candidates, llm_candidates)
@@ -6063,6 +6451,8 @@ def _run_onboard_map(
         low_confidence_candidates,
         LOW_CONFIDENCE_THRESHOLD,
     )
+    if job_id:
+        attach_mapping_id_to_agents(settings, job_id=job_id, mapping_id=mapping_id)
     return OnboardMapResponse(
         mapping_id=mapping_id,
         tenant_id=tenant_id,
@@ -6496,7 +6886,7 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                         "measures": fact.get("measures", []),
                         "dimensions": fact.get("dimensions", []),
                         "description": fact.get("description"),
-                        "status": fact.get("status", "draft"),
+                        "status": fact.get("status", "suggested"),
                         "confidence": fact.get("confidence", 0.85),
                     }
                 )
@@ -6511,7 +6901,7 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                         "keys": dim.get("keys", []),
                         "attributes": dim.get("attributes", []),
                         "description": dim.get("description"),
-                        "status": dim.get("status", "draft"),
+                        "status": dim.get("status", "suggested"),
                         "confidence": dim.get("confidence", 0.8),
                     }
                 )
@@ -6537,7 +6927,7 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                 "measures": fact.get("measures", []),
                 "dimensions": fact.get("dimensions", []),
                 "description": fact.get("description"),
-                "lifecycle_status": fact.get("status", "draft"),
+                "lifecycle_status": fact.get("status", "suggested"),
                 "source_type": "llm" if request.use_llm else "rule",
             },
         )
@@ -6558,7 +6948,7 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                 "keys": dim.get("keys", []),
                 "attributes": dim.get("attributes", []),
                 "description": dim.get("description"),
-                "lifecycle_status": dim.get("status", "draft"),
+                "lifecycle_status": dim.get("status", "suggested"),
                 "source_type": "llm" if request.use_llm else "rule",
             },
         )
@@ -6693,9 +7083,15 @@ def suggested_metrics_async(
         },
     },
 )
-def suggested_metrics(request: OnboardScanRequest, persist: bool = True) -> SuggestedMetricsResponse:
+def suggested_metrics(
+    request: OnboardScanRequest,
+    persist: bool = True,
+    progress_cb: Callable[[int, str], None] | None = None,
+) -> SuggestedMetricsResponse:
     if not request.tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
+    if progress_cb:
+        progress_cb(5, "resolve_scope")
     domain_id = _resolve_domain_id(request.tenant_id, None)
     connection_id, database_name, schema_name, tables = _resolve_scope_values(
         request.tenant_id,
@@ -6712,7 +7108,18 @@ def suggested_metrics(request: OnboardScanRequest, persist: bool = True) -> Sugg
     if not schema_payload:
         raise HTTPException(status_code=400, detail="No scan results found for scope")
     tables = schema_payload.get("tables", [])
+    logger.info(
+        "metrics_suggested: start | tenant=%s domain=%s tables=%s persist=%s",
+        request.tenant_id,
+        domain_id,
+        len(tables),
+        persist,
+    )
+    if progress_cb:
+        progress_cb(20, "detect_measures")
     measures = detect_measures(tables)
+    if progress_cb:
+        progress_cb(40, "detect_time_columns")
     low_confidence_measures = [
         measure
         for measure in measures
@@ -6724,8 +7131,12 @@ def suggested_metrics(request: OnboardScanRequest, persist: bool = True) -> Sugg
         if measure.get("confidence", 0) >= LOW_CONFIDENCE_THRESHOLD
     ]
     time_columns = detect_time_columns(tables)
+    if progress_cb:
+        progress_cb(55, "map_entities")
     ontology = load_pack(f"packs/{domain_id}").get("ontology", {})
     entity_candidates = map_entities(tables, ontology)
+    if progress_cb:
+        progress_cb(75, "persist_metrics" if persist else "skip_persist")
     if persist:
         persist_suggested_metrics(
             settings,
@@ -6736,6 +7147,8 @@ def suggested_metrics(request: OnboardScanRequest, persist: bool = True) -> Sugg
             schema_name,
             measures,
         )
+    if progress_cb:
+        progress_cb(95, "finalize_response")
     return SuggestedMetricsResponse(
         measures=high_confidence_measures,
         low_confidence_measures=low_confidence_measures,
@@ -6854,7 +7267,12 @@ def apply_contracts() -> dict:
     return {"metrics": len(catalog.metrics), "dimensions": len(catalog.dimensions)}
 
 
-def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[dict]]:
+def _resolve_metrics(
+    request: QueryRequest,
+    *,
+    glossary: list[dict] | None = None,
+    allowed_dimensions: list[str] | None = None,
+) -> tuple[list[str], list[str], list[dict]]:
     if request.metrics:
         logger.info("request.metrics provided: %s", request.metrics)
         return request.metrics, request.dimensions, [flt.model_dump() for flt in request.filters]
@@ -6865,15 +7283,35 @@ def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[
 
     if request.question:
         logger.info("resolving question: %s", request.question)
-        glossary = None
-        if request.tenant_id:
-            domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
-            glossary = fetch_glossary_terms(settings, request.tenant_id, domain_id)
-        resolved = resolve_question(request.question, catalog, settings, glossary=glossary)
+        resolved = resolve_question(
+            request.question,
+            catalog,
+            settings,
+            glossary=glossary,
+            allowed_dimensions=allowed_dimensions,
+        )
         logger.info("resolver output: %s", resolved)
         metrics = resolved.get("metrics", [])
         dimensions = resolved.get("dimensions", [])
         filters = resolved.get("filters", [])
+        if allowed_dimensions:
+            allowed_metrics_set = {m for m in catalog.metric_names()}
+            if allowed_metrics_set:
+                filtered_metrics = []
+                for metric in metrics:
+                    if metric in allowed_metrics_set:
+                        filtered_metrics.append(metric)
+                if filtered_metrics != metrics:
+                    logger.info("resolver filtered metrics to catalog: %s -> %s", metrics, filtered_metrics)
+                    metrics = filtered_metrics
+        expanded_dimensions = _expand_dimensions_from_glossary(
+            dimensions,
+            glossary,
+            allowed_dimensions,
+        )
+        if expanded_dimensions != dimensions:
+            logger.info("resolver expanded dimensions from glossary: %s -> %s", dimensions, expanded_dimensions)
+            dimensions = expanded_dimensions
         if not metrics:
             question = request.question.lower()
             if "required run rate" in question:
@@ -6907,7 +7345,8 @@ def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[
 
         if metrics and any(metric not in allowed_metrics for metric in metrics):
             if not allowed_metrics:
-                return ([], dimensions, filters)
+                # Defer filtering; downstream will coerce/drop unsupported dims/filters.
+                return (metrics, dimensions, filters)
             logger.info("re-resolving with allowed metrics: %s", allowed_metrics)
             resolved = resolve_question(
                 request.question,
@@ -6915,11 +7354,24 @@ def _resolve_metrics(request: QueryRequest) -> tuple[list[str], list[str], list[
                 settings,
                 allowed_metrics=allowed_metrics,
                 glossary=glossary,
+                allowed_dimensions=allowed_dimensions,
             )
             logger.info("resolver output (restricted): %s", resolved)
+            restricted_dimensions = resolved.get("dimensions", [])
+            expanded_dimensions = _expand_dimensions_from_glossary(
+                restricted_dimensions,
+                glossary,
+                allowed_dimensions,
+            )
+            if expanded_dimensions != restricted_dimensions:
+                logger.info(
+                    "resolver expanded dimensions from glossary (restricted): %s -> %s",
+                    restricted_dimensions,
+                    expanded_dimensions,
+                )
             return (
                 resolved.get("metrics", []),
-                resolved.get("dimensions", []),
+                expanded_dimensions,
                 resolved.get("filters", []),
             )
 
@@ -7025,6 +7477,17 @@ def _normalize_filters(filters: list[dict], settings: object) -> list[dict]:
     fiscal_year = None
     for flt in filters:
         value = flt.get("value")
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"last week start date", "last week end date"}:
+                today = _date.today()
+                last_week_end = today - _timedelta(days=today.weekday() + 1)
+                last_week_start = last_week_end - _timedelta(days=6)
+                if lowered == "last week start date":
+                    normalized.append({"field": flt["field"], "operator": flt["operator"], "value": last_week_start.isoformat()})
+                else:
+                    normalized.append({"field": flt["field"], "operator": flt["operator"], "value": last_week_end.isoformat()})
+                continue
         if isinstance(value, str) and value.strip().lower() == "this month":
             month_name, fiscal_year = _resolve_this_month(settings)
             if month_name:
@@ -7036,6 +7499,21 @@ def _normalize_filters(filters: list[dict], settings: object) -> list[dict]:
     return normalized
 
 
+def _expand_relative_date_filters(filters: list[dict]) -> list[dict]:
+    expanded: list[dict] = []
+    for flt in filters:
+        value = flt.get("value")
+        if isinstance(value, str) and value.strip().lower() == "last week" and flt.get("operator") == "IN":
+            today = _date.today()
+            last_week_end = today - _timedelta(days=today.weekday() + 1)
+            last_week_start = last_week_end - _timedelta(days=6)
+            expanded.append({"field": flt["field"], "operator": ">=", "value": last_week_start.isoformat()})
+            expanded.append({"field": flt["field"], "operator": "<=", "value": last_week_end.isoformat()})
+            continue
+        expanded.append(flt)
+    return expanded
+
+
 def _filter_dimension_filters(filters: list[dict], dimension_names: set[str]) -> list[dict]:
     filtered = []
     for flt in filters:
@@ -7044,6 +7522,118 @@ def _filter_dimension_filters(filters: list[dict], dimension_names: set[str]) ->
         else:
             logger.info("dropping non-dimension filter: %s", flt)
     return filtered
+
+
+def _coerce_dimension_aliases(
+    dimensions: list[str],
+    filters: list[dict],
+    catalog_dimensions: set[str],
+    metric_dimensions: set[str],
+) -> tuple[list[str], list[dict]]:
+    alias_map: dict[str, str] = {}
+    for dim in dimensions:
+        if dim in metric_dimensions:
+            continue
+        if dim in {"plant", "plant_id"} and ("plant_name" in metric_dimensions or "plant_name" in catalog_dimensions):
+            alias_map[dim] = "plant_name"
+        elif dim in {"plant", "plant_id"} and ("sap_id" in metric_dimensions or "sap_id" in catalog_dimensions):
+            alias_map[dim] = "sap_id"
+        elif dim in {"pdate", "date_day", "date"} and ("process_date" in metric_dimensions or "process_date" in catalog_dimensions):
+            alias_map[dim] = "process_date"
+        elif f"{dim}_name" in metric_dimensions:
+            alias_map[dim] = f"{dim}_name"
+
+    if not alias_map:
+        return dimensions, filters
+
+    coerced_dimensions = [alias_map.get(dim, dim) for dim in dimensions]
+    coerced_filters = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        field = payload.get("field")
+        if isinstance(field, str) and field in alias_map:
+            payload["field"] = alias_map[field]
+        coerced_filters.append(payload)
+    return coerced_dimensions, coerced_filters
+
+
+def _coerce_dimensions_from_glossary(
+    dimensions: list[str],
+    filters: list[dict],
+    glossary: list[dict] | None,
+    fact_columns: set[str],
+) -> tuple[list[str], list[dict]]:
+    if not glossary or not fact_columns:
+        return dimensions, filters
+    synonym_map: dict[str, set[str]] = {}
+    for term in glossary:
+        synonyms = term.get("synonyms") or []
+        normalized = term.get("normalized_term") or term.get("term")
+        if not normalized:
+            continue
+        key = str(normalized).strip().lower()
+        for syn in synonyms:
+            if not syn:
+                continue
+            synonym_map.setdefault(str(syn).strip().lower(), set()).add(key)
+            synonym_map.setdefault(key, set()).add(str(syn).strip().lower())
+    if not synonym_map:
+        return dimensions, filters
+    def _map_dim(dim: str) -> str:
+        if dim in fact_columns:
+            return dim
+        candidates = synonym_map.get(dim.lower(), set())
+        for cand in candidates:
+            if cand in fact_columns:
+                return cand
+        return dim
+    coerced_dimensions = [_map_dim(dim) for dim in dimensions]
+    coerced_filters = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        field = payload.get("field")
+        if isinstance(field, str):
+            payload["field"] = _map_dim(field)
+        coerced_filters.append(payload)
+    return coerced_dimensions, coerced_filters
+
+
+def _expand_dimensions_from_glossary(
+    dimensions: list[str],
+    glossary: list[dict] | None,
+    allowed_dimensions: list[str] | None,
+) -> list[str]:
+    if not glossary or not allowed_dimensions:
+        return dimensions
+    allowed_set = {d.lower() for d in allowed_dimensions}
+    synonym_map: dict[str, set[str]] = {}
+    for term in glossary:
+        synonyms = term.get("synonyms") or []
+        normalized = term.get("normalized_term") or term.get("term")
+        if not normalized:
+            continue
+        key = str(normalized).strip().lower()
+        for syn in synonyms:
+            if not syn:
+                continue
+            synonym_map.setdefault(key, set()).add(str(syn).strip().lower())
+            synonym_map.setdefault(str(syn).strip().lower(), set()).add(key)
+    expanded = []
+    for dim in dimensions:
+        dim_l = dim.lower()
+        if dim_l in allowed_set:
+            expanded.append(dim)
+        for syn in synonym_map.get(dim_l, set()):
+            if syn in allowed_set:
+                expanded.append(syn)
+    # de-dupe while preserving order
+    seen = set()
+    result = []
+    for dim in expanded:
+        if dim not in seen:
+            seen.add(dim)
+            result.append(dim)
+    return result
 
 
 def _normalize_sales_quarter_filters(filters: list[dict], metric_names: list[str]) -> list[dict]:
@@ -7070,6 +7660,106 @@ def _extract_top_n(question: str | None) -> int | None:
     if match:
         return int(match.group(1))
     return 5
+
+
+def _infer_fact_table_from_metric_sql(metric_sql: str) -> str | None:
+    match = re.search(r"ref\('([^']+)'\)", metric_sql or "")
+    if match:
+        return match.group(1)
+    match = re.search(r'ref\\(\"([^\"]+)\"\\)', metric_sql or "")
+    if match:
+        return match.group(1)
+    return None
+
+
+def _list_fact_table_columns(schema_name: str, table_name: str) -> list[str]:
+    if not schema_name or not table_name:
+        return []
+    sql = """
+        SELECT column_name
+          FROM information_schema.columns
+         WHERE table_schema = %s
+           AND table_name = %s
+         ORDER BY ordinal_position
+    """
+    try:
+        rows = run_query(settings, sql, [schema_name, table_name])
+    except Exception:
+        return []
+    return [row.get("column_name") for row in rows if row.get("column_name")]
+
+
+def _fact_columns_for_metric(metric_sql: str, schema_name: str) -> set[str]:
+    fact_table = _infer_fact_table_from_metric_sql(metric_sql)
+    if not fact_table:
+        return set()
+    return set(_list_fact_table_columns(schema_name, fact_table))
+
+
+def _augment_catalog_dimensions_from_facts(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database_name: str,
+    schema_name: str,
+) -> None:
+    if not tenant_id or not domain_id or not connection_id or not database_name or not schema_name:
+        return
+    facts = list_facts(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    if not facts:
+        return
+    added = 0
+    for fact in facts:
+        table_name = fact.get("table_name")
+        if not table_name:
+            continue
+        db_dims = _list_fact_table_columns(schema_name, table_name)
+        if not db_dims:
+            continue
+        for dim in db_dims:
+            if dim in catalog.dimensions:
+                continue
+            catalog.dimensions[dim] = Dimension(
+                name=dim,
+                description=f"Auto-detected from {table_name}",
+                data_type="string",
+                sql=f"{{{{ ref('{table_name}') }}}}.{dim}",
+            )
+            added += 1
+    if added:
+        logger.info("catalog.dimensions augmented from facts | added=%s", added)
+
+
+def _dimension_candidates_for_scope(
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database_name: str,
+    schema_name: str,
+) -> list[str]:
+    candidates: set[str] = set()
+    facts = list_facts(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    for fact in facts:
+        table_name = fact.get("table_name")
+        if not table_name:
+            continue
+        db_dims = _list_fact_table_columns(schema_name, table_name)
+        candidates.update(db_dims)
+    return sorted(candidates)
 
 
 @app.post(
@@ -7145,27 +7835,84 @@ def query(request: QueryRequest) -> QueryResult:
     row_count = None
     glossary = None
     contract = None
+    logger.info("query.start | tenant=%s domain=%s question=%s metric=%s metrics=%s dims=%s filters=%s limit=%s",
+                request.tenant_id, request.domain_id, request.question, request.metric, request.metrics,
+                request.dimensions, request.filters, request.limit)
+    fact_dims_map: dict[str, set[str]] = {}
+    dimension_candidates: list[str] | None = None
     if request.tenant_id:
         domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
         connection_id, database_name, schema_name, tables = _resolve_scope_values(
             request.tenant_id,
             domain_id,
         )
+        logger.info("query.scope | domain=%s connection=%s db=%s schema=%s tables=%s",
+                    domain_id, connection_id, database_name, schema_name, tables)
+        _augment_catalog_dimensions_from_facts(
+            request.tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+        )
+        facts_for_scope = list_facts(
+            settings,
+            tenant_id=request.tenant_id,
+            domain_id=domain_id,
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
+        for fact in facts_for_scope:
+            table_name = fact.get("table_name")
+            if table_name:
+                db_dims = _list_fact_table_columns(schema_name, table_name)
+                fact_dims_map[table_name] = set(db_dims)
+        dimension_candidates = _dimension_candidates_for_scope(
+            request.tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+        )
+        logger.info("query.fact_dim_candidates | count=%s dims=%s", len(dimension_candidates), dimension_candidates)
         glossary = fetch_glossary_terms(settings, request.tenant_id, domain_id)
+        logger.info("query.glossary | loaded=%s", len(glossary or []))
         contract = get_active_semantic_contract(settings, request.tenant_id, domain_id)
-    metric_names, dimensions, filters = _resolve_metrics(request)
+    metric_names, dimensions, filters = _resolve_metrics(
+        request,
+        glossary=glossary,
+        allowed_dimensions=dimension_candidates,
+    )
+    logger.info("query.resolve_metrics | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
+    if metric_names or dimensions or filters:
+        metric_lookup = {name.lower(): name for name in catalog.metrics.keys()}
+        dim_lookup = {name.lower(): name for name in catalog.dimensions.keys()}
+        metric_names = [metric_lookup.get(name.lower(), name) for name in metric_names]
+        dimensions = [dim_lookup.get(name.lower(), name) for name in dimensions]
+        normalized_filters = []
+        for flt in filters:
+            payload = flt if isinstance(flt, dict) else flt.model_dump()
+            field = payload.get("field")
+            if isinstance(field, str):
+                payload["field"] = dim_lookup.get(field.lower(), field)
+            normalized_filters.append(payload)
+        filters = normalized_filters
+        logger.info("query.normalized | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     if not metric_names and request.question:
         question = request.question.lower()
         if "required run rate" in question:
             metric_names = ["current_run_rate_mmt", "required_run_rate_mmt"]
             dimensions = ["sales_area_name", "month_name", "fiscal_year"]
     logger.info("metrics: %s", metric_names)
+    filters = _expand_relative_date_filters(filters)
     filters = _coerce_sbu_filters(filters)
     filters = _coerce_product_filters(filters)
     dimensions = _coerce_sbu_dimensions(dimensions, filters)
     filters = _normalize_filters(filters, settings)
     filters = _normalize_sales_quarter_filters(filters, metric_names)
     filters = _filter_dimension_filters(filters, set(catalog.dimensions.keys()))
+    logger.info("query.coerced | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     logger.info("dimensions: %s", dimensions)
     logger.info("filters: %s", filters)
 
@@ -7185,14 +7932,36 @@ def query(request: QueryRequest) -> QueryResult:
             row_count,
             error_message="No metrics resolved",
         )
+        logger.error("query.fail | reason=no_metrics_resolved metrics=%s dimensions=%s filters=%s",
+                     metric_names, dimensions, filters)
         raise HTTPException(status_code=400, detail="No metrics resolved")
 
     metrics = []
+    metrics_all = []
     for metric_name in metric_names:
         if metric_name not in catalog.metrics:
+            logger.error("query.fail | reason=unknown_metric metric=%s", metric_name)
             raise HTTPException(status_code=400, detail=f"Unknown metric: {metric_name}")
         metrics.append(catalog.metrics[metric_name])
+        metrics_all.append(catalog.metrics[metric_name])
 
+    filter_fields = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        filter_fields.append(payload["field"])
+
+    metric_dimension_set = set()
+    for metric in metrics_all:
+        fact_cols = _fact_columns_for_metric(metric.sql, settings.db_schema)
+        metric_dimension_set.update(fact_cols)
+    dimensions, filters = _coerce_dimension_aliases(
+        dimensions,
+        filters,
+        set(catalog.dimensions.keys()),
+        metric_dimension_set,
+    )
+    logger.info("query.dim_alias | dimensions=%s filters=%s metric_dims=%s",
+                dimensions, filters, sorted(metric_dimension_set))
     filter_fields = []
     for flt in filters:
         payload = flt if isinstance(flt, dict) else flt.model_dump()
@@ -7201,11 +7970,25 @@ def query(request: QueryRequest) -> QueryResult:
     if dimensions or filter_fields:
         filtered_metrics = []
         for metric in metrics:
-            if all(dim in metric.dimensions for dim in dimensions) and all(
-                field in metric.dimensions for field in filter_fields
-            ):
+            metric_dims = _fact_columns_for_metric(metric.sql, settings.db_schema)
+            logger.info("query.metric_fact_cols | metric=%s cols=%s", metric.name, sorted(metric_dims))
+            dimensions, filters = _coerce_dimensions_from_glossary(
+                dimensions,
+                filters,
+                glossary,
+                metric_dims,
+            )
+            logger.info("query.glossary_coerced | dimensions=%s filters=%s", dimensions, filters)
+            supported_dims = [dim for dim in dimensions if dim in metric_dims]
+            supported_filters = [flt for flt in filters if flt.get("field") in metric_dims]
+            if supported_dims or supported_filters:
                 filtered_metrics.append(metric)
+                # Narrow dims/filters to what this metric supports.
+                dimensions = supported_dims
+                filters = supported_filters
         metrics = filtered_metrics
+        logger.info("query.filtered_metrics | count=%s names=%s",
+                    len(metrics), [m.name for m in metrics])
 
     if request.question and metric_names and len(metrics) != len(metric_names):
         allowed_metrics = [metric.name for metric in metrics]
@@ -7217,6 +8000,7 @@ def query(request: QueryRequest) -> QueryResult:
                 settings,
                 allowed_metrics=allowed_metrics,
                 glossary=glossary,
+                allowed_dimensions=dimension_candidates,
             )
             metric_names = resolved.get("metrics", [])
             dimensions = _coerce_sbu_dimensions(resolved.get("dimensions", []), resolved.get("filters", []))
@@ -7228,6 +8012,7 @@ def query(request: QueryRequest) -> QueryResult:
             metrics = []
             for metric_name in metric_names:
                 if metric_name not in catalog.metrics:
+                    logger.error("query.fail | reason=unknown_metric_after_reresolve metric=%s", metric_name)
                     raise HTTPException(status_code=400, detail=f"Unknown metric: {metric_name}")
                 metrics.append(catalog.metrics[metric_name])
 
@@ -7240,8 +8025,22 @@ def query(request: QueryRequest) -> QueryResult:
                     ):
                         filtered_metrics.append(metric)
                 metrics = filtered_metrics
+            logger.info("query.filtered_metrics_post_reresolve | count=%s names=%s",
+                        len(metrics), [m.name for m in metrics])
+
+    if not metrics and metrics_all:
+        logger.info("dropping unsupported dimensions/filters for resolved metrics")
+        allowed_dims = set()
+        for metric in metrics_all:
+            allowed_dims.update(metric.dimensions)
+        dimensions = [dim for dim in dimensions if dim in allowed_dims]
+        filters = [flt for flt in filters if flt.get("field") in allowed_dims]
+        metrics = metrics_all
+        logger.info("query.drop_unsupported | dimensions=%s filters=%s metrics=%s",
+                    dimensions, filters, [m.name for m in metrics])
 
     if not metrics:
+        logger.error("query.fail | reason=no_metrics_after_filtering")
         raise HTTPException(
             status_code=400,
             detail="No metrics support the requested dimensions/filters",
@@ -7249,9 +8048,24 @@ def query(request: QueryRequest) -> QueryResult:
 
     dim_objects = []
     for dim_name in dimensions:
-        if dim_name not in catalog.dimensions:
-            raise HTTPException(status_code=400, detail=f"Unknown dimension: {dim_name}")
-        dim_objects.append(catalog.dimensions[dim_name])
+        if dim_name in catalog.dimensions:
+            dim_objects.append(catalog.dimensions[dim_name])
+            continue
+        # Ad-hoc dimension: if it matches a metric dimension, build SQL from metric base table.
+        if dim_name in metric_dimension_set:
+            base_table = _infer_fact_table_from_metric_sql(metrics[0].sql)
+            if base_table:
+                dim_objects.append(
+                    Dimension(
+                        name=dim_name,
+                        description="Ad-hoc dimension from metric",
+                        data_type="string",
+                        sql=f"{{{{ ref('{base_table}') }}}}.{dim_name}",
+                    )
+                )
+                logger.info("query.ad_hoc_dimension | name=%s base_table=%s", dim_name, base_table)
+                continue
+        raise HTTPException(status_code=400, detail=f"Unknown dimension: {dim_name}")
 
     built_filters: List[Filter] = []
     for flt in filters:
@@ -7372,7 +8186,7 @@ def query(request: QueryRequest) -> QueryResult:
     return QueryResult(
         metrics=[metric.name for metric in metrics],
         dimensions=[dim.name for dim in dim_objects if dim.name != "company_name"],
-        sql=built.sql if request.explain else None,
+        sql=built.sql,
         rows=rows,
         by_company_sql=by_company_sql,
         by_company_rows=by_company_rows,

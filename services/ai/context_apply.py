@@ -5,6 +5,7 @@ from typing import Any
 from services.ai.config import Settings
 from services.ai.db import execute_non_query
 from services.ai.metrics_registry import upsert_metric
+from psycopg2.extras import Json
 
 
 def _normalize_term(term: str) -> str:
@@ -17,6 +18,7 @@ def apply_extractions(
     domain_id: str,
     payload: dict[str, Any],
     apply_flags: dict[str, bool],
+    hierarchy_selection: dict[str, Any] | None = None,
     source_context_id: str | None = None,
     connection_id: str | None = None,
     database_name: str | None = None,
@@ -80,7 +82,7 @@ def apply_extractions(
                     entity.get("join_key"),
                     entity.get("examples"),
                     entity_id,
-                    "draft",
+                    "suggested",
                     "llm",
                     source_context_id,
                     source_context_id,
@@ -90,11 +92,19 @@ def apply_extractions(
             updated["entities"] += 1
 
     if apply_flags.get("hierarchies"):
+        allowed_names: set[str] | None = None
+        if hierarchy_selection and not hierarchy_selection.get("apply_all", True):
+            names = hierarchy_selection.get("names") or []
+            allowed_names = {name for name in names if isinstance(name, str) and name.strip()}
         for hierarchy in payload.get("hierarchies", []):
             name = hierarchy.get("name")
             levels = hierarchy.get("levels")
             if not name or not levels:
                 continue
+            if allowed_names is not None and name not in allowed_names:
+                continue
+            context_id = source_context_id or "ctx_legacy"
+            artifact_key = f"{context_id}::{name}"
             sql = """
                 INSERT INTO public.quantyx_hierarchy_overrides (
                   tenant_id,
@@ -102,7 +112,9 @@ def apply_extractions(
                   connection_id,
                   database_name,
                   schema_name,
+                  context_id,
                   hierarchy_name,
+                  hierarchy_group,
                   levels,
                   description,
                   artifact_key,
@@ -114,9 +126,10 @@ def apply_extractions(
                   created_at,
                   updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
-                ON CONFLICT (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                ON CONFLICT (tenant_id, domain_id, connection_id, database_name, schema_name, context_id, hierarchy_name)
                 DO UPDATE SET
+                  hierarchy_group = EXCLUDED.hierarchy_group,
                   levels = EXCLUDED.levels,
                   description = EXCLUDED.description,
                   artifact_key = EXCLUDED.artifact_key,
@@ -136,11 +149,13 @@ def apply_extractions(
                     connection_id,
                     database_name,
                     schema_name,
+                    context_id,
                     name,
+                    hierarchy.get("group") or hierarchy.get("hierarchy_group"),
                     levels,
                     hierarchy.get("description"),
-                    name,
-                    "draft",
+                    artifact_key,
+                    "suggested",
                     "llm",
                     source_context_id,
                     source_context_id,
@@ -166,16 +181,18 @@ def apply_extractions(
                   definition,
                   synonyms,
                   abbreviations,
+                  lifecycle_status,
                   source_context_id,
                   created_at,
                   updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
                 ON CONFLICT (term_id)
                 DO UPDATE SET
                   definition = EXCLUDED.definition,
                   synonyms = EXCLUDED.synonyms,
                   abbreviations = EXCLUDED.abbreviations,
+                  lifecycle_status = EXCLUDED.lifecycle_status,
                   source_context_id = EXCLUDED.source_context_id,
                   updated_at = now()
             """
@@ -189,8 +206,9 @@ def apply_extractions(
                     term,
                     normalized,
                     entry.get("definition"),
-                    entry.get("synonyms", []),
-                    entry.get("abbreviations", []),
+                    Json(entry.get("synonyms", [])),
+                    Json(entry.get("abbreviations", [])),
+                    "suggested",
                     source_context_id,
                 ],
             )
@@ -213,15 +231,17 @@ def apply_extractions(
                   definition,
                   synonyms,
                   abbreviations,
+                  lifecycle_status,
                   source_context_id,
                   created_at,
                   updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
                 ON CONFLICT (term_id)
                 DO UPDATE SET
                   definition = EXCLUDED.definition,
                   abbreviations = EXCLUDED.abbreviations,
+                  lifecycle_status = EXCLUDED.lifecycle_status,
                   source_context_id = EXCLUDED.source_context_id,
                   updated_at = now()
             """
@@ -235,8 +255,9 @@ def apply_extractions(
                     abbr,
                     normalized,
                     definition,
-                    [],
-                    [abbr],
+                    Json([]),
+                    Json([abbr]),
+                    "certified",
                     source_context_id,
                 ],
             )
@@ -244,7 +265,11 @@ def apply_extractions(
 
     if apply_flags.get("metrics"):
         for metric in payload.get("metric_candidates", []):
-            metric_name = metric.get("metric_name")
+            if isinstance(metric, str):
+                metric_name = metric
+                metric = {"metric_name": metric}
+            else:
+                metric_name = metric.get("metric_name")
             if not metric_name:
                 continue
             metric_id = f"{domain_id}__{metric_name}"
@@ -268,7 +293,7 @@ def apply_extractions(
                     "source_model": metric.get("table"),
                     "source_schema": metric.get("schema"),
                     "sql": metric.get("sql"),
-                    "lifecycle_status": "suggested",
+                    "lifecycle_status": "certified",
                     "source_type": "llm",
                     "source_run_id": source_context_id,
                     "is_current": True,

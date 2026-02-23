@@ -149,7 +149,115 @@ Ask depends on upstream phases for specific inputs:
 
 ---
 
+## 2.4 Low-Level Data + API Map (Ask Runtime Inputs)
+
+This section lists the exact tables, columns, and upstream APIs that feed Ask.
+Ask reads these directly from the DB or on-disk contracts at runtime.
+
+### 2.4.1 Tenant + Scope Resolution
+Tables:
+- `public.quantyx_tenant_domains`
+  - `tenant_id`, `domain_id`, `status`
+- `public.quantyx_tenant_scopes` (if implemented in Phase U)
+  - `tenant_id`, `default_connection_id`, `default_database`, `default_schema`, `default_tables`
+
+APIs that populate:
+- `POST /tenant/domain`
+- `GET /tenant/domain`
+
+### 2.4.2 Glossary + Ontology + Hierarchy
+Tables / Files:
+- `public.quantyx_glossary_terms`
+  - `term`, `synonyms`, `abbreviation`, `canonical`, `source_context_id`
+- `public.quantyx_entity_overrides`
+  - `tenant_id`, `connection_id`, `database`, `schema`, `entity_id`, `join_key`, `description`
+- `public.quantyx_hierarchy_overrides`
+  - `tenant_id`, `connection_id`, `database`, `schema`, `hierarchy_name`, `levels`, `description`
+- `public.quantyx_context_scope_active` (Phase AD)
+  - active context selection for hierarchy resolution (multiple active contexts)
+- `packs/<industry>/ontology.yml`
+
+APIs that populate:
+- `POST /context/ingest`, `POST /context/extract`, `POST /context/apply`
+- `POST /onboard/map`
+- `PATCH /entities/{entity_id}`
+- `PATCH /hierarchies/{hierarchy_name}`
+
+### 2.4.3 Metrics + Datasets
+Tables / Contracts:
+- `public.quantyx_metrics_registry`
+  - `metric_id`, `definition_sql`, `status`, `grain`, `metadata`
+- `contracts/datasets/*.yml` or DB‑stored dataset contract
+  - dataset name, dimensions, grain, source model
+
+APIs that populate:
+- `POST /metrics`, `PATCH /metrics/{id}`
+- `POST /metrics/suggested`
+- `POST /contracts/apply`
+- `GET /datasets`, `GET /metrics`
+
+### 2.4.4 Derived Metric Binding (Phase AA)
+Table:
+- `public.quantyx_flow_node_data_registry`
+  - `artifact_key`, `is_current`, `data_schema`, `pyiceberg_table_fqn`, `minio_path`
+  - `semantic_binding`, `binding_status`, `binding_errors`
+
+Written by:
+- flow builder output writer (pipeline process)
+- binding worker (Phase AB write-time binding)
+
+### 2.4.5 Query Audit + Explainability
+Table:
+- `public.quantyx_query_audit`
+  - `question`, `resolved_metrics`, `resolved_dimensions`, `resolved_filters`,
+    `sql_hash`, `runtime_ms`, `asked_by`
+
+API:
+- `/query` (Ask)
+
+---
+
+## 2.5 Semantic Parsing (Detailed Implementation)
+
+### 2.5.1 Normalization
+- lowercase + trim
+- normalize time phrases (this month, last week, Q2 FY 2024-2025)
+- strip punctuation and extra whitespace
+
+### 2.5.2 Phrase extraction (rule-based)
+Input sources:
+- glossary terms + synonyms
+- ontology entity names + hierarchy levels
+- metric aliases from `quantyx_metrics_registry.metadata.aliases`
+
+Output candidates:
+- metrics: [{metric_id, confidence, source}]
+- dimensions: [{dimension_name, confidence, source}]
+- entities: [{entity_id, confidence, source}]
+- hierarchy_levels: [{hierarchy_name, level, confidence}]
+
+### 2.5.3 LLM fallback
+Inputs:
+- question
+- top candidate lists from rule-based parsing
+- glossary + ontology snippets
+Outputs:
+- ranked candidates + confidence + rationale
+Rules:
+- if confidence < threshold, return ambiguity error
+- never auto-bind to a low‑confidence candidate
+
+---
+
 ## 3) Semantic Binding Rules (Key Concepts)
+
+### 3.0 LLM Usage (When Needed)
+Use LLMs as a fallback or assistive layer when rule-based matching is
+insufficient or ambiguous. LLM calls must be bounded and deterministic:
+- Inputs: question, glossary terms, ontology entities/hierarchies,
+  candidate metrics/dimensions from registry + schema.
+- Outputs: ranked candidates with confidence + rationale.
+- Fallback: if confidence < threshold, return ambiguity error rather than guess.
 
 ### 3.1 Metrics
 Priority order for metric resolution:

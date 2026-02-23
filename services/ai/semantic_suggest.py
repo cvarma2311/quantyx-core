@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 from services.ai.config import Settings
 
+logger = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).parent / "prompts" / "semantic_suggest"
 
@@ -30,6 +32,11 @@ def _call_llm(
 ) -> dict[str, Any]:
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY is not set")
+    logger.debug(
+        "llm.semantic_suggest: request | model=%s prompt_chars=%s",
+        model_override or settings.openai_model,
+        len(user_prompt or ""),
+    )
     payload = {
         "model": model_override or settings.openai_model,
         "messages": [
@@ -51,6 +58,7 @@ def _call_llm(
     with urllib.request.urlopen(request, timeout=45) as response:
         body = json.loads(response.read().decode("utf-8"))
     content = body["choices"][0]["message"]["content"]
+    logger.debug("llm.semantic_suggest: response | chars=%s", len(content or ""))
     return json.loads(content)
 
 

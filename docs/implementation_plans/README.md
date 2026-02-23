@@ -62,6 +62,16 @@ dependency order.
    - `Phase_AA_Flow_Node_Data_Registry_For_NL_Query.md`
 23) Phase AB - Ask/NL Query Resolution + Semantic Binding
    - `Phase_AB_Ask_NL_Query_Resolution_Semantic_Binding.md`
+24) Phase AC - Ask "Why" / Driver Analysis
+   - `Phase_AC_Ask_Why_Driver_Analysis.md`
+25) Phase Demo - LPG Production + Distribution Onboarding + Ask
+   - `Phase_Demo_LPG_Onboarding_Ask.md`
+26) Phase AD - Multi-Context + Multi-Hierarchy Support
+   - `Phase_AD_Multi_Context_Multi_Hierarchy.md`
+27) Phase AE - Multi-Agent LLM Parallelism
+   - `Phase_AE_Multi_Agent_LLM_Parallelism.md`
+28) Phase AF - Async Context Apply
+   - `Phase_AF_Context_Apply_Async.md`
 
 ## Dependencies (summary)
 

@@ -385,7 +385,9 @@ CREATE TABLE IF NOT EXISTS public.quantyx_hierarchy_overrides (
   connection_id TEXT NOT NULL,
   database_name TEXT NOT NULL,
   schema_name TEXT NOT NULL,
+  context_id TEXT NOT NULL,
   hierarchy_name TEXT NOT NULL,
+  hierarchy_group TEXT NULL,
   levels TEXT[] NOT NULL,
   description TEXT,
   source_context_id TEXT NULL,
@@ -403,7 +405,7 @@ CREATE TABLE IF NOT EXISTS public.quantyx_hierarchy_overrides (
   updated_by TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, hierarchy_name),
+  PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, context_id, hierarchy_name),
   CHECK (connection_id <> 'global' AND database_name <> 'global' AND schema_name <> 'global')
 );
 
@@ -411,7 +413,7 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_hierarchy_overrides_domain
   ON public.quantyx_hierarchy_overrides (tenant_id, domain_id);
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_hierarchy_overrides_scope
-  ON public.quantyx_hierarchy_overrides (tenant_id, domain_id, connection_id, database_name, schema_name);
+  ON public.quantyx_hierarchy_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, context_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_hierarchy_overrides_current
   ON public.quantyx_hierarchy_overrides (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
   WHERE is_current = true;
@@ -442,6 +444,26 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_business_context_conn
   ON public.quantyx_business_context (connection_id, database_name, schema_name);
 
 
+CREATE TABLE IF NOT EXISTS public.quantyx_context_scope_active (
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NULL,
+  database_name TEXT NULL,
+  schema_name TEXT NULL,
+  context_id TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, context_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_scope_active_context
+  ON public.quantyx_context_scope_active (context_id);
+
+CREATE INDEX IF NOT EXISTS idx_context_scope_active_scope
+  ON public.quantyx_context_scope_active (tenant_id, domain_id, connection_id, database_name, schema_name, is_active);
+
+
 CREATE TABLE IF NOT EXISTS public.quantyx_context_extractions (
   extraction_id TEXT PRIMARY KEY,
   context_id TEXT NOT NULL,
@@ -451,6 +473,8 @@ CREATE TABLE IF NOT EXISTS public.quantyx_context_extractions (
   payload JSONB NOT NULL,
   llm_model TEXT NULL,
   confidence NUMERIC NULL,
+  agent_name TEXT NULL,
+  parent_job_id TEXT NULL,
   status TEXT NULL,
   notes TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -459,6 +483,16 @@ CREATE TABLE IF NOT EXISTS public.quantyx_context_extractions (
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_context_extractions_tenant
   ON public.quantyx_context_extractions (tenant_id, domain_id, extraction_type);
+
+
+CREATE TABLE IF NOT EXISTS public.quantyx_context_extraction_agents (
+  agent_run_id TEXT PRIMARY KEY,
+  extraction_id TEXT NOT NULL,
+  agent_name TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  confidence NUMERIC NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 
 CREATE TABLE IF NOT EXISTS public.quantyx_glossary_terms (
@@ -470,6 +504,7 @@ CREATE TABLE IF NOT EXISTS public.quantyx_glossary_terms (
   definition TEXT NULL,
   synonyms JSONB NOT NULL DEFAULT '[]'::jsonb,
   abbreviations JSONB NOT NULL DEFAULT '[]'::jsonb,
+  lifecycle_status TEXT NOT NULL DEFAULT 'suggested',
   source_context_id TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -582,6 +617,30 @@ CREATE TABLE IF NOT EXISTS public.quantyx_facts_registry (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS public.quantyx_entity_mapping_agents (
+  agent_run_id TEXT PRIMARY KEY,
+  job_id TEXT NULL,
+  mapping_id TEXT NULL,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  table_name TEXT NULL,
+  chunk_index INTEGER NULL,
+  chunk_label TEXT NULL,
+  request_payload JSONB NOT NULL,
+  response_payload JSONB NULL,
+  error_message TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_entity_mapping_agents_tenant
+  ON public.quantyx_entity_mapping_agents (tenant_id, domain_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_entity_mapping_agents_job
+  ON public.quantyx_entity_mapping_agents (job_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_facts_registry_current
   ON public.quantyx_facts_registry (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key)
   WHERE is_current = true;
@@ -854,6 +913,22 @@ CREATE TABLE IF NOT EXISTS public.quantyx_flow_node_data_registry (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Fact view registry (tracks demo/provisioned fact views)
+CREATE TABLE IF NOT EXISTS public.quantyx_fact_views_registry (
+  view_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  view_name TEXT NOT NULL,
+  source_table TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_fact_views_tenant
+  ON public.quantyx_fact_views_registry (tenant_id, domain_id, created_at DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_flow_node_registry_current
   ON public.quantyx_flow_node_data_registry (tenant_id, domain_id, artifact_key)
