@@ -121,6 +121,28 @@ class QueryResult(BaseModel):
     }
 
 
+class ChartRequest(BaseModel):
+    tenant_id: str = Field(..., description="Tenant identifier")
+    domain_id: Optional[str] = Field(None, description="Domain identifier")
+    question: Optional[str] = Field(None, description="Natural language question")
+    metrics: Optional[List[str]] = Field(None, description="Metric names to query")
+    dimensions: Optional[List[str]] = Field(None, description="Dimensions to group by")
+    filters: Optional[List[QueryFilter]] = Field(None, description="Filters to apply")
+    limit: int = Field(200, ge=1, le=1000, description="Row limit")
+
+
+class ChartStatusResponse(BaseModel):
+    chart_id: str
+    status: str
+    chart_type: Optional[str] = None
+    chart_payload: Optional[dict] = None
+    data: Optional[List[dict]] = None
+    sql: Optional[str] = None
+    params: Optional[List[Any]] = None
+    rows_json: Optional[List[dict]] = None
+    error_message: Optional[str] = None
+
+
 class MetricsResponse(BaseModel):
     metrics: List[dict] = Field(
         examples=[

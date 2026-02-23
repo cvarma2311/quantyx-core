@@ -7,7 +7,7 @@ from typing import Any
 import psycopg2
 
 from services.ai.config import Settings
-from services.ai.db import execute_non_query
+from services.ai.db import execute_non_query, run_query
 
 
 def persist_entity_mapping_agent(
@@ -87,3 +87,33 @@ def attach_mapping_id_to_agents(
         execute_non_query(settings, sql, [mapping_id, job_id])
     except psycopg2.errors.UndefinedTable:
         return
+
+
+def list_entity_mapping_agents(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database_name: str,
+    schema_name: str,
+    limit: int = 50,
+) -> list[dict]:
+    sql = """
+        SELECT agent_run_id, job_id, mapping_id, tenant_id, domain_id, connection_id,
+               database_name, schema_name, table_name, chunk_index, chunk_label,
+               request_payload, response_payload, error_message, created_at
+          FROM public.quantyx_entity_mapping_agents
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+         ORDER BY created_at DESC
+         LIMIT %s
+    """
+    params = [tenant_id, domain_id, connection_id, database_name, schema_name, limit]
+    try:
+        return run_query(settings, sql, params)
+    except psycopg2.errors.UndefinedTable:
+        return []
