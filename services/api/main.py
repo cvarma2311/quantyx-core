@@ -7909,6 +7909,10 @@ def _expand_relative_date_filters(filters: list[dict]) -> list[dict]:
     expanded: list[dict] = []
     for flt in filters:
         value = flt.get("value")
+        if isinstance(value, list) and len(value) == 1 and isinstance(value[0], str):
+            value = value[0]
+            flt = dict(flt)
+            flt["value"] = value
         if isinstance(value, str) and value.strip().lower() == "last week" and flt.get("operator") == "IN":
             today = _date.today()
             last_week_end = today - _timedelta(days=today.weekday() + 1)
@@ -7916,6 +7920,14 @@ def _expand_relative_date_filters(filters: list[dict]) -> list[dict]:
             expanded.append({"field": flt["field"], "operator": ">=", "value": last_week_start.isoformat()})
             expanded.append({"field": flt["field"], "operator": "<=", "value": last_week_end.isoformat()})
             continue
+        if isinstance(value, str) and flt.get("operator") == "IN":
+            lowered = value.strip().lower()
+            if lowered in {"last three months", "last 3 months", "past three months", "past 3 months"}:
+                today = _date.today()
+                start = today - _timedelta(days=90)
+                expanded.append({"field": flt["field"], "operator": ">=", "value": start.isoformat()})
+                expanded.append({"field": flt["field"], "operator": "<=", "value": today.isoformat()})
+                continue
         expanded.append(flt)
     return expanded
 
@@ -8180,9 +8192,14 @@ def _deterministic_date_filters_from_question(
     allowed_dimensions: list[str] | None,
 ) -> list[dict]:
     if not question or not allowed_dimensions:
+        question_l = (question or "").lower()
+        if "last week" in question_l:
+            return [{"field": "process_date", "operator": "IN", "value": "last week"}]
+        if "last three months" in question_l or "last 3 months" in question_l:
+            return [{"field": "process_date", "operator": "IN", "value": "last three months"}]
         return []
     question_l = question.lower()
-    if "last week" not in question_l:
+    if "last week" not in question_l and "last three months" not in question_l and "last 3 months" not in question_l:
         return []
     allowed_set = {d.lower() for d in allowed_dimensions}
     date_field = None
@@ -8192,7 +8209,9 @@ def _deterministic_date_filters_from_question(
             break
     if not date_field:
         return []
-    return [{"field": date_field, "operator": "IN", "value": "last week"}]
+    if "last week" in question_l:
+        return [{"field": date_field, "operator": "IN", "value": "last week"}]
+    return [{"field": date_field, "operator": "IN", "value": "last three months"}]
 
 
 def _strip_time_filters(filters: list[dict]) -> list[dict]:
@@ -8207,6 +8226,27 @@ def _strip_time_filters(filters: list[dict]) -> list[dict]:
     return stripped
 
 
+def _coerce_time_filter_fields(filters: list[dict], metric_dimension_set: set[str]) -> list[dict]:
+    if not metric_dimension_set:
+        return filters
+    if "process_date" not in metric_dimension_set:
+        return filters
+    coerced = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        field = payload.get("field")
+        value = payload.get("value")
+        if isinstance(value, list) and len(value) == 1 and isinstance(value[0], str):
+            value = value[0]
+        if isinstance(field, str) and field not in metric_dimension_set:
+            if isinstance(value, str) and ("last" in value.lower() or re.match(r"\\d{4}-\\d{2}-\\d{2}", value)):
+                payload["field"] = "process_date"
+            elif field.lower() in {"month_year", "month", "month_number"}:
+                payload["field"] = "process_date"
+        coerced.append(payload)
+    return coerced
+
+
 def _extract_top_n(question: str | None) -> int | None:
     if not question:
         return None
@@ -8217,6 +8257,17 @@ def _extract_top_n(question: str | None) -> int | None:
     if match:
         return int(match.group(1))
     return 5
+
+
+def _infer_sort_desc(question: str | None) -> bool:
+    if not question:
+        return True
+    lowered = question.lower()
+    if "ascending" in lowered or "asc" in lowered:
+        return False
+    if "descending" in lowered or "desc" in lowered:
+        return True
+    return True
 
 
 def _infer_fact_table_from_metric_sql(metric_sql: str) -> str | None:
@@ -8479,7 +8530,11 @@ def query(request: QueryRequest) -> QueryResult:
             # Refresh time filters based on current question
             filters = _strip_time_filters(filters)
             filters.extend(_deterministic_date_filters_from_question(request.question, dimension_candidates))
-    else:
+        if not dimensions and request.question:
+            logger.info("query.cache_empty_dimensions | fallback_resolve=true")
+            cached_payload = None
+
+    if not cached_payload:
         metric_names, dimensions, filters = _resolve_metrics(
             request,
             glossary=glossary,
@@ -8514,7 +8569,8 @@ def query(request: QueryRequest) -> QueryResult:
     dimensions = _coerce_sbu_dimensions(dimensions, filters)
     filters = _normalize_filters(filters, settings)
     filters = _normalize_sales_quarter_filters(filters, metric_names)
-    filters = _filter_dimension_filters(filters, set(catalog.dimensions.keys()))
+    if not (cached_payload and dimension_candidates is None):
+        filters = _filter_dimension_filters(filters, set(catalog.dimensions.keys()))
     _log_step("normalize_inputs")
     logger.info("query.coerced | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     logger.info("dimensions: %s", dimensions)
@@ -8574,11 +8630,12 @@ def query(request: QueryRequest) -> QueryResult:
         set(catalog.dimensions.keys()),
         metric_dimension_set,
     )
+    filters = _coerce_time_filter_fields(filters, metric_dimension_set)
     _log_step("alias_coerced")
     logger.info("query.dim_alias | dimensions=%s filters=%s metric_dims=%s",
                 dimensions, filters, sorted(metric_dimension_set))
     if metric_dimension_set:
-        filtered_dimensions = [dim for dim in dimensions if dim in metric_dimension_set]
+        filtered_dimensions = [dim for dim in dimensions if dim in metric_dimension_set or dim == "process_month"]
         if filtered_dimensions != dimensions:
             logger.info(
                 "query.dimensions_filtered_to_fact | before=%s after=%s",
@@ -8586,6 +8643,13 @@ def query(request: QueryRequest) -> QueryResult:
                 filtered_dimensions,
             )
             dimensions = filtered_dimensions
+    if request.question and metric_dimension_set:
+        question_l = request.question.lower()
+        if "last three months" in question_l or "last 3 months" in question_l:
+            if "process_date" in metric_dimension_set:
+                if "process_month" not in dimensions:
+                    dimensions.append("process_month")
+                dimensions = [d for d in dimensions if d not in {"process_date", "pdate", "date_day", "date"}]
     filter_fields = []
     for flt in filters:
         payload = flt if isinstance(flt, dict) else flt.model_dump()
@@ -8603,7 +8667,7 @@ def query(request: QueryRequest) -> QueryResult:
                 metric_dims,
             )
             logger.info("query.glossary_coerced | dimensions=%s filters=%s", dimensions, filters)
-            supported_dims = [dim for dim in dimensions if dim in metric_dims]
+            supported_dims = [dim for dim in dimensions if dim in metric_dims or dim == "process_month"]
             supported_filters = [flt for flt in filters if flt.get("field") in metric_dims]
             if supported_dims or supported_filters:
                 filtered_metrics.append(metric)
@@ -8676,6 +8740,19 @@ def query(request: QueryRequest) -> QueryResult:
         if dim_name in catalog.dimensions:
             dim_objects.append(catalog.dimensions[dim_name])
             continue
+        if dim_name == "process_month":
+            base_table = _infer_fact_table_from_metric_sql(metrics[0].sql)
+            if base_table:
+                dim_objects.append(
+                    Dimension(
+                        name=dim_name,
+                        description="Process month (Mon-YY)",
+                        data_type="string",
+                        sql=f"to_char(date_trunc('month', {{{{ ref('{base_table}') }}}}.process_date), 'Mon-YY')",
+                    )
+                )
+                logger.info("query.ad_hoc_dimension | name=%s base_table=%s", dim_name, base_table)
+                continue
         # Ad-hoc dimension: if it matches a metric dimension, build SQL from metric base table.
         if dim_name in metric_dimension_set:
             base_table = _infer_fact_table_from_metric_sql(metrics[0].sql)
@@ -8704,14 +8781,32 @@ def query(request: QueryRequest) -> QueryResult:
         )
     _log_step("filter_objects")
 
+    sort_desc = _infer_sort_desc(request.question)
+    top_n = _extract_top_n(request.question)
+    effective_limit = top_n if top_n else request.limit
     try:
+        filter_dimensions = dict(catalog.dimensions)
+        base_table = _infer_fact_table_from_metric_sql(metrics[0].sql)
+        if base_table:
+            for flt in filters:
+                payload = flt if isinstance(flt, dict) else flt.model_dump()
+                field = payload.get("field")
+                if field and field not in filter_dimensions and field in metric_dimension_set:
+                    filter_dimensions[field] = Dimension(
+                        name=field,
+                        description="Ad-hoc filter dimension from metric",
+                        data_type="string",
+                        sql=f"{{{{ ref('{base_table}') }}}}.{field}",
+                    )
         built = build_query(
             metrics=metrics,
             dimensions=dim_objects,
-            filter_dimensions=catalog.dimensions,
+            filter_dimensions=filter_dimensions,
             filters=built_filters,
             schema=settings.db_schema,
-            limit=request.limit,
+            limit=effective_limit,
+            order_by_metric=True,
+            order_desc=sort_desc,
         )
         _log_step("sql_built")
         sql_text = built.sql
@@ -8775,10 +8870,12 @@ def query(request: QueryRequest) -> QueryResult:
             by_company_built = build_query(
                 metrics=[by_company_metric],
                 dimensions=by_company_dimensions,
-                filter_dimensions=catalog.dimensions,
+                filter_dimensions=filter_dimensions,
                 filters=built_filters,
                 schema=settings.db_schema,
-                limit=request.limit,
+                limit=effective_limit,
+                order_by_metric=True,
+                order_desc=sort_desc,
             )
             by_company_sql = by_company_built.sql
             logger.info("by_company_sql: %s", by_company_sql)
