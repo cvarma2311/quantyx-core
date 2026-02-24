@@ -155,6 +155,8 @@ def build_query(
     filters: list[Filter],
     schema: str,
     limit: int,
+    order_by_metric: bool = True,
+    order_desc: bool = True,
 ) -> BuiltQuery:
     if not metrics:
         raise ValueError("At least one metric is required")
@@ -177,7 +179,8 @@ def build_query(
             base_alias,
             alias_map,
         )
-        select_parts.append(dim_sql)
+        dim_alias = dim.name.replace('"', '""')
+        select_parts.append(f'{dim_sql} AS "{dim_alias}"')
         metric_tables.update(_collect_tables(dim_sql))
 
     for metric in metrics:
@@ -234,5 +237,10 @@ def build_query(
 
     where_clause = f" WHERE {where_sql}" if where_sql else ""
 
-    sql = f"SELECT {', '.join(select_parts)} {base_sql}{where_clause}{group_by} LIMIT {limit}"
+    order_clause = ""
+    if order_by_metric and metrics:
+        alias = metrics[0].name.replace('"', '""')
+        direction = "DESC" if order_desc else "ASC"
+        order_clause = f' ORDER BY "{alias}" {direction}'
+    sql = f"SELECT {', '.join(select_parts)} {base_sql}{where_clause}{group_by}{order_clause} LIMIT {limit}"
     return BuiltQuery(sql=sql, params=where_params)
