@@ -151,7 +151,10 @@ from services.ai.context_store import (
     create_context_file,
     get_context,
     get_context_file,
+    get_context_file_bytes,
     get_extraction,
+    list_extractions,
+    list_context_files_for_contexts,
     list_context,
     list_active_context_ids,
     link_context_files,
@@ -220,6 +223,7 @@ from services.api.schemas import (
     ContextExtractRequest,
     ContextExtractResponse,
     ContextExtractionResponse,
+    ContextExtractionListResponse,
     ContextApplyRequest,
     ContextApplyResponse,
     ContextPatchRequest,
@@ -4567,6 +4571,75 @@ def extract_context_async(payload: ContextExtractRequest) -> JobCreateResponse:
 
 
 @app.get(
+    "/context/extractions",
+    response_model=ContextExtractionListResponse,
+    tags=["context"],
+    summary="List extractions for tenant",
+    description="Return recent extractions for all contexts in a tenant (optional domain filter).",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "list": {
+                                "summary": "Extraction list",
+                                "value": {
+                                    "extractions": [
+                                        {
+                                            "extraction_id": "ext_123",
+                                            "context_id": "ctx_abc",
+                                            "extraction_type": "combined",
+                                            "payload": {"hierarchies": []},
+                                            "raw_text": "Source notes...",
+                                            "files": [
+                                                {
+                                                    "file_id": "file_1",
+                                                    "filename": "notes.txt",
+                                                    "content_type": "text/plain",
+                                                }
+                                            ],
+                                            "status": "reviewed",
+                                            "created_at": "2026-02-20T10:05:12Z",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_context_extractions(
+    tenant_id: str,
+    domain_id: str | None = None,
+    limit: int = 50,
+) -> ContextExtractionListResponse:
+    resolved_domain_id = _resolve_domain_id(tenant_id, domain_id) if tenant_id else domain_id
+    rows = list_extractions(settings, tenant_id, resolved_domain_id if domain_id else None, limit=limit)
+    context_ids = [row.get("context_id") for row in rows if row.get("context_id")]
+    files_by_context = list_context_files_for_contexts(settings, context_ids)
+    extractions = []
+    for row in rows:
+        extractions.append(
+            ContextExtractionResponse(
+                extraction_id=row.get("extraction_id"),
+                context_id=row.get("context_id"),
+                extraction_type=row.get("extraction_type"),
+                payload=row.get("payload") or {},
+                raw_text=row.get("raw_text"),
+                files=files_by_context.get(row.get("context_id"), []),
+                status=row.get("status"),
+                notes=row.get("notes"),
+                created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
+            )
+        )
+    return ContextExtractionListResponse(extractions=extractions)
+
+
+@app.get(
     "/context/extractions/{extraction_id}",
     response_model=ContextExtractionResponse,
     tags=["context"],
@@ -4620,6 +4693,45 @@ def get_context_extraction(
         notes=extraction_row.get("notes"),
         created_at=created_at.isoformat() if created_at else None,
     )
+
+
+@app.get(
+    "/context/files/{file_id}/download",
+    tags=["context"],
+    summary="Download a context file",
+    description="Download the original file bytes for a context file.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/octet-stream": {
+                        "examples": {
+                            "file": {
+                                "summary": "Binary file download",
+                                "description": "Binary response with Content-Disposition header",
+                                "value": "..."
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def download_context_file(file_id: str, tenant_id: str) -> Response:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    row = get_context_file_bytes(settings, file_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="File not found")
+    if row.get("tenant_id") != tenant_id or row.get("domain_id") != domain_id:
+        raise HTTPException(status_code=404, detail="File not found")
+    raw_bytes = row.get("raw_bytes") or b""
+    if isinstance(raw_bytes, memoryview):
+        raw_bytes = raw_bytes.tobytes()
+    filename = row.get("filename") or file_id
+    content_type = row.get("content_type") or "application/octet-stream"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(content=raw_bytes, media_type=content_type, headers=headers)
 
 
 @app.post(
@@ -6564,6 +6676,27 @@ def _run_onboard_map(
     tags=["onboard"],
     summary="Get latest mapping run",
     description="Return the latest entity mapping run for the active tenant scope.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "latest": {
+                                "summary": "Latest mapping",
+                                "value": {
+                                    "mapping_id": "map_123",
+                                    "tenant_id": "VC_101",
+                                    "status": "draft",
+                                    "candidates": [],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def onboard_map_latest(
     tenant_id: str,
@@ -6658,6 +6791,31 @@ def onboard_map_history(
     tags=["onboard"],
     summary="List mapping agent runs",
     description="Return recent entity mapping agent runs for the given scope.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "agents": {
+                                "summary": "Agent runs",
+                                "value": {
+                                    "agents": [
+                                        {
+                                            "agent_run_id": "emap_123",
+                                            "job_id": "job_abc",
+                                            "table_name": "fact_sales",
+                                            "created_at": "2026-02-20T10:05:12Z",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def onboard_map_agents(
     tenant_id: str,
@@ -8281,7 +8439,6 @@ def query(request: QueryRequest) -> QueryResult:
         cached = get_latest_chart_request_by_question(
             settings,
             tenant_id=request.tenant_id,
-            domain_id=domain_id if request.tenant_id else None,
             question=request.question,
         )
         if cached and cached.get("query_payload"):
@@ -8683,6 +8840,39 @@ def query(request: QueryRequest) -> QueryResult:
     response_model=ChartStatusResponse,
     tags=["charts"],
     summary="Create async chart request",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "chart_from_question": {
+                            "summary": "Create chart from question",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "question": "What is total LPG production by plant last week?",
+                                "limit": 200,
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "queued": {
+                                "summary": "Queued chart",
+                                "value": {"chart_id": "chart_2f7a9c4d", "status": "queued"},
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
 )
 def create_chart(request: ChartRequest) -> ChartStatusResponse:
     domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
@@ -8724,6 +8914,35 @@ def create_chart(request: ChartRequest) -> ChartStatusResponse:
     response_model=ChartStatusResponse,
     tags=["charts"],
     summary="Get chart status and payload",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "ready": {
+                                "summary": "Chart ready",
+                                "value": {
+                                    "chart_id": "chart_2f7a9c4d",
+                                    "status": "ready",
+                                    "chart_type": "bar",
+                                    "chart_payload": {
+                                        "chart": {"type": "XYChart"},
+                                        "xAxis": {"type": "CategoryAxis", "categoryField": "category"},
+                                        "yAxis": {"type": "ValueAxis"},
+                                    },
+                                    "data": [
+                                        {"category": "Plant A", "value": 123.4},
+                                        {"category": "Plant B", "value": 98.1},
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_chart(chart_id: str) -> ChartStatusResponse:
     row = get_chart_request(settings, chart_id)

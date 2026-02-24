@@ -312,6 +312,21 @@ def get_context_file(settings: Settings, file_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def get_context_file_bytes(settings: Settings, file_id: str) -> dict | None:
+    sql = """
+        SELECT file_id,
+               tenant_id,
+               domain_id,
+               filename,
+               content_type,
+               raw_bytes
+          FROM public.quantyx_context_files
+         WHERE file_id = %s
+    """
+    rows = run_query(settings, sql, [file_id])
+    return rows[0] if rows else None
+
+
 def mark_context_processed(settings: Settings, context_id: str) -> None:
     sql = """
         UPDATE public.quantyx_business_context
@@ -447,6 +462,74 @@ def get_extraction(settings: Settings, extraction_id: str) -> dict | None:
     """
     rows = run_query(settings, sql, [extraction_id])
     return rows[0] if rows else None
+
+
+def list_extractions(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str | None,
+    limit: int = 50,
+) -> list[dict]:
+    sql = """
+        SELECT e.extraction_id,
+               e.context_id,
+               e.tenant_id,
+               e.domain_id,
+               e.extraction_type,
+               e.payload,
+               e.llm_model,
+               e.agent_name,
+               e.parent_job_id,
+               e.status,
+               e.notes,
+               e.created_at,
+               c.raw_text
+          FROM public.quantyx_context_extractions
+          AS e
+          LEFT JOIN public.quantyx_business_context AS c
+            ON c.context_id = e.context_id
+         WHERE e.tenant_id = %s
+           AND (%s IS NULL OR e.domain_id = %s)
+         ORDER BY created_at DESC
+         LIMIT %s
+    """
+    rows = run_query(settings, sql, [tenant_id, domain_id, domain_id, limit])
+    return rows
+
+
+def list_context_files_for_contexts(
+    settings: Settings,
+    context_ids: list[str],
+) -> dict[str, list[dict]]:
+    if not context_ids:
+        return {}
+    placeholders = ", ".join(["%s"] * len(context_ids))
+    sql = f"""
+        SELECT l.context_id,
+               f.file_id,
+               f.filename,
+               f.content_type,
+               f.metadata,
+               f.created_at
+          FROM public.quantyx_context_file_links AS l
+          JOIN public.quantyx_context_files AS f
+            ON f.file_id = l.file_id
+         WHERE l.context_id IN ({placeholders})
+         ORDER BY f.created_at DESC
+    """
+    rows = run_query(settings, sql, context_ids)
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row.get("context_id"), []).append(
+            {
+                "file_id": row.get("file_id"),
+                "filename": row.get("filename"),
+                "content_type": row.get("content_type"),
+                "metadata": row.get("metadata"),
+                "created_at": row.get("created_at"),
+            }
+        )
+    return grouped
 
 
 def update_extraction(
