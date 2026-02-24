@@ -8112,6 +8112,21 @@ def _deterministic_metrics_from_question(question: str, catalog: MetricCatalog) 
     return winners[:1]
 
 
+def _score_metric_match(question: str, metric_name: str) -> float:
+    if not question or not metric_name:
+        return 0.0
+    stopwords = {
+        "the", "a", "an", "by", "of", "for", "in", "on", "to", "from", "last", "this",
+        "that", "week", "month", "year", "today", "yesterday", "total", "vs", "and",
+    }
+    q_tokens = [t for t in _normalize_text_for_match(question) if t not in stopwords]
+    m_tokens = [t for t in _normalize_text_for_match(metric_name) if t not in stopwords]
+    if not q_tokens or not m_tokens:
+        return 0.0
+    overlap = len(set(q_tokens) & set(m_tokens))
+    return overlap / max(1, len(set(m_tokens)))
+
+
 def _deterministic_dimensions_from_question(
     question: str,
     glossary: list[dict] | None,
@@ -8382,7 +8397,26 @@ def query(request: QueryRequest) -> QueryResult:
                 request.dimensions, request.filters, request.limit)
     fact_dims_map: dict[str, set[str]] = {}
     dimension_candidates: list[str] | None = None
-    if request.tenant_id:
+    cached_payload = None
+    if request.question and request.tenant_id:
+        logger.info("query.cache_lookup | tenant=%s question=%s", request.tenant_id, request.question)
+        cached = get_latest_chart_request_by_question(
+            settings,
+            tenant_id=request.tenant_id,
+            question=request.question,
+        )
+        if cached and cached.get("query_payload"):
+            cached_payload = cached.get("query_payload")
+            if isinstance(cached_payload, str):
+                try:
+                    cached_payload = json.loads(cached_payload)
+                except json.JSONDecodeError:
+                    cached_payload = None
+            logger.info("query.cache_hit | chart_id=%s", cached.get("chart_id"))
+        else:
+            logger.info("query.cache_miss")
+
+    if request.tenant_id and not cached_payload:
         domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
         connection_id, database_name, schema_name, tables = _resolve_scope_values(
             request.tenant_id,
@@ -8427,21 +8461,8 @@ def query(request: QueryRequest) -> QueryResult:
         logger.info("query.glossary | loaded=%s", len(glossary or []))
         contract = get_active_semantic_contract(settings, request.tenant_id, domain_id)
         _log_step("glossary_contract")
-    cached_payload = None
-    if request.question and request.tenant_id:
-        cached = get_latest_chart_request_by_question(
-            settings,
-            tenant_id=request.tenant_id,
-            question=request.question,
-        )
-        if cached and cached.get("query_payload"):
-            cached_payload = cached.get("query_payload")
-            if isinstance(cached_payload, str):
-                try:
-                    cached_payload = json.loads(cached_payload)
-                except json.JSONDecodeError:
-                    cached_payload = None
-            logger.info("query.cache_hit | chart_id=%s", cached.get("chart_id"))
+    elif request.tenant_id and cached_payload:
+        logger.info("query.scope_skipped | reason=cache_hit")
 
     if cached_payload:
         metric_names = cached_payload.get("metrics") or []
@@ -8520,6 +8541,15 @@ def query(request: QueryRequest) -> QueryResult:
             raise HTTPException(status_code=400, detail=f"Unknown metric: {metric_name}")
         metrics.append(catalog.metrics[metric_name])
         metrics_all.append(catalog.metrics[metric_name])
+        if request.question:
+            score = _score_metric_match(request.question, metric_name)
+            base_table = _infer_fact_table_from_metric_sql(catalog.metrics[metric_name].sql)
+            logger.info(
+                "query.metric_score | metric=%s score=%.3f base_table=%s",
+                metric_name,
+                score,
+                base_table,
+            )
     _log_step("metrics_loaded")
 
     filter_fields = []
