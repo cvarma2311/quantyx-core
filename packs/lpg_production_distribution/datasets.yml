@@ -1,0 +1,19 @@
+industry: lpg_production_distribution
+version: 1
+
+datasets:
+  - name: plant_operations
+    source_model: fact_lpg_plant_operations
+    description: Daily LPG plant operations and production metrics
+  - name: event_log
+    source_model: fact_event_log
+    description: Production and distribution event log
+  - name: production_log
+    source_model: fact_production_log
+    description: Production line log with process-level metrics
+  - name: distributor_mapping
+    source_model: dim_distributor
+    description: Distributor and mapping reference data
+  - name: plant_master
+    source_model: dim_plant
+    description: Plant master data (sap_id, plant_name, region, sales_area)

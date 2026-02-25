@@ -1,0 +1,28 @@
+industry: lpg_production_distribution
+version: 1
+
+templates:
+  - name: production_mt
+    type: sum
+    description: Total LPG production in metric tonnes
+    measure_hint: volume
+
+  - name: production_lakh_cyl
+    type: sum
+    description: Total LPG production in lakh cylinders
+    measure_hint: volume
+
+  - name: utilization_pct
+    type: ratio
+    description: Utilization percentage of production capacity
+    measure_hint: duration
+
+  - name: rejection_rate_pct
+    type: ratio
+    description: Rejection rate across production checks
+    measure_hint: count
+
+  - name: productivity_avg
+    type: avg
+    description: Average production productivity per line or plant
+    measure_hint: volume

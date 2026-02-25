@@ -15,9 +15,7 @@ import zipfile
 import xml.etree.ElementTree as ElementTree
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, APIRouter, Response
-
-from services.ai.onboarding.api_helpers import get_secret
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
 
 from services.ai.catalog import Dimension, load_catalog_with_registry, resolve_ref
 from datetime import date as _date, timedelta as _timedelta
@@ -35,17 +33,6 @@ from services.ai.connection_registry import (
     register_connection_scopes,
     resolve_connection_scope,
 )
-
-from services.ai.flow_node_registry import (
-    get_flow_exec_details,
-    get_minio_data_path,
-    get_table_schema,
-    get_source_node_ids,
-    generate_custom_sql,
-    read_from_minio,
-    store_flow_node_details
-)
-
 from services.ai.onboarding.scan_store import persist_schema_scan
 from services.ai.onboarding.scan_store import load_latest_scan_result, load_latest_scan_for_scope
 from services.ai.resolver import resolve_question
@@ -197,6 +184,9 @@ from services.api.schemas import (
     MetricUpsertResponse,
     DatasetsResponse,
     DimensionsResponse,
+    TenantCreateRequest,
+    TenantResponse,
+    TenantsResponse,
     DimensionValuesResponse,
     OnboardScanRequest,
     OnboardScanResponse,
@@ -297,7 +287,6 @@ from services.api.schemas import (
     CanvasListResponse,
     CanvasDetailResponse,
     CanvasTreeResponse,
-    FlowsNodesRequest
 )
 from services.api.validators import (
     generate_source_title,
@@ -1136,13 +1125,13 @@ def validate_semantic_contract(payload: dict) -> SemanticContractValidateRespons
                         "extract": {
                             "summary": "Extract glossary terms",
                             "value": {
-                                "tenant_id": "tenant_a",
-                                "industry": "petroleum_refinery",
+                                "tenant_id": "VC_101",
+                                "industry": "lpg_production_distribution",
                                 "inputs": {
-                                    "raw_text": "MFM = mass flow meter. Stock_code identifies product.",
-                                    "tables_and_columns": "fact_dispatch: [bay_name, mfm_id, product_name]",
-                                    "entity_types": ["organizational_unit", "mass_flow_meter", "product"],
-                                    "metric_candidate": "metric_name=throughput_volume, columns=[mfm_volume, product_name]",
+                                    "raw_text": "Plant = LPG filling facility. SAP ID identifies plant.",
+                                    "tables_and_columns": "lpg_plant_operations: [process_date, sap_id, region, production_19kg]",
+                                    "entity_types": ["organizational_unit", "plant", "product"],
+                                    "metric_candidate": "metric_name=production_mt, columns=[production_14_2kg, production_19kg]",
                                 },
                                 "model": "gpt-4o-mini",
                             },
@@ -1200,7 +1189,7 @@ def extract_semantic_contract(request: SemanticExtractRequest) -> SemanticExtrac
                     "examples": {
                         "apply": {
                             "summary": "Apply contract",
-                            "value": {"tenant_id": "tenant_a", "contract_id": "contract_123"},
+                            "value": {"tenant_id": "VC_101", "contract_id": "contract_123"},
                         }
                     }
                 }
@@ -1237,15 +1226,15 @@ def apply_semantic_contract(request: SemanticApplyRequest) -> SemanticApplyRespo
                         "suggest": {
                             "summary": "Suggest semantic model",
                             "value": {
-                                "tenant_id": "tenant_a",
-                                "domain_id": "petroleum_refinery",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "inputs": {
-                                    "schema_summary": "fact_dispatch: [dispatch_date, plant_id, product_id, volume_tmt]",
+                                    "schema_summary": "lpg_plant_operations: [process_date, sap_id, region, production_19kg]",
                                     "questions": [
-                                        "Top 5 plants by dispatch volume this month",
-                                        "Which products are trending down YoY?",
+                                        "Top 5 plants by LPG production last week",
+                                        "Which regions are trending down YoY?",
                                     ],
-                                    "glossary": "MFM=Mass Flow Meter, bay=loading bay",
+                                    "glossary": "Plant = LPG filling facility; SAP ID identifies plant",
                                 },
                                 "model": "gpt-4o-mini",
                             },
@@ -1312,43 +1301,43 @@ def _infer_edge_type(from_type: str | None, to_type: str | None) -> str | None:
                         "apply": {
                             "summary": "Apply semantic suggestions",
                             "value": {
-                                "tenant_id": "tenant_a",
-                                "domain_id": "petroleum_refinery",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "facts": [
                                     {
-                                        "table_name": "fact_dispatch_daily",
+                                        "table_name": "fact_lpg_plant_operations",
                                         "grain": "day",
-                                        "time_column": "dispatch_date",
-                                        "measures": ["volume_tmt"],
-                                        "dimensions": ["plant_id", "product_id"],
-                                        "description": "Daily dispatch fact",
+                                        "time_column": "process_date",
+                                        "measures": ["production_14_2kg", "production_19kg"],
+                                        "dimensions": ["sap_id", "region"],
+                                        "description": "Daily LPG production fact",
                                         "status": "draft",
                                     }
                                 ],
                                 "dimensions": [
                                     {
                                         "name": "dim_plant",
-                                        "keys": ["plant_id"],
-                                        "attributes": ["plant_name", "region_name"],
+                                        "keys": ["sap_id"],
+                                        "attributes": ["plant_name", "region"],
                                         "description": "Plant dimension",
                                         "status": "draft",
                                     }
                                 ],
                                 "metrics": [
                                     {
-                                        "metric_name": "dispatch_volume_tmt",
+                                        "metric_name": "production_mt",
                                         "type": "sum",
-                                        "sql": "{{ ref('fact_dispatch_daily') }}.volume_tmt",
+                                        "sql": "({{ ref('fact_lpg_plant_operations') }}.production_14_2kg * 14.2 + {{ ref('fact_lpg_plant_operations') }}.production_19kg * 19) / 1000",
                                         "grain": "day",
-                                        "dimensions": ["plant_id", "product_id"],
-                                        "description": "Total dispatch volume",
+                                        "dimensions": ["sap_id", "region"],
+                                        "description": "Total LPG production in MT",
                                         "status": "suggested",
                                     }
                                 ],
                                 "lineage": {
                                     "edges": [
-                                        {"from": "dim_plant", "to": "fact_dispatch_daily"},
-                                        {"from": "fact_dispatch_daily", "to": "dispatch_volume_tmt"},
+                                        {"from": "dim_plant", "to": "fact_lpg_plant_operations"},
+                                        {"from": "fact_lpg_plant_operations", "to": "production_mt"},
                                     ]
                                 },
                             },
@@ -1550,14 +1539,14 @@ def semantic_suggest_apply(request: SemanticSuggestApplyRequest) -> SemanticSugg
                         "scan_job": {
                             "summary": "Scan connection job",
                             "value": {
-                                "tenant_id": "tenant_a",
-                                "domain_id": "manufacturing",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "job_type": "scan_connection",
                                 "payload": {
-                                    "tenant_id": "tenant_a",
+                                    "tenant_id": "VC_101",
                                     "connections": [
                                         {
-                                            "connection_id": "conn_prod",
+                                            "connection_id": "conn_lpg",
                                             "db_type": "postgres",
                                             "host": "db.company.com",
                                             "port": 5432,
@@ -1566,9 +1555,9 @@ def semantic_suggest_apply(request: SemanticSuggestApplyRequest) -> SemanticSugg
                                             "sample_rows": 100,
                                             "databases": [
                                                 {
-                                                    "name": "prod_warehouse",
+                                                    "name": "hpcl_ceg",
                                                     "schemas": [
-                                                        {"name": "public", "tables": ["fact_production_daily"]}
+                                                        {"name": "public", "tables": ["lpg_plant_operations"]}
                                                     ],
                                                 }
                                             ],
@@ -1812,6 +1801,128 @@ def cancel_job(job_id: str) -> JobCancelResponse:
 
 
 @app.post(
+    "/tenants",
+    response_model=TenantResponse,
+    tags=["admin"],
+    summary="Create or update a tenant",
+    description="Register a tenant for UI switching and metadata storage.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "create_tenant": {
+                            "summary": "Create tenant",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "display_name": "HPCL LPG",
+                                "status": "active",
+                                "metadata": {"region": "IN"},
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "created": {
+                                "summary": "Tenant created",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "display_name": "HPCL LPG",
+                                    "status": "active",
+                                    "domain_id": "lpg_production_distribution",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def create_tenant(payload: TenantCreateRequest) -> TenantResponse:
+    row = upsert_tenant(
+        settings,
+        tenant_id=payload.tenant_id,
+        display_name=payload.display_name,
+        status=payload.status,
+        metadata=payload.metadata,
+    )
+    domain_row = get_tenant_domain(settings, payload.tenant_id)
+    return TenantResponse(
+        tenant_id=row.get("tenant_id") or payload.tenant_id,
+        display_name=row.get("display_name"),
+        status=row.get("status") or payload.status,
+        domain_id=domain_row.get("domain_id") if domain_row else None,
+        metadata=row.get("metadata"),
+        created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
+        updated_at=row.get("updated_at").isoformat() if row.get("updated_at") else None,
+    )
+
+
+@app.get(
+    "/tenants",
+    response_model=TenantsResponse,
+    tags=["admin"],
+    summary="List tenants",
+    description="List tenants available for UI switching.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "tenants": {
+                                "summary": "Tenant list",
+                                "value": {
+                                    "tenants": [
+                                        {
+                                            "tenant_id": "VC_101",
+                                            "display_name": "HPCL LPG",
+                                            "status": "active",
+                                            "domain_id": "lpg_production_distribution",
+                                        },
+                                        {
+                                            "tenant_id": "BT_01",
+                                            "display_name": "Bharat Petroleum",
+                                            "status": "active",
+                                            "domain_id": "lpg_production_distribution",
+                                        },
+                                    ],
+                                    "limit": 200,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_tenants_api(limit: int = 200) -> TenantsResponse:
+    rows = list_tenants(settings, limit=limit)
+    payload = []
+    for row in rows:
+        payload.append(
+            {
+                "tenant_id": row.get("tenant_id"),
+                "display_name": row.get("display_name"),
+                "status": row.get("status"),
+                "domain_id": row.get("domain_id"),
+                "metadata": row.get("metadata"),
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+            }
+        )
+    return TenantsResponse(tenants=payload, limit=limit)
+
+
+@app.post(
     "/tenant/domain",
     tags=["admin"],
     summary="Set tenant domain",
@@ -1918,13 +2029,13 @@ def get_tenant_scope_api(tenant_id: str, domain_id: str | None = None) -> Tenant
                                 "value": {
                                     "metrics": [
                                         {
-                                            "metric_name": "total_sales",
-                                            "description": "Total sales amount",
+                                            "metric_name": "production_mt",
+                                            "description": "Total LPG production in metric tonnes",
                                             "type": "sum",
-                                            "sql": "{{ ref('fact_sales') }}.sales_amount",
+                                            "sql": "{{ ref('fact_lpg_plant_operations') }}.production_19kg",
                                             "grain": "day",
-                                            "dimensions": ["sales_area_name"],
-                                            "tables": ["fact_sales"],
+                                            "dimensions": ["region", "sap_id"],
+                                            "tables": ["fact_lpg_plant_operations"],
                                             "status": "certified",
                                             "owner": "analytics@company.com",
                                             "version": "v1",
@@ -2065,9 +2176,9 @@ def metrics_all(tenant_id: str) -> dict:
                                 "value": {
                                     "datasets": [
                                         {
-                                            "name": "sales_area_performance",
-                                            "source_model": "fact_hpcl_sales_daily",
-                                            "description": "Sales performance by sales area and product",
+                                            "name": "lpg_plant_operations",
+                                            "source_model": "fact_lpg_plant_operations",
+                                            "description": "LPG plant operations with production and process metrics",
                                         }
                                     ],
                                     "limit": 200,
@@ -2119,6 +2230,71 @@ def datasets(
     return DatasetsResponse(datasets=page, limit=limit, cursor=cursor, next_cursor=next_cursor)
 
 
+@app.get(
+    "/dimensions",
+    response_model=DimensionsResponse,
+    tags=["explore"],
+    summary="List dimensions",
+    description="Return dimensions from the metric catalog, scoped by tenant scope.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "dimensions": {
+                                "summary": "Dimension list",
+                                "value": {
+                                    "dimensions": [
+                                        {
+                                            "name": "region",
+                                            "description": "Sales region",
+                                            "data_type": "string",
+                                            "sql": "{{ ref('fact_lpg_plant_operations') }}.region",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def dimensions(tenant_id: str) -> DimensionsResponse:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    _, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
+    payload = [
+        {
+            "name": dim.name,
+            "description": dim.description,
+            "data_type": dim.data_type,
+            "sql": dim.sql,
+        }
+        for dim in catalog.dimensions.values()
+    ]
+    if schema or database:
+        schema_map = _model_schema_map()
+        database_map = _model_database_map()
+        filtered = []
+        for item in payload:
+            match = re.search(r"\{\{\s*ref\('(?P<name>[^']+)'\)\s*\}\}", item["sql"])
+            if not match:
+                filtered.append(item)
+                continue
+            model_name = match.group("name")
+            if schema and schema_map.get(model_name) != schema:
+                continue
+            if database and database_map.get(model_name) != database:
+                continue
+            filtered.append(item)
+        payload = filtered
+    return DimensionsResponse(dimensions=payload)
+
 
 @app.get(
     "/policies",
@@ -2137,8 +2313,8 @@ def datasets(
                                 "value": {
                                     "policies": [
                                         {
-                                            "policy_id": "sbu_exclusion",
-                                            "description": "Exclude SBU values not relevant for this tenant",
+                                            "policy_id": "lpg_region_filter",
+                                            "description": "Restrict LPG production queries to tenant regions",
                                         }
                                     ]
                                 },
@@ -2174,9 +2350,9 @@ def policies(tenant_id: str) -> PoliciesResponse:
                                 "value": {
                                     "lineage": [
                                         {
-                                            "metric_name": "total_sales_volume_tmt",
-                                            "dataset": "fact_hpcl_sales_daily",
-                                            "dbt_model": "fact_hpcl_sales_daily",
+                                            "metric_name": "production_mt",
+                                            "dataset": "fact_lpg_plant_operations",
+                                            "dbt_model": "fact_lpg_plant_operations",
                                         }
                                     ]
                                 },
@@ -2307,12 +2483,12 @@ def _persist_canvas_graph(
                                 "value": {
                                     "nodes": [
                                         {"id": "dim_plant", "type": "dimension"},
-                                        {"id": "fact_production_daily", "type": "fact"},
-                                        {"id": "total_output_tmt", "type": "metric"},
+                                        {"id": "fact_lpg_plant_operations", "type": "fact"},
+                                        {"id": "production_mt", "type": "metric"},
                                     ],
                                     "edges": [
-                                        {"from": "dim_plant", "to": "fact_production_daily", "edge_type": "dimension_to_fact"},
-                                        {"from": "fact_production_daily", "to": "total_output_tmt", "edge_type": "fact_to_metric"},
+                                        {"from": "dim_plant", "to": "fact_lpg_plant_operations", "edge_type": "dimension_to_fact"},
+                                        {"from": "fact_lpg_plant_operations", "to": "production_mt", "edge_type": "fact_to_metric"},
                                     ],
                                 },
                             }
@@ -2860,7 +3036,7 @@ def generate_dbt_manifest(payload: DbtManifestGenerateRequest) -> DbtManifestGen
                                 "summary": "Latest manifest",
                                 "value": {
                                     "manifest_id": "manifest_123",
-                                    "tenant_id": "tenant_a",
+                                    "tenant_id": "VC_101",
                                     "dbt_project_path": "dbt",
                                     "profile_name": "default",
                                     "target_name": "dev",
@@ -2977,7 +3153,8 @@ def get_latest_dbt_config_endpoint(
                         "generate_scaffold": {
                             "summary": "Generate scaffold",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "context_id": "ctx_123",
                                 "host": "db.company.com",
                                 "port": 5432,
@@ -3071,7 +3248,7 @@ def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
                                     "scaffolds": [
                                         {
                                             "scaffold_id": "scaffold_123",
-                                            "tables": ["fact_sales", "dim_customer"],
+                                            "tables": ["lpg_plant_operations", "lpg_plant_operations_masters"],
                                             "status": "draft",
                                             "created_at": "2025-02-14T10:00:00Z",
                                         }
@@ -3238,7 +3415,7 @@ def apply_dbt_scaffold(
                                         {
                                             "insight_id": "ins_123",
                                             "insight_type": "variance",
-                                            "headline": "Sales volume decreased 4.2% vs last month",
+                                            "headline": "LPG production decreased 4.2% vs last month",
                                             "severity": "medium",
                                             "confidence": 0.8,
                                         }
@@ -3280,10 +3457,10 @@ def insights(tenant_id: str, limit: int = 200, cursor: str | None = None) -> Ins
                                     "insight": {
                                         "insight_id": "ins_123",
                                         "insight_type": "variance",
-                                        "headline": "Sales volume decreased 4.2% vs last month",
+                                        "headline": "LPG production decreased 4.2% vs last month",
                                         "severity": "medium",
                                         "confidence": 0.8,
-                                        "entity_scope": {"sales_area_name": "Tenali"},
+                                        "entity_scope": {"region": "BANGALORE LPG RO"},
                                     }
                                 },
                             }
@@ -3319,11 +3496,11 @@ def insight_detail(insight_id: str) -> InsightDetailResponse:
                                     "insight": {
                                         "insight_id": "ins_123",
                                         "insight_type": "anomaly",
-                                        "headline": "total_sales_volume_tmt anomaly detected at 2024-06-01",
+                                        "headline": "production_mt anomaly detected at 2026-02-01",
                                     },
                                     "drivers": [
                                         {
-                                            "period": "2024-06-01",
+                                            "period": "2026-02-01",
                                             "actual": 1200.5,
                                             "baseline": 1100.2,
                                             "deviation": 100.3,
@@ -3478,9 +3655,9 @@ def generate_insights(
                         "timeseries": {
                             "summary": "Monthly time series",
                             "value": {
-                                "metric_name": "total_sales_volume_tmt",
+                                "metric_name": "production_mt",
                                 "grain": "month",
-                                "filters": [{"field": "product_name", "operator": "=", "value": "MS"}],
+                                "filters": [{"field": "region", "operator": "=", "value": "BANGALORE LPG RO"}],
                                 "limit": 24,
                                 "window": 6,
                                 "threshold": 2.5,
@@ -3589,8 +3766,8 @@ def action_detail(action_id: str) -> ActionDetailResponse:
                         "create_action": {
                             "summary": "Create action",
                             "value": {
-                                "tenant_id": "tenant_a",
-                                "headline": "Investigate sales drop in Tenali",
+                                "tenant_id": "VC_101",
+                                "headline": "Investigate LPG production drop in Bangalore",
                                 "severity": "medium",
                                 "status": "open",
                                 "assigned_to": "ops_manager@company.com",
@@ -3728,8 +3905,8 @@ def scenarios(tenant_id: str, limit: int = 200, cursor: str | None = None) -> Sc
                                 "value": {
                                     "scenario": {
                                         "scenario_id": "scenario_001",
-                                        "domain_id": "energy_distribution",
-                                        "name": "Distribution Disruption",
+                                        "domain_id": "lpg_production_distribution",
+                                        "name": "Plant Outage Simulation",
                                         "status": "draft",
                                     }
                                 },
@@ -3761,9 +3938,9 @@ def scenario_detail(scenario_id: str) -> dict:
                         "create_scenario": {
                             "summary": "Create scenario",
                             "value": {
-                                "tenant_id": "tenant_a",
-                                "name": "Distribution Disruption",
-                                "description": "Simulate loss of supply in Zone A",
+                                "tenant_id": "VC_101",
+                                "name": "Plant Outage Simulation",
+                                "description": "Simulate loss of production in a region",
                                 "status": "draft",
                             },
                         }
@@ -3890,7 +4067,7 @@ def run_scenario_endpoint(scenario_id: str, payload: ScenarioRunRequest) -> Scen
                             "value": {
                                 "base_scenario_id": "baseline",
                                 "compare_scenario_id": "scenario_001",
-                                "metric_name": "total_sales_volume_tmt",
+                                "metric_name": "production_mt",
                             },
                         }
                     }
@@ -3907,7 +4084,7 @@ def run_scenario_endpoint(scenario_id: str, payload: ScenarioRunRequest) -> Scen
                                 "value": {
                                     "base_scenario_id": "baseline",
                                     "compare_scenario_id": "scenario_001",
-                                    "metric_name": "total_sales_volume_tmt",
+                                    "metric_name": "production_mt",
                                     "delta": 12.3,
                                 },
                             }
@@ -3948,8 +4125,8 @@ def compare_scenarios_endpoint(payload: ScenarioCompareRequest) -> ScenarioCompa
                             "values": {
                                 "summary": "Dimension values",
                                 "value": {
-                                    "dimension": "sales_area_name",
-                                    "values": [{"value": "Tenali"}, {"value": "Vijayawada"}],
+                                    "dimension": "region",
+                                    "values": [{"value": "BANGALORE LPG RO"}, {"value": "HYDERABAD LPG RO"}],
                                 },
                             }
                         }
@@ -4035,14 +4212,15 @@ def dimension_values(
                         "create_metric": {
                             "summary": "Create metric",
                             "value": {
-                                "tenant_id": "tenant_a",
-                                "metric_name": "total_sales_volume_tmt",
-                                "description": "Total sales volume in TMT",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "metric_name": "production_mt",
+                                "description": "Total LPG production in MT",
                                 "type": "sum",
-                                "sql": "{{ ref('fact_hpcl_sales_daily') }}.sales_tmt",
+                                "sql": "({{ ref('fact_lpg_plant_operations') }}.production_14_2kg * 14.2 + {{ ref('fact_lpg_plant_operations') }}.production_19kg * 19) / 1000",
                                 "grain": "day",
-                                "dimensions": ["sales_area_name", "fiscal_year"],
-                                "unit": "tmt",
+                                "dimensions": ["region", "sap_id"],
+                                "unit": "mt",
                                 "status": "certified",
                             },
                         }
@@ -4091,7 +4269,7 @@ def create_metric(payload: MetricUpsertRequest) -> MetricUpsertResponse:
                         },
                         "fix_sql": {
                             "summary": "Update SQL",
-                            "value": {"sql": "{{ ref('fact_hpcl_sales_daily') }}.sales_tmt"},
+                            "value": {"sql": "{{ ref('fact_lpg_plant_operations') }}.production_19kg"},
                         },
                     }
                 }
@@ -4154,6 +4332,17 @@ def patch_metric(metric_id: str, payload: MetricPatchRequest) -> MetricUpsertRes
     tags=["admin"],
     summary="Delete a metric",
     description="Delete a metric from the registry.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {"deleted": {"value": {"ok": True}}}
+                    }
+                }
+            }
+        }
+    },
 )
 def delete_metric_endpoint(metric_id: str) -> dict:
     delete_metric(settings, metric_id)
@@ -4174,7 +4363,7 @@ def delete_metric_endpoint(metric_id: str) -> dict:
                                 "summary": "Domain packs",
                                 "value": {
                                     "domains": [
-                                        {"domain_id": "energy_distribution", "display_name": "energy_distribution"},
+                                        {"domain_id": "lpg_production_distribution", "display_name": "lpg_production_distribution"},
                                         {"domain_id": "manufacturing", "display_name": "manufacturing"},
                                     ]
                                 },
@@ -4205,13 +4394,14 @@ def domains() -> dict:
                         "business_context": {
                             "summary": "Glossary and hierarchy notes",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "source_type": "business_context",
                                 "source_title": "Operations glossary and hierarchy notes",
-                                "raw_text": "SBU = Strategic Business Unit. Sales org is Zone > Region > Sales Area...",
+                                "raw_text": "Plant = LPG filling facility. Sales org is Zone > Region > Sales Area...",
                                 "file_ids": ["file_123", "file_456"],
                                 "metadata": {
-                                    "columns": ["plant_name", "region_name"],
+                                    "columns": ["plant_name", "region"],
                                 },
                             },
                         }
@@ -4284,10 +4474,11 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
                         "upload_context": {
                             "summary": "Upload business context (.txt or .docx)",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "source_type": "business_context",
                                 "source_title": "Operations glossary",
-                                "metadata": "{\"columns\":[\"plant_name\",\"region_name\"]}",
+                                "metadata": "{\"columns\":[\"plant_name\",\"region\"]}",
                                 "file": "@context.txt",
                             },
                         }
@@ -4419,7 +4610,8 @@ def list_context_entries(
                         "extract_context": {
                             "summary": "Extract from stored context",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "context_id": "ctx_123",
                                 "extraction_types": [
                                     "abbreviations",
@@ -4446,19 +4638,19 @@ def list_context_entries(
                                     "context_id": "ctx_123",
                                     "extractions": {
                                         "abbreviations": [
-                                            {"abbr": "SBU", "definition": "Strategic Business Unit"}
+                                            {"abbr": "SAP", "definition": "Systems, Applications, and Products"}
                                         ],
-                                        "synonyms": [{"term": "sales area", "synonyms": ["territory"]}],
+                                        "synonyms": [{"term": "plant", "synonyms": ["sap_id", "plant_id"]}],
                                         "hierarchies": [
                                             {"name": "sales_org", "levels": ["zone", "region", "sales_area"]}
                                         ],
                                         "metric_candidates": [
-                                            {"metric_name": "output_tmt", "table": "fact_production_daily"}
+                                            {"metric_name": "production_mt", "table": "fact_lpg_plant_operations"}
                                         ],
                                         "question_intents": [
                                             {
                                                 "question": "Which plants are underperforming?",
-                                                "metrics": ["output_tmt"],
+                                                "metrics": ["production_mt"],
                                             }
                                         ],
                                     },
@@ -4748,7 +4940,8 @@ def download_context_file(file_id: str, tenant_id: str) -> Response:
                         "apply_context": {
                             "summary": "Apply all extracted signals",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "extraction_id": "ext_123",
                                 "apply": {
                                     "entities": True,
@@ -4762,7 +4955,8 @@ def download_context_file(file_id: str, tenant_id: str) -> Response:
                         "apply_selected_hierarchies": {
                             "summary": "Apply only selected hierarchies",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "extraction_id": "ext_123",
                                 "apply": {
                                     "entities": True,
@@ -5031,13 +5225,13 @@ def patch_context_extraction(
                                         {
                                             "entity_id": "organizational_unit",
                                             "description": "Sales organization",
-                                            "join_key": "sales_area_name",
+                                            "join_key": "sap_id",
                                         }
                                     ],
                                     "hierarchies": [
                                         {
                                             "name": "sales_org",
-                                            "levels": ["sbu", "zone", "region", "sales_area"],
+                                            "levels": ["zone", "region", "sales_area"],
                                         }
                                     ],
                                 },
@@ -5263,9 +5457,9 @@ def hierarchies(
                         "update_join_key": {
                             "summary": "Update join key",
                             "value": {
-                                "description": "Organizational hierarchy for sales operations",
-                                "join_key": "sales_area_name",
-                                "examples": ["zone", "region", "sales_area"],
+                                "description": "Organizational hierarchy for LPG operations",
+                                "join_key": "sap_id",
+                                "examples": ["sap_id", "plant_name", "region"],
                             },
                         }
                     }
@@ -5323,7 +5517,7 @@ def update_entity(
                         "override_levels": {
                             "summary": "Override hierarchy levels",
                             "value": {
-                                "levels": ["sbu", "zone", "region", "sales_area"],
+                                "levels": ["zone", "region", "sales_area"],
                                 "description": "Sales organization rollup",
                                 "status": "certified",
                             },
@@ -5404,6 +5598,43 @@ def update_hierarchy_payload(payload: HierarchyUpdateRequest) -> dict:
     response_model=dict,
     tags=["onboard"],
     summary="Create or upsert a fact",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "create_fact": {
+                            "summary": "Create fact",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "table_name": "fact_lpg_plant_operations",
+                                "grain": "day",
+                                "time_column": "process_date",
+                                "measures": ["production_14_2kg", "production_19kg"],
+                                "dimensions": ["sap_id", "region"],
+                                "description": "Daily LPG production fact",
+                                "status": "certified",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "created": {
+                                "value": {"fact_id": "fact_ab12cd34", "status": "certified"}
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
 )
 def create_fact(payload: FactsUpsertRequest) -> dict:
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
@@ -5439,6 +5670,34 @@ def create_fact(payload: FactsUpsertRequest) -> dict:
     response_model=FactsResponse,
     tags=["explore"],
     summary="List facts (connection-scoped)",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "facts": {
+                                "summary": "Facts list",
+                                "value": {
+                                    "facts": [
+                                        {
+                                            "fact_id": "fact_ab12cd34",
+                                            "table_name": "fact_lpg_plant_operations",
+                                            "grain": "day",
+                                            "time_column": "process_date",
+                                            "measures": ["production_14_2kg", "production_19kg"],
+                                            "dimensions": ["sap_id", "region"],
+                                            "status": "certified",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_facts(
     tenant_id: str,
@@ -5462,6 +5721,30 @@ def get_facts(
     response_model=FactsAllResponse,
     tags=["explore"],
     summary="List facts for all connections",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "facts_all": {
+                                "summary": "Facts by connection",
+                                "value": {
+                                    "connections": [
+                                        {
+                                            "facts": [
+                                                {"fact_id": "fact_ab12cd34", "table_name": "fact_lpg_plant_operations"}
+                                            ]
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_facts_all(tenant_id: str) -> FactsAllResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
@@ -5485,6 +5768,24 @@ def get_facts_all(tenant_id: str) -> FactsAllResponse:
     "/facts/{fact_id}",
     tags=["onboard"],
     summary="Update a fact",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "promote_fact": {
+                            "summary": "Promote to certified",
+                            "value": {"status": "certified"},
+                        },
+                        "update_measures": {
+                            "summary": "Update measures",
+                            "value": {"measures": ["production_mt", "total_production"]},
+                        },
+                    }
+                }
+            }
+        }
+    },
 )
 def patch_fact(fact_id: str, payload: FactsPatchRequest) -> dict:
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
@@ -5517,6 +5818,17 @@ def patch_fact(fact_id: str, payload: FactsPatchRequest) -> dict:
     "/facts/{fact_id}",
     tags=["onboard"],
     summary="Delete a fact",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {"deleted": {"value": {"ok": True}}}
+                    }
+                }
+            }
+        }
+    },
 )
 def remove_fact(fact_id: str) -> dict:
     delete_fact(settings, fact_id)
@@ -5528,6 +5840,37 @@ def remove_fact(fact_id: str) -> dict:
     response_model=dict,
     tags=["onboard"],
     summary="Create or upsert a dimension",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "create_dimension": {
+                            "summary": "Create dimension",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "name": "dim_plant",
+                                "keys": ["sap_id"],
+                                "attributes": ["plant_name", "region"],
+                                "description": "Plant dimension",
+                                "status": "certified",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {"created": {"value": {"dimension_id": "dim_ab12cd34", "status": "certified"}}}
+                    }
+                }
+            }
+        },
+    },
 )
 def create_dimension(payload: DimensionsUpsertRequest) -> dict:
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
@@ -5561,6 +5904,32 @@ def create_dimension(payload: DimensionsUpsertRequest) -> dict:
     response_model=DimensionsResponse,
     tags=["explore"],
     summary="List dimensions (connection-scoped)",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "dimensions": {
+                                "summary": "Dimensions list",
+                                "value": {
+                                    "dimensions": [
+                                        {
+                                            "dimension_id": "dim_ab12cd34",
+                                            "name": "dim_plant",
+                                            "keys": ["sap_id"],
+                                            "attributes": ["plant_name", "region"],
+                                            "status": "certified",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_dimensions(
     tenant_id: str,
@@ -5584,6 +5953,30 @@ def get_dimensions(
     response_model=DimensionsAllResponse,
     tags=["explore"],
     summary="List dimensions for all connections",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "dimensions_all": {
+                                "summary": "Dimensions by connection",
+                                "value": {
+                                    "connections": [
+                                        {
+                                            "dimensions": [
+                                                {"dimension_id": "dim_ab12cd34", "name": "dim_plant"}
+                                            ]
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_dimensions_all(tenant_id: str) -> DimensionsAllResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
@@ -5607,6 +6000,24 @@ def get_dimensions_all(tenant_id: str) -> DimensionsAllResponse:
     "/dimensions/{dimension_id}",
     tags=["onboard"],
     summary="Update a dimension",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "promote_dimension": {
+                            "summary": "Promote to certified",
+                            "value": {"status": "certified"},
+                        },
+                        "update_keys": {
+                            "summary": "Update keys/attributes",
+                            "value": {"keys": ["sap_id"], "attributes": ["plant_name", "region"]},
+                        },
+                    }
+                }
+            }
+        }
+    },
 )
 def patch_dimension(dimension_id: str, payload: DimensionsPatchRequest) -> dict:
     updates = {key: value for key, value in payload.model_dump().items() if value is not None}
@@ -5639,66 +6050,21 @@ def patch_dimension(dimension_id: str, payload: DimensionsPatchRequest) -> dict:
     "/dimensions/{dimension_id}",
     tags=["onboard"],
     summary="Delete a dimension",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {"deleted": {"value": {"ok": True}}}
+                    }
+                }
+            }
+        }
+    },
 )
 def remove_dimension(dimension_id: str) -> dict:
     delete_dimension(settings, dimension_id)
     return {"ok": True}
-
-
-@app.post(
-    "/flows/nodes",
-    response_model=FlowsNodesRequest,
-    tags=["flows"],
-    summary="Storing user selected nodes details for a flow",
-)
-
-def store_flow_nodes(payload: FlowsNodesRequest):
-    flow_id = payload.flow_id
-    tenant_id = payload.tenant_id
-    domain_id = _resolve_domain_id(payload.tenant_id) or ''
-    node_id = payload.node_id
-
-    flow_data = get_flow_exec_details(settings, flow_id)
-
-    if not flow_data:
-        raise HTTPException(status_code=404, detail="Latest Execution not found")
-
-    if flow_data.get("job_status","") == 'RUNNING':
-        raise HTTPException(status_code=400, detail="Flow is still running. Please try again after execution completed")
-
-    flow_run_id = flow_data.get("flow_run_id", "")
-    # flow_statement_date = flow_data.get("flow_statement_date", "")
-    # flow_name = flow_data.get("flow_name", "")
-
-    catalog_name, minio_path = get_minio_data_path(settings=settings, table_namespace=flow_run_id, table_name=node_id)
-    table_schema = get_table_schema(settings=settings, table_namespace=flow_run_id, table_name=node_id)
-    column_names = [col.get("name") for col in table_schema if "name" in col]
-    source_node_ids = get_source_node_ids(settings=settings, flow_id=flow_id, node_id = node_id)
-    transform_sql = generate_custom_sql(minio_path=minio_path, columns = column_names)
-
-    data_stats = read_from_minio(settings=settings, table_name = node_id, catalog_name=settings.catalog_name, warehouse = settings.minio_bucket_name, namespace = flow_run_id, limit=1)
-    row_count = data_stats.get("row_count", 0)
-    sample_records = data_stats.get("data", [])
-
-    data = {
-        "flow_id": flow_id,
-        "tenant_id": tenant_id,
-        "node_id": node_id,
-        "domain_id": domain_id,
-        "catalog_name": catalog_name,
-        "minio_path": minio_path,
-        "table_schema": table_schema,
-        "source_node_ids": source_node_ids,
-        "transform_sql": transform_sql,
-        "table_namespace": flow_run_id,
-        "table_name": node_id,
-        "sample_records": sample_records,
-        "row_count": row_count
-    }
-
-    store_flow_node_details(settings = settings, payload = data)
-
-    return {"ok": True, "message": "Flow node details stored successfully"}
 
 
 @app.post(
@@ -5933,14 +6299,14 @@ def review_summary(
                                 "value": {
                                     "models": [
                                         {
-                                            "name": "fact_hpcl_sales_daily",
+                                            "name": "fact_lpg_plant_operations",
                                             "schema": "public",
-                                            "columns": ["sales_date", "sales_tmt"],
+                                            "columns": ["process_date", "production_14_2kg", "production_19kg"],
                                         }
                                     ],
                                     "limit": 200,
                                     "cursor": None,
-                                    "next_cursor": "ZmFjdF9ocGNsX3NhbGVzX21vbnRobHlfdGFyZ2V0cw==",
+                                    "next_cursor": "ZmFjdF9scGdfcGxhbnRfb3BlcmF0aW9ucw==",
                                 },
                             }
                         }
@@ -5983,7 +6349,10 @@ def schema(
                     "examples": {
                         "scan_public": {
                             "summary": "Scan public schema",
-                            "value": {"tenant_id": "tenant_a"},
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                            },
                         }
                     }
                 }
@@ -5999,9 +6368,18 @@ def schema(
                                 "value": {
                                     "tables": [
                                         {
-                                            "table": "fact_hpcl_sales_daily",
+                                            "table": "fact_lpg_plant_operations",
                                             "columns": [
-                                                {"name": "sales_tmt", "data_type": "numeric", "null_frac": 0.0}
+                                                {
+                                                    "name": "process_date",
+                                                    "data_type": "date",
+                                                    "null_frac": 0.0,
+                                                },
+                                                {
+                                                    "name": "production_19kg",
+                                                    "data_type": "numeric",
+                                                    "null_frac": 0.0,
+                                                },
                                             ],
                                         }
                                     ]
@@ -6033,7 +6411,8 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
                         "scan_connections_async": {
                             "summary": "Scan multiple connections (async)",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "connections": [
                                     {
                                         "connection_id": "conn_prod",
@@ -6049,7 +6428,7 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
                                                 "schemas": [
                                                     {
                                                         "name": "public",
-                                                        "tables": ["fact_production_daily"],
+                                                        "tables": ["lpg_plant_operations"],
                                                         "limit": 20,
                                                         "cursor": None,
                                                     }
@@ -6067,7 +6446,16 @@ def onboard_scan(request: OnboardScanRequest) -> OnboardScanResponse:
         "responses": {
             "202": {
                 "content": {
-                    "application/json": {"examples": {"queued": {"value": {"job_id": "job_123", "status": "queued"}}}}
+                    "application/json": {
+                        "examples": {
+                            "queued": {
+                                "value": {
+                                    "job_id": "job_123",
+                                    "status": "queued",
+                                }
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -6122,7 +6510,6 @@ def _run_scan_connection(
     connections_payload = []
     payload_by_connection: dict[str, list[dict]] = {}
     for connection in request.connections:
-        connection.password = get_secret(connection.password)
         _log_scan_step(
             "connection.begin",
             {"connection_id": connection.connection_id, "db_type": connection.db_type},
@@ -6190,7 +6577,7 @@ def _run_scan_connection(
         connection_payload = {"connection_id": connection.connection_id, "databases": databases_payload}
         connections_payload.append(connection_payload)
         payload_by_connection[connection.connection_id] = databases_payload
-        register_connection(settings, connection.connection_id, tenant_id, domain_id)
+        register_connection(settings, connection.connection_id)
         if scopes:
             register_connection_scopes(settings, connection.connection_id, scopes)
         _log_scan_step(
@@ -6220,7 +6607,6 @@ def _run_scan_connection(
                     tenant_id,
                     template_dir=settings.dbt_project_template,
                 )
-
                 _log_scan_step(
                     "dbt.project.ready",
                     {"connection_id": connection.connection_id, "path": dbt_project_path},
@@ -6363,7 +6749,8 @@ def _run_scan_connection(
                         "scan_connections": {
                             "summary": "Scan multiple connections",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "connections": [
                                     {
                                         "connection_id": "conn_prod",
@@ -6379,7 +6766,7 @@ def _run_scan_connection(
                                                 "schemas": [
                                                     {
                                                         "name": "public",
-                                                        "tables": ["fact_production_daily"],
+                                                        "tables": ["lpg_plant_operations"],
                                                         "limit": 20,
                                                         "cursor": None,
                                                     }
@@ -6413,14 +6800,14 @@ def _run_scan_connection(
                                                             "name": "public",
                                                             "tables": [
                                                                 {
-                                                                    "table": "fact_production_daily",
+                                                                    "table": "lpg_plant_operations",
                                                                     "columns": [
                                                                         {
-                                                                            "name": "production_date",
+                                                                            "name": "process_date",
                                                                             "data_type": "date",
                                                                             "null_frac": 0.0,
                                                                             "distinct": 365,
-                                                                            "profile": {"min": "2024-01-01", "max": "2024-12-31"},
+                                                                            "profile": {"min": "2025-01-01", "max": "2026-12-31"},
                                                                         }
                                                                     ],
                                                                 }
@@ -6514,7 +6901,8 @@ def _pick_best_candidates_per_entity(candidates: list[dict]) -> tuple[list[dict]
                         "map_async": {
                             "summary": "Map schema (async)",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                             },
                         }
                     }
@@ -6574,8 +6962,37 @@ def onboard_map_async(
                         "map_public": {
                             "summary": "Map public schema",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                             },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "map_result": {
+                                "summary": "Mapping result",
+                                "value": {
+                                    "mapping_id": "map_ab12cd34",
+                                    "tenant_id": "VC_101",
+                                    "candidates": [
+                                        {
+                                            "table": "lpg_plant_operations",
+                                            "column": "region",
+                                            "mapped_entity_type": "organizational_unit",
+                                            "confidence": 0.92,
+                                            "source": "llm",
+                                        }
+                                    ],
+                                    "low_confidence_candidates": [],
+                                    "low_confidence_threshold": 0.7,
+                                },
+                            }
                         }
                     }
                 }
@@ -6687,6 +7104,10 @@ def _run_onboard_map(
                                 "value": {
                                     "mapping_id": "map_123",
                                     "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "connection_id": "conn_lpg",
+                                    "database_name": "hpcl_ceg",
+                                    "schema_name": "public",
                                     "status": "draft",
                                     "candidates": [],
                                 },
@@ -6747,6 +7168,32 @@ def onboard_map_latest(
     tags=["onboard"],
     summary="List mapping history",
     description="Return recent entity mapping runs for the given scope.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "history": {
+                                "summary": "Recent runs",
+                                "value": {
+                                    "runs": [
+                                        {
+                                            "mapping_id": "map_ab12cd34",
+                                            "created_at": "2026-02-22T10:12:11Z",
+                                            "candidates": 18,
+                                            "low_confidence": 2,
+                                            "status": "draft",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def onboard_map_history(
     tenant_id: str,
@@ -6851,6 +7298,42 @@ def onboard_map_agents(
     tags=["onboard"],
     summary="Get mapping run",
     description="Return a single mapping run by mapping_id for the active tenant scope.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "mapping": {
+                                "summary": "Mapping run",
+                                "value": {
+                                    "mapping_id": "map_ab12cd34",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "connection_id": "conn_lpg",
+                                    "database_name": "hpcl_ceg",
+                                    "schema_name": "public",
+                                    "tables": ["lpg_plant_operations"],
+                                    "candidates": [
+                                        {
+                                            "table": "lpg_plant_operations",
+                                            "column": "sap_id",
+                                            "mapped_entity_type": "plant",
+                                            "confidence": 0.93,
+                                            "source": "llm",
+                                        }
+                                    ],
+                                    "low_confidence_candidates": [],
+                                    "low_confidence_threshold": 0.7,
+                                    "status": "draft",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def onboard_map_get(mapping_id: str, tenant_id: str) -> OnboardMapRunResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
@@ -6892,6 +7375,60 @@ def onboard_map_get(mapping_id: str, tenant_id: str) -> OnboardMapRunResponse:
     tags=["onboard"],
     summary="Apply mapping run to entity overrides",
     description="Promote mapping candidates from a mapping run into canonical entity overrides.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "apply_all": {
+                            "summary": "Apply all candidates",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "selection_mode": "all",
+                                "status": "draft",
+                                "notes": "Apply from mapping run",
+                            },
+                        },
+                        "apply_selected": {
+                            "summary": "Apply selected candidates",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "selection_mode": "selected",
+                                "candidates": [
+                                    {
+                                        "table": "lpg_plant_operations",
+                                        "column": "sap_id",
+                                        "mapped_entity_type": "plant",
+                                    }
+                                ],
+                                "status": "draft",
+                                "notes": "Apply selected only",
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "applied": {
+                                "summary": "Apply success",
+                                "value": {
+                                    "ok": True,
+                                    "mapping_id": "map_ab12cd34",
+                                    "applied_count": 8,
+                                    "skipped_count": 2,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
 )
 def onboard_map_apply(mapping_id: str, payload: OnboardMapApplyRequest) -> OnboardMapApplyResponse:
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
@@ -7079,7 +7616,8 @@ def _merge_models(rule_facts: list[dict], rule_dims: list[dict], llm_payload: di
                         "infer_async": {
                             "summary": "Infer models (async)",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "grain": "day",
                                 "use_llm": False,
                             },
@@ -7135,7 +7673,8 @@ def infer_models_async(request: InferModelsRequest) -> JobCreateResponse:
                         "infer_models": {
                             "summary": "Infer models",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "time_column": "production_date",
                                 "grain": "day",
                                 "use_llm": True,
@@ -7155,19 +7694,19 @@ def infer_models_async(request: InferModelsRequest) -> JobCreateResponse:
                                 "value": {
                                     "facts": [
                                         {
-                                            "name": "fact_production_daily",
+                                            "name": "fact_lpg_plant_operations",
                                             "grain": "day",
-                                            "time_column": "production_date",
-                                            "measures": ["output_tmt", "downtime_hours"],
-                                            "dimensions": ["plant_name", "product_name", "fiscal_year"],
+                                            "time_column": "process_date",
+                                            "measures": ["production_14_2kg", "production_19kg"],
+                                            "dimensions": ["sap_id", "region", "sales_area"],
                                             "confidence": 0.85,
                                         }
                                     ],
                                     "dimensions": [
                                         {
                                             "name": "dim_plant",
-                                            "keys": ["plant_id"],
-                                            "attributes": ["plant_name", "region_name"],
+                                            "keys": ["sap_id"],
+                                            "attributes": ["plant_name", "region"],
                                             "confidence": 0.8,
                                         }
                                     ],
@@ -7308,7 +7847,8 @@ def infer_models(request: InferModelsRequest) -> InferModelsResponse:
                         "metrics_async": {
                             "summary": "Suggest metrics (async)",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                             },
                         }
                     }
@@ -7366,7 +7906,8 @@ def suggested_metrics_async(
                         "suggest_public": {
                             "summary": "Suggest metrics for public schema",
                             "value": {
-                                "tenant_id": "tenant_a",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                             },
                         }
                     }
@@ -7383,18 +7924,18 @@ def suggested_metrics_async(
                                 "value": {
                                     "measures": [
                                         {
-                                            "table": "fact_hpcl_sales_daily",
-                                            "column": "sales_tmt",
+                                            "table": "lpg_plant_operations",
+                                            "column": "production_19kg",
                                             "measure_type": "volume",
-                                            "unit": "tmt",
+                                            "unit": "kg",
                                             "confidence": 0.9,
                                             "additive": True,
                                         }
                                     ],
                                     "low_confidence_measures": [
                                         {
-                                            "table": "fact_hpcl_sales_daily",
-                                            "column": "avg_rate",
+                                            "table": "lpg_plant_operations",
+                                            "column": "production_14_2kg",
                                             "measure_type": "number",
                                             "unit": None,
                                             "confidence": 0.6,
@@ -7403,12 +7944,12 @@ def suggested_metrics_async(
                                     ],
                                     "low_confidence_threshold": 0.7,
                                     "time_columns": [
-                                        {"table": "fact_hpcl_sales_daily", "column": "sales_date"}
+                                        {"table": "lpg_plant_operations", "column": "process_date"}
                                     ],
                                     "entity_candidates": [
                                         {
-                                            "table": "fact_hpcl_sales_daily",
-                                            "column": "sales_area_name",
+                                            "table": "lpg_plant_operations",
+                                            "column": "region",
                                             "mapped_entity_type": "organizational_unit",
                                             "confidence": 0.9,
                                         }
@@ -7559,11 +8100,11 @@ def _validate_contract_metrics(request: ContractValidateRequest) -> ContractVali
                             "value": {
                                 "metrics": [
                                     {
-                                        "metric_name": "total_sales_volume_tmt",
+                                        "metric_name": "production_mt",
                                         "type": "sum",
-                                        "sql": "{{ ref('fact_hpcl_sales_daily') }}.sales_tmt",
+                                        "sql": "({{ ref('fact_lpg_plant_operations') }}.production_14_2kg * 14.2 + {{ ref('fact_lpg_plant_operations') }}.production_19kg * 19) / 1000",
                                         "grain": "day",
-                                        "dimensions": ["sales_area_name", "fiscal_year"],
+                                        "dimensions": ["region", "sap_id"],
                                     }
                                 ]
                             },
@@ -7922,6 +8463,14 @@ def _expand_relative_date_filters(filters: list[dict]) -> list[dict]:
             continue
         if isinstance(value, str) and flt.get("operator") == "IN":
             lowered = value.strip().lower()
+            match = re.match(r"last\\s+(\\d+)\\s+months", lowered)
+            if match:
+                months = int(match.group(1))
+                today = _date.today()
+                start = today - _timedelta(days=30 * months)
+                expanded.append({"field": flt["field"], "operator": ">=", "value": start.isoformat()})
+                expanded.append({"field": flt["field"], "operator": "<=", "value": today.isoformat()})
+                continue
             if lowered in {"last three months", "last 3 months", "past three months", "past 3 months"}:
                 today = _date.today()
                 start = today - _timedelta(days=90)
@@ -8195,11 +8744,14 @@ def _deterministic_date_filters_from_question(
         question_l = (question or "").lower()
         if "last week" in question_l:
             return [{"field": "process_date", "operator": "IN", "value": "last week"}]
+        match = re.search(r"last\\s+(\\d+)\\s+months", question_l)
+        if match:
+            return [{"field": "process_date", "operator": "IN", "value": f"last {match.group(1)} months"}]
         if "last three months" in question_l or "last 3 months" in question_l:
             return [{"field": "process_date", "operator": "IN", "value": "last three months"}]
         return []
     question_l = question.lower()
-    if "last week" not in question_l and "last three months" not in question_l and "last 3 months" not in question_l:
+    if "last week" not in question_l and "last three months" not in question_l and "last 3 months" not in question_l and not re.search(r"last\\s+\\d+\\s+months", question_l):
         return []
     allowed_set = {d.lower() for d in allowed_dimensions}
     date_field = None
@@ -8211,6 +8763,9 @@ def _deterministic_date_filters_from_question(
         return []
     if "last week" in question_l:
         return [{"field": date_field, "operator": "IN", "value": "last week"}]
+    match = re.search(r"last\\s+(\\d+)\\s+months", question_l)
+    if match:
+        return [{"field": date_field, "operator": "IN", "value": f"last {match.group(1)} months"}]
     return [{"field": date_field, "operator": "IN", "value": "last three months"}]
 
 
@@ -8382,28 +8937,31 @@ def _dimension_candidates_for_scope(
                 "application/json": {
                     "examples": {
                         "sales_volume_top5": {
-                            "summary": "Top 5 sales areas",
+                            "summary": "Top 5 plants (LPG production)",
                             "value": {
-                                "question": "Top 5 sales areas by sales volume for MS in Q2 FY 2024-2025.",
-                                "tenant_id": "tenant_a",
+                                "question": "Top 5 LPG plants by production last week.",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "limit": 100,
                                 "explain": True,
                             },
                         },
                         "hpcl_vs_bpcl": {
-                            "summary": "HPCL vs BPCL market share",
+                            "summary": "Production by region (last 3 months)",
                             "value": {
-                                "question": "HPCL vs BPCL market share for MS in UTTAR PRADESH during FY 2024-2025.",
-                                "tenant_id": "tenant_a",
+                                "question": "Total LPG production by region for last three months.",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "limit": 100,
                                 "explain": True,
                             },
                         },
                         "run_rate_risk": {
-                            "summary": "Below required run rate",
+                            "summary": "Plant production trend",
                             "value": {
-                                "question": "Which sales areas are below required run rate this month?",
-                                "tenant_id": "tenant_a",
+                                "question": "LPG production trend by plant for last 6 months.",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "limit": 100,
                                 "explain": True,
                             },
@@ -8420,11 +8978,16 @@ def _dimension_candidates_for_scope(
                             "result_rows": {
                                 "summary": "Query response",
                                 "value": {
-                                    "metrics": ["total_sales_volume_tmt"],
-                                    "dimensions": ["sales_area_name"],
-                                    "sql": "SELECT sales_area_name, SUM(sales_tmt) AS total_sales_volume_tmt FROM ...",
+                                    "metrics": ["production_mt"],
+                                    "dimensions": ["region", "process_month"],
+                                    "chart_id": "chart_2f7a9c4d",
+                                    "sql": "SELECT region, to_char(date_trunc('month', process_date), 'Mon-YY') AS process_month, SUM(...) AS production_mt FROM public.fact_lpg_plant_operations WHERE process_date >= %s AND process_date <= %s GROUP BY region, process_month ORDER BY production_mt DESC LIMIT 100",
                                     "rows": [
-                                        {"sales_area_name": "Tenali", "total_sales_volume_tmt": 123.4}
+                                        {
+                                            "region": "BANGALORE LPG RO",
+                                            "process_month": "Jan-26",
+                                            "production_mt": "39694.3732"
+                                        }
                                     ],
                                     "by_company_sql": None,
                                     "by_company_rows": None,
@@ -8645,7 +9208,7 @@ def query(request: QueryRequest) -> QueryResult:
             dimensions = filtered_dimensions
     if request.question and metric_dimension_set:
         question_l = request.question.lower()
-        if "last three months" in question_l or "last 3 months" in question_l:
+        if "trend" in question_l or "last three months" in question_l or "last 3 months" in question_l or re.search(r"last\\s+\\d+\\s+months", question_l):
             if "process_date" in metric_dimension_set:
                 if "process_month" not in dimensions:
                     dimensions.append("process_month")
