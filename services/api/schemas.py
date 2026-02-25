@@ -148,6 +148,39 @@ class ChartStatusResponse(BaseModel):
     error_message: Optional[str] = None
 
 
+class TenantCreateRequest(BaseModel):
+    tenant_id: str = Field(..., description="Tenant identifier", examples=["VC_101"])
+    display_name: Optional[str] = Field(None, description="Tenant display name", examples=["HPCL LPG"])
+    status: str = Field("active", description="Tenant status", examples=["active"])
+    metadata: dict | None = Field(None, description="Optional tenant metadata")
+
+
+class TenantResponse(BaseModel):
+    tenant_id: str
+    display_name: Optional[str] = None
+    status: str
+    domain_id: Optional[str] = None
+    metadata: dict | None = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class TenantsResponse(BaseModel):
+    tenants: List[dict] = Field(
+        examples=[
+            [
+                {
+                    "tenant_id": "VC_101",
+                    "display_name": "HPCL LPG",
+                    "status": "active",
+                    "domain_id": "lpg_production_distribution",
+                }
+            ]
+        ]
+    )
+    limit: int = Field(200, examples=[200])
+
+
 class MetricsResponse(BaseModel):
     metrics: List[dict] = Field(
         examples=[

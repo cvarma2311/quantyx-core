@@ -160,6 +160,7 @@ from services.ai.context_apply import apply_extractions
 from services.ai.glossary import fetch_glossary_terms
 from services.ai.sql_builder import Filter, build_query
 from services.ai.tenant_domain import get_tenant_domain, upsert_tenant_domain
+from services.ai.tenant_registry import list_tenants, upsert_tenant
 from services.ai.tenant_scope import get_tenant_scope, upsert_tenant_scope
 from services.ai.tenant_purge import purge_tenant_data
 from services.ai.policy_audit import log_policy_audit
@@ -184,6 +185,9 @@ from services.api.schemas import (
     MetricUpsertResponse,
     DatasetsResponse,
     DimensionsResponse,
+    TenantCreateRequest,
+    TenantResponse,
+    TenantsResponse,
     DimensionValuesResponse,
     OnboardScanRequest,
     OnboardScanResponse,
@@ -1795,6 +1799,128 @@ def cancel_job(job_id: str) -> JobCancelResponse:
         update_job_status(settings, job_id, "canceled", result_payload=None, error_message="Canceled by user request")
         status_value = "canceled"
     return JobCancelResponse(job_id=job_id, status=status_value)
+
+
+@app.post(
+    "/tenants",
+    response_model=TenantResponse,
+    tags=["admin"],
+    summary="Create or update a tenant",
+    description="Register a tenant for UI switching and metadata storage.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "create_tenant": {
+                            "summary": "Create tenant",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "display_name": "HPCL LPG",
+                                "status": "active",
+                                "metadata": {"region": "IN"},
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "created": {
+                                "summary": "Tenant created",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "display_name": "HPCL LPG",
+                                    "status": "active",
+                                    "domain_id": "lpg_production_distribution",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def create_tenant(payload: TenantCreateRequest) -> TenantResponse:
+    row = upsert_tenant(
+        settings,
+        tenant_id=payload.tenant_id,
+        display_name=payload.display_name,
+        status=payload.status,
+        metadata=payload.metadata,
+    )
+    domain_row = get_tenant_domain(settings, payload.tenant_id)
+    return TenantResponse(
+        tenant_id=row.get("tenant_id") or payload.tenant_id,
+        display_name=row.get("display_name"),
+        status=row.get("status") or payload.status,
+        domain_id=domain_row.get("domain_id") if domain_row else None,
+        metadata=row.get("metadata"),
+        created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
+        updated_at=row.get("updated_at").isoformat() if row.get("updated_at") else None,
+    )
+
+
+@app.get(
+    "/tenants",
+    response_model=TenantsResponse,
+    tags=["admin"],
+    summary="List tenants",
+    description="List tenants available for UI switching.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "tenants": {
+                                "summary": "Tenant list",
+                                "value": {
+                                    "tenants": [
+                                        {
+                                            "tenant_id": "VC_101",
+                                            "display_name": "HPCL LPG",
+                                            "status": "active",
+                                            "domain_id": "lpg_production_distribution",
+                                        },
+                                        {
+                                            "tenant_id": "BT_01",
+                                            "display_name": "Bharat Petroleum",
+                                            "status": "active",
+                                            "domain_id": "lpg_production_distribution",
+                                        },
+                                    ],
+                                    "limit": 200,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_tenants_api(limit: int = 200) -> TenantsResponse:
+    rows = list_tenants(settings, limit=limit)
+    payload = []
+    for row in rows:
+        payload.append(
+            {
+                "tenant_id": row.get("tenant_id"),
+                "display_name": row.get("display_name"),
+                "status": row.get("status"),
+                "domain_id": row.get("domain_id"),
+                "metadata": row.get("metadata"),
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+            }
+        )
+    return TenantsResponse(tenants=payload, limit=limit)
 
 
 @app.post(

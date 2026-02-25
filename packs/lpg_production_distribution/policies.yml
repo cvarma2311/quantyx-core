@@ -1,0 +1,10 @@
+industry: lpg_production_distribution
+version: 1
+
+policies:
+  - name: suppress_small_groups
+    applies_to: query
+    filter:
+      column: sap_id
+      operator: min_group_size
+      values: [5]

@@ -1,0 +1,38 @@
+industry: lpg_production_distribution
+version: 1
+
+title: LPG Production & Distribution Ontology
+
+entity_types:
+  plant:
+    examples: [sap_id, plant_id, plant_name]
+    description: LPG cylinder filling facility
+    join_key: sap_id
+  organizational_unit:
+    examples: [zone, region, sales_area]
+    description: Sales and distribution org hierarchy
+    join_key: sales_area
+  product:
+    examples: [product_name, cyl_type]
+    description: LPG product or cylinder type
+    join_key: cyl_type
+  process:
+    examples: [process_id, process_status]
+    description: Production process identifiers and status
+    join_key: process_id
+  equipment:
+    examples: [carousel, filling_head, device_id]
+    description: Production equipment identifiers
+    join_key: device_id
+  cylinder:
+    examples: [cyl_id_no, cyl_type, cyl_owner]
+    description: Cylinder identifiers and attributes
+    join_key: cyl_id_no
+  time:
+    examples: [process_date, pdate, month, fiscal_year]
+    description: Time grains used for analysis
+
+hierarchies:
+  - name: sales_org
+    levels: [zone, region, sales_area]
+    description: Sales organization rollup for LPG distribution

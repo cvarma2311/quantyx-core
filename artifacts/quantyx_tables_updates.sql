@@ -90,6 +90,18 @@ CREATE TABLE IF NOT EXISTS public.quantyx_tenant_domains (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS public.quantyx_tenants (
+  tenant_id TEXT PRIMARY KEY,
+  display_name TEXT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_tenants_status
+  ON public.quantyx_tenants (status, created_at DESC);
+
 ALTER TABLE public.quantyx_metrics_registry
   ADD COLUMN IF NOT EXISTS tenant_id TEXT NULL;
 
