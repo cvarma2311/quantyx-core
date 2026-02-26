@@ -532,6 +532,86 @@ def list_context_files_for_contexts(
     return grouped
 
 
+def list_applied_context_artifacts(
+    settings: Settings,
+    context_ids: list[str],
+) -> dict[str, dict[str, list[dict]]]:
+    if not context_ids:
+        return {}
+    placeholders = ", ".join(["%s"] * len(context_ids))
+    params: list[Any] = list(context_ids)
+
+    entities_sql = f"""
+        SELECT source_context_id AS context_id,
+               entity_id,
+               description,
+               join_key,
+               examples,
+               lifecycle_status
+          FROM public.quantyx_entity_overrides
+         WHERE source_context_id IN ({placeholders})
+           AND COALESCE(is_current, true) = true
+    """
+    hier_sql = f"""
+        SELECT source_context_id AS context_id,
+               hierarchy_name,
+               levels,
+               description,
+               lifecycle_status,
+               hierarchy_group
+          FROM public.quantyx_hierarchy_overrides
+         WHERE source_context_id IN ({placeholders})
+           AND COALESCE(is_current, true) = true
+    """
+    glossary_sql = f"""
+        SELECT source_context_id AS context_id,
+               term,
+               definition,
+               synonyms,
+               abbreviations,
+               lifecycle_status
+          FROM public.quantyx_glossary_terms
+         WHERE source_context_id IN ({placeholders})
+           AND COALESCE(is_current, true) = true
+    """
+    entities = run_query(settings, entities_sql, params)
+    hierarchies = run_query(settings, hier_sql, params)
+    glossary = run_query(settings, glossary_sql, params)
+
+    grouped: dict[str, dict[str, list[dict]]] = {}
+    for row in entities:
+        grouped.setdefault(row.get("context_id"), {}).setdefault("entities", []).append(
+            {
+                "entity_id": row.get("entity_id"),
+                "description": row.get("description"),
+                "join_key": row.get("join_key"),
+                "examples": row.get("examples"),
+                "lifecycle_status": row.get("lifecycle_status"),
+            }
+        )
+    for row in hierarchies:
+        grouped.setdefault(row.get("context_id"), {}).setdefault("hierarchies", []).append(
+            {
+                "name": row.get("hierarchy_name"),
+                "levels": row.get("levels"),
+                "description": row.get("description"),
+                "hierarchy_group": row.get("hierarchy_group"),
+                "lifecycle_status": row.get("lifecycle_status"),
+            }
+        )
+    for row in glossary:
+        grouped.setdefault(row.get("context_id"), {}).setdefault("glossary", []).append(
+            {
+                "term": row.get("term"),
+                "definition": row.get("definition"),
+                "synonyms": row.get("synonyms"),
+                "abbreviations": row.get("abbreviations"),
+                "lifecycle_status": row.get("lifecycle_status"),
+            }
+        )
+    return grouped
+
+
 def update_extraction(
     settings: Settings,
     extraction_id: str,

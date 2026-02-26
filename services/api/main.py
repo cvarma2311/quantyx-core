@@ -142,6 +142,7 @@ from services.ai.context_store import (
     get_extraction,
     list_extractions,
     list_context_files_for_contexts,
+    list_applied_context_artifacts,
     list_context,
     list_active_context_ids,
     link_context_files,
@@ -160,6 +161,7 @@ from services.ai.context_apply import apply_extractions
 from services.ai.glossary import fetch_glossary_terms
 from services.ai.sql_builder import Filter, build_query
 from services.ai.tenant_domain import get_tenant_domain, upsert_tenant_domain
+from services.ai.tenant_registry import delete_tenant, list_tenants, upsert_tenant, update_tenant
 from services.ai.tenant_scope import get_tenant_scope, upsert_tenant_scope
 from services.ai.tenant_purge import purge_tenant_data
 from services.ai.policy_audit import log_policy_audit
@@ -185,6 +187,7 @@ from services.api.schemas import (
     DatasetsResponse,
     DimensionsResponse,
     TenantCreateRequest,
+    TenantUpdateRequest,
     TenantResponse,
     TenantsResponse,
     DimensionValuesResponse,
@@ -1816,6 +1819,7 @@ def cancel_job(job_id: str) -> JobCancelResponse:
                             "value": {
                                 "tenant_id": "VC_101",
                                 "display_name": "HPCL LPG",
+                                "domain_id": "lpg_production_distribution",
                                 "status": "active",
                                 "metadata": {"region": "IN"},
                             },
@@ -1846,12 +1850,15 @@ def cancel_job(job_id: str) -> JobCancelResponse:
     },
 )
 def create_tenant(payload: TenantCreateRequest) -> TenantResponse:
+    if not payload.domain_id:
+        raise HTTPException(status_code=400, detail="domain_id is required")
     row = upsert_tenant(
         settings,
         tenant_id=payload.tenant_id,
         display_name=payload.display_name,
         status=payload.status,
         metadata=payload.metadata,
+        domain_id=payload.domain_id,
     )
     domain_row = get_tenant_domain(settings, payload.tenant_id)
     return TenantResponse(
@@ -1920,6 +1927,114 @@ def list_tenants_api(limit: int = 200) -> TenantsResponse:
             }
         )
     return TenantsResponse(tenants=payload, limit=limit)
+
+
+@app.patch(
+    "/tenants/{tenant_id}",
+    response_model=TenantResponse,
+    tags=["admin"],
+    summary="Update a tenant",
+    description="Update tenant display_name, status, or metadata.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "rename": {
+                            "summary": "Update display name",
+                            "value": {"display_name": "HPCL LPG - South"},
+                        }
+                        ,
+                        "domain_only": {
+                            "summary": "Update domain only",
+                            "value": {"domain_id": "lpg_production_distribution"},
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "updated": {
+                                "summary": "Tenant updated",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "display_name": "HPCL LPG - South",
+                                    "status": "active",
+                                    "domain_id": "lpg_production_distribution",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def update_tenant_api(tenant_id: str, payload: TenantUpdateRequest) -> TenantResponse:
+    row = update_tenant(
+        settings,
+        tenant_id=tenant_id,
+        display_name=payload.display_name,
+        status=payload.status,
+        metadata=payload.metadata,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    if payload.domain_id:
+        upsert_tenant_domain(settings, tenant_id, payload.domain_id)
+    domain_row = get_tenant_domain(settings, tenant_id)
+    return TenantResponse(
+        tenant_id=row.get("tenant_id") or tenant_id,
+        display_name=row.get("display_name"),
+        status=row.get("status") or "active",
+        domain_id=domain_row.get("domain_id") if domain_row else None,
+        metadata=row.get("metadata"),
+        created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
+        updated_at=row.get("updated_at").isoformat() if row.get("updated_at") else None,
+    )
+
+
+@app.delete(
+    "/tenants/{tenant_id}",
+    tags=["admin"],
+    summary="Delete a tenant",
+    description="Delete tenant registry entry and default domain mapping. Optionally purge tenant data.",
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "purge",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "boolean", "default": False},
+                "description": "When true, purge all tenant data across tables.",
+            }
+        ],
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "deleted": {
+                                "summary": "Tenant deleted",
+                                "value": {"ok": True, "tenant_id": "VC_101", "purged": False},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def delete_tenant_api(tenant_id: str, purge: bool = False) -> dict:
+    purged_tables = None
+    if purge:
+        purged_tables = purge_tenant_data(settings, tenant_id, dry_run=False)
+    delete_tenant(settings, tenant_id)
+    return {"ok": True, "tenant_id": tenant_id, "purged": purge, "tables": purged_tables}
 
 
 @app.post(
@@ -4791,6 +4906,23 @@ def extract_context_async(payload: ContextExtractRequest) -> JobCreateResponse:
                                                     "content_type": "text/plain",
                                                 }
                                             ],
+                                            "applied_glossary": [
+                                                {
+                                                    "term": "plant",
+                                                    "definition": "LPG filling facility",
+                                                    "synonyms": ["sap_id", "plant_id"],
+                                                }
+                                            ],
+                                            "applied_entities": [
+                                                {
+                                                    "entity_id": "plant",
+                                                    "join_key": "sap_id",
+                                                    "lifecycle_status": "certified",
+                                                }
+                                            ],
+                                            "applied_hierarchies": [
+                                                {"name": "sales_org", "levels": ["zone", "region", "sales_area"]}
+                                            ],
                                             "status": "reviewed",
                                             "created_at": "2026-02-20T10:05:12Z",
                                         }
@@ -4808,13 +4940,16 @@ def list_context_extractions(
     tenant_id: str,
     domain_id: str | None = None,
     limit: int = 50,
+    include_applied: bool = True,
 ) -> ContextExtractionListResponse:
     resolved_domain_id = _resolve_domain_id(tenant_id, domain_id) if tenant_id else domain_id
     rows = list_extractions(settings, tenant_id, resolved_domain_id if domain_id else None, limit=limit)
     context_ids = [row.get("context_id") for row in rows if row.get("context_id")]
     files_by_context = list_context_files_for_contexts(settings, context_ids)
+    applied_by_context = list_applied_context_artifacts(settings, context_ids) if include_applied else {}
     extractions = []
     for row in rows:
+        applied = applied_by_context.get(row.get("context_id"), {})
         extractions.append(
             ContextExtractionResponse(
                 extraction_id=row.get("extraction_id"),
@@ -4823,6 +4958,9 @@ def list_context_extractions(
                 payload=row.get("payload") or {},
                 raw_text=row.get("raw_text"),
                 files=files_by_context.get(row.get("context_id"), []),
+                applied_glossary=applied.get("glossary", []),
+                applied_entities=applied.get("entities", []),
+                applied_hierarchies=applied.get("hierarchies", []),
                 status=row.get("status"),
                 notes=row.get("notes"),
                 created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
@@ -4854,6 +4992,23 @@ def list_context_extractions(
                                             {"name": "sales_org", "levels": ["zone", "region", "sales_area"]}
                                         ]
                                     },
+                                    "applied_glossary": [
+                                        {
+                                            "term": "plant",
+                                            "definition": "LPG filling facility",
+                                            "synonyms": ["sap_id", "plant_id"],
+                                        }
+                                    ],
+                                    "applied_entities": [
+                                        {
+                                            "entity_id": "plant",
+                                            "join_key": "sap_id",
+                                            "lifecycle_status": "certified",
+                                        }
+                                    ],
+                                    "applied_hierarchies": [
+                                        {"name": "sales_org", "levels": ["zone", "region", "sales_area"]}
+                                    ],
                                     "status": "reviewed",
                                     "notes": "Reviewed by analyst",
                                 },
@@ -4868,6 +5023,7 @@ def list_context_extractions(
 def get_context_extraction(
     extraction_id: str,
     tenant_id: str,
+    include_applied: bool = True,
 ) -> ContextExtractionResponse:
     domain_id = _resolve_domain_id(tenant_id, None)
     extraction_row = get_extraction(settings, extraction_id)
@@ -4876,11 +5032,20 @@ def get_context_extraction(
     if extraction_row["tenant_id"] != tenant_id or extraction_row["domain_id"] != domain_id:
         raise HTTPException(status_code=400, detail="Extraction tenant/domain mismatch")
     created_at = extraction_row.get("created_at")
+    applied = {}
+    if include_applied and extraction_row.get("context_id"):
+        applied = list_applied_context_artifacts(settings, [extraction_row.get("context_id")]).get(
+            extraction_row.get("context_id"),
+            {},
+        )
     return ContextExtractionResponse(
         extraction_id=extraction_row["extraction_id"],
         context_id=extraction_row["context_id"],
         extraction_type=extraction_row.get("extraction_type"),
         payload=extraction_row.get("payload") or {},
+        applied_glossary=applied.get("glossary", []),
+        applied_entities=applied.get("entities", []),
+        applied_hierarchies=applied.get("hierarchies", []),
         status=extraction_row.get("status"),
         notes=extraction_row.get("notes"),
         created_at=created_at.isoformat() if created_at else None,
@@ -6120,6 +6285,114 @@ def certify_glossary(payload: dict) -> dict:
     return {"ok": True}
 
 
+@app.post(
+    "/entities/certify",
+    tags=["admin"],
+    summary="Certify entities",
+    description="Mark entity overrides as certified for a tenant/scope.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "certify_entity": {
+                            "summary": "Certify a single entity",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "entity_id": "plant",
+                            },
+                        },
+                        "certify_all": {
+                            "summary": "Certify all entities in scope",
+                            "value": {
+                                "tenant_id": "VC_101",
+                            },
+                        },
+                    }
+                }
+            }
+        }
+    },
+)
+def certify_entities(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, payload.get("domain_id"))
+    connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+    entity_id = payload.get("entity_id")
+    params = [tenant_id, domain_id, connection_id, database, schema]
+    sql = """
+        UPDATE public.quantyx_entity_overrides
+           SET lifecycle_status = 'certified',
+               updated_at = now()
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+    """
+    if entity_id:
+        sql += " AND entity_id = %s"
+        params.append(entity_id)
+    execute_non_query(settings, sql, params)
+    return {"ok": True}
+
+
+@app.post(
+    "/hierarchies/certify",
+    tags=["admin"],
+    summary="Certify hierarchies",
+    description="Mark hierarchy overrides as certified for a tenant/scope.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "certify_hierarchy": {
+                            "summary": "Certify a single hierarchy",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "hierarchy_name": "sales_org",
+                            },
+                        },
+                        "certify_all": {
+                            "summary": "Certify all hierarchies in scope",
+                            "value": {
+                                "tenant_id": "VC_101",
+                            },
+                        },
+                    }
+                }
+            }
+        }
+    },
+)
+def certify_hierarchies(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, payload.get("domain_id"))
+    connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+    hierarchy_name = payload.get("hierarchy_name")
+    params = [tenant_id, domain_id, connection_id, database, schema]
+    sql = """
+        UPDATE public.quantyx_hierarchy_overrides
+           SET lifecycle_status = 'certified',
+               updated_at = now()
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+    """
+    if hierarchy_name:
+        sql += " AND hierarchy_name = %s"
+        params.append(hierarchy_name)
+    execute_non_query(settings, sql, params)
+    return {"ok": True}
+
+
 @app.get(
     "/review",
     response_model=ReviewListResponse,
@@ -6209,6 +6482,7 @@ def review_summary(
         schema_name=schema,
         include_all_statuses=True,
     )
+    glossary_terms = fetch_glossary_terms(settings, tenant_id, domain_id)
     review_events = list_review_events(
         settings, tenant_id, domain_id, connection_id, database, schema
     )
@@ -6235,6 +6509,12 @@ def review_summary(
             "description": hierarchy.get("description"),
             "context_id": hierarchy.get("context_id"),
             "hierarchy_group": hierarchy.get("hierarchy_group"),
+            "lifecycle_status": hierarchy.get("lifecycle_status"),
+            "source_type": hierarchy.get("source_type"),
+            "source_run_id": hierarchy.get("source_run_id"),
+            "artifact_key": hierarchy.get("artifact_key"),
+            "version_no": hierarchy.get("version_no"),
+            "is_current": hierarchy.get("is_current"),
         }
         status = review_map.get(("hierarchies", hierarchy.get("artifact_key") or hierarchy.get("hierarchy_name")))
         if status:
@@ -6271,6 +6551,7 @@ def review_summary(
 
     return ReviewSummaryResponse(
         scan=scan_summary,
+        glossary=glossary_terms or [],
         entities=entities_payload,
         hierarchies=hierarchies_payload,
         facts=facts_payload,
@@ -6871,6 +7152,17 @@ def _candidate_identity(candidate: dict) -> tuple[str, str, str]:
     )
 
 
+def _candidate_artifact_key(candidate: dict) -> str:
+    entity_id = str(candidate.get("mapped_entity_type") or candidate.get("entity_id") or "").strip()
+    table_name = candidate.get("table")
+    column_name = candidate.get("column") or candidate.get("join_key")
+    if table_name and column_name:
+        return f"{entity_id}::{table_name}.{column_name}"
+    if column_name:
+        return f"{entity_id}::{column_name}"
+    return entity_id
+
+
 def _pick_best_candidates_per_entity(candidates: list[dict]) -> tuple[list[dict], int]:
     by_entity: dict[str, dict] = {}
     skipped = 0
@@ -7461,6 +7753,7 @@ def onboard_map_apply(mapping_id: str, payload: OnboardMapApplyRequest) -> Onboa
         entity_id = candidate.get("mapped_entity_type") or candidate.get("entity_id")
         column_name = candidate.get("column")
         table_name = candidate.get("table")
+        artifact_key = _candidate_artifact_key(candidate)
         upsert_entity_override(
             settings,
             payload.tenant_id,
@@ -7477,6 +7770,10 @@ def onboard_map_apply(mapping_id: str, payload: OnboardMapApplyRequest) -> Onboa
                 "lifecycle_status": payload.status,
                 "source_type": "user",
                 "source_run_id": mapping_id,
+                "artifact_key": artifact_key,
+                "source_table": table_name,
+                "source_column": column_name,
+                "confidence": candidate.get("confidence"),
                 "change_reason": payload.notes,
             },
         )

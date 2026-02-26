@@ -37,7 +37,7 @@ def load_entity_overrides(
             where_clause = " AND ".join(filters)
             cur.execute(
                 f"""
-                SELECT entity_id, description, join_key, examples,
+                SELECT entity_id, description, join_key, examples, source_table, source_column, confidence,
                        connection_id, database_name, schema_name,
                        lifecycle_status, source_type, source_run_id, artifact_key, version_no, is_current
                 FROM public.quantyx_entity_overrides
@@ -63,7 +63,7 @@ def load_entity_overrides_all(settings: Settings, tenant_id: str, domain_id: str
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT entity_id, description, join_key, examples,
+                SELECT entity_id, description, join_key, examples, source_table, source_column, confidence,
                        connection_id, database_name, schema_name,
                        lifecycle_status, source_type, source_run_id, artifact_key, version_no, is_current
                 FROM public.quantyx_entity_overrides

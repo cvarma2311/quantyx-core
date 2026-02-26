@@ -59,16 +59,16 @@ def upsert_entity_override(
             [tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key],
         )
     version_no = previous_version + 1
-    row_entity_id = artifact_key if version_no == 1 else f"{artifact_key}__v{version_no}_{uuid.uuid4().hex[:6]}"
     execute_non_query(
         settings,
         """
         INSERT INTO public.quantyx_entity_overrides
           (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id, description, join_key, examples,
            artifact_key, version_no, lifecycle_status, source_type, source_run_id, change_reason, approved_by, approved_at,
+           source_table, source_column, confidence,
            supersedes_version_no, created_by, updated_by, is_current, created_at, updated_at)
         VALUES
-          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
         """,
         [
             tenant_id,
@@ -76,7 +76,7 @@ def upsert_entity_override(
             connection_id,
             database_name,
             schema_name,
-            row_entity_id,
+            payload["entity_id"],
             payload.get("description"),
             payload.get("join_key"),
             payload.get("examples"),
@@ -88,6 +88,9 @@ def upsert_entity_override(
             payload.get("change_reason"),
             payload.get("approved_by"),
             payload.get("approved_at"),
+            payload.get("source_table"),
+            payload.get("source_column"),
+            payload.get("confidence"),
             payload.get("supersedes_version_no") or (previous_version or None),
             payload.get("created_by"),
             payload.get("updated_by"),
