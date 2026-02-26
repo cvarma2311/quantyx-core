@@ -573,22 +573,6 @@ CREATE INDEX IF NOT EXISTS idx_quantyx_dbt_config_lookup
   ON public.quantyx_dbt_config (tenant_id, domain_id, connection_id, updated_at DESC);
 
 
-CREATE TABLE IF NOT EXISTS public.quantyx_entity_mappings (
-  mapping_id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
-  domain_id TEXT NOT NULL,
-  connection_id TEXT NOT NULL,
-  database_name TEXT NOT NULL,
-  schema_name TEXT NOT NULL,
-  tables JSONB NOT NULL DEFAULT '[]'::jsonb,
-  payload JSONB NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_quantyx_entity_mappings_scope
-  ON public.quantyx_entity_mappings (tenant_id, domain_id, connection_id, created_at DESC);
-
-
 CREATE TABLE IF NOT EXISTS public.quantyx_facts_registry (
   fact_id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,

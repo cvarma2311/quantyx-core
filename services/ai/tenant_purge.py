@@ -69,7 +69,6 @@ def purge_tenant_data(
                 "quantyx_review_events",
                 "quantyx_dbt_manifest",
                 "quantyx_dbt_config",
-                "quantyx_entity_mappings",
                 "quantyx_dbt_scaffolds",
                 "quantyx_tenant_dbt_projects",
                 "quantyx_flow_node_data_registry",

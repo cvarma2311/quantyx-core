@@ -10,6 +10,15 @@ ALTER TABLE public.quantyx_entity_overrides
 ALTER TABLE public.quantyx_entity_overrides
   ADD COLUMN IF NOT EXISTS schema_name TEXT;
 
+ALTER TABLE public.quantyx_entity_overrides
+  ADD COLUMN IF NOT EXISTS source_table TEXT NULL;
+
+ALTER TABLE public.quantyx_entity_overrides
+  ADD COLUMN IF NOT EXISTS source_column TEXT NULL;
+
+ALTER TABLE public.quantyx_entity_overrides
+  ADD COLUMN IF NOT EXISTS confidence NUMERIC NULL;
+
 UPDATE public.quantyx_entity_overrides
   SET connection_id = COALESCE(connection_id, 'global'),
       database_name = COALESCE(database_name, 'global'),
@@ -32,7 +41,7 @@ ALTER TABLE public.quantyx_entity_overrides
   DROP CONSTRAINT IF EXISTS quantyx_entity_overrides_pkey;
 
 ALTER TABLE public.quantyx_entity_overrides
-  ADD PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, entity_id);
+  ADD PRIMARY KEY (tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, version_no);
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_entity_overrides_scope
   ON public.quantyx_entity_overrides (tenant_id, domain_id, connection_id, database_name, schema_name);
@@ -117,13 +126,6 @@ ALTER TABLE public.quantyx_metrics_registry
 CREATE INDEX IF NOT EXISTS idx_quantyx_metrics_registry_scope
   ON public.quantyx_metrics_registry (tenant_id, domain_id, connection_id, database_name, schema_name);
 
-ALTER TABLE public.quantyx_entity_mappings
-  ADD COLUMN IF NOT EXISTS candidates JSONB,
-  ADD COLUMN IF NOT EXISTS low_confidence_candidates JSONB,
-  ADD COLUMN IF NOT EXISTS low_confidence_threshold NUMERIC,
-  ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'draft',
-  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  ADD COLUMN IF NOT EXISTS tables JSONB;
 
 ALTER TABLE public.quantyx_facts_registry
   ADD COLUMN IF NOT EXISTS name TEXT NULL;
@@ -232,46 +234,6 @@ CREATE TABLE IF NOT EXISTS public.quantyx_tenant_scope_history (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-UPDATE public.quantyx_entity_mappings
-  SET tables = COALESCE(tables, '[]'::jsonb)
-  WHERE tables IS NULL;
-
-UPDATE public.quantyx_entity_mappings
-  SET candidates = COALESCE(candidates, payload -> 'candidates', '[]'::jsonb)
-  WHERE candidates IS NULL;
-
-UPDATE public.quantyx_entity_mappings
-  SET low_confidence_candidates = COALESCE(low_confidence_candidates, payload -> 'low_confidence_candidates', '[]'::jsonb)
-  WHERE low_confidence_candidates IS NULL;
-
-UPDATE public.quantyx_entity_mappings
-  SET low_confidence_threshold = COALESCE(
-    low_confidence_threshold,
-    CASE
-      WHEN payload ? 'low_confidence_threshold' THEN (payload ->> 'low_confidence_threshold')::NUMERIC
-      ELSE 0.7
-    END
-  )
-  WHERE low_confidence_threshold IS NULL;
-
-UPDATE public.quantyx_entity_mappings
-  SET status = COALESCE(status, 'draft')
-  WHERE status IS NULL;
-
-ALTER TABLE public.quantyx_entity_mappings
-  ALTER COLUMN tables SET DEFAULT '[]'::jsonb;
-
-ALTER TABLE public.quantyx_entity_mappings
-  ALTER COLUMN candidates SET DEFAULT '[]'::jsonb;
-
-ALTER TABLE public.quantyx_entity_mappings
-  ALTER COLUMN low_confidence_candidates SET DEFAULT '[]'::jsonb;
-
-ALTER TABLE public.quantyx_entity_mappings
-  ALTER COLUMN low_confidence_threshold SET DEFAULT 0.7;
-
-ALTER TABLE public.quantyx_entity_mappings
-  ALTER COLUMN status SET DEFAULT 'draft';
 
 ALTER TABLE public.quantyx_dimensions_registry
   ADD COLUMN IF NOT EXISTS name TEXT NULL;

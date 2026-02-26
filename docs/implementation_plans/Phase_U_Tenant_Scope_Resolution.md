@@ -195,6 +195,8 @@ Affected endpoints:
 - `POST /onboard/map`
 - `POST /onboard/infer-models`
 - `POST /metrics/suggested`
+- `POST /entities/certify`
+- `POST /hierarchies/certify`
 - `POST /jobs`
 - `POST /query`
 - `POST /insights/generate`
@@ -233,6 +235,14 @@ Example: `POST /onboard/map` response should omit `connection_id`, `database`, `
   - No scope fields in request.
 - `POST /metrics/suggested`
   - No scope fields in request.
+
+### Admin (Certify)
+- `POST /entities/certify`
+  - Only `tenant_id` (optional `domain_id`, `entity_id`).
+  - Scope resolved from tenant registry.
+- `POST /hierarchies/certify`
+  - Only `tenant_id` (optional `domain_id`, `hierarchy_name`).
+  - Scope resolved from tenant registry.
 
 ### Jobs
 - `POST /jobs`

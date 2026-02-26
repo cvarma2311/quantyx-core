@@ -151,7 +151,26 @@ class ChartStatusResponse(BaseModel):
 class TenantCreateRequest(BaseModel):
     tenant_id: str = Field(..., description="Tenant identifier", examples=["VC_101"])
     display_name: Optional[str] = Field(None, description="Tenant display name", examples=["HPCL LPG"])
+    domain_id: str = Field(..., description="Default domain for the tenant", examples=["lpg_production_distribution"])
     status: str = Field("active", description="Tenant status", examples=["active"])
+    metadata: dict | None = Field(None, description="Optional tenant metadata")
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "VC_101",
+                "display_name": "HPCL LPG",
+                "domain_id": "lpg_production_distribution",
+                "status": "active",
+                "metadata": {"region": "IN"},
+            }
+        }
+    }
+
+
+class TenantUpdateRequest(BaseModel):
+    display_name: Optional[str] = Field(None, description="Tenant display name", examples=["HPCL LPG"])
+    domain_id: Optional[str] = Field(None, description="Default domain for the tenant", examples=["lpg_production_distribution"])
+    status: Optional[str] = Field(None, description="Tenant status", examples=["active"])
     metadata: dict | None = Field(None, description="Optional tenant metadata")
 
 
@@ -224,6 +243,30 @@ class MetricsResponse(BaseModel):
             }
         }
     }
+
+
+class ContextAppliedEntity(BaseModel):
+    entity_id: str
+    description: Optional[str] = None
+    join_key: Optional[str] = None
+    examples: Optional[List[str]] = None
+    lifecycle_status: Optional[str] = None
+
+
+class ContextAppliedHierarchy(BaseModel):
+    name: str
+    levels: Optional[List[str]] = None
+    description: Optional[str] = None
+    hierarchy_group: Optional[str] = None
+    lifecycle_status: Optional[str] = None
+
+
+class ContextAppliedGlossary(BaseModel):
+    term: str
+    definition: Optional[str] = None
+    synonyms: Optional[List[str]] = None
+    abbreviations: Optional[List[str]] = None
+    lifecycle_status: Optional[str] = None
 
 
 class SchemaResponse(BaseModel):
@@ -580,6 +623,7 @@ class ReviewListResponse(BaseModel):
 
 class ReviewSummaryResponse(BaseModel):
     scan: dict | None = Field(default=None, examples=[{"tables": 12}])
+    glossary: List[dict] = Field(default_factory=list)
     entities: List[dict] = Field(default_factory=list)
     hierarchies: List[dict] = Field(default_factory=list)
     facts: List[dict] = Field(default_factory=list)
@@ -1261,6 +1305,9 @@ class ContextExtractionResponse(BaseModel):
     payload: dict
     raw_text: Optional[str] = Field(None, examples=["Raw context text"])
     files: Optional[List[dict]] = Field(None, examples=[[{"file_id": "file_1", "filename": "notes.txt"}]])
+    applied_glossary: Optional[List[ContextAppliedGlossary]] = None
+    applied_entities: Optional[List[ContextAppliedEntity]] = None
+    applied_hierarchies: Optional[List[ContextAppliedHierarchy]] = None
     status: str | None = Field(None, examples=["reviewed"])
     notes: str | None = Field(None, examples=["Reviewed by analyst"])
     created_at: str | None = Field(None, examples=["2025-02-14T10:00:00Z"])
@@ -1271,6 +1318,15 @@ class ContextExtractionResponse(BaseModel):
                 "context_id": "ctx_123",
                 "extraction_type": "combined",
                 "payload": {"hierarchies": [{"name": "sales_org", "levels": ["zone", "region"]}]},
+                "applied_glossary": [
+                    {"term": "plant", "definition": "LPG filling facility", "synonyms": ["sap_id"]}
+                ],
+                "applied_entities": [
+                    {"entity_id": "plant", "join_key": "sap_id", "lifecycle_status": "certified"}
+                ],
+                "applied_hierarchies": [
+                    {"name": "sales_org", "levels": ["zone", "region", "sales_area"]}
+                ],
                 "status": "reviewed",
                 "notes": "Reviewed by analyst",
                 "created_at": "2025-02-14T10:00:00Z",
