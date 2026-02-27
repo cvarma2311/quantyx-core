@@ -5613,7 +5613,7 @@ def hierarchies(
     "/entities/{entity_id}",
     tags=["admin"],
     summary="Override an entity",
-    description="Upsert a tenant-specific entity override (description/join_key/examples).",
+    description="Upsert a tenant-specific entity override (description/join_key/examples). Scope is resolved from tenant_id.",
     openapi_extra={
         "requestBody": {
             "content": {
@@ -5645,12 +5645,10 @@ def hierarchies(
 def update_entity(
     entity_id: str,
     tenant_id: str,
-    connection_id: str,
-    database: str,
-    schema: str,
     payload: EntityOverrideRequest,
 ) -> dict:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
     upsert_entity_override(
         settings,
         tenant_id,
