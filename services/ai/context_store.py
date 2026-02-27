@@ -565,6 +565,7 @@ def list_applied_context_artifacts(
     """
     glossary_sql = f"""
         SELECT source_context_id AS context_id,
+               term_id,
                term,
                definition,
                synonyms,
@@ -602,6 +603,7 @@ def list_applied_context_artifacts(
     for row in glossary:
         grouped.setdefault(row.get("context_id"), {}).setdefault("glossary", []).append(
             {
+                "term_id": row.get("term_id"),
                 "term": row.get("term"),
                 "definition": row.get("definition"),
                 "synonyms": row.get("synonyms"),

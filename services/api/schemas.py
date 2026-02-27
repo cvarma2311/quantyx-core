@@ -262,6 +262,7 @@ class ContextAppliedHierarchy(BaseModel):
 
 
 class ContextAppliedGlossary(BaseModel):
+    term_id: Optional[str] = None
     term: str
     definition: Optional[str] = None
     synonyms: Optional[List[str]] = None

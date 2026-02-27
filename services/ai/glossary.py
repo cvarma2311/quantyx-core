@@ -9,7 +9,8 @@ from services.ai.db import run_query
 
 def fetch_glossary_terms(settings: Settings, tenant_id: str, domain_id: str) -> list[dict[str, Any]]:
     sql = """
-        SELECT term,
+        SELECT term_id,
+               term,
                normalized_term,
                definition,
                synonyms,
