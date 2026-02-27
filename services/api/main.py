@@ -302,7 +302,13 @@ _log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, _log_level, logging.INFO))
 logger = logging.getLogger("quantyx.api")
 
-app = FastAPI(title="quantyx-core-services API", version="0.1.0")
+app = FastAPI(
+    title="quantyx-core-services API",
+    version="0.1.0",
+    openapi_tags=[
+        {"name": "certify", "description": "Certification endpoints for glossary, entities, hierarchies, facts, dimensions, and metrics."},
+    ],
+)
 
 settings = load_settings()
 catalog = load_catalog_with_registry(settings, settings.metrics_catalog_path)
@@ -5671,7 +5677,7 @@ def update_entity(
     "/hierarchies/{hierarchy_name}",
     tags=["admin"],
     summary="Override a hierarchy",
-    description="Upsert a tenant-specific hierarchy override (levels/description).",
+    description="Upsert a tenant-specific hierarchy override (levels/description). Scope is resolved from tenant_id.",
     openapi_extra={
         "requestBody": {
             "content": {
@@ -5703,12 +5709,10 @@ def update_entity(
 def update_hierarchy(
     hierarchy_name: str,
     tenant_id: str,
-    connection_id: str,
-    database: str,
-    schema: str,
     payload: HierarchyOverrideRequest,
 ) -> dict:
     domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
     upsert_hierarchy_override(
         settings,
         tenant_id,
@@ -5733,17 +5737,18 @@ def update_hierarchy(
     response_model=dict,
     tags=["context"],
     summary="Update hierarchy override (payload)",
-    description="Update hierarchy override using JSON payload instead of path/query params.",
+    description="Update hierarchy override using JSON payload instead of path/query params. Scope is resolved from tenant_id.",
 )
 def update_hierarchy_payload(payload: HierarchyUpdateRequest) -> dict:
     domain_id = _resolve_domain_id(payload.tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(payload.tenant_id, domain_id)
     upsert_hierarchy_override(
         settings,
         payload.tenant_id,
         domain_id,
-        payload.connection_id,
-        payload.database,
-        payload.schema,
+        connection_id,
+        database,
+        schema,
         {
             "hierarchy_name": payload.hierarchy_name,
             "levels": payload.levels,
@@ -6260,13 +6265,39 @@ def create_review(payload: ReviewCreateRequest) -> ReviewResponse:
 
 @app.post(
     "/glossary/certify",
-    tags=["admin"],
+    tags=["certify"],
     summary="Certify glossary terms",
     description="Mark glossary terms as certified for a tenant (and optional domain).",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "certify_glossary": {
+                            "summary": "Certify glossary",
+                            "value": {"tenant_id": "VC_101"},
+                        },
+                        "certify_term": {
+                            "summary": "Certify a single term",
+                            "value": {"tenant_id": "VC_101", "term_id": "gls_123"},
+                        },
+                        "certify_glossary_domain": {
+                            "summary": "Certify glossary for domain",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                            },
+                        },
+                    }
+                }
+            }
+        }
+    },
 )
 def certify_glossary(payload: dict) -> dict:
     tenant_id = payload.get("tenant_id")
     domain_id = payload.get("domain_id")
+    term_id = payload.get("term_id")
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     params = [tenant_id]
@@ -6279,13 +6310,16 @@ def certify_glossary(payload: dict) -> dict:
     if domain_id:
         sql += " AND domain_id = %s"
         params.append(domain_id)
+    if term_id:
+        sql += " AND term_id = %s"
+        params.append(term_id)
     execute_non_query(settings, sql, params)
     return {"ok": True}
 
 
 @app.post(
     "/entities/certify",
-    tags=["admin"],
+    tags=["certify"],
     summary="Certify entities",
     description="Mark entity overrides as certified for a tenant/scope.",
     openapi_extra={
@@ -6339,7 +6373,7 @@ def certify_entities(payload: dict) -> dict:
 
 @app.post(
     "/hierarchies/certify",
-    tags=["admin"],
+    tags=["certify"],
     summary="Certify hierarchies",
     description="Mark hierarchy overrides as certified for a tenant/scope.",
     openapi_extra={
@@ -6387,6 +6421,153 @@ def certify_hierarchies(payload: dict) -> dict:
     if hierarchy_name:
         sql += " AND hierarchy_name = %s"
         params.append(hierarchy_name)
+    execute_non_query(settings, sql, params)
+    return {"ok": True}
+
+
+@app.post(
+    "/metrics/certify",
+    tags=["certify"],
+    summary="Certify metrics",
+    description="Mark metrics as certified for a tenant/scope.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "certify_metric": {
+                            "summary": "Certify a single metric",
+                            "value": {"tenant_id": "VC_101", "metric_id": "lpg_production_distribution__production_mt"},
+                        },
+                        "certify_all": {
+                            "summary": "Certify all metrics in scope",
+                            "value": {"tenant_id": "VC_101"},
+                        },
+                    }
+                }
+            }
+        }
+    },
+)
+def certify_metrics(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, payload.get("domain_id"))
+    connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+    metric_id = payload.get("metric_id")
+    params = [tenant_id, domain_id, connection_id, database, schema]
+    sql = """
+        UPDATE public.quantyx_metrics_registry
+           SET lifecycle_status = 'certified',
+               updated_at = now()
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+    """
+    if metric_id:
+        sql += " AND (metric_id = %s OR artifact_key = %s)"
+        params.extend([metric_id, metric_id])
+    execute_non_query(settings, sql, params)
+    return {"ok": True}
+
+
+@app.post(
+    "/facts/certify",
+    tags=["certify"],
+    summary="Certify facts",
+    description="Mark facts as certified for a tenant/scope.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "certify_fact": {
+                            "summary": "Certify a single fact",
+                            "value": {"tenant_id": "VC_101", "fact_id": "fact_abc123"},
+                        },
+                        "certify_all": {
+                            "summary": "Certify all facts in scope",
+                            "value": {"tenant_id": "VC_101"},
+                        },
+                    }
+                }
+            }
+        }
+    },
+)
+def certify_facts(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, payload.get("domain_id"))
+    connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+    fact_id = payload.get("fact_id")
+    params = [tenant_id, domain_id, connection_id, database, schema]
+    sql = """
+        UPDATE public.quantyx_facts_registry
+           SET lifecycle_status = 'certified',
+               updated_at = now()
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+    """
+    if fact_id:
+        sql += " AND (fact_id = %s OR artifact_key = %s)"
+        params.extend([fact_id, fact_id])
+    execute_non_query(settings, sql, params)
+    return {"ok": True}
+
+
+@app.post(
+    "/dimensions/certify",
+    tags=["certify"],
+    summary="Certify dimensions",
+    description="Mark dimensions as certified for a tenant/scope.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "certify_dimension": {
+                            "summary": "Certify a single dimension",
+                            "value": {"tenant_id": "VC_101", "dimension_id": "dim_ab12cd34"},
+                        },
+                        "certify_all": {
+                            "summary": "Certify all dimensions in scope",
+                            "value": {"tenant_id": "VC_101"},
+                        },
+                    }
+                }
+            }
+        }
+    },
+)
+def certify_dimensions(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, payload.get("domain_id"))
+    connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+    dimension_id = payload.get("dimension_id")
+    params = [tenant_id, domain_id, connection_id, database, schema]
+    sql = """
+        UPDATE public.quantyx_dimensions_registry
+           SET lifecycle_status = 'certified',
+               updated_at = now()
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+    """
+    if dimension_id:
+        sql += " AND (dimension_id = %s OR artifact_key = %s)"
+        params.extend([dimension_id, dimension_id])
     execute_non_query(settings, sql, params)
     return {"ok": True}
 

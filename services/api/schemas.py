@@ -409,9 +409,6 @@ class HierarchyOverrideRequest(BaseModel):
 
 class HierarchyUpdateRequest(BaseModel):
     tenant_id: str = Field(..., examples=["tenant_a"])
-    connection_id: str = Field(..., examples=["conn_prod"])
-    database: str = Field(..., examples=["prod_warehouse"])
-    schema: str = Field(..., examples=["public"])
     hierarchy_name: str = Field(..., examples=["Geographic Hierarchy"])
     context_id: str | None = Field(None, examples=["ctx_123"])
     hierarchy_group: str | None = Field(None, examples=["geography"])
@@ -422,9 +419,6 @@ class HierarchyUpdateRequest(BaseModel):
         "json_schema_extra": {
             "example": {
                 "tenant_id": "tenant_a",
-                "connection_id": "conn_prod",
-                "database": "prod_warehouse",
-                "schema": "public",
                 "hierarchy_name": "Geographic Hierarchy",
                 "context_id": "ctx_123",
                 "hierarchy_group": "geography",
