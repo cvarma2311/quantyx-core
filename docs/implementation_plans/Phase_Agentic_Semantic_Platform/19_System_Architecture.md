@@ -92,6 +92,39 @@ flowchart TB
 
 ---
 
+## Sequence Diagram (Mermaid)
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant UI
+  participant API
+  participant Orchestrator
+  participant Agents
+  participant DB
+
+  User->>UI: Select connection + tables
+  UI->>API: POST /agentic/runs
+  API->>Orchestrator: enqueue agentic run
+  Orchestrator->>Agents: execute LangGraph workflow
+  Agents->>DB: read schema + profile data
+  Agents-->>API: emit progress events
+  API-->>UI: stream /agentic/runs/{run_id}/stream
+
+  Agents->>DB: write semantic graph + rollups + dashboards
+  Orchestrator-->>API: run completed
+  API-->>UI: status completed
+
+  User->>UI: Ask NL question
+  UI->>API: POST /chat (sync or async)
+  API->>DB: resolve + run SQL
+  API-->>UI: response + chart_id
+  UI->>API: GET /charts/{chart_id}
+  API-->>UI: chart payload + data
+```
+
+---
+
 ## Notes
 - **LangGraph optional**: use if we need explicit agent graph orchestration.
 - **Agent Orchestrator** can be our existing job system + event stream.
