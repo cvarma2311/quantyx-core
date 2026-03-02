@@ -18,14 +18,14 @@ flowchart TB
   end
 
   subgraph API
-    F[/agentic/runs]
-    G[/query]
-    H[/charts/{id}]
-    I[/dashboards]
-    J[/views/query]
-    K[/semantic/*]
-    L1[/chat]
-    L2[/rollups]
+    F["/agentic/runs"]
+    G["/query"]
+    H["/charts/{id}"]
+    I["/dashboards"]
+    J["/views/query"]
+    K["/semantic/*"]
+    L1["/chat"]
+    L2["/rollups"]
   end
 
   subgraph Orchestration
