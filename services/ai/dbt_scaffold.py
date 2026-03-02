@@ -173,7 +173,7 @@ def build_scaffold_payload(
             if not model.get("name") or not model.get("sql"):
                 continue
             model["sql"] = _normalize_source_sql(model.get("sql", ""), "raw")
-            model["status"] = "draft"
+            model["status"] = "live"
             models.append(model)
     if not models:
         facts, dims = infer_models_from_scan(tables)
@@ -189,7 +189,7 @@ def build_scaffold_payload(
                     "sql": sql,
                     "description": "Auto-generated fact model",
                     "columns": [],
-                    "status": "draft",
+                    "status": "live",
                 }
             )
         for dim in dims:
@@ -204,7 +204,7 @@ def build_scaffold_payload(
                     "sql": sql,
                     "description": "Auto-generated dimension model",
                     "columns": [],
-                    "status": "draft",
+                    "status": "live",
                 }
             )
 
@@ -307,7 +307,7 @@ def persist_scaffold(
             schema,
             json.dumps(tables),
             context_id,
-            payload.get("status", "draft"),
+            payload.get("status", "live"),
             json.dumps(payload),
         ],
     )

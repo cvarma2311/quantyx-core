@@ -40,7 +40,7 @@ Goal: provide a runnable demo that shows the full onboarding flow end-to-end.
 
 7) **Metrics catalog (review)**
    - `GET /metrics`
-   - Purpose: list the current catalog (contracts + registry), including suggested/draft/certified
+   - Purpose: list the current catalog (contracts + registry), including suggested/live/certified
 
 8) **Promote a metric**
    - `PATCH /metrics/{metric_id}`

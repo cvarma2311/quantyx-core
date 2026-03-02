@@ -20,7 +20,7 @@ def upsert_entity_override(
 ) -> None:
     if not payload.get("entity_id"):
         raise HTTPException(status_code=400, detail="entity_id is required")
-    lifecycle_status = payload.get("lifecycle_status") or payload.get("status") or "draft"
+    lifecycle_status = payload.get("lifecycle_status") or payload.get("status") or "live"
     artifact_key = payload.get("artifact_key") or payload["entity_id"]
 
     current_rows = run_query(
@@ -111,7 +111,7 @@ def upsert_hierarchy_override(
     if not payload.get("hierarchy_name"):
         raise HTTPException(status_code=400, detail="hierarchy_name is required")
     context_id = payload.get("context_id") or payload.get("source_context_id") or "ctx_legacy"
-    lifecycle_status = payload.get("lifecycle_status") or payload.get("status") or "draft"
+    lifecycle_status = payload.get("lifecycle_status") or payload.get("status") or "live"
     artifact_key = payload.get("artifact_key") or f"{context_id}::{payload['hierarchy_name']}"
 
     current_rows = run_query(

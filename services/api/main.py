@@ -36,7 +36,17 @@ from services.ai.connection_registry import (
 from services.ai.onboarding.scan_store import persist_schema_scan
 from services.ai.onboarding.scan_store import load_latest_scan_result, load_latest_scan_for_scope
 from services.ai.resolver import resolve_question
+from services.ai.semantic_graph_resolver import resolve_question_semantic, log_semantic_usage
 from services.ai.charts import build_chart_payload, infer_chart_type, infer_chart_type_with_llm
+from services.ai.rollups import (
+    create_rollup,
+    list_rollups,
+    get_rollup,
+    build_rollup_table,
+    find_matching_rollup,
+    update_rollup_status,
+)
+from services.ai.views import list_views as list_registered_views, get_view_schema as load_view_schema
 from services.ai.charts_store import (
     create_chart_request,
     create_chart_event,
@@ -113,6 +123,16 @@ from services.ai.onboarding.entity_mapping_agents import (
     attach_mapping_id_to_agents,
     list_entity_mapping_agents,
 )
+from services.ai.agentic_store import (
+    create_agent_run,
+    update_agent_run_status,
+    append_agent_run_event,
+    list_agent_run_events,
+    get_agent_run,
+    list_agent_chat_log,
+    append_plan_summary,
+)
+from services.ai.agentic_orchestrator import run_agentic_workflow
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
 from services.ai.semantic_suggest import build_lineage_edges, build_schema_summary, suggest_semantic_model
@@ -174,6 +194,13 @@ from services.ai.jobs_store import (
     update_job_progress,
     update_job_status,
 )
+from services.ai.chat_store import create_chat_request, get_chat_request, update_chat_request
+from services.ai.chat_events_store import create_chat_event, list_chat_events
+from services.ai.semantic_feedback_store import (
+    create_semantic_feedback,
+    list_semantic_feedback,
+    apply_semantic_feedback,
+)
 from services.api.schemas import (
     EntitiesResponse,
     EntitiesAllResponse,
@@ -228,6 +255,8 @@ from services.api.schemas import (
     InferModelsResponse,
     QueryRequest,
     QueryResult,
+    ChatRequest,
+    ChatResponse,
     SchemaResponse,
     SuggestedMetricsResponse,
     ContractValidateRequest,
@@ -253,6 +282,15 @@ from services.api.schemas import (
     ActionCreateResponse,
     ChartRequest,
     ChartStatusResponse,
+    RollupCreateRequest,
+    RollupResponse,
+    RollupRefreshResponse,
+    SemanticFeedbackRequest,
+    SemanticFeedbackResponse,
+    ViewListResponse,
+    ViewSchemaResponse,
+    ViewQueryRequest,
+    ViewQueryResponse,
     ScenariosResponse,
     ScenarioCreateRequest,
     ScenarioUpdateRequest,
@@ -307,13 +345,28 @@ app = FastAPI(
     version="0.1.0",
     openapi_tags=[
         {"name": "certify", "description": "Certification endpoints for glossary, entities, hierarchies, facts, dimensions, and metrics."},
+        {"name": "rollups", "description": "Rollup registry and refresh endpoints."},
+        {"name": "chat", "description": "Chat-style query endpoints."},
+        {"name": "governance", "description": "Semantic feedback and governance endpoints."},
+        {"name": "views", "description": "View explorer and SQL editor endpoints."},
     ],
 )
 
 settings = load_settings()
 catalog = load_catalog_with_registry(settings, settings.metrics_catalog_path)
 LOW_CONFIDENCE_THRESHOLD = 0.7
-JOB_TYPES = {"scan_connection", "map_entities", "infer_models", "metrics_suggested", "context_extract", "context_apply"}
+JOB_TYPES = {
+    "scan_connection",
+    "map_entities",
+    "infer_models",
+    "metrics_suggested",
+    "context_extract",
+    "context_apply",
+    "agentic_run",
+    "rollup_build",
+    "rollup_refresh",
+    "chat_build",
+}
 _job_worker_stop = threading.Event()
 _job_worker_thread: threading.Thread | None = None
 _REF_PATTERN = re.compile(r"\{\{\s*ref\('(?P<name>[^']+)'\)\s*\}\}")
@@ -807,6 +860,73 @@ def _execute_job(job: dict) -> dict:
         return ContextApplyResponse(status="applied", updated=updated).model_dump()
     if job_type == "chart_build":
         return _execute_chart_job(payload)
+    if job_type in {"rollup_build", "rollup_refresh"}:
+        rollup_id = payload.get("rollup_id")
+        if not rollup_id:
+            raise HTTPException(status_code=400, detail="rollup_id is required")
+        rollup = get_rollup(settings, rollup_id)
+        if not rollup:
+            raise HTTPException(status_code=404, detail="Rollup not found")
+        update_rollup_status(settings, rollup_id, "building" if job_type == "rollup_build" else "refreshing")
+        build_rollup_table(settings, rollup, schema_name=settings.db_schema)
+        update_rollup_status(settings, rollup_id, "active")
+        return {"rollup_id": rollup_id, "status": "active"}
+    if job_type == "chat_build":
+        chat_id = payload.get("chat_id")
+        if not chat_id:
+            raise HTTPException(status_code=400, detail="chat_id is required")
+        chat_row = get_chat_request(settings, chat_id)
+        if not chat_row:
+            raise HTTPException(status_code=404, detail="Chat request not found")
+        create_chat_event(settings, chat_id, "running", "Chat request started")
+        update_chat_request(settings, chat_id, status="running")
+        request_payload = chat_row.get("request_payload") or {}
+        try:
+            create_chat_event(settings, chat_id, "resolve", "Resolving metrics and dimensions")
+            query_request = QueryRequest(**request_payload)
+            query_result = query(query_request)
+            create_chat_event(settings, chat_id, "query", "Executing SQL")
+            chart_payload = None
+            chart_type = None
+            if query_result.rows and query_result.metrics:
+                create_chat_event(settings, chat_id, "chart", "Building chart payload")
+                chart_type = infer_chart_type(query_result.dimensions, query_result.rows, query_result.metrics)
+                if chart_type:
+                    chart_payload = build_chart_payload(
+                        chart_type,
+                        query_result.rows,
+                        query_result.metrics[0],
+                        query_result.dimensions,
+                    )
+            response_payload = {
+                "metrics": query_result.metrics,
+                "dimensions": query_result.dimensions,
+                "chart_id": query_result.chart_id,
+                "chart_type": chart_type,
+                "chart_payload": chart_payload.get("chart_payload") if chart_payload else None,
+                "data": chart_payload.get("data") if chart_payload else None,
+                "sql": query_result.sql,
+                "rows": query_result.rows,
+            }
+            update_chat_request(settings, chat_id, status="complete", response_payload=response_payload)
+            create_chat_event(settings, chat_id, "complete", "Chat response ready")
+            return {"chat_id": chat_id, "status": "complete"}
+        except Exception as exc:  # noqa: BLE001
+            update_chat_request(settings, chat_id, status="failed", error_message=str(exc))
+            create_chat_event(settings, chat_id, "failed", "Chat request failed", {"error": str(exc)})
+            raise
+    if job_type == "agentic_run":
+        run_id = payload.get("run_id")
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id is required")
+        run = get_agent_run(settings, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        update_agent_run_status(settings, run_id, "running")
+        initial_state = payload.get("initial_state") or {}
+        run_agentic_workflow(settings, run_id, initial_state)
+        update_agent_run_status(settings, run_id, "completed")
+        return {"run_id": run_id, "status": "completed"}
     raise ValueError(f"Unsupported job_type: {job_type}")
 
 
@@ -1179,9 +1299,9 @@ def extract_semantic_contract(request: SemanticExtractRequest) -> SemanticExtrac
         settings,
         tenant_id=request.tenant_id,
         industry=request.industry,
-        version="draft",
+        version="live",
         payload=payload,
-        status="draft",
+        status="live",
     )
     return SemanticExtractResponse(contract_id=contract_id, status="extracted")
 
@@ -1320,7 +1440,7 @@ def _infer_edge_type(from_type: str | None, to_type: str | None) -> str | None:
                                         "measures": ["production_14_2kg", "production_19kg"],
                                         "dimensions": ["sap_id", "region"],
                                         "description": "Daily LPG production fact",
-                                        "status": "draft",
+                                        "status": "live",
                                     }
                                 ],
                                 "dimensions": [
@@ -1329,7 +1449,7 @@ def _infer_edge_type(from_type: str | None, to_type: str | None) -> str | None:
                                         "keys": ["sap_id"],
                                         "attributes": ["plant_name", "region"],
                                         "description": "Plant dimension",
-                                        "status": "draft",
+                                        "status": "live",
                                     }
                                 ],
                                 "metrics": [
@@ -1387,7 +1507,7 @@ def semantic_suggest_apply(request: SemanticSuggestApplyRequest) -> SemanticSugg
             "measures": fact.get("measures", []),
             "dimensions": fact.get("dimensions", []),
             "description": fact.get("description"),
-            "status": fact.get("status", "draft"),
+            "status": fact.get("status", "live"),
         }
         _validate_fact_payload(fact_payload)
         fact_id = upsert_fact(
@@ -1416,7 +1536,7 @@ def semantic_suggest_apply(request: SemanticSuggestApplyRequest) -> SemanticSugg
             "keys": dim.get("keys", []),
             "attributes": dim.get("attributes", []),
             "description": dim.get("description"),
-            "status": dim.get("status", "draft"),
+            "status": dim.get("status", "live"),
         }
         _validate_dimension_payload(dim_payload)
         dimension_id = upsert_dimension(
@@ -1520,7 +1640,7 @@ def semantic_suggest_apply(request: SemanticSuggestApplyRequest) -> SemanticSugg
             name="AI Suggested Canvas",
             description="Auto-generated semantic model",
             root_node_id=None,
-            status="draft",
+            status="live",
             idempotency_key=request.idempotency_key,
             nodes=nodes,
             edges=edges,
@@ -2711,7 +2831,7 @@ def save_canvas(payload: CanvasSaveRequest) -> CanvasSaveResponse:
                     "keys": node_payload.get("keys", []),
                     "attributes": node_payload.get("attributes", []),
                     "description": node_payload.get("description"),
-                    "status": node_payload.get("status", "draft"),
+                    "status": node_payload.get("status", "live"),
                 },
             )
             for alias in (node_payload.get("name"), node_payload.get("dimension_id"), dimension_id):
@@ -2737,7 +2857,7 @@ def save_canvas(payload: CanvasSaveRequest) -> CanvasSaveResponse:
                     "measures": node_payload.get("measures", []),
                     "dimensions": node_payload.get("dimensions", []),
                     "description": node_payload.get("description"),
-                    "status": node_payload.get("status", "draft"),
+                    "status": node_payload.get("status", "live"),
                 },
             )
             for alias in (node_payload.get("table_name"), node_payload.get("fact_id"), fact_id):
@@ -2829,7 +2949,7 @@ def save_canvas(payload: CanvasSaveRequest) -> CanvasSaveResponse:
         name=payload.name,
         description=payload.description,
         root_node_id=payload.root_node_id,
-        status=payload.status or "draft",
+        status=payload.status or "live",
         idempotency_key=payload.idempotency_key,
         nodes=nodes,
         edges=edges,
@@ -2873,7 +2993,7 @@ def update_canvas(canvas_id: str, payload: CanvasSaveRequest) -> CanvasSaveRespo
                     "keys": node_payload.get("keys", []),
                     "attributes": node_payload.get("attributes", []),
                     "description": node_payload.get("description"),
-                    "status": node_payload.get("status", "draft"),
+                    "status": node_payload.get("status", "live"),
                 },
             )
             for alias in (node_payload.get("name"), node_payload.get("dimension_id"), dimension_id):
@@ -2899,7 +3019,7 @@ def update_canvas(canvas_id: str, payload: CanvasSaveRequest) -> CanvasSaveRespo
                     "measures": node_payload.get("measures", []),
                     "dimensions": node_payload.get("dimensions", []),
                     "description": node_payload.get("description"),
-                    "status": node_payload.get("status", "draft"),
+                    "status": node_payload.get("status", "live"),
                 },
             )
             for alias in (node_payload.get("table_name"), node_payload.get("fact_id"), fact_id):
@@ -2990,7 +3110,7 @@ def update_canvas(canvas_id: str, payload: CanvasSaveRequest) -> CanvasSaveRespo
         name=payload.name,
         description=payload.description,
         root_node_id=payload.root_node_id,
-        status=payload.status or "draft",
+        status=payload.status or "live",
         idempotency_key=payload.idempotency_key,
         nodes=nodes,
         edges=edges,
@@ -3370,7 +3490,7 @@ def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
                                         {
                                             "scaffold_id": "scaffold_123",
                                             "tables": ["lpg_plant_operations", "lpg_plant_operations_masters"],
-                                            "status": "draft",
+                                            "status": "live",
                                             "created_at": "2025-02-14T10:00:00Z",
                                         }
                                     ]
@@ -4028,7 +4148,7 @@ def scenarios(tenant_id: str, limit: int = 200, cursor: str | None = None) -> Sc
                                         "scenario_id": "scenario_001",
                                         "domain_id": "lpg_production_distribution",
                                         "name": "Plant Outage Simulation",
-                                        "status": "draft",
+                                        "status": "live",
                                     }
                                 },
                             }
@@ -4062,7 +4182,7 @@ def scenario_detail(scenario_id: str) -> dict:
                                 "tenant_id": "VC_101",
                                 "name": "Plant Outage Simulation",
                                 "description": "Simulate loss of production in a region",
-                                "status": "draft",
+                                "status": "live",
                             },
                         }
                     }
@@ -4076,7 +4196,7 @@ def scenario_detail(scenario_id: str) -> dict:
                         "examples": {
                             "created": {
                                 "summary": "Scenario created",
-                                "value": {"scenario_id": "scenario_001", "status": "draft"},
+                                "value": {"scenario_id": "scenario_001", "status": "live"},
                             }
                         }
                     }
@@ -4090,7 +4210,7 @@ def create_scenario_endpoint(payload: ScenarioCreateRequest) -> dict:
     payload_dict = payload.model_dump()
     payload_dict["domain_id"] = domain_id
     scenario_id = create_scenario(settings, payload_dict)
-    return {"scenario_id": scenario_id, "status": payload.status or "draft"}
+    return {"scenario_id": scenario_id, "status": payload.status or "live"}
 
 
 @app.patch(
@@ -5510,7 +5630,7 @@ def entities(
                                             ],
                                             "low_confidence_candidates": [],
                                             "low_confidence_threshold": 0.7,
-                                            "status": "draft",
+                                            "status": "live",
                                         }
                                     ]
                                 },
@@ -5538,6 +5658,175 @@ def entities_mappings(tenant_id: str, limit: int = 50) -> dict:
         limit=limit,
     )
     return {"runs": runs}
+
+
+@app.post(
+    "/agentic/runs",
+    tags=["agentic"],
+    summary="Start agentic run",
+    description="Start a multi-agent semantic build run.",
+)
+def start_agentic_run(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, payload.get("domain_id"))
+    if not payload.get("schema_payload"):
+        connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+        schema_payload = load_latest_scan_for_scope(
+            settings, tenant_id, domain_id, connection_id, database, schema
+        )
+        if not schema_payload:
+            raise HTTPException(status_code=400, detail="schema_payload is required")
+        payload["schema_payload"] = schema_payload
+        payload["schema_name"] = schema
+    run_id = create_agent_run(settings, tenant_id, domain_id, status="queued")
+    append_agent_run_event(
+        settings,
+        run_id,
+        "PlanningAgent",
+        "completed",
+        "Plan created",
+        {"steps": ["Scan schema", "Build semantics", "Create dashboards"]},
+    )
+    append_plan_summary(
+        settings,
+        run_id,
+        ["Scan schema", "Build semantics", "Create dashboards"],
+    )
+    initial_state = {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "schema_ids": payload.get("schema_ids") or [],
+        "context_text": payload.get("context_text"),
+        "schema_payload": payload.get("schema_payload") or {},
+        "schema_name": payload.get("schema_name") or "public",
+        "connection_id": payload.get("connection_id") or connection_id,
+        "database_name": payload.get("database") or database,
+    }
+    job = create_job(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        job_type="agentic_run",
+        payload={"run_id": run_id, "initial_state": initial_state},
+        idempotency_key=None,
+    )
+    update_agent_run_status(settings, run_id, "queued")
+    return {"run_id": run_id, "status": job.get("status", "queued"), "job_id": job.get("job_id")}
+
+
+@app.get(
+    "/agentic/runs/{run_id}",
+    tags=["agentic"],
+    summary="Get agentic run",
+    description="Return agentic run status.",
+)
+def get_agentic_run(run_id: str) -> dict:
+    run = get_agent_run(settings, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@app.get(
+    "/agentic/runs/{run_id}/events",
+    tags=["agentic"],
+    summary="List agentic run events",
+    description="Return agentic run progress events.",
+)
+def get_agentic_run_events(run_id: str, limit: int = 200) -> dict:
+    events = list_agent_run_events(settings, run_id, limit=limit)
+    return {"events": events}
+
+
+@app.get(
+    "/agentic/runs/{run_id}/stream",
+    tags=["agentic"],
+    summary="Stream agentic run events",
+    description="Server-sent events stream of agentic run progress.",
+)
+def agentic_run_stream(run_id: str):
+    from fastapi.responses import StreamingResponse
+
+    def _event_stream():
+        last_count = 0
+        while True:
+            events = list_agent_run_events(settings, run_id, limit=2000)
+            new_events = events[last_count:]
+            for event in new_events:
+                payload = json.dumps(event, default=str)
+                yield f"data: {payload}\n\n"
+            last_count = len(events)
+            time.sleep(1.0)
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
+
+
+@app.get(
+    "/agentic/runs/{run_id}/chat",
+    tags=["agentic"],
+    summary="List agentic run chat log",
+    description="Return stored chat/summary stream messages for a run.",
+)
+def get_agentic_run_chat(run_id: str, limit: int = 200) -> dict:
+    messages = list_agent_chat_log(settings, run_id, limit=limit)
+    return {"messages": messages}
+
+
+@app.get(
+    "/views",
+    response_model=ViewListResponse,
+    tags=["views"],
+    summary="List views",
+)
+def list_views_endpoint(tenant_id: str, domain_id: str | None = None) -> ViewListResponse:
+    views = list_registered_views(settings, tenant_id, domain_id)
+    payload = []
+    for view in views:
+        payload.append(
+            {
+                "view_name": view.get("view_name"),
+                "schema": view.get("schema_name"),
+                "type": "fact",
+                "source_table": view.get("source_table"),
+                "created_at": view.get("created_at"),
+            }
+        )
+    return ViewListResponse(views=payload)
+
+
+@app.get(
+    "/views/{view_name}/schema",
+    response_model=ViewSchemaResponse,
+    tags=["views"],
+    summary="Get view schema",
+)
+def view_schema_endpoint(view_name: str, tenant_id: str, schema: str | None = None) -> ViewSchemaResponse:
+    schema_name = schema or settings.db_schema
+    columns = load_view_schema(settings, schema_name, view_name)
+    return ViewSchemaResponse(view_name=view_name, schema=schema_name, columns=columns)
+
+
+@app.post(
+    "/views/query",
+    response_model=ViewQueryResponse,
+    tags=["views"],
+    summary="Run SQL query on views",
+)
+def views_query(request: ViewQueryRequest) -> ViewQueryResponse:
+    sql_text = request.sql.strip().rstrip(";")
+    if not sql_text.lower().startswith("select"):
+        raise HTTPException(status_code=400, detail="Only SELECT queries are allowed")
+    if "limit" not in sql_text.lower():
+        sql_text = f"{sql_text} LIMIT {request.limit}"
+    rows = run_query(settings, sql_text, [])
+    columns = list(rows[0].keys()) if rows else []
+    chart = {
+        "type": "table",
+        "payload": {"columns": columns},
+    }
+    return ViewQueryResponse(rows=rows, columns=columns, row_count=len(rows), chart=chart)
 
 
 @app.get(
@@ -5890,11 +6179,11 @@ def create_fact(payload: FactsUpsertRequest) -> dict:
             "measures": payload.measures,
             "dimensions": payload.dimensions,
             "description": payload.description,
-            "lifecycle_status": payload.status or "draft",
+            "lifecycle_status": payload.status or "live",
             "source_type": "user",
         },
     )
-    return {"fact_id": fact_id, "status": payload.status or "draft"}
+    return {"fact_id": fact_id, "status": payload.status or "live"}
 
 
 @app.get(
@@ -6124,11 +6413,11 @@ def create_dimension(payload: DimensionsUpsertRequest) -> dict:
             "keys": payload.keys,
             "attributes": payload.attributes,
             "description": payload.description,
-            "lifecycle_status": payload.status or "draft",
+            "lifecycle_status": payload.status or "live",
             "source_type": "user",
         },
     )
-    return {"dimension_id": dimension_id, "status": payload.status or "draft"}
+    return {"dimension_id": dimension_id, "status": payload.status or "live"}
 
 
 @app.get(
@@ -7643,7 +7932,7 @@ def _run_onboard_map(
                                     "connection_id": "conn_lpg",
                                     "database_name": "hpcl_ceg",
                                     "schema_name": "public",
-                                    "status": "draft",
+                                    "status": "live",
                                     "candidates": [],
                                 },
                             }
@@ -7692,7 +7981,7 @@ def onboard_map_latest(
         candidates=row.get("candidates") or [],
         low_confidence_candidates=row.get("low_confidence_candidates") or [],
         low_confidence_threshold=float(row.get("low_confidence_threshold") or LOW_CONFIDENCE_THRESHOLD),
-        status=row.get("status") or "draft",
+        status=row.get("status") or "live",
         created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
         updated_at=row.get("updated_at").isoformat() if row.get("updated_at") else None,
     )
@@ -7718,7 +8007,7 @@ def onboard_map_latest(
                                             "created_at": "2026-02-22T10:12:11Z",
                                             "candidates": 18,
                                             "low_confidence": 2,
-                                            "status": "draft",
+                                            "status": "live",
                                         }
                                     ]
                                 },
@@ -7860,7 +8149,7 @@ def onboard_map_agents(
                                     ],
                                     "low_confidence_candidates": [],
                                     "low_confidence_threshold": 0.7,
-                                    "status": "draft",
+                                    "status": "live",
                                 },
                             }
                         }
@@ -7898,7 +8187,7 @@ def onboard_map_get(mapping_id: str, tenant_id: str) -> OnboardMapRunResponse:
         candidates=row.get("candidates") or [],
         low_confidence_candidates=row.get("low_confidence_candidates") or [],
         low_confidence_threshold=float(row.get("low_confidence_threshold") or LOW_CONFIDENCE_THRESHOLD),
-        status=row.get("status") or "draft",
+        status=row.get("status") or "live",
         created_at=row.get("created_at").isoformat() if row.get("created_at") else None,
         updated_at=row.get("updated_at").isoformat() if row.get("updated_at") else None,
     )
@@ -7920,7 +8209,7 @@ def onboard_map_get(mapping_id: str, tenant_id: str) -> OnboardMapRunResponse:
                             "value": {
                                 "tenant_id": "VC_101",
                                 "selection_mode": "all",
-                                "status": "draft",
+                                "status": "live",
                                 "notes": "Apply from mapping run",
                             },
                         },
@@ -7936,7 +8225,7 @@ def onboard_map_get(mapping_id: str, tenant_id: str) -> OnboardMapRunResponse:
                                         "mapped_entity_type": "plant",
                                     }
                                 ],
-                                "status": "draft",
+                                "status": "live",
                                 "notes": "Apply selected only",
                             },
                         },
@@ -8692,6 +8981,7 @@ def _resolve_metrics(
     *,
     glossary: list[dict] | None = None,
     allowed_dimensions: list[str] | None = None,
+    domain_id: str | None = None,
 ) -> tuple[list[str], list[str], list[dict]]:
     if request.metrics:
         logger.info("request.metrics provided: %s", request.metrics)
@@ -8745,17 +9035,40 @@ def _resolve_metrics(
                 dimensions = resolved.get("dimensions", [])
                 filters = resolved.get("filters", [])
         else:
-            resolved = resolve_question(
-                request.question,
-                catalog,
-                settings,
-                glossary=glossary,
-                allowed_dimensions=allowed_dimensions,
-            )
-            logger.info("resolver output: %s", resolved)
-            metrics = resolved.get("metrics", [])
-            dimensions = resolved.get("dimensions", [])
-            filters = resolved.get("filters", [])
+            semantic_resolved = None
+            if domain_id and request.tenant_id:
+                try:
+                    semantic_resolved = resolve_question_semantic(
+                        settings,
+                        request.question,
+                        domain_id,
+                        allowed_dimensions=allowed_dimensions,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("resolver.semantic_graph failed: %s", exc)
+            if semantic_resolved and semantic_resolved.get("metrics"):
+                logger.info("resolver.semantic_graph | metrics=%s dimensions=%s matched=%s",
+                            semantic_resolved.get("metrics"),
+                            semantic_resolved.get("dimensions"),
+                            semantic_resolved.get("matched"))
+                metrics = semantic_resolved.get("metrics", [])
+                dimensions = semantic_resolved.get("dimensions", [])
+                filters = _deterministic_date_filters_from_question(
+                    request.question,
+                    allowed_dimensions,
+                )
+            else:
+                resolved = resolve_question(
+                    request.question,
+                    catalog,
+                    settings,
+                    glossary=glossary,
+                    allowed_dimensions=allowed_dimensions,
+                )
+                logger.info("resolver output: %s", resolved)
+                metrics = resolved.get("metrics", [])
+                dimensions = resolved.get("dimensions", [])
+                filters = resolved.get("filters", [])
         if allowed_dimensions:
             allowed_metrics_set = {m for m in catalog.metric_names()}
             if allowed_metrics_set:
@@ -8906,6 +9219,73 @@ def _normalize_filter_value(field: str, value: object) -> object:
         if cleaned.upper().startswith("FY "):
             return cleaned[3:].strip()
     return value
+
+
+def _infer_time_grain(dimensions: list[str]) -> str:
+    if "process_month" in dimensions:
+        return "month"
+    if "process_week" in dimensions:
+        return "week"
+    for dim in dimensions:
+        if dim in {"process_date", "pdate", "date_day", "date"}:
+            return "day"
+    return "none"
+
+
+def _build_rollup_query(
+    rollup: dict,
+    metric_name: str,
+    dimensions: list[str],
+    filters: list[dict],
+    order_desc: bool,
+    limit: int,
+) -> tuple[str, list[object]] | None:
+    rollup_dims = rollup.get("dimensions") or []
+    rollup_table = rollup.get("rollup_table")
+    if not rollup_table:
+        return None
+
+    # Ensure all filter fields are available in rollup
+    filter_fields = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        field = payload.get("field")
+        if field:
+            filter_fields.append(field)
+    if any(field not in rollup_dims for field in filter_fields):
+        return None
+
+    select_parts = []
+    for dim in dimensions:
+        select_parts.append(f"{rollup_table}.{dim} AS \"{dim}\"")
+    select_parts.append(f"{rollup_table}.\"{metric_name}\" AS \"{metric_name}\"")
+
+    where_parts: list[str] = []
+    params: list[object] = []
+    for flt in filters:
+        payload = flt if isinstance(flt, dict) else flt.model_dump()
+        field = payload.get("field")
+        operator = payload.get("operator")
+        value = payload.get("value")
+        if not field or field not in rollup_dims:
+            continue
+        if operator == "IN":
+            if not isinstance(value, (list, tuple)) or not value:
+                return None
+            placeholders = ",".join(["%s"] * len(value))
+            where_parts.append(f"{rollup_table}.{field} IN ({placeholders})")
+            params.extend(list(value))
+        else:
+            where_parts.append(f"{rollup_table}.{field} {operator} %s")
+            params.append(value)
+
+    where_clause = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    order_clause = f' ORDER BY "{metric_name}" {"DESC" if order_desc else "ASC"}'
+    sql = (
+        f"SELECT {', '.join(select_parts)} FROM {rollup_table}"
+        f"{where_clause}{order_clause} LIMIT {limit}"
+    )
+    return sql, params
 
 
 def _coerce_sbu_filters(filters: list[dict]) -> list[dict]:
@@ -9553,6 +9933,7 @@ def query(request: QueryRequest) -> QueryResult:
     row_count = None
     glossary = None
     contract = None
+    domain_id = None
     logger.info("query.start | tenant=%s domain=%s question=%s metric=%s metrics=%s dims=%s filters=%s limit=%s",
                 request.tenant_id, request.domain_id, request.question, request.metric, request.metrics,
                 request.dimensions, request.filters, request.limit)
@@ -9642,6 +10023,7 @@ def query(request: QueryRequest) -> QueryResult:
             request,
             glossary=glossary,
             allowed_dimensions=dimension_candidates,
+            domain_id=domain_id,
         )
     _log_step("resolve_metrics")
     logger.info("query.resolve_metrics | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
@@ -9678,6 +10060,21 @@ def query(request: QueryRequest) -> QueryResult:
     logger.info("query.coerced | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     logger.info("dimensions: %s", dimensions)
     logger.info("filters: %s", filters)
+    if request.question and request.tenant_id:
+        if domain_id is None:
+            domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+        try:
+            log_semantic_usage(
+                settings,
+                question=request.question,
+                tenant_id=request.tenant_id,
+                domain_id=domain_id,
+                metrics=metric_names,
+                dimensions=dimensions,
+                filters=filters,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("query.semantic_usage failed: %s", exc)
 
     if request.question and "sales volume" in request.question.lower() and not metric_names:
         metric_names = ["total_sales_volume_tmt"]
@@ -9887,6 +10284,107 @@ def query(request: QueryRequest) -> QueryResult:
     sort_desc = _infer_sort_desc(request.question)
     top_n = _extract_top_n(request.question)
     effective_limit = top_n if top_n else request.limit
+
+    rollup_used = False
+    rollup_sql = None
+    rollup_params: list[object] = []
+    rollup_rows: list[dict] | None = None
+    if request.tenant_id and domain_id and len(metrics) == 1:
+        time_grain = _infer_time_grain(dimensions)
+        rollup = find_matching_rollup(
+            settings,
+            tenant_id=request.tenant_id,
+            domain_id=domain_id,
+            metric_name=metrics[0].name,
+            dimensions=sorted(dimensions),
+            time_grain=time_grain,
+        )
+        if rollup:
+            rollup_table = f"{settings.db_schema}.{rollup.get('rollup_table')}"
+            rollup_sql_payload = _build_rollup_query(
+                {**rollup, "rollup_table": rollup_table},
+                metrics[0].name,
+                dimensions,
+                filters,
+                sort_desc,
+                effective_limit,
+            )
+            if rollup_sql_payload:
+                rollup_sql, rollup_params = rollup_sql_payload
+                try:
+                    rollup_rows = run_query(settings, rollup_sql, rollup_params)
+                    rollup_used = True
+                    sql_text = rollup_sql
+                    row_count = len(rollup_rows)
+                    logger.info(
+                        "query.rollup_hit | rollup_id=%s table=%s rows=%s",
+                        rollup.get("rollup_id"),
+                        rollup.get("rollup_table"),
+                        row_count,
+                    )
+                    _log_step("rollup_query")
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("query.rollup_failed | error=%s", exc)
+        else:
+            logger.info(
+                "query.rollup_miss | metric=%s dims=%s time_grain=%s",
+                metrics[0].name,
+                dimensions,
+                time_grain,
+            )
+
+    if rollup_used and rollup_rows is not None:
+        semantic_validation = _build_semantic_validation(metrics, contract)
+        lineage = _build_lineage(metrics)
+        chart_id = None
+        if request.question and request.tenant_id:
+            try:
+                query_payload = {
+                    "tenant_id": request.tenant_id,
+                    "domain_id": domain_id,
+                    "question": request.question,
+                    "metrics": [metric.name for metric in metrics],
+                    "dimensions": dimensions,
+                    "filters": [flt.model_dump() if hasattr(flt, "model_dump") else flt for flt in filters],
+                    "limit": request.limit,
+                }
+                chart_row = create_chart_request(
+                    settings,
+                    tenant_id=request.tenant_id,
+                    domain_id=domain_id,
+                    question=request.question,
+                    query_payload=query_payload,
+                    sql=rollup_sql,
+                    params=rollup_params,
+                    rows_json=rollup_rows,
+                )
+                create_chart_event(
+                    settings,
+                    chart_row["chart_id"],
+                    "queued",
+                    details={"question": request.question},
+                )
+                create_job(
+                    settings,
+                    tenant_id=request.tenant_id,
+                    domain_id=domain_id,
+                    job_type="chart_build",
+                    payload={"chart_id": chart_row["chart_id"]},
+                )
+                chart_id = chart_row["chart_id"]
+            except Exception:  # noqa: BLE001
+                logger.exception("chart enqueue failed")
+        return QueryResult(
+            metrics=[metric.name for metric in metrics],
+            dimensions=dimensions,
+            chart_id=chart_id,
+            sql=rollup_sql,
+            rows=rollup_rows,
+            by_company_sql=None,
+            by_company_rows=None,
+            semantic_validation=semantic_validation,
+            lineage=lineage,
+        )
     try:
         filter_dimensions = dict(catalog.dimensions)
         base_table = _infer_fact_table_from_metric_sql(metrics[0].sql)
@@ -10137,6 +10635,280 @@ def create_chart(request: ChartRequest) -> ChartStatusResponse:
         payload={"chart_id": chart_row["chart_id"], "query_payload": query_payload},
     )
     return ChartStatusResponse(chart_id=chart_row["chart_id"], status=chart_row.get("status", "queued"))
+
+
+@app.get(
+    "/rollups",
+    response_model=list[RollupResponse],
+    tags=["rollups"],
+    summary="List rollups",
+)
+def list_rollups_endpoint(tenant_id: str, domain_id: str | None = None) -> list[RollupResponse]:
+    return list_rollups(settings, tenant_id, domain_id)
+
+
+@app.post(
+    "/rollups",
+    response_model=RollupResponse,
+    tags=["rollups"],
+    summary="Create rollup",
+)
+def create_rollup_endpoint(request: RollupCreateRequest) -> RollupResponse:
+    domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+    rollup = create_rollup(
+        settings,
+        tenant_id=request.tenant_id,
+        domain_id=domain_id,
+        metric_name=request.metric_name,
+        dimensions=request.dimensions,
+        time_grain=request.time_grain,
+        filters=request.filters,
+    )
+    if request.build_now:
+        update_rollup_status(settings, rollup["rollup_id"], "building")
+        create_job(
+            settings,
+            tenant_id=request.tenant_id,
+            domain_id=domain_id,
+            job_type="rollup_build",
+            payload={"rollup_id": rollup["rollup_id"]},
+        )
+        rollup["status"] = "building"
+    return rollup
+
+
+@app.post(
+    "/rollups/{rollup_id}/refresh",
+    response_model=RollupRefreshResponse,
+    tags=["rollups"],
+    summary="Refresh rollup",
+)
+def refresh_rollup_endpoint(rollup_id: str, tenant_id: str) -> RollupRefreshResponse:
+    rollup = get_rollup(settings, rollup_id)
+    if not rollup or rollup.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=404, detail="Rollup not found")
+    update_rollup_status(settings, rollup_id, "refreshing")
+    create_job(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=rollup.get("domain_id"),
+        job_type="rollup_refresh",
+        payload={"rollup_id": rollup_id},
+    )
+    return RollupRefreshResponse(rollup_id=rollup_id, status="refreshing")
+
+
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    tags=["chat"],
+    summary="Chat-style query",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "sync": {
+                            "summary": "Sync chat",
+                            "value": {
+                                "question": "What is total LPG production by plant last week?",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "mode": "sync",
+                            },
+                        },
+                        "async": {
+                            "summary": "Async chat",
+                            "value": {
+                                "question": "What is total LPG production by plant last week?",
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "mode": "async",
+                            },
+                        },
+                    }
+                }
+            }
+        }
+    },
+)
+def chat_query(request: ChatRequest) -> ChatResponse:
+    mode = (request.mode or "sync").lower()
+    request_payload = {
+        "question": request.question,
+        "tenant_id": request.tenant_id,
+        "domain_id": request.domain_id,
+        "metrics": request.metrics,
+        "dimensions": request.dimensions,
+        "filters": [flt.model_dump() for flt in request.filters],
+        "limit": request.limit,
+        "explain": request.explain,
+    }
+    if mode == "async":
+        chat_row = create_chat_request(
+            settings,
+            tenant_id=request.tenant_id,
+            domain_id=request.domain_id,
+            question=request.question,
+            request_payload=request_payload,
+        )
+        create_job(
+            settings,
+            tenant_id=request.tenant_id,
+            domain_id=request.domain_id,
+            job_type="chat_build",
+            payload={"chat_id": chat_row["chat_id"]},
+        )
+        return ChatResponse(chat_id=chat_row["chat_id"], status=chat_row.get("status", "queued"))
+
+    query_result = query(
+        QueryRequest(
+            question=request.question,
+            tenant_id=request.tenant_id,
+            domain_id=request.domain_id,
+            metrics=request.metrics,
+            dimensions=request.dimensions,
+            filters=request.filters,
+            limit=request.limit,
+            explain=request.explain,
+        )
+    )
+    chart_payload = None
+    chart_type = None
+    if query_result.rows and query_result.metrics:
+        chart_type = infer_chart_type(query_result.dimensions, query_result.rows, query_result.metrics)
+        if chart_type:
+            chart_payload = build_chart_payload(
+                chart_type,
+                query_result.rows,
+                query_result.metrics[0],
+                query_result.dimensions,
+            )
+    response_payload = {
+        "metrics": query_result.metrics,
+        "dimensions": query_result.dimensions,
+        "chart_id": query_result.chart_id,
+        "chart_type": chart_type,
+        "chart_payload": chart_payload.get("chart_payload") if chart_payload else None,
+        "data": chart_payload.get("data") if chart_payload else None,
+        "sql": query_result.sql,
+        "rows": query_result.rows,
+    }
+    return ChatResponse(chat_id=None, status="complete", response=response_payload)
+
+
+@app.get(
+    "/chat/{chat_id}",
+    response_model=ChatResponse,
+    tags=["chat"],
+    summary="Get chat response",
+)
+def get_chat(chat_id: str) -> ChatResponse:
+    row = get_chat_request(settings, chat_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Chat request not found")
+    return ChatResponse(
+        chat_id=row["chat_id"],
+        status=row.get("status", "queued"),
+        response=row.get("response_payload"),
+        error_message=row.get("error_message"),
+    )
+
+
+@app.get(
+    "/chat/{chat_id}/events",
+    tags=["chat"],
+    summary="List chat events",
+)
+def get_chat_events(chat_id: str, limit: int = 200) -> dict:
+    events = list_chat_events(settings, chat_id, limit=limit)
+    return {"events": events}
+
+
+@app.get(
+    "/chat/{chat_id}/stream",
+    tags=["chat"],
+    summary="Stream chat events",
+)
+def chat_stream(chat_id: str):
+    from fastapi.responses import StreamingResponse
+
+    def _event_stream():
+        last_count = 0
+        while True:
+            events = list_chat_events(settings, chat_id, limit=2000)
+            new_events = events[last_count:]
+            for event in new_events:
+                payload = json.dumps(event, default=str)
+                yield f"data: {payload}\n\n"
+            last_count = len(events)
+            time.sleep(1.0)
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
+
+
+@app.post(
+    "/semantic/feedback",
+    response_model=SemanticFeedbackResponse,
+    tags=["governance"],
+    summary="Submit semantic feedback",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "confirm": {
+                            "summary": "Confirm edge",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "edge_id": "edge_123",
+                                "action": "confirm",
+                                "delta_confidence": 0.1,
+                                "notes": "Correct mapping for plant -> sap_id",
+                            },
+                        },
+                        "reject": {
+                            "summary": "Reject edge",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "edge_id": "edge_456",
+                                "action": "reject",
+                                "delta_confidence": -0.3,
+                                "notes": "Incorrect synonym mapping",
+                            },
+                        },
+                    }
+                }
+            }
+        }
+    },
+)
+def semantic_feedback(payload: SemanticFeedbackRequest) -> SemanticFeedbackResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    record = create_semantic_feedback(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        edge_id=payload.edge_id,
+        action=payload.action,
+        delta_confidence=payload.delta_confidence,
+        notes=payload.notes,
+    )
+    apply_semantic_feedback(settings, payload.edge_id, payload.delta_confidence)
+    return SemanticFeedbackResponse(**record)
+
+
+@app.get(
+    "/semantic/feedback",
+    response_model=list[SemanticFeedbackResponse],
+    tags=["governance"],
+    summary="List semantic feedback",
+)
+def list_semantic_feedback_endpoint(tenant_id: str, domain_id: str | None = None) -> list[SemanticFeedbackResponse]:
+    rows = list_semantic_feedback(settings, tenant_id, domain_id)
+    return [SemanticFeedbackResponse(**row) for row in rows]
 
 
 @app.get(

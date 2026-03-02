@@ -68,7 +68,7 @@ rm -rf dbt/models/example
 
 ## 4) Align staging models with actual raw columns
 
-Why: the raw tables use column names that differ from the initial draft
+Why: the raw tables use column names that differ from the initial live
 models (e.g., `SBU_Name` vs `SBU`). Mismatched columns cause model failures.
 The official column definitions are in `artifacts/HPCL- Sales Schema and Parameters.pdf`.
 

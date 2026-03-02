@@ -326,7 +326,7 @@ The merged output is what `/context/apply` consumes.
 
 ---
 
-## 7.1 Merge Utility (Implementation Draft)
+## 7.1 Merge Utility (Implementation Live)
 
 Proposed module:
 `services/ai/context_merge.py`

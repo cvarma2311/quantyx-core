@@ -35,7 +35,7 @@ Files:
 - `models/auto/dim_<name>.sql`
 - `models/auto/schema.yml` (sources, columns, tests, descriptions)
 
-All outputs are marked **draft** until reviewed.
+All outputs are marked **live** until reviewed.
 
 ---
 
@@ -90,8 +90,8 @@ Response:
   "status": "generated",
   "scaffold_id": "scaffold_123",
   "models": [
-    {"name": "fact_sales", "path": "models/auto/fact_sales.sql", "status": "draft"},
-    {"name": "dim_customer", "path": "models/auto/dim_customer.sql", "status": "draft"}
+    {"name": "fact_sales", "path": "models/auto/fact_sales.sql", "status": "live"},
+    {"name": "dim_customer", "path": "models/auto/dim_customer.sql", "status": "live"}
   ]
 }
 ```
@@ -100,14 +100,14 @@ Response:
 
 `GET /dbt/scaffold?tenant_id=...&domain_id=...`
 
-Returns generated models + status (draft/reviewed/applied).
+Returns generated models + status (live/reviewed/applied).
 
 ### 4.4 Review/update scaffold
 
 `PATCH /dbt/scaffold/{scaffold_id}`
 
 Fields:
-- `status`: draft → reviewed → applied
+- `status`: live → reviewed → applied
 - `notes`: review comments
 - `sql` or `schema_yaml` edits
 
@@ -121,8 +121,8 @@ Writes reviewed content into the tenant dbt project and re-runs compile.
 
 ## 5) Human review gates
 
-- All generated models start with `status = "draft"`.
-- `dbt compile` runs but outputs are marked `draft` in metadata.
+- All generated models start with `status = "live"`.
+- `dbt compile` runs but outputs are marked `live` in metadata.
 - Only after manual review (`PATCH` → status=reviewed) can the scaffold be applied.
 - `apply` step records reviewer and timestamp.
 
@@ -141,7 +141,7 @@ Columns:
 - schema
 - tables (jsonb)
 - context_id (optional)
-- status (draft/reviewed/applied)
+- status (live/reviewed/applied)
 - payload (jsonb: models + yaml + review checklist)
 - created_at, updated_at
 
@@ -151,7 +151,7 @@ Columns:
 
 - Scan triggers auto-scaffold generation into tenant dbt project.
 - Generated models are stored in DB and written to disk.
-- All outputs are marked `draft` until explicitly reviewed.
+- All outputs are marked `live` until explicitly reviewed.
 - Review/update/apply APIs function end-to-end.
 - `/dbt/manifest/generate` uses reviewed models only.
 
@@ -162,4 +162,4 @@ Columns:
 - LLM output may be incorrect → enforce review.
 - Joins and grains must be validated by humans.
 - Do not auto-run dbt `run` for generated models.
-*** End Patch다면 code its correct? and update phase readme? Wait I added not update README. need update README to include Phase P. We'll patch. Also need update to include in docs? user asked "Once md file is written and implemented we need to have onboarding_demo.py updated with this flow added and also all the documentation is updated along wiht ht eswagger, request and responses" They asked to draft complete details phase P in documentation; we should create md. But also update README to include Phase P. Let's patch README. Don't implement yet? The user asked to draft phase P. We should update phase README listing and maybe mention? We'll update docs/implementation_plans/README.md. Let's patch. We'll add Phase P after O. Also update maybe V2_API? But user asked now only draft doc. We'll do minimal now? Let's obey: "draft complete end to end details of phase p in documentation" - done. Might update README. Let's patch. We'll use apply_patch. We'll also not implement. We'll respond with doc created and updated list. Let's patch README. We'll do apply_patch. We'll ensure proper patch. Let's proceed. 
+*** End Patch다면 code its correct? and update phase readme? Wait I added not update README. need update README to include Phase P. We'll patch. Also need update to include in docs? user asked "Once md file is written and implemented we need to have onboarding_demo.py updated with this flow added and also all the documentation is updated along wiht ht eswagger, request and responses" They asked to live complete details phase P in documentation; we should create md. But also update README to include Phase P. Let's patch README. Don't implement yet? The user asked to live phase P. We should update phase README listing and maybe mention? We'll update docs/implementation_plans/README.md. Let's patch. We'll add Phase P after O. Also update maybe V2_API? But user asked now only live doc. We'll do minimal now? Let's obey: "live complete end to end details of phase p in documentation" - done. Might update README. Let's patch. We'll use apply_patch. We'll also not implement. We'll respond with doc created and updated list. Let's patch README. We'll do apply_patch. We'll ensure proper patch. Let's proceed. 

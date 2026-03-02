@@ -49,7 +49,7 @@ Request:
   "domain_id": "manufacturing",
   "selection_mode": "all",
   "candidates": [],
-  "status": "draft",
+  "status": "live",
   "notes": "Initial apply from mapping run"
 }
 ```
@@ -62,7 +62,7 @@ Request fields:
   - `table`
   - `column`
   - `mapped_entity_type`
-- `status` (optional): `draft` (default) or `reviewed`
+- `status` (optional): `live` (default) or `reviewed`
 - `notes` (optional): audit note
 
 Response:
@@ -72,7 +72,7 @@ Response:
   "mapping_id": "map_ab12cd34",
   "applied_count": 8,
   "skipped_count": 2,
-  "status": "draft",
+  "status": "live",
   "review_id": "review_123",
   "mapping_status": "partially_applied"
 }
@@ -109,7 +109,7 @@ Response:
   "candidates": [],
   "low_confidence_candidates": [],
   "low_confidence_threshold": 0.7,
-  "status": "draft",
+  "status": "live",
   "created_at": "2026-02-18T10:00:00Z"
 }
 ```
@@ -122,11 +122,11 @@ Response:
 
 ```sql
 ALTER TABLE public.quantyx_entity_mappings
-  ALTER COLUMN status SET DEFAULT 'draft';
+  ALTER COLUMN status SET DEFAULT 'live';
 ```
 
 Allowed status values (application-enforced):
-- `draft`
+- `live`
 - `applied`
 - `partially_applied`
 - `archived`
@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS public.quantyx_mapping_apply_events (
   selection_mode TEXT NOT NULL,
   applied_count INTEGER NOT NULL DEFAULT 0,
   skipped_count INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'draft',
+  status TEXT NOT NULL DEFAULT 'live',
   notes TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

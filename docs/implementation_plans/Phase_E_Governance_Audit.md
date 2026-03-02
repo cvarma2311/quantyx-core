@@ -20,7 +20,7 @@ Goal: implement lineage and audit for explainability.
 
 4) **Metric registry (optional)**
    - `public.quantyx_metrics_registry` table
-   - Stores lifecycle status: suggested/draft/certified/deprecated
+   - Stores lifecycle status: suggested/live/certified/deprecated
 
 ## Database prerequisites
 - Run `artifacts/quantyx_tables.sql` to create `public.quantyx_query_audit` and

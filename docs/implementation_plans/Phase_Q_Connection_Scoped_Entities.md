@@ -33,7 +33,7 @@ This phase updates:
    - All writes must persist to DB tables, scoped by tenant + connection.
 
 5) **Review workflow**
-   - Draft → reviewed → applied status for each section.
+   - Live → reviewed → applied status for each section.
    - Review artifacts stored in DB for audit.
 
 ---
@@ -82,7 +82,7 @@ Response (grouped by connection scope):
 
 Notes:
 - Store results in `quantyx_entity_mappings` (new table).
-- Status defaults to `draft`.
+- Status defaults to `live`.
 
 #### GET /entities (connection-scoped)
 
@@ -289,7 +289,7 @@ Response:
       "table_name": "fact_sales",
       "grain": "day",
       "time_column": "sales_date",
-      "status": "draft"
+      "status": "live"
     }
   ]
 }
@@ -309,7 +309,7 @@ Response:
     {
       "dimension_id": "dim_123",
       "table_name": "dim_customer",
-      "status": "draft"
+      "status": "live"
     }
   ]
 }
@@ -331,7 +331,7 @@ Response:
       "database": "prod_warehouse",
       "schema": "public",
       "facts": [
-        { "fact_id": "fact_123", "table_name": "fact_sales", "status": "draft" }
+        { "fact_id": "fact_123", "table_name": "fact_sales", "status": "live" }
       ]
     }
   ]
@@ -354,7 +354,7 @@ Response:
       "database": "prod_warehouse",
       "schema": "public",
       "dimensions": [
-        { "dimension_id": "dim_123", "table_name": "dim_customer", "status": "draft" }
+        { "dimension_id": "dim_123", "table_name": "dim_customer", "status": "live" }
       ]
     }
   ]
@@ -639,7 +639,7 @@ Response:
       "name": "sales_org",
       "levels": ["zone", "region", "sales_area"],
       "description": "Sales rollup",
-      "status": "draft"
+      "status": "live"
     }
   ],
   "facts": [
@@ -649,7 +649,7 @@ Response:
       "grain": "day",
       "time_column": "sales_date",
       "payload": { "measures": ["sales_amount"], "dimensions": ["sales_area_name"] },
-      "status": "draft"
+      "status": "live"
     }
   ],
   "dimensions": [
@@ -756,7 +756,7 @@ CREATE TABLE IF NOT EXISTS public.quantyx_facts_registry (
   table_name TEXT NOT NULL,
   time_column TEXT NULL,
   grain TEXT NULL,
-  status TEXT NOT NULL DEFAULT 'draft',
+  status TEXT NOT NULL DEFAULT 'live',
   payload JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -770,7 +770,7 @@ CREATE TABLE IF NOT EXISTS public.quantyx_dimensions_registry (
   database_name TEXT NOT NULL,
   schema_name TEXT NOT NULL,
   table_name TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'draft',
+  status TEXT NOT NULL DEFAULT 'live',
   payload JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()

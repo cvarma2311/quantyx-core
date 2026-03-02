@@ -77,7 +77,7 @@ Response (aligned with Phase V payloads):
       "measures": ["volume_tmt"],
       "dimensions": ["plant_id", "product_id"],
       "description": "Daily dispatch fact",
-      "status": "draft"
+      "status": "live"
     }
   ],
   "dimensions": [
@@ -86,7 +86,7 @@ Response (aligned with Phase V payloads):
       "keys": ["plant_id"],
       "attributes": ["plant_name", "region_name"],
       "description": "Plant dimension",
-      "status": "draft"
+      "status": "live"
     }
   ],
   "metrics": [
@@ -129,7 +129,7 @@ Request (aligned with Phase V payloads):
       "measures": ["volume_tmt"],
       "dimensions": ["plant_id", "product_id"],
       "description": "Daily dispatch fact",
-      "status": "draft"
+      "status": "live"
     }
   ],
   "dimensions": [
@@ -138,7 +138,7 @@ Request (aligned with Phase V payloads):
       "keys": ["plant_id"],
       "attributes": ["plant_name", "region_name"],
       "description": "Plant dimension",
-      "status": "draft"
+      "status": "live"
     }
   ],
   "metrics": [

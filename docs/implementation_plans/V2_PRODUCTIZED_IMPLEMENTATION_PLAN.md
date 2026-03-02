@@ -20,7 +20,7 @@ Missing or incomplete:
 - Industry pack infrastructure (ontology + templates + policies)
 - Onboarding pipeline (scan → map → generate → suggest → certify)
 - API endpoints in `V2_API.md` beyond Ask/Query
-- Metric lifecycle management (suggested/draft/certified)
+- Metric lifecycle management (suggested/live/certified)
 - Governance endpoints (lineage, audit)
 - Scenario and decision endpoints
 
@@ -40,7 +40,7 @@ Deliverables:
    - Load entity types + hierarchies from pack
 
 3) **Metric lifecycle registry**
-   - Table or YAML registry with status: suggested/draft/certified/deprecated
+   - Table or YAML registry with status: suggested/live/certified/deprecated
    - API to list by status
 
 4) **Doc updates**

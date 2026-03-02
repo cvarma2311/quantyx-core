@@ -270,7 +270,7 @@ CREATE TABLE IF NOT EXISTS public.quantyx_canvases (
   description TEXT NULL,
   graph_json JSONB NOT NULL,
   root_node_id TEXT NULL,
-  status TEXT NOT NULL DEFAULT 'draft',
+  status TEXT NOT NULL DEFAULT 'live',
   idempotency_key TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -326,7 +326,7 @@ ALTER TABLE public.quantyx_entity_overrides
   ADD COLUMN IF NOT EXISTS artifact_key TEXT,
   ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
   ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
-  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'live',
   ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
   ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
   ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
@@ -352,7 +352,7 @@ ALTER TABLE public.quantyx_hierarchy_overrides
   ADD COLUMN IF NOT EXISTS artifact_key TEXT,
   ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
   ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
-  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'live',
   ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
   ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
   ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
@@ -378,7 +378,7 @@ ALTER TABLE public.quantyx_facts_registry
   ADD COLUMN IF NOT EXISTS artifact_key TEXT,
   ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
   ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
-  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'live',
   ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
   ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
   ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
@@ -393,7 +393,7 @@ UPDATE public.quantyx_facts_registry
   WHERE artifact_key IS NULL;
 
 UPDATE public.quantyx_facts_registry
-  SET lifecycle_status = COALESCE(lifecycle_status, 'draft')
+  SET lifecycle_status = COALESCE(lifecycle_status, 'live')
   WHERE lifecycle_status IS NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_facts_registry_current
@@ -407,7 +407,7 @@ ALTER TABLE public.quantyx_dimensions_registry
   ADD COLUMN IF NOT EXISTS artifact_key TEXT,
   ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
   ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
-  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'live',
   ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
   ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
   ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
@@ -422,7 +422,7 @@ UPDATE public.quantyx_dimensions_registry
   WHERE artifact_key IS NULL;
 
 UPDATE public.quantyx_dimensions_registry
-  SET lifecycle_status = COALESCE(lifecycle_status, 'draft')
+  SET lifecycle_status = COALESCE(lifecycle_status, 'live')
   WHERE lifecycle_status IS NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_dimensions_registry_current

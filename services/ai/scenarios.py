@@ -51,7 +51,7 @@ def create_scenario(settings: Settings, payload: dict[str, Any]) -> str:
         payload.get("domain_id"),
         payload.get("name"),
         payload.get("description"),
-        payload.get("status", "draft"),
+        payload.get("status", "live"),
         payload.get("is_baseline", False),
         payload.get("created_by"),
     ]

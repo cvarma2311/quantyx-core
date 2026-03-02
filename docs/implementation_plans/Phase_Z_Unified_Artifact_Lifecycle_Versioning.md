@@ -29,7 +29,7 @@ Out of scope:
 - Lifecycle values (minimum):
   - `inferred`
   - `suggested`
-  - `draft`
+  - `live`
   - `reviewed`
   - `certified`
   - `deprecated`
@@ -57,7 +57,7 @@ Add to each registry table:
 - `artifact_key TEXT NOT NULL` (stable logical key inside scope)
 - `version_no INTEGER NOT NULL DEFAULT 1`
 - `is_current BOOLEAN NOT NULL DEFAULT true`
-- `lifecycle_status TEXT NOT NULL DEFAULT 'draft'`
+- `lifecycle_status TEXT NOT NULL DEFAULT 'live'`
 - `source_type TEXT NOT NULL DEFAULT 'system'` (`rule|llm|user|system`)
 - `source_run_id TEXT NULL` (job id / mapping run id / extraction id)
 - `change_reason TEXT NULL`
@@ -109,7 +109,7 @@ ALTER TABLE public.quantyx_entity_overrides
   ADD COLUMN IF NOT EXISTS artifact_key TEXT,
   ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1,
   ADD COLUMN IF NOT EXISTS is_current BOOLEAN NOT NULL DEFAULT true,
-  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'live',
   ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
   ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
   ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
@@ -223,11 +223,11 @@ Behavior:
     - `source_run_id=<mapping_id or job_id>`
     - `source_type='rule'|'llm'`
 - `/onboard/map/{mapping_id}/apply`:
-  - transition selected inferred entities to `draft`/`reviewed` by versioned writes.
+  - transition selected inferred entities to `live`/`reviewed` by versioned writes.
 
 ### Facts/Dimensions
 - `/onboard/infer-models` and async variant:
-  - write rows with `lifecycle_status='draft'`, `source_type='rule'|'llm'`, `source_run_id=job_id`.
+  - write rows with `lifecycle_status='live'`, `source_type='rule'|'llm'`, `source_run_id=job_id`.
 
 ### Metrics
 - `/metrics/suggested` and async variant:
@@ -251,9 +251,9 @@ Add version endpoints:
 ## Phase Z.D: Review + promotion workflow
 
 Promotion transitions (app-enforced):
-- inferred -> draft
-- suggested -> draft
-- draft -> reviewed
+- inferred -> live
+- suggested -> live
+- live -> reviewed
 - reviewed -> certified
 - certified -> deprecated
 - deprecated -> archived
@@ -278,7 +278,7 @@ Required additions:
 
 Optional controls:
 - `include_versions=false` default
-- `statuses=inferred,draft,reviewed,...`
+- `statuses=inferred,live,reviewed,...`
 - `source_run_id=...` for trace filtering
 
 Hard cutover policy:

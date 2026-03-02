@@ -21,7 +21,7 @@ Goal: introduce industry pack structure and prerequisites for any domain.
 
 3) **Metric lifecycle registry**
    - Registry table or YAML store
-   - Metric status: suggested/draft/certified/deprecated
+   - Metric status: suggested/live/certified/deprecated
 
 4) **Doc updates**
    - Add industry pack checklist appendix

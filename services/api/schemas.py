@@ -67,6 +67,34 @@ class QueryRequest(BaseModel):
     }
 
 
+class ChatRequest(BaseModel):
+    question: str = Field(..., description="Natural language question")
+    tenant_id: str = Field(..., description="Tenant identifier")
+    domain_id: Optional[str] = Field(None, description="Domain identifier")
+    metrics: Optional[List[str]] = Field(None, description="Metric names to query")
+    dimensions: List[str] = Field(default_factory=list, description="Dimensions to group by")
+    filters: List[QueryFilter] = Field(default_factory=list, description="Filters to apply")
+    limit: int = Field(200, ge=1, le=1000, description="Row limit")
+    explain: bool = Field(False, description="Include SQL details")
+    mode: str = Field("sync", description="sync or async", examples=["sync", "async"])
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "question": "What is total LPG production by plant last week?",
+                "tenant_id": "VC_101",
+                "domain_id": "lpg_production_distribution",
+                "mode": "sync",
+            }
+        }
+    }
+
+
+class ChatResponse(BaseModel):
+    chat_id: Optional[str] = None
+    status: str
+    response: Optional[dict] = None
+    error_message: Optional[str] = None
+
 class QueryResult(BaseModel):
     metrics: List[str] = Field(examples=[["total_sales_volume_tmt"]])
     dimensions: List[str] = Field(examples=[["sales_area_name", "fiscal_year"]])
@@ -146,6 +174,84 @@ class ChartStatusResponse(BaseModel):
     params: Optional[List[Any]] = None
     rows_json: Optional[List[dict]] = None
     error_message: Optional[str] = None
+
+
+class RollupCreateRequest(BaseModel):
+    tenant_id: str = Field(..., description="Tenant identifier")
+    domain_id: Optional[str] = Field(None, description="Domain identifier")
+    metric_name: str = Field(..., description="Metric name to roll up")
+    dimensions: List[str] = Field(default_factory=list, description="Dimensions to group by")
+    time_grain: str = Field(
+        "none",
+        description="Rollup time grain. Use 'none' if no time dimension.",
+        examples=["none", "day", "week", "month"],
+    )
+    filters: Optional[List[dict]] = Field(None, description="Optional filters for the rollup")
+    build_now: bool = Field(True, description="Build rollup table immediately")
+
+
+class RollupResponse(BaseModel):
+    rollup_id: str
+    tenant_id: str
+    domain_id: str
+    base_model: str
+    metric_name: str
+    dimensions: List[str]
+    time_grain: str
+    filters: Optional[List[dict]] = None
+    rollup_table: str
+    status: str
+
+
+class RollupRefreshResponse(BaseModel):
+    rollup_id: str
+    status: str
+
+
+class SemanticFeedbackRequest(BaseModel):
+    tenant_id: str = Field(..., description="Tenant identifier")
+    domain_id: Optional[str] = Field(None, description="Domain identifier")
+    edge_id: str = Field(..., description="Semantic edge identifier")
+    action: str = Field(..., description="confirm|reject|correct")
+    delta_confidence: Optional[float] = Field(
+        None,
+        description="Confidence delta to apply to edge",
+        examples=[0.1, -0.2],
+    )
+    notes: Optional[str] = Field(None, description="Optional feedback notes")
+
+
+class SemanticFeedbackResponse(BaseModel):
+    feedback_id: str
+    tenant_id: str
+    domain_id: str
+    edge_id: str
+    action: str
+    delta_confidence: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class ViewListResponse(BaseModel):
+    views: List[dict]
+
+
+class ViewSchemaResponse(BaseModel):
+    view_name: str
+    schema: str
+    columns: List[dict]
+
+
+class ViewQueryRequest(BaseModel):
+    tenant_id: str
+    sql: str
+    limit: int = Field(200, ge=1, le=1000, description="Row limit")
+
+
+class ViewQueryResponse(BaseModel):
+    rows: List[dict]
+    columns: List[str]
+    row_count: int
+    chart: Optional[dict] = None
 
 
 class TenantCreateRequest(BaseModel):
@@ -477,7 +583,7 @@ class FactsUpsertRequest(BaseModel):
     measures: List[str] = Field(default_factory=list, examples=[["sales_amount", "sales_tmt"]])
     dimensions: List[str] = Field(default_factory=list, examples=[["sales_area_name"]])
     description: str | None = Field(None, examples=["Daily sales fact"])
-    status: str | None = Field("draft", examples=["reviewed"])
+    status: str | None = Field("live", examples=["reviewed"])
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -487,7 +593,7 @@ class FactsUpsertRequest(BaseModel):
                 "time_column": "sales_date",
                 "measures": ["sales_amount", "sales_tmt"],
                 "dimensions": ["sales_area_name"],
-                "status": "draft",
+                "status": "live",
             }
         }
     }
@@ -514,7 +620,7 @@ class FactsResponse(BaseModel):
                     "time_column": "sales_date",
                     "measures": ["sales_amount"],
                     "dimensions": ["sales_area_name"],
-                    "status": "draft",
+                    "status": "live",
                 }
             ]
         ]
@@ -540,7 +646,7 @@ class DimensionsUpsertRequest(BaseModel):
     keys: List[str] = Field(default_factory=list, examples=[["customer_id"]])
     attributes: List[str] = Field(default_factory=list, examples=[["customer_name", "region_name"]])
     description: str | None = Field(None, examples=["Customer dimension"])
-    status: str | None = Field("draft", examples=["reviewed"])
+    status: str | None = Field("live", examples=["reviewed"])
 
 
 class DimensionsPatchRequest(BaseModel):
@@ -560,7 +666,7 @@ class DimensionsResponse(BaseModel):
                     "name": "dim_customer",
                     "keys": ["customer_id"],
                     "attributes": ["customer_name"],
-                    "status": "draft",
+                    "status": "live",
                 }
             ]
         ]
@@ -903,7 +1009,7 @@ class ScenarioCreateRequest(BaseModel):
     domain_id: str | None = Field(None, examples=["energy_distribution"])
     name: str = Field(..., examples=["Distribution Disruption"])
     description: str | None = Field(None, examples=["Simulate loss of supply in Zone A"])
-    status: str | None = Field("draft", examples=["draft"])
+    status: str | None = Field("live", examples=["live"])
     is_baseline: bool | None = Field(False, examples=[False])
     created_by: str | None = Field(None, examples=["planner@company.com"])
     model_config = {
@@ -913,7 +1019,7 @@ class ScenarioCreateRequest(BaseModel):
                 "tenant_id": "tenant_a",
                 "name": "Distribution Disruption",
                 "description": "Simulate loss of supply in Zone A",
-                "status": "draft",
+                "status": "live",
             }
         }
     }
@@ -1125,7 +1231,7 @@ class OnboardMapApplyRequest(BaseModel):
     domain_id: str | None = Field(None, examples=["manufacturing"])
     selection_mode: MappingApplySelectionMode = Field(MappingApplySelectionMode.all)
     candidates: List[MappingCandidateSelection] = Field(default_factory=list)
-    status: str = Field("draft", examples=["draft"])
+    status: str = Field("live", examples=["live"])
     notes: str | None = Field(None, examples=["Initial apply from mapping run"])
     model_config = {
         "json_schema_extra": {
@@ -1133,7 +1239,7 @@ class OnboardMapApplyRequest(BaseModel):
                 "tenant_id": "tenant_a",
                 "selection_mode": "all",
                 "candidates": [],
-                "status": "draft",
+                "status": "live",
                 "notes": "Initial apply from mapping run",
             }
         }
@@ -1145,7 +1251,7 @@ class OnboardMapApplyResponse(BaseModel):
     mapping_id: str = Field(..., examples=["map_ab12cd34"])
     applied_count: int = Field(..., examples=[8])
     skipped_count: int = Field(..., examples=[2])
-    status: str = Field(..., examples=["draft"])
+    status: str = Field(..., examples=["live"])
     review_id: str | None = Field(None, examples=["review_123"])
     mapping_status: str = Field(..., examples=["applied"])
 
@@ -1161,7 +1267,7 @@ class OnboardMapRunResponse(BaseModel):
     candidates: List[dict] = Field(default_factory=list)
     low_confidence_candidates: List[dict] = Field(default_factory=list)
     low_confidence_threshold: float = Field(0.7, examples=[0.7])
-    status: str = Field("draft", examples=["draft"])
+    status: str = Field("live", examples=["live"])
     created_at: str | None = Field(None, examples=["2026-02-18T10:00:00Z"])
     updated_at: str | None = Field(None, examples=["2026-02-18T10:05:00Z"])
 
@@ -1943,8 +2049,8 @@ class DbtScaffoldResponse(BaseModel):
     models: List[dict] = Field(
         examples=[
             [
-                {"name": "fact_sales", "path": "models/auto/fact_sales.sql", "status": "draft"},
-                {"name": "dim_customer", "path": "models/auto/dim_customer.sql", "status": "draft"},
+                {"name": "fact_sales", "path": "models/auto/fact_sales.sql", "status": "live"},
+                {"name": "dim_customer", "path": "models/auto/dim_customer.sql", "status": "live"},
             ]
         ]
     )
@@ -1954,8 +2060,8 @@ class DbtScaffoldResponse(BaseModel):
                 "status": "generated",
                 "scaffold_id": "scaffold_123",
                 "models": [
-                    {"name": "fact_sales", "path": "models/auto/fact_sales.sql", "status": "draft"},
-                    {"name": "dim_customer", "path": "models/auto/dim_customer.sql", "status": "draft"},
+                    {"name": "fact_sales", "path": "models/auto/fact_sales.sql", "status": "live"},
+                    {"name": "dim_customer", "path": "models/auto/dim_customer.sql", "status": "live"},
                 ],
             }
         }
@@ -1971,7 +2077,7 @@ class DbtScaffoldListResponse(BaseModel):
                     {
                         "scaffold_id": "scaffold_123",
                         "tables": ["fact_sales", "dim_customer"],
-                        "status": "draft",
+                        "status": "live",
                         "created_at": "2025-02-14T10:00:00Z",
                     }
                 ]
@@ -2010,7 +2116,7 @@ class CanvasSaveRequest(BaseModel):
     nodes: List[CanvasNodePayload] = Field(default_factory=list)
     edges: List[CanvasEdgePayload] = Field(default_factory=list)
     root_node_id: str | None = Field(None, examples=["tenant_root"])
-    status: str | None = Field("draft", examples=["reviewed"])
+    status: str | None = Field("live", examples=["reviewed"])
     idempotency_key: str | None = Field(None, examples=["canvas-001"])
 
 

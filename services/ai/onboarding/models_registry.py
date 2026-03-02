@@ -16,7 +16,7 @@ def _make_id(prefix: str) -> str:
 
 def upsert_fact(settings: Settings, payload: dict[str, Any]) -> str:
     fact_id = payload.get("fact_id") or _make_id("fact")
-    lifecycle_status = payload.get("lifecycle_status", "draft")
+    lifecycle_status = payload.get("lifecycle_status", "live")
     measures = payload.get("measures", [])
     dimensions = payload.get("dimensions", [])
     measures_value = Json(measures) if isinstance(measures, (list, dict)) else measures
@@ -213,7 +213,7 @@ def update_fact(settings: Settings, fact_id: str, updates: dict[str, Any]) -> No
             "description": merged.get("description"),
             "artifact_key": artifact_key,
             "version_no": next_version,
-            "lifecycle_status": merged.get("lifecycle_status", "draft"),
+            "lifecycle_status": merged.get("lifecycle_status", "live"),
             "source_type": merged.get("source_type", "user"),
             "source_run_id": merged.get("source_run_id"),
             "change_reason": merged.get("change_reason"),
@@ -234,7 +234,7 @@ def delete_fact(settings: Settings, fact_id: str) -> None:
 
 def upsert_dimension(settings: Settings, payload: dict[str, Any]) -> str:
     dimension_id = payload.get("dimension_id") or _make_id("dim")
-    lifecycle_status = payload.get("lifecycle_status", "draft")
+    lifecycle_status = payload.get("lifecycle_status", "live")
     keys = payload.get("keys", [])
     attributes = payload.get("attributes", [])
     keys_value = Json(keys) if isinstance(keys, (list, dict)) else keys
@@ -421,7 +421,7 @@ def update_dimension(settings: Settings, dimension_id: str, updates: dict[str, A
             "description": merged.get("description"),
             "artifact_key": artifact_key,
             "version_no": next_version,
-            "lifecycle_status": merged.get("lifecycle_status", "draft"),
+            "lifecycle_status": merged.get("lifecycle_status", "live"),
             "source_type": merged.get("source_type", "user"),
             "source_run_id": merged.get("source_run_id"),
             "change_reason": merged.get("change_reason"),

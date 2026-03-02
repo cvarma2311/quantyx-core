@@ -131,7 +131,7 @@ The same output can be reconstructed from registries:
   "keys": ["plant_id"],
   "attributes": ["plant_name", "region_name"],
   "description": "Plant master dimension",
-  "status": "draft"
+  "status": "live"
 }
 ```
 
@@ -168,7 +168,7 @@ The same output can be reconstructed from registries:
   "measures": ["output_tmt", "downtime_hours"],
   "dimensions": ["plant_id", "product_id", "fiscal_year"],
   "description": "Daily production fact",
-  "status": "draft"
+  "status": "live"
 }
 ```
 
@@ -273,7 +273,7 @@ Example:
 
 1. **Always persist on creation**
    - `POST /dimensions`, `POST /facts`, `POST /metrics`
-2. **Draft by default**
+2. **Live by default**
    - unless explicitly set to `reviewed` or `certified`
 3. **Deletion**
    - soft delete can be added later (out of scope)

@@ -20,7 +20,7 @@ def persist_entity_mapping(
     candidates: list[dict],
     low_confidence_candidates: list[dict],
     low_confidence_threshold: float,
-    status: str = "draft",
+    status: str = "live",
 ) -> str:
     mapping_id = f"map_{uuid.uuid4().hex[:10]}"
     threshold = low_confidence_threshold or LOW_CONFIDENCE_THRESHOLD
@@ -120,7 +120,7 @@ def list_entity_mappings(
                 "candidates": [],
                 "low_confidence_candidates": [],
                 "low_confidence_threshold": LOW_CONFIDENCE_THRESHOLD,
-                "status": "draft",
+                "status": "live",
                 "created_at": row.get("created_at"),
                 "updated_at": row.get("updated_at"),
             },
@@ -197,7 +197,7 @@ def get_entity_mapping(
         "candidates": [],
         "low_confidence_candidates": [],
         "low_confidence_threshold": LOW_CONFIDENCE_THRESHOLD,
-        "status": "draft",
+        "status": "live",
         "created_at": rows[0].get("created_at"),
         "updated_at": rows[0].get("updated_at"),
     }

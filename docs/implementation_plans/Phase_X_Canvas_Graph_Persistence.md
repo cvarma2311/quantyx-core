@@ -25,7 +25,7 @@ Fields:
 - `name`, `description`
 - `graph_json` (nodes + edges snapshot)
 - `root_node_id` (optional; if not set, a virtual root is used)
-- `status` (`draft`, `reviewed`, `certified`)
+- `status` (`live`, `reviewed`, `certified`)
 - `created_at`, `updated_at`
 
 ### 2.2 Node Link Table
