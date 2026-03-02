@@ -5665,6 +5665,38 @@ def entities_mappings(tenant_id: str, limit: int = 50) -> dict:
     tags=["agentic"],
     summary="Start agentic run",
     description="Start a multi-agent semantic build run.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "start": {
+                            "summary": "Start run",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "mode": "full",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "queued": {
+                                "summary": "Run queued",
+                                "value": {"run_id": "run_123", "status": "queued", "job_id": "job_abc"},
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
 )
 def start_agentic_run(payload: dict) -> dict:
     tenant_id = payload.get("tenant_id")
@@ -5721,6 +5753,22 @@ def start_agentic_run(payload: dict) -> dict:
     tags=["agentic"],
     summary="Get agentic run",
     description="Return agentic run status.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "status": {
+                                "summary": "Run status",
+                                "value": {"run_id": "run_123", "tenant_id": "VC_101", "status": "running"},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_agentic_run(run_id: str) -> dict:
     run = get_agent_run(settings, run_id)
@@ -5734,6 +5782,30 @@ def get_agentic_run(run_id: str) -> dict:
     tags=["agentic"],
     summary="List agentic run events",
     description="Return agentic run progress events.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "events": {
+                                "summary": "Run events",
+                                "value": {
+                                    "events": [
+                                        {
+                                            "agent_name": "SchemaAgent",
+                                            "status": "completed",
+                                            "message": "Schema Agent completed",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_agentic_run_events(run_id: str, limit: int = 200) -> dict:
     events = list_agent_run_events(settings, run_id, limit=limit)
@@ -5745,6 +5817,22 @@ def get_agentic_run_events(run_id: str, limit: int = 200) -> dict:
     tags=["agentic"],
     summary="Stream agentic run events",
     description="Server-sent events stream of agentic run progress.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "text/event-stream": {
+                        "examples": {
+                            "stream": {
+                                "summary": "SSE stream",
+                                "value": "data: {\"agent_name\":\"SchemaAgent\",\"status\":\"completed\"}\\n\\n",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def agentic_run_stream(run_id: str):
     from fastapi.responses import StreamingResponse
@@ -5768,6 +5856,26 @@ def agentic_run_stream(run_id: str):
     tags=["agentic"],
     summary="List agentic run chat log",
     description="Return stored chat/summary stream messages for a run.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "chat": {
+                                "summary": "Chat summary",
+                                "value": {
+                                    "messages": [
+                                        {"sender": "system", "message": "Dashboard ready: Auto Dashboard"}
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_agentic_run_chat(run_id: str, limit: int = 200) -> dict:
     messages = list_agent_chat_log(settings, run_id, limit=limit)
@@ -5779,6 +5887,31 @@ def get_agentic_run_chat(run_id: str, limit: int = 200) -> dict:
     response_model=ViewListResponse,
     tags=["views"],
     summary="List views",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "views": {
+                                "summary": "View list",
+                                "value": {
+                                    "views": [
+                                        {
+                                            "view_name": "fact_lpg_plant_operations",
+                                            "schema": "public",
+                                            "type": "fact",
+                                            "source_table": "lpg_plant_operations",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def list_views_endpoint(tenant_id: str, domain_id: str | None = None) -> ViewListResponse:
     views = list_registered_views(settings, tenant_id, domain_id)
@@ -5801,6 +5934,29 @@ def list_views_endpoint(tenant_id: str, domain_id: str | None = None) -> ViewLis
     response_model=ViewSchemaResponse,
     tags=["views"],
     summary="Get view schema",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "schema": {
+                                "summary": "View schema",
+                                "value": {
+                                    "view_name": "fact_lpg_plant_operations",
+                                    "schema": "public",
+                                    "columns": [
+                                        {"column_name": "sap_id", "data_type": "text"},
+                                        {"column_name": "process_date", "data_type": "date"},
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def view_schema_endpoint(view_name: str, tenant_id: str, schema: str | None = None) -> ViewSchemaResponse:
     schema_name = schema or settings.db_schema
@@ -5813,6 +5969,23 @@ def view_schema_endpoint(view_name: str, tenant_id: str, schema: str | None = No
     response_model=ViewQueryResponse,
     tags=["views"],
     summary="Run SQL query on views",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "query": {
+                            "summary": "SQL query",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "sql": "SELECT * FROM public.fact_lpg_plant_operations LIMIT 100",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def views_query(request: ViewQueryRequest) -> ViewQueryResponse:
     sql_text = request.sql.strip().rstrip(";")
@@ -10642,6 +10815,34 @@ def create_chart(request: ChartRequest) -> ChartStatusResponse:
     response_model=list[RollupResponse],
     tags=["rollups"],
     summary="List rollups",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "rollups": {
+                                "summary": "Rollup list",
+                                "value": [
+                                    {
+                                        "rollup_id": "rollup_123",
+                                        "tenant_id": "VC_101",
+                                        "domain_id": "lpg_production_distribution",
+                                        "base_model": "fact_lpg_plant_operations",
+                                        "metric_name": "production_mt",
+                                        "dimensions": ["region"],
+                                        "time_grain": "month",
+                                        "rollup_table": "rollup_production_mt_abc123",
+                                        "status": "active",
+                                    }
+                                ],
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def list_rollups_endpoint(tenant_id: str, domain_id: str | None = None) -> list[RollupResponse]:
     return list_rollups(settings, tenant_id, domain_id)
@@ -10652,6 +10853,27 @@ def list_rollups_endpoint(tenant_id: str, domain_id: str | None = None) -> list[
     response_model=RollupResponse,
     tags=["rollups"],
     summary="Create rollup",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "create": {
+                            "summary": "Create rollup",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "metric_name": "production_mt",
+                                "dimensions": ["region"],
+                                "time_grain": "month",
+                                "build_now": True,
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def create_rollup_endpoint(request: RollupCreateRequest) -> RollupResponse:
     domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
@@ -10682,6 +10904,20 @@ def create_rollup_endpoint(request: RollupCreateRequest) -> RollupResponse:
     response_model=RollupRefreshResponse,
     tags=["rollups"],
     summary="Refresh rollup",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "refresh": {
+                            "summary": "Refresh rollup",
+                            "value": {"tenant_id": "VC_101"},
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def refresh_rollup_endpoint(rollup_id: str, tenant_id: str) -> RollupRefreshResponse:
     rollup = get_rollup(settings, rollup_id)
@@ -10802,6 +11038,31 @@ def chat_query(request: ChatRequest) -> ChatResponse:
     response_model=ChatResponse,
     tags=["chat"],
     summary="Get chat response",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "complete": {
+                                "summary": "Chat complete",
+                                "value": {
+                                    "chat_id": "chat_123",
+                                    "status": "complete",
+                                    "response": {
+                                        "metrics": ["production_mt"],
+                                        "dimensions": ["region"],
+                                        "sql": "SELECT ...",
+                                        "rows": [],
+                                    },
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_chat(chat_id: str) -> ChatResponse:
     row = get_chat_request(settings, chat_id)
@@ -10819,6 +11080,28 @@ def get_chat(chat_id: str) -> ChatResponse:
     "/chat/{chat_id}/events",
     tags=["chat"],
     summary="List chat events",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "events": {
+                                "summary": "Chat events",
+                                "value": {
+                                    "events": [
+                                        {"event_type": "resolve", "message": "Resolving metrics and dimensions"},
+                                        {"event_type": "query", "message": "Executing SQL"},
+                                        {"event_type": "complete", "message": "Chat response ready"},
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_chat_events(chat_id: str, limit: int = 200) -> dict:
     events = list_chat_events(settings, chat_id, limit=limit)
@@ -10829,6 +11112,22 @@ def get_chat_events(chat_id: str, limit: int = 200) -> dict:
     "/chat/{chat_id}/stream",
     tags=["chat"],
     summary="Stream chat events",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "text/event-stream": {
+                        "examples": {
+                            "stream": {
+                                "summary": "SSE stream",
+                                "value": "data: {\"event_type\":\"resolve\",\"message\":\"Resolving metrics\"}\\n\\n",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def chat_stream(chat_id: str):
     from fastapi.responses import StreamingResponse

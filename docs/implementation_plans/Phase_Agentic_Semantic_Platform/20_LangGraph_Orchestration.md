@@ -181,6 +181,32 @@ Errors are logged into `errors[]` state and emitted as events.
 
 ---
 
+## LangGraph Studio (Local Dev UI)
+
+LangGraph Studio is **local-only** and requires no API key.
+
+Suggested usage:
+1. Export env:
+   - `LANGGRAPH_STUDIO_ENABLED=true`
+   - `LANGGRAPH_STUDIO_PORT=2024`
+2. Run Studio in a separate terminal:
+   - `langgraph dev --port 2024`
+3. Open Studio UI:
+   - `http://127.0.0.1:2024`
+
+Quick start:
+```bash
+export LANGGRAPH_STUDIO_ENABLED=true
+export LANGGRAPH_STUDIO_PORT=2024
+langgraph dev --port 2024
+```
+
+All agent events are already streamed to your UI via:
+- `GET /agentic/runs/{run_id}/stream`
+- `GET /chat/{chat_id}/stream`
+
+---
+
 ## Success Criteria
 - Deterministic orchestration
 - Clear error handling + retries

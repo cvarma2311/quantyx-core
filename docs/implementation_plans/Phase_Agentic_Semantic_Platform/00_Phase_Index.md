@@ -58,8 +58,10 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 18. **Phase 20: LangGraph Orchestration**
    - Explicit agent graph, shared state, retries, and error handling.
 
+19. **Phase 21: UI-to-API Flow (End-to-End)**
+   - Ordered UI call sequence from schema selection to chat completion.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
 - Phase 05 can run after 02 (semantic graph ready).
-
