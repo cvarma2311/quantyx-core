@@ -5477,6 +5477,70 @@ def entities(
 
 
 @app.get(
+    "/entities/mappings",
+    tags=["explore"],
+    summary="List entity mapping runs",
+    description="Return all entity mapping runs for the active tenant scope.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "runs": {
+                                "summary": "Mapping runs",
+                                "value": {
+                                    "runs": [
+                                        {
+                                            "mapping_id": "map_ab12cd34",
+                                            "tenant_id": "VC_101",
+                                            "domain_id": "lpg_production_distribution",
+                                            "connection_id": "conn_lpg",
+                                            "database_name": "hpcl_ceg",
+                                            "schema_name": "public",
+                                            "tables": ["lpg_plant_operations"],
+                                            "candidates": [
+                                                {
+                                                    "table": "lpg_plant_operations",
+                                                    "column": "sap_id",
+                                                    "mapped_entity_type": "plant",
+                                                    "confidence": 0.93,
+                                                    "source": "llm",
+                                                }
+                                            ],
+                                            "low_confidence_candidates": [],
+                                            "low_confidence_threshold": 0.7,
+                                            "status": "draft",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def entities_mappings(tenant_id: str, limit: int = 50) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, None)
+    connection_id, database, schema, _ = _resolve_scope_values(
+        tenant_id,
+        domain_id,
+    )
+    runs = list_entity_mappings(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id,
+        database,
+        schema,
+        limit=limit,
+    )
+    return {"runs": runs}
+
+
+@app.get(
     "/entities/all",
     response_model=EntitiesAllResponse,
     tags=["explore"],
