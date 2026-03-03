@@ -1,8 +1,0 @@
----
-- name: Verify Denodo container
-  hosts: local
-  gather_facts: false
-  vars_files:
-    - ../group_vars/all.yml
-  roles:
-    - denodo_verify

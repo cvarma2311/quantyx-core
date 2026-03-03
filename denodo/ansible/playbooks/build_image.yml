@@ -1,8 +1,0 @@
----
-- name: Build Denodo image
-  hosts: local
-  gather_facts: false
-  vars_files:
-    - ../group_vars/all.yml
-  roles:
-    - denodo_image
