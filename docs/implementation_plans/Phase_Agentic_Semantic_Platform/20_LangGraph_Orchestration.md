@@ -16,7 +16,12 @@ Adopt LangGraph to orchestrate multi‑agent workflows with shared state, retrie
 ## Graph Definition (High‑Level)
 
 ```
-Schema → Profiling → Context → Ontology → Glossary → Join → Metric → Model → Rollup → Quality → Dashboard
+Schema ─┬→ Profiling ─┬→ Join ─────────────┐
+        │             ├→ Metric → Rollup ─┤
+        │             └→ Model ───────────┤
+        └→ Context → Ontology → Glossary ─┘
+                       │
+                       └→ Quality ───────→ Dashboard
 ```
 
 Optional branches:
@@ -103,6 +108,19 @@ Optional branches:
 - If join_edges empty → allow single‑table metrics only
 - If metric_defs empty → fallback to numeric column sums
 - If dashboard_spec fails → fallback to default 3‑chart template
+
+---
+
+## Parallel Execution Notes
+- `Profiling`, `Context` branches run in parallel after `Schema`.
+- `Join`, `Metric`, `Model` run in parallel after `Profiling`.
+- `Quality` waits for `Join` + `Ontology`.
+- `Dashboard` waits for `Rollup` + `Quality`.
+
+## Parallelism Summary (Implementation)
+- Parallel edges are now active in the LangGraph flow.
+- Independent agents execute concurrently to reduce total runtime.
+- Deterministic ordering is preserved by join nodes (Quality/Dashboard).
 
 ---
 

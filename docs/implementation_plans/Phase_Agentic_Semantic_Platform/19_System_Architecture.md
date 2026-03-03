@@ -61,19 +61,30 @@ flowchart TB
   A --> F --> L --> S1
   L --> S2
   L --> S3
-  L --> S4
-  L --> S5
-  L --> S6
-  L --> S7
-  L --> S8
-  L --> S9
+  S2 --> S5
+  S2 --> S6
+  S2 --> S7
+  S3 --> S12
+  S12 --> S4
+  S6 --> S8
+  S5 --> S11
+  S12 --> S11
+  S8 --> S9
+  S11 --> S9
   L --> S10
-  L --> S11
-  L --> S12
 
-  L --> T1
-  L --> T2
-  L --> T5
+  S1 --> T1
+  S2 --> T1
+  S3 --> T1
+  S4 --> T1
+  S5 --> T2
+  S6 --> T2
+  S7 --> T1
+  S8 --> T3
+  S9 --> T4
+  S10 --> T5
+  S11 --> T5
+  S12 --> T2
   L --> T6
 
   G --> T1
@@ -111,9 +122,13 @@ sequenceDiagram
   Agents-->>API: emit progress events
   API-->>UI: stream /agentic/runs/{run_id}/stream
 
-  Agents->>DB: write semantic graph + rollups + dashboards
+  Agents->>DB: write semantic graph + rollups + dashboards (parallel branches)
   Orchestrator-->>API: run completed
   API-->>UI: status completed
+
+  Note over Agents: Agent-to-agent validation (live)
+  Agents->>DB: JoinAgent checks uniqueness on join keys
+  Agents-->>Orchestrator: Confidence updated based on SchemaAgent response
 
   User->>UI: Ask NL question
   UI->>API: POST /chat (sync or async)
@@ -129,3 +144,4 @@ sequenceDiagram
 - **LangGraph optional**: use if we need explicit agent graph orchestration.
 - **Agent Orchestrator** can be our existing job system + event stream.
 - **All outputs persist into quantyx_* tables**.
+- **Agent-to-agent interactions are live**: JoinAgent issues SchemaAgent uniqueness checks and records request/response in `quantyx_agent_run_events`.

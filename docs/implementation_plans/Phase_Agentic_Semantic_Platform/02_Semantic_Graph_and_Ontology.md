@@ -25,4 +25,4 @@ Generate ontology + glossary + join graph from agent outputs and context text, t
 ## Notes
 - Validate all LLM edges against schema.
 - Confidence scores required for all edges.
-
+ - Parallelism: Ontology + Glossary can run concurrently after Context; Join can run in parallel with Metric.

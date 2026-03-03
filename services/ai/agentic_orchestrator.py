@@ -545,15 +545,28 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
     graph.add_node("dashboard", dashboard_node)
 
     graph.set_entry_point("schema")
+    # Parallel branches after schema
     graph.add_edge("schema", "profiling")
-    graph.add_edge("profiling", "context")
+    graph.add_edge("schema", "context")
+
+    # Context branch
     graph.add_edge("context", "ontology")
     graph.add_edge("ontology", "glossary")
-    graph.add_edge("glossary", "join")
-    graph.add_edge("join", "metric")
-    graph.add_edge("metric", "model")
-    graph.add_edge("model", "rollup")
-    graph.add_edge("rollup", "quality")
+
+    # Profiling branch to join/metric/model in parallel
+    graph.add_edge("profiling", "join")
+    graph.add_edge("profiling", "metric")
+    graph.add_edge("profiling", "model")
+
+    # Rollup depends on metric + profiling (profiling already done)
+    graph.add_edge("metric", "rollup")
+
+    # Quality depends on join + ontology
+    graph.add_edge("join", "quality")
+    graph.add_edge("ontology", "quality")
+
+    # Dashboard waits on rollup + quality
+    graph.add_edge("rollup", "dashboard")
     graph.add_edge("quality", "dashboard")
     graph.add_edge("dashboard", END)
 

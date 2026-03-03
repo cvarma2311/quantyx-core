@@ -80,3 +80,4 @@ flowchart LR
 - First live baseline is generated **from schema only** (no context required).
 - Context can be supplied **later via chat** to refine semantics and regenerate views/dashboards.
 - When context changes, re-run agents and refresh derived views/actions on a schedule.
+ - Parallelism: after Schema Agent, Profiling + Context can run in parallel; Join/Metric/Model branch off Profiling.
