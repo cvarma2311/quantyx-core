@@ -254,6 +254,20 @@ class ViewQueryResponse(BaseModel):
     chart: Optional[dict] = None
 
 
+class DashboardListResponse(BaseModel):
+    dashboards: List[dict]
+
+
+class DashboardResponse(BaseModel):
+    dashboard_id: str
+    tenant_id: str
+    domain_id: str
+    title: str
+    spec: dict
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
 class TenantCreateRequest(BaseModel):
     tenant_id: str = Field(..., description="Tenant identifier", examples=["VC_101"])
     display_name: Optional[str] = Field(None, description="Tenant display name", examples=["HPCL LPG"])

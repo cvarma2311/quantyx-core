@@ -326,3 +326,41 @@ def persist_dashboard_spec(
         [dashboard_id, tenant_id, domain_id, title, spec],
     )
     return dashboard_id
+
+
+def list_dashboard_specs(settings: Settings, tenant_id: str, domain_id: str | None) -> list[dict[str, Any]]:
+    if domain_id:
+        return run_query(
+            settings,
+            """
+            SELECT dashboard_id, tenant_id, domain_id, title, spec, created_at, updated_at
+              FROM public.quantyx_dashboard_specs
+             WHERE tenant_id = %s AND domain_id = %s
+             ORDER BY created_at DESC
+            """,
+            [tenant_id, domain_id],
+        )
+    return run_query(
+        settings,
+        """
+        SELECT dashboard_id, tenant_id, domain_id, title, spec, created_at, updated_at
+          FROM public.quantyx_dashboard_specs
+         WHERE tenant_id = %s
+         ORDER BY created_at DESC
+        """,
+        [tenant_id],
+    )
+
+
+def get_dashboard_spec(settings: Settings, dashboard_id: str) -> dict[str, Any] | None:
+    rows = run_query(
+        settings,
+        """
+        SELECT dashboard_id, tenant_id, domain_id, title, spec, created_at, updated_at
+          FROM public.quantyx_dashboard_specs
+         WHERE dashboard_id = %s
+         LIMIT 1
+        """,
+        [dashboard_id],
+    )
+    return rows[0] if rows else None

@@ -285,6 +285,32 @@ Response:
 
 ---
 
+# 4.1) List Dashboards
+
+## GET /dashboards
+List dashboards for tenant.
+
+Request (query params):
+```
+?tenant_id=VC_101&domain_id=lpg_production_distribution
+```
+
+Response:
+```json
+{
+  "dashboards": [
+    {
+      "dashboard_id": "dash_123",
+      "tenant_id": "VC_101",
+      "domain_id": "lpg_production_distribution",
+      "title": "Auto Dashboard"
+    }
+  ]
+}
+```
+
+---
+
 # 5) Rollups
 
 ## POST /rollups

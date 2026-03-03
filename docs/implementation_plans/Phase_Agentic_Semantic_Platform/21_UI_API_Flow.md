@@ -70,6 +70,7 @@ The agent run writes dashboards and charts automatically.
 
 **UI can fetch dashboards after run completion:**
 ```http
+GET /dashboards?tenant_id=VC_101&domain_id=lpg_production_distribution
 GET /dashboards/{dashboard_id}
 ```
 
@@ -185,4 +186,3 @@ POST /views/query
 4. `GET /chat/{chat_id}/stream`
 5. `GET /chat/{chat_id}`
 6. `GET /charts/{chart_id}`
-

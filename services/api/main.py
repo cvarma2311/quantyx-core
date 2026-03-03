@@ -201,6 +201,7 @@ from services.ai.semantic_feedback_store import (
     list_semantic_feedback,
     apply_semantic_feedback,
 )
+from services.ai.semantic_graph_store import list_dashboard_specs, get_dashboard_spec
 from services.api.schemas import (
     EntitiesResponse,
     EntitiesAllResponse,
@@ -291,6 +292,8 @@ from services.api.schemas import (
     ViewSchemaResponse,
     ViewQueryRequest,
     ViewQueryResponse,
+    DashboardListResponse,
+    DashboardResponse,
     ScenariosResponse,
     ScenarioCreateRequest,
     ScenarioUpdateRequest,
@@ -349,6 +352,7 @@ app = FastAPI(
         {"name": "chat", "description": "Chat-style query endpoints."},
         {"name": "governance", "description": "Semantic feedback and governance endpoints."},
         {"name": "views", "description": "View explorer and SQL editor endpoints."},
+        {"name": "dashboards", "description": "Dashboard listing and retrieval endpoints."},
     ],
 )
 
@@ -6000,6 +6004,96 @@ def views_query(request: ViewQueryRequest) -> ViewQueryResponse:
         "payload": {"columns": columns},
     }
     return ViewQueryResponse(rows=rows, columns=columns, row_count=len(rows), chart=chart)
+
+
+@app.get(
+    "/dashboards",
+    response_model=DashboardListResponse,
+    tags=["dashboards"],
+    summary="List dashboards",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "dashboards": {
+                                "summary": "Dashboard list",
+                                "value": {
+                                    "dashboards": [
+                                        {
+                                            "dashboard_id": "dash_123",
+                                            "tenant_id": "VC_101",
+                                            "domain_id": "lpg_production_distribution",
+                                            "title": "Auto Dashboard",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> DashboardListResponse:
+    dashboards = list_dashboard_specs(settings, tenant_id, domain_id)
+    payload = []
+    for dash in dashboards:
+        payload.append(
+            {
+                "dashboard_id": dash.get("dashboard_id"),
+                "tenant_id": dash.get("tenant_id"),
+                "domain_id": dash.get("domain_id"),
+                "title": dash.get("title"),
+                "created_at": dash.get("created_at"),
+            }
+        )
+    return DashboardListResponse(dashboards=payload)
+
+
+@app.get(
+    "/dashboards/{dashboard_id}",
+    response_model=DashboardResponse,
+    tags=["dashboards"],
+    summary="Get dashboard",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "dashboard": {
+                                "summary": "Dashboard",
+                                "value": {
+                                    "dashboard_id": "dash_123",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "title": "Auto Dashboard",
+                                    "spec": {"charts": []},
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_dashboard_endpoint(dashboard_id: str) -> DashboardResponse:
+    row = get_dashboard_spec(settings, dashboard_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    return DashboardResponse(
+        dashboard_id=row["dashboard_id"],
+        tenant_id=row["tenant_id"],
+        domain_id=row["domain_id"],
+        title=row["title"],
+        spec=row.get("spec") or {},
+        created_at=row.get("created_at"),
+        updated_at=row.get("updated_at"),
+    )
 
 
 @app.get(
