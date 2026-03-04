@@ -605,8 +605,27 @@ CREATE TABLE IF NOT EXISTS public.quantyx_fact_views_registry (
   schema_name TEXT NOT NULL,
   view_name TEXT NOT NULL,
   source_table TEXT NOT NULL,
+  view_type TEXT NOT NULL DEFAULT 'fact',
+  join_left_key TEXT NULL,
+  join_right_key TEXT NULL,
+  coverage_ratio NUMERIC NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE public.quantyx_fact_views_registry
+  ALTER COLUMN connection_id DROP NOT NULL;
+
+ALTER TABLE public.quantyx_fact_views_registry
+  ALTER COLUMN database_name DROP NOT NULL;
+
+ALTER TABLE public.quantyx_fact_views_registry
+  ADD COLUMN IF NOT EXISTS join_left_key TEXT NULL;
+
+ALTER TABLE public.quantyx_fact_views_registry
+  ADD COLUMN IF NOT EXISTS join_right_key TEXT NULL;
+
+ALTER TABLE public.quantyx_fact_views_registry
+  ADD COLUMN IF NOT EXISTS coverage_ratio NUMERIC NULL;
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_fact_views_tenant
   ON public.quantyx_fact_views_registry (tenant_id, domain_id, created_at DESC);

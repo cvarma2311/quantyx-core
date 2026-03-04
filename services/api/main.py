@@ -5707,8 +5707,17 @@ def start_agentic_run(payload: dict) -> dict:
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(tenant_id, payload.get("domain_id"))
+    logger.info("agentic.start | tenant=%s domain=%s", tenant_id, domain_id)
     if not payload.get("schema_payload"):
         connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+        logger.info(
+            "agentic.start | loading schema_payload tenant=%s domain=%s connection=%s db=%s schema=%s",
+            tenant_id,
+            domain_id,
+            connection_id,
+            database,
+            schema,
+        )
         schema_payload = load_latest_scan_for_scope(
             settings, tenant_id, domain_id, connection_id, database, schema
         )
@@ -5716,6 +5725,7 @@ def start_agentic_run(payload: dict) -> dict:
             raise HTTPException(status_code=400, detail="schema_payload is required")
         payload["schema_payload"] = schema_payload
         payload["schema_name"] = schema
+    logger.info("agentic.start | context_present=%s", bool(payload.get("context_text")))
     run_id = create_agent_run(settings, tenant_id, domain_id, status="queued")
     append_agent_run_event(
         settings,
@@ -5816,6 +5826,76 @@ def get_agentic_run_events(run_id: str, limit: int = 200) -> dict:
     return {"events": events}
 
 
+def _latest_agent_event(run_id: str, agent_name: str, status: str = "completed") -> dict | None:
+    events = list_agent_run_events(settings, run_id, limit=2000)
+    for event in reversed(events):
+        if event.get("agent_name") == agent_name and event.get("status") == status:
+            return event
+    return None
+
+
+@app.get(
+    "/agentic/debug/schema",
+    tags=["agentic"],
+    summary="Debug: latest schema payload",
+    description="Return the latest stored schema payload for the tenant/domain scope.",
+)
+def agentic_debug_schema(tenant_id: str, domain_id: str | None = None) -> dict:
+    domain_id = _resolve_domain_id(tenant_id, domain_id)
+    connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+    schema_payload = load_latest_scan_for_scope(
+        settings, tenant_id, domain_id, connection_id, database, schema
+    )
+    if not schema_payload:
+        raise HTTPException(status_code=404, detail="No schema payload found for scope")
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "connection_id": connection_id,
+        "database": database,
+        "schema": schema,
+        "schema_payload": schema_payload,
+    }
+
+
+@app.get(
+    "/agentic/debug/profiling",
+    tags=["agentic"],
+    summary="Debug: profiling stats for run",
+)
+def agentic_debug_profiling(run_id: str) -> dict:
+    event = _latest_agent_event(run_id, "ProfilingAgent")
+    if not event:
+        raise HTTPException(status_code=404, detail="Profiling event not found")
+    return {"run_id": run_id, "profiling_stats": event.get("artifacts")}
+
+
+@app.get(
+    "/agentic/debug/glossary",
+    tags=["agentic"],
+    summary="Debug: glossary terms after context",
+)
+def agentic_debug_glossary(run_id: str) -> dict:
+    event = _latest_agent_event(run_id, "ContextAgent")
+    if not event:
+        event = _latest_agent_event(run_id, "GlossaryAgent")
+    if not event:
+        raise HTTPException(status_code=404, detail="Glossary event not found")
+    return {"run_id": run_id, "glossary_terms": event.get("artifacts")}
+
+
+@app.get(
+    "/agentic/debug/rollups",
+    tags=["agentic"],
+    summary="Debug: rollup candidates before build",
+)
+def agentic_debug_rollups(run_id: str) -> dict:
+    event = _latest_agent_event(run_id, "RollupPlannerAgent")
+    if not event:
+        raise HTTPException(status_code=404, detail="Rollup event not found")
+    return {"run_id": run_id, "rollup_artifacts": event.get("artifacts")}
+
+
 @app.get(
     "/agentic/runs/{run_id}/stream",
     tags=["agentic"],
@@ -5850,6 +5930,9 @@ def agentic_run_stream(run_id: str):
                 payload = json.dumps(event, default=str)
                 yield f"data: {payload}\n\n"
             last_count = len(events)
+            # heartbeat to keep clients (like Swagger) from hanging silently
+            if not new_events:
+                yield ": heartbeat\n\n"
             time.sleep(1.0)
 
     return StreamingResponse(_event_stream(), media_type="text/event-stream")
@@ -5907,6 +5990,20 @@ def get_agentic_run_chat(run_id: str, limit: int = 200) -> dict:
                                             "type": "fact",
                                             "source_table": "lpg_plant_operations",
                                         }
+                                        ,
+                                        {
+                                            "view_name": "view_fact_lpg_plant_operations_lpg_distributor_mapping",
+                                            "schema": "public",
+                                            "type": "joined",
+                                            "source_table": "fact_lpg_plant_operations__lpg_distributor_mapping",
+                                            "join_metadata": {
+                                                "left_table": "fact_lpg_plant_operations",
+                                                "right_table": "lpg_distributor_mapping",
+                                                "left_key": "sap_id",
+                                                "right_key": "sap_id",
+                                                "coverage_ratio": 0.92
+                                            }
+                                        }
                                     ]
                                 },
                             }
@@ -5921,12 +6018,26 @@ def list_views_endpoint(tenant_id: str, domain_id: str | None = None) -> ViewLis
     views = list_registered_views(settings, tenant_id, domain_id)
     payload = []
     for view in views:
+        view_type = view.get("view_type") or "fact"
+        join_meta = None
+        if view_type == "joined":
+            source_table = view.get("source_table") or ""
+            if "__" in source_table:
+                left_table, right_table = source_table.split("__", 1)
+                join_meta = {
+                    "left_table": left_table,
+                    "right_table": right_table,
+                    "left_key": view.get("join_left_key"),
+                    "right_key": view.get("join_right_key"),
+                    "coverage_ratio": view.get("coverage_ratio"),
+                }
         payload.append(
             {
                 "view_name": view.get("view_name"),
                 "schema": view.get("schema_name"),
-                "type": "fact",
+                "type": view_type,
                 "source_table": view.get("source_table"),
+                "join_metadata": join_meta,
                 "created_at": view.get("created_at"),
             }
         )
@@ -11310,6 +11421,15 @@ def list_semantic_feedback_endpoint(tenant_id: str, domain_id: str | None = None
     tags=["charts"],
     summary="Get chart status and payload",
     openapi_extra={
+        "parameters": [
+            {
+                "name": "refresh",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "boolean", "default": False},
+                "description": "If true, re-run the SQL and refresh chart payload/data.",
+            }
+        ],
         "responses": {
             "200": {
                 "content": {
@@ -11339,10 +11459,46 @@ def list_semantic_feedback_endpoint(tenant_id: str, domain_id: str | None = None
         }
     },
 )
-def get_chart(chart_id: str) -> ChartStatusResponse:
+def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
     row = get_chart_request(settings, chart_id)
     if not row:
         raise HTTPException(status_code=404, detail="Chart not found")
+    if refresh:
+        if not row.get("sql"):
+            raise HTTPException(status_code=400, detail="No SQL stored for chart")
+        logger.info("charts.refresh | chart_id=%s sql=%s params=%s", chart_id, row.get("sql"), row.get("params"))
+        try:
+            rows = run_query(settings, row.get("sql") or "", row.get("params") or [])
+            payload = build_chart_payload(
+                row.get("chart_type") or "bar",
+                rows,
+                (row.get("query_payload") or {}).get("metrics", [None])[0] or "metric",
+                (row.get("query_payload") or {}).get("dimensions", []) or ["category"],
+            )
+            update_chart_request(
+                settings,
+                chart_id,
+                status="ready",
+                rows_json=rows,
+                chart_payload=payload.get("chart_payload"),
+                chart_data=payload.get("data"),
+            )
+            row = get_chart_request(settings, chart_id)
+            logger.info(
+                "charts.refresh | chart_id=%s rows=%s sample=%s",
+                chart_id,
+                len(rows),
+                rows[0] if rows else None,
+            )
+        except Exception as exc:
+            logger.exception("charts.refresh failed | chart_id=%s", chart_id)
+            update_chart_request(
+                settings,
+                chart_id,
+                status="failed",
+                error_message=str(exc),
+            )
+            row = get_chart_request(settings, chart_id)
     return ChartStatusResponse(
         chart_id=row["chart_id"],
         status=row.get("status"),

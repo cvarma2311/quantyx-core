@@ -48,9 +48,13 @@ def ensure_fact_view(
           database_name,
           schema_name,
           view_name,
-          source_table
+          source_table,
+          view_type,
+          join_left_key,
+          join_right_key,
+          coverage_ratio
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT DO NOTHING
         """,
         [
@@ -62,6 +66,10 @@ def ensure_fact_view(
             schema_name,
             fact_table,
             source_table,
+            "fact",
+            None,
+            None,
+            None,
         ],
     )
     return fact_table
@@ -76,7 +84,7 @@ def list_views(
         return run_query(
             settings,
             """
-            SELECT view_name, schema_name, source_table, created_at
+            SELECT view_name, schema_name, source_table, created_at, view_type, join_left_key, join_right_key, coverage_ratio
               FROM public.quantyx_fact_views_registry
              WHERE tenant_id = %s AND domain_id = %s
              ORDER BY created_at DESC
@@ -86,7 +94,7 @@ def list_views(
     return run_query(
         settings,
         """
-        SELECT view_name, schema_name, source_table, created_at
+        SELECT view_name, schema_name, source_table, created_at, view_type, join_left_key, join_right_key, coverage_ratio
           FROM public.quantyx_fact_views_registry
          WHERE tenant_id = %s
          ORDER BY created_at DESC
@@ -134,4 +142,88 @@ def create_views_from_schema(
                 name,
             )
         )
+    return created
+
+
+def create_joined_views(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str,
+    schema_name: str,
+    join_edges: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    created: list[dict[str, Any]] = []
+    for edge in join_edges[:5]:
+        left = edge.get("left_table")
+        right = edge.get("right_table")
+        left_key = edge.get("left_key")
+        right_key = edge.get("right_key")
+        if not (left and right and left_key and right_key):
+            continue
+        view_name = f"view_{left}_{right}"
+        sql = (
+            f"CREATE OR REPLACE VIEW {schema_name}.{view_name} AS "
+            f"SELECT l.*, r.* "
+            f"FROM {schema_name}.{left} l "
+            f"LEFT JOIN {schema_name}.{right} r "
+            f"ON l.{left_key} = r.{right_key}"
+        )
+        try:
+            execute_non_query(settings, sql, [])
+            execute_non_query(
+                settings,
+                """
+                INSERT INTO public.quantyx_fact_views_registry (
+                  view_id,
+                  tenant_id,
+                  domain_id,
+                  connection_id,
+                  database_name,
+                  schema_name,
+                  view_name,
+                  source_table,
+                  view_type,
+                  join_left_key,
+                  join_right_key,
+                  coverage_ratio
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                [
+                    f"jview_{uuid.uuid4().hex[:10]}",
+                    tenant_id,
+                    domain_id,
+                    "",
+                    "",
+                    schema_name,
+                    view_name,
+                    f"{left}__{right}",
+                    "joined",
+                    left_key,
+                    right_key,
+                    edge.get("coverage_ratio"),
+                ],
+            )
+            created.append(
+                {
+                    "view_name": view_name,
+                    "left_table": left,
+                    "right_table": right,
+                    "left_key": left_key,
+                    "right_key": right_key,
+                    "status": "created",
+                }
+            )
+        except Exception:
+            created.append(
+                {
+                    "view_name": view_name,
+                    "left_table": left,
+                    "right_table": right,
+                    "left_key": left_key,
+                    "right_key": right_key,
+                    "status": "failed",
+                }
+            )
     return created
