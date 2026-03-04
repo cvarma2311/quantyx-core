@@ -5674,11 +5674,34 @@ def entities_mappings(tenant_id: str, limit: int = 50) -> dict:
             "content": {
                 "application/json": {
                     "examples": {
-                        "start": {
-                            "summary": "Start run",
+                        "start_minimal": {
+                            "summary": "Start run (minimal)",
                             "value": {
                                 "tenant_id": "VC_101",
                                 "domain_id": "lpg_production_distribution",
+                                "mode": "full",
+                            },
+                        },
+                        "start_with_context_and_schema": {
+                            "summary": "Start run with context and schema payload",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "schema_ids": ["schema_public"],
+                                "context_text": "Plant hierarchy is Zone > Region > Plant. SAP ID is unique per plant.",
+                                "schema_name": "public",
+                                "schema_payload": {
+                                    "tables": [
+                                        {
+                                            "table": "lpg_plant_operations",
+                                            "columns": [
+                                                {"name": "sap_id", "data_type": "text"},
+                                                {"name": "process_date", "data_type": "date"},
+                                                {"name": "production_19kg", "data_type": "numeric"},
+                                            ],
+                                        }
+                                    ]
+                                },
                                 "mode": "full",
                             },
                         }
@@ -5694,6 +5717,10 @@ def entities_mappings(tenant_id: str, limit: int = 50) -> dict:
                             "queued": {
                                 "summary": "Run queued",
                                 "value": {"run_id": "run_123", "status": "queued", "job_id": "job_abc"},
+                            },
+                            "accepted": {
+                                "summary": "Run accepted for async processing",
+                                "value": {"run_id": "run_9f2d1a8c45e1", "status": "queued", "job_id": "job_2b4d87a1c9d0"},
                             }
                         }
                     }
@@ -5773,9 +5800,23 @@ def start_agentic_run(payload: dict) -> dict:
                 "content": {
                     "application/json": {
                         "examples": {
-                            "status": {
-                                "summary": "Run status",
-                                "value": {"run_id": "run_123", "tenant_id": "VC_101", "status": "running"},
+                            "running": {
+                                "summary": "Run in progress",
+                                "value": {
+                                    "run_id": "run_123",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "status": "running",
+                                },
+                            },
+                            "completed": {
+                                "summary": "Run completed",
+                                "value": {
+                                    "run_id": "run_123",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "status": "completed",
+                                },
                             }
                         }
                     }
@@ -5797,6 +5838,15 @@ def get_agentic_run(run_id: str) -> dict:
     summary="List agentic run events",
     description="Return agentic run progress events.",
     openapi_extra={
+        "parameters": [
+            {
+                "name": "limit",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "default": 200, "minimum": 1, "maximum": 2000},
+                "description": "Maximum number of events to return in ascending chronological order.",
+            }
+        ],
         "responses": {
             "200": {
                 "content": {
@@ -5808,8 +5858,20 @@ def get_agentic_run(run_id: str) -> dict:
                                     "events": [
                                         {
                                             "agent_name": "SchemaAgent",
+                                            "status": "running",
+                                            "message": "Schema Agent started",
+                                        },
+                                        {
+                                            "agent_name": "SchemaAgent",
                                             "status": "completed",
                                             "message": "Schema Agent completed",
+                                            "artifacts": {"tables": 12},
+                                        },
+                                        {
+                                            "agent_name": "ChartPlannerAgent",
+                                            "status": "completed",
+                                            "message": "Chart Planner completed",
+                                            "artifacts": {"selected": 6},
                                         }
                                     ]
                                 },
@@ -5839,6 +5901,39 @@ def _latest_agent_event(run_id: str, agent_name: str, status: str = "completed")
     tags=["agentic"],
     summary="Debug: latest schema payload",
     description="Return the latest stored schema payload for the tenant/domain scope.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "schema_payload": {
+                                "summary": "Latest scoped schema payload",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "connection_id": "conn_lpg",
+                                    "database": "hpcl_ceg",
+                                    "schema": "public",
+                                    "schema_payload": {
+                                        "tables": [
+                                            {
+                                                "table": "lpg_plant_operations",
+                                                "columns": [
+                                                    {"name": "sap_id", "data_type": "text"},
+                                                    {"name": "process_date", "data_type": "date"},
+                                                ],
+                                            }
+                                        ]
+                                    },
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def agentic_debug_schema(tenant_id: str, domain_id: str | None = None) -> dict:
     domain_id = _resolve_domain_id(tenant_id, domain_id)
@@ -5862,6 +5957,34 @@ def agentic_debug_schema(tenant_id: str, domain_id: str | None = None) -> dict:
     "/agentic/debug/profiling",
     tags=["agentic"],
     summary="Debug: profiling stats for run",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "profiling_stats": {
+                                "summary": "Profiling artifacts for run",
+                                "value": {
+                                    "run_id": "run_123",
+                                    "profiling_stats": {
+                                        "tables": 4,
+                                        "profiles": [
+                                            {
+                                                "name": "lpg_plant_operations",
+                                                "row_count": 12000,
+                                                "numeric_columns": ["production_19kg"],
+                                            }
+                                        ],
+                                    },
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def agentic_debug_profiling(run_id: str) -> dict:
     event = _latest_agent_event(run_id, "ProfilingAgent")
@@ -5874,6 +5997,28 @@ def agentic_debug_profiling(run_id: str) -> dict:
     "/agentic/debug/glossary",
     tags=["agentic"],
     summary="Debug: glossary terms after context",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "glossary_terms": {
+                                "summary": "Glossary artifacts for run",
+                                "value": {
+                                    "run_id": "run_123",
+                                    "glossary_terms": {
+                                        "entities": 8,
+                                        "sample_entities": ["plant", "region", "sap id"],
+                                    },
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def agentic_debug_glossary(run_id: str) -> dict:
     event = _latest_agent_event(run_id, "ContextAgent")
@@ -5888,6 +6033,34 @@ def agentic_debug_glossary(run_id: str) -> dict:
     "/agentic/debug/rollups",
     tags=["agentic"],
     summary="Debug: rollup candidates before build",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "rollup_candidates": {
+                                "summary": "Rollup planner artifacts",
+                                "value": {
+                                    "run_id": "run_123",
+                                    "rollup_artifacts": {
+                                        "rollups": 3,
+                                        "rollup_candidates": [
+                                            {
+                                                "metric_name": "production_mt",
+                                                "dimensions": ["region"],
+                                                "time_grain": "month",
+                                            }
+                                        ],
+                                    },
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def agentic_debug_rollups(run_id: str) -> dict:
     event = _latest_agent_event(run_id, "RollupPlannerAgent")
@@ -5907,9 +6080,17 @@ def agentic_debug_rollups(run_id: str) -> dict:
                 "content": {
                     "text/event-stream": {
                         "examples": {
-                            "stream": {
-                                "summary": "SSE stream",
-                                "value": "data: {\"agent_name\":\"SchemaAgent\",\"status\":\"completed\"}\\n\\n",
+                            "running_event": {
+                                "summary": "Agent started",
+                                "value": "data: {\"agent_name\":\"SchemaAgent\",\"status\":\"running\",\"message\":\"Schema Agent started\"}\n\n",
+                            },
+                            "completed_event": {
+                                "summary": "Agent completed",
+                                "value": "data: {\"agent_name\":\"JoinAgent\",\"status\":\"completed\",\"message\":\"Join Agent completed\",\"artifacts\":{\"joins\":7}}\n\n",
+                            },
+                            "heartbeat": {
+                                "summary": "SSE heartbeat",
+                                "value": ": heartbeat\n\n",
                             }
                         }
                     }
@@ -5944,6 +6125,15 @@ def agentic_run_stream(run_id: str):
     summary="List agentic run chat log",
     description="Return stored chat/summary stream messages for a run.",
     openapi_extra={
+        "parameters": [
+            {
+                "name": "limit",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "default": 200, "minimum": 1, "maximum": 2000},
+                "description": "Maximum number of chat summary messages to return in chronological order.",
+            }
+        ],
         "responses": {
             "200": {
                 "content": {
@@ -5953,6 +6143,8 @@ def agentic_run_stream(run_id: str):
                                 "summary": "Chat summary",
                                 "value": {
                                     "messages": [
+                                        {"sender": "system", "message": "Plan created: Scan schema; Build semantics; Create dashboards"},
+                                        {"sender": "agent", "message": "Schema Agent completed"},
                                         {"sender": "system", "message": "Dashboard ready: Auto Dashboard"}
                                     ]
                                 },
@@ -11324,15 +11516,24 @@ def get_chat_events(chat_id: str, limit: int = 200) -> dict:
     "/chat/{chat_id}/stream",
     tags=["chat"],
     summary="Stream chat events",
+    description="Server-sent events stream of chat lifecycle events.",
     openapi_extra={
         "responses": {
             "200": {
                 "content": {
                     "text/event-stream": {
                         "examples": {
-                            "stream": {
-                                "summary": "SSE stream",
-                                "value": "data: {\"event_type\":\"resolve\",\"message\":\"Resolving metrics\"}\\n\\n",
+                            "resolve_event": {
+                                "summary": "Resolve step",
+                                "value": "data: {\"event_type\":\"resolve\",\"message\":\"Resolving metrics and dimensions\"}\n\n",
+                            },
+                            "query_event": {
+                                "summary": "SQL step",
+                                "value": "data: {\"event_type\":\"query\",\"message\":\"Executing SQL\"}\n\n",
+                            },
+                            "complete_event": {
+                                "summary": "Completion step",
+                                "value": "data: {\"event_type\":\"complete\",\"message\":\"Chat response ready\"}\n\n",
                             }
                         }
                     }
