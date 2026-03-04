@@ -42,8 +42,9 @@ flowchart TB
     S6[Metric Agent]
     S7[Semantic Model Agent]
     S8[Rollup Planner Agent]
-    S9[Dashboard Story Agent]
-    S10[Planning Agent]
+    S9[Chart Planner Agent]
+    S10[Dashboard Story Agent]
+    S10a[Planning Agent]
     S11[Quality Gate Agent]
     S12[Ontology Agent]
   end
@@ -71,7 +72,8 @@ flowchart TB
   S12 --> S11
   S8 --> S9
   S11 --> S9
-  L --> S10
+  S9 --> S10
+  L --> S10a
 
   S1 --> T1
   S2 --> T1
@@ -81,8 +83,8 @@ flowchart TB
   S6 --> T2
   S7 --> T1
   S8 --> T3
-  S9 --> T4
-  S10 --> T5
+  S10 --> T4
+  S10a --> T5
   S11 --> T5
   S12 --> T2
   L --> T6
@@ -122,7 +124,9 @@ sequenceDiagram
   Agents-->>API: emit progress events
   API-->>UI: stream /agentic/runs/{run_id}/stream
 
-  Agents->>DB: write semantic graph + rollups + dashboards (parallel branches)
+  Agents->>DB: write semantic graph + rollups (parallel branches)
+  Agents->>DB: ChartPlannerAgent ranks chart candidates
+  Agents->>DB: DashboardAgent builds charts + dashboard spec
   Orchestrator-->>API: run completed
   API-->>UI: status completed
 

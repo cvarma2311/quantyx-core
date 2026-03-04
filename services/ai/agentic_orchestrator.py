@@ -17,6 +17,8 @@ from services.ai.agentic_agents import (
     propose_ontology,
     propose_joins,
     propose_metrics,
+    propose_chart_candidates,
+    select_charts,
     classify_models,
     propose_rollups,
     build_dashboard_spec,
@@ -153,6 +155,14 @@ def _chart_narrative(rows: list[dict], metric_name: str, dim_key: str | None) ->
     summary = f"Top {dim_key}: {best_label} ({values[best_idx]:.2f}); "
     summary += f"Lowest {dim_key}: {worst_label} ({values[worst_idx]:.2f})"
     return {"summary": summary, "top": best_label, "bottom": worst_label}
+
+
+def _qualify_formula(formula: str, table_ref: str, table_profile: dict[str, Any]) -> str:
+    cols = set((table_profile.get("numeric_columns") or []) + (table_profile.get("time_columns") or []) + (table_profile.get("categorical_columns") or []))
+    qualified = formula
+    for col in sorted(cols, key=len, reverse=True):
+        qualified = qualified.replace(col, f"{table_ref}.{col}")
+    return qualified
 
 
 def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -> dict[str, Any]:
@@ -439,6 +449,30 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
             append_agent_chat_log(settings, run_id, "system", f"Rollups created: {created}")
         return state
 
+    def chart_planner_node(state: dict[str, Any]) -> dict[str, Any]:
+        _emit(settings, run_id, "ChartPlannerAgent", "running", "Chart Planner started")
+        candidates = propose_chart_candidates(
+            state.get("profiling_stats", {}),
+            state.get("metric_defs", []),
+            state.get("join_edges", []),
+        )
+        selected = select_charts(candidates, min_charts=4, max_charts=8)
+        state["chart_candidates"] = candidates
+        state["chart_plan"] = selected
+        _emit(
+            settings,
+            run_id,
+            "ChartPlannerAgent",
+            "completed",
+            "Chart Planner completed",
+            {
+                "candidates": len(candidates),
+                "selected": len(selected),
+                "chart_plan": selected,
+            },
+        )
+        return state
+
     def quality_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(settings, run_id, "QualityGateAgent", "running", "Quality Gate started")
         low_conf = 0
@@ -476,7 +510,9 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
             state.get("metric_defs", []),
             state.get("profiling_stats", {}),
         )
-        charts_spec = dashboard_spec.get("charts", [])
+        charts_spec = state.get("chart_plan") or dashboard_spec.get("charts", [])
+        dashboard_spec["chart_plan"] = state.get("chart_plan") or []
+        dashboard_spec["chart_candidates"] = state.get("chart_candidates") or []
         chart_ids = []
         schema_name = state.get("schema_name") or "public"
         enriched_charts = []
@@ -502,7 +538,8 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
             dimensions: list[str] = []
             rows: list[dict] = []
 
-            metric_expr = None
+            metric_expr = chart.get("metric_expr")
+            metric_name = chart.get("metric") or metric_name
             if table_ref and metric_col:
                 table_profile = profiling_map.get(table_name) or {}
                 numeric_cols = set(table_profile.get("numeric_columns") or [])
@@ -518,6 +555,8 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                         table_name,
                         metric_col,
                     )
+            if metric_expr and table_ref and not metric_expr.startswith("SUM("):
+                metric_expr = _qualify_formula(metric_expr, table_ref, profiling_map.get(table_name) or {})
             if not metric_expr:
                 logger.warning(
                     "dashboard.chart.skip | title=%s reason=invalid_metric metric=%s table=%s",
@@ -543,15 +582,28 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                     if time_col:
                         dim_expr = f"date_trunc('month', {table_ref}.{time_col})"
                         dim_alias = "period"
-                        sql = (
-                            f"SELECT {dim_expr} AS {dim_alias}, "
-                            f"{metric_expr} AS \"{metric_name}\" "
-                            f"FROM {table_ref} "
-                            f"GROUP BY {dim_alias} "
-                            f"ORDER BY {dim_alias} ASC "
-                            f"LIMIT 200"
-                        )
-                        dimensions = [dim_alias]
+                        if category_col:
+                            cat_alias = "category"
+                            sql = (
+                                f"SELECT {dim_expr} AS {dim_alias}, "
+                                f"{table_ref}.{category_col} AS {cat_alias}, "
+                                f"{metric_expr} AS \"{metric_name}\" "
+                                f"FROM {table_ref} "
+                                f"GROUP BY {dim_alias}, {cat_alias} "
+                                f"ORDER BY {dim_alias} ASC "
+                                f"LIMIT 500"
+                            )
+                            dimensions = [dim_alias, cat_alias]
+                        else:
+                            sql = (
+                                f"SELECT {dim_expr} AS {dim_alias}, "
+                                f"{metric_expr} AS \"{metric_name}\" "
+                                f"FROM {table_ref} "
+                                f"GROUP BY {dim_alias} "
+                                f"ORDER BY {dim_alias} ASC "
+                                f"LIMIT 200"
+                            )
+                            dimensions = [dim_alias]
                     elif category_col:
                         dim_alias = "category"
                         sql = (
@@ -743,6 +795,7 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
     graph.add_node("metric", metric_node)
     graph.add_node("model", model_node)
     graph.add_node("rollup", rollup_node)
+    graph.add_node("chart_planner", chart_planner_node)
     graph.add_node("quality", quality_node)
     graph.add_node("dashboard", dashboard_node)
 
@@ -768,8 +821,9 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
     graph.add_edge("ontology", "quality")
 
     # Dashboard waits on rollup + quality
-    graph.add_edge("rollup", "dashboard")
-    graph.add_edge("quality", "dashboard")
+    graph.add_edge("rollup", "chart_planner")
+    graph.add_edge("quality", "chart_planner")
+    graph.add_edge("chart_planner", "dashboard")
     graph.add_edge("dashboard", END)
 
     app = graph.compile()

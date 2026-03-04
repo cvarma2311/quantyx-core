@@ -94,12 +94,34 @@ def build_chart_payload(chart_type: str, rows: list[dict], metric_name: str, dim
         }
 
     if chart_type == "line":
-        # prefer a time-like dimension if present
-        dim = dimensions[0]
-        data = [
-            {"date": row.get(dim), "value": row.get(metric_name)}
-            for row in rows
-        ]
+        # time series (single or multi-series)
+        time_dim = dimensions[0]
+        if len(dimensions) > 1:
+            cat_dim = dimensions[1]
+            data = [
+                {"date": row.get(time_dim), "category": row.get(cat_dim), "value": row.get(metric_name)}
+                for row in rows
+            ]
+            return {
+                "chart_type": "line",
+                "chart_payload": {
+                    "root": {"useTheme": "Animated"},
+                    "chart": {"type": "XYChart", "panX": True, "panY": False},
+                    "xAxis": {"type": "DateAxis", "baseInterval": {"timeUnit": "day", "count": 1}},
+                    "yAxis": {"type": "ValueAxis"},
+                    "series": [
+                        {
+                            "type": "LineSeries",
+                            "nameField": "category",
+                            "valueYField": "value",
+                            "valueXField": "date",
+                        }
+                    ],
+                    "legend": {"type": "Legend"},
+                },
+                "data": data,
+            }
+        data = [{"date": row.get(time_dim), "value": row.get(metric_name)} for row in rows]
         return {
             "chart_type": "line",
             "chart_payload": {

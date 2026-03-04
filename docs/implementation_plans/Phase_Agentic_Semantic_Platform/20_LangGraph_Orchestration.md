@@ -21,7 +21,7 @@ Schema ─┬→ Profiling ─┬→ Join ────────────�
         │             └→ Model ───────────┤
         └→ Context → Ontology → Glossary ─┘
                        │
-                       └→ Quality ───────→ Dashboard
+                       └→ Quality ───────→ ChartPlanner → Dashboard
 ```
 
 Optional branches:
@@ -73,7 +73,7 @@ Optional branches:
 - **Writes:** quality_report
 
 ### DashboardNode
-- **Reads:** metric_defs, glossary_terms, join_edges
+- **Reads:** chart_plan, metric_defs, glossary_terms, join_edges
 - **Writes:** dashboard_spec
 
 ---
@@ -93,6 +93,8 @@ Optional branches:
   "metric_defs": [],
   "model_classifications": [],
   "rollup_plan": [],
+  "chart_candidates": [],
+  "chart_plan": [],
   "quality_report": {},
   "dashboard_spec": {},
   "errors": []
@@ -115,7 +117,8 @@ Optional branches:
 - `Profiling`, `Context` branches run in parallel after `Schema`.
 - `Join`, `Metric`, `Model` run in parallel after `Profiling`.
 - `Quality` waits for `Join` + `Ontology`.
-- `Dashboard` waits for `Rollup` + `Quality`.
+- `ChartPlanner` waits for `Rollup` + `Quality`.
+- `Dashboard` waits for `ChartPlanner`.
 
 ## Parallelism Summary (Implementation)
 - Parallel edges are now active in the LangGraph flow.

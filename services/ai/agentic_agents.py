@@ -575,3 +575,161 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
             ],
         },
     }
+
+
+def propose_chart_candidates(
+    profiling: dict[str, Any],
+    metrics: list[dict[str, Any]],
+    join_edges: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    metrics_by_table: dict[str, list[dict[str, Any]]] = {}
+    for metric in metrics:
+        base = metric.get("base_table")
+        if not base:
+            continue
+        metrics_by_table.setdefault(base, []).append(metric)
+    join_edges = join_edges or []
+    for table in profiling.get("tables", []):
+        table_name = table.get("name")
+        if not table_name:
+            continue
+        numeric_cols = table.get("numeric_columns") or []
+        time_cols = table.get("time_columns") or []
+        cat_cols = table.get("categorical_columns") or []
+        samples = table.get("sample_values") or {}
+        if not numeric_cols:
+            continue
+        metric_col = numeric_cols[0]
+        metric_name = f"sum_{metric_col}"
+        # prefer derived metrics when available
+        derived_metrics = [m for m in metrics_by_table.get(table_name, []) if m.get("metric_type")]
+        if derived_metrics:
+            metric_name = derived_metrics[0].get("metric_name")
+        # Trend candidate
+        if time_cols:
+            candidates.append(
+                {
+                    "type": "line",
+                    "intent": "trend",
+                    "table": table_name,
+                    "metric": metric_name,
+                    "metric_column": metric_col,
+                    "time_column": time_cols[0],
+                    "category_column": None,
+                }
+            )
+        # Breakdown candidate
+        if cat_cols:
+            best_cat = cat_cols[0]
+            # pick category with small cardinality for pie
+            for col in cat_cols:
+                if len(samples.get(col) or []) <= 10:
+                    best_cat = col
+                    break
+            candidates.append(
+                {
+                    "type": "bar",
+                    "intent": "breakdown",
+                    "table": table_name,
+                    "metric": metric_name,
+                    "metric_column": metric_col,
+                    "time_column": None,
+                    "category_column": best_cat,
+                }
+            )
+            if len(samples.get(best_cat) or []) <= 10:
+                candidates.append(
+                    {
+                        "type": "pie",
+                        "intent": "share",
+                        "table": table_name,
+                        "metric": metric_name,
+                        "metric_column": metric_col,
+                        "time_column": None,
+                        "category_column": best_cat,
+                    }
+                )
+        # multi-series trend if time + category small
+        if time_cols and cat_cols:
+            for col in cat_cols:
+                if len(samples.get(col) or []) <= 6:
+                    candidates.append(
+                        {
+                            "type": "line",
+                            "intent": "multi_series",
+                            "table": table_name,
+                            "metric": metric_name,
+                            "metric_column": metric_col,
+                            "time_column": time_cols[0],
+                            "category_column": col,
+                        }
+                    )
+                    break
+    # add join-driven candidates (dimension lookups)
+    for edge in join_edges:
+        if edge.get("relationship") in {"many_to_one", "one_to_many"}:
+            left_table = edge.get("left_table")
+            if not left_table:
+                continue
+            left_metrics = metrics_by_table.get(left_table, [])
+            if not left_metrics:
+                continue
+            metric = left_metrics[0]
+            candidates.append(
+                {
+                    "type": "bar",
+                    "intent": "join_breakdown",
+                    "table": left_table,
+                    "metric": metric.get("metric_name"),
+                    "metric_column": None,
+                    "metric_expr": metric.get("formula"),
+                    "time_column": None,
+                    "category_column": edge.get("left_key"),
+                }
+            )
+    return candidates
+
+
+def select_charts(
+    candidates: list[dict[str, Any]],
+    min_charts: int = 4,
+    max_charts: int = 8,
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+    # score candidates
+    scored = []
+    for cand in candidates:
+        score = 0
+        if cand.get("intent") == "trend":
+            score += 3
+        if cand.get("intent") == "share":
+            score += 2
+        if cand.get("intent") == "breakdown":
+            score += 2
+        if cand.get("intent") == "multi_series":
+            score += 3
+        if cand.get("metric_expr"):
+            score += 1
+        scored.append((score, cand))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    selected: list[dict[str, Any]] = []
+    seen = set()
+    for score, cand in scored:
+        key = (cand.get("table"), cand.get("metric"), cand.get("type"), cand.get("category_column"), cand.get("time_column"))
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(cand)
+        if len(selected) >= max_charts:
+            break
+    if len(selected) < min_charts:
+        # pad with remaining candidates
+        for score, cand in scored:
+            if cand in selected:
+                continue
+            selected.append(cand)
+            if len(selected) >= min_charts:
+                break
+    return selected

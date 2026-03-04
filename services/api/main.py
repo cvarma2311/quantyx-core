@@ -6152,6 +6152,7 @@ def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> Da
     dashboards = list_dashboard_specs(settings, tenant_id, domain_id)
     payload = []
     for dash in dashboards:
+        spec = dash.get("spec") or {}
         payload.append(
             {
                 "dashboard_id": dash.get("dashboard_id"),
@@ -6159,6 +6160,7 @@ def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> Da
                 "domain_id": dash.get("domain_id"),
                 "title": dash.get("title"),
                 "created_at": dash.get("created_at"),
+                "chart_plan": spec.get("chart_plan") or [],
             }
         )
     return DashboardListResponse(dashboards=payload)
@@ -6196,12 +6198,17 @@ def get_dashboard_endpoint(dashboard_id: str) -> DashboardResponse:
     row = get_dashboard_spec(settings, dashboard_id)
     if not row:
         raise HTTPException(status_code=404, detail="Dashboard not found")
+    spec = row.get("spec") or {}
+    if row.get("spec") and row["spec"].get("chart_plan"):
+        spec["chart_plan"] = row["spec"].get("chart_plan")
+    if row.get("spec") and row["spec"].get("chart_candidates"):
+        spec["chart_candidates"] = row["spec"].get("chart_candidates")
     return DashboardResponse(
         dashboard_id=row["dashboard_id"],
         tenant_id=row["tenant_id"],
         domain_id=row["domain_id"],
         title=row["title"],
-        spec=row.get("spec") or {},
+        spec=spec,
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
@@ -11510,3 +11517,21 @@ def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
         rows_json=row.get("rows_json"),
         error_message=row.get("error_message"),
     )
+
+
+@app.get(
+    "/charts/plan",
+    tags=["charts"],
+    summary="Get chart plan for a dashboard",
+    description="Return chart_candidates and chart_plan stored in the dashboard spec.",
+)
+def get_chart_plan(dashboard_id: str) -> dict:
+    row = get_dashboard_spec(settings, dashboard_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    spec = row.get("spec") or {}
+    return {
+        "dashboard_id": dashboard_id,
+        "chart_candidates": spec.get("chart_candidates") or [],
+        "chart_plan": spec.get("chart_plan") or [],
+    }

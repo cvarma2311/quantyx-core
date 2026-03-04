@@ -5,6 +5,7 @@ Generate intelligent dashboards with story‑driven charts and narratives.
 
 ## Agents
 - **Story Agent**: suggests key questions + story arc
+- **ChartPlannerAgent**: builds chart candidates (4–8) based on schema/profile/joins
 - **Chart Agent**: selects chart types + payloads (amCharts compatible)
 - **Insight Agent**: highlights anomalies + drivers
 
@@ -16,8 +17,29 @@ Generate intelligent dashboards with story‑driven charts and narratives.
 ## Outputs
 - Dashboard spec (cards, charts, narratives)
 - Chart payloads (amCharts compatible)
- - Minimum 3 charts per auto‑dashboard
+- Minimum 4 charts, maximum 8 per auto‑dashboard
 - Story cards + insights per chart
+
+---
+
+## ChartPlannerAgent (Dynamic Chart Generation)
+
+### Inputs
+- Profiling stats (time cols, numeric cols, categorical cols)
+- Derived metrics (productivity, utilization, yield, rejection rate)
+- Join metadata (cardinality, coverage_ratio)
+
+### Candidate Rules
+- **Trend**: time dimension → line chart
+- **Breakdown**: category dimension → bar chart
+- **Share**: category dimension with ≤ 10 values → pie chart
+- **Multi‑series**: time + small category (≤ 6) → line multi‑series
+- **Join‑breakdown**: use join key with highest coverage ratio as category
+
+### Ranking + Selection
+- Score by intent + derived metrics + coverage ratio
+- Ensure diversity: at least 1 trend, 1 breakdown, 1 share, 1 efficiency metric
+- Select **4–8 charts** deterministically
 
 ---
 

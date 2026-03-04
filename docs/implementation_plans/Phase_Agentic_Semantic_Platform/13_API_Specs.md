@@ -59,6 +59,11 @@ Server‑sent events stream (optional).
 
 ---
 
+### ChartPlannerAgent (within agentic run)
+ChartPlannerAgent runs inside `/agentic/runs` and emits artifacts:
+- `chart_candidates`
+- `chart_plan` (4–8 charts)
+
 ## GET /agentic/runs/{run_id}/chat
 Return stored summary stream.
 
