@@ -525,7 +525,7 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
                 "recommended_view": f"{table.get('name')}_overview",
             }
         )
-    elif metrics:
+    if not metric_name and metrics:
         metric_name = metrics[0].get("metric_name")
     metric_name = metric_name or "metric"
 
