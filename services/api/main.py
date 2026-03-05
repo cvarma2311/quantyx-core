@@ -133,6 +133,7 @@ from services.ai.agentic_store import (
     append_plan_summary,
 )
 from services.ai.agentic_orchestrator import run_agentic_workflow
+from services.ai.langsmith_forwarder import LangSmithEventForwarder
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
 from services.ai.semantic_suggest import build_lineage_edges, build_schema_summary, suggest_semantic_model
@@ -745,7 +746,7 @@ def _execute_job(job: dict) -> dict:
     if job_type == "metrics_suggested":
         persist = payload.pop("persist", True)
         request = OnboardScanRequest(**payload)
-        response = suggested_metrics(
+        response = _suggested_metrics_impl(
             request,
             persist=persist,
             progress_cb=lambda pct, stage: update_job_progress(settings, job.get("job_id"), pct, stage),
@@ -928,9 +929,15 @@ def _execute_job(job: dict) -> dict:
             raise HTTPException(status_code=404, detail="Run not found")
         update_agent_run_status(settings, run_id, "running")
         initial_state = payload.get("initial_state") or {}
-        run_agentic_workflow(settings, run_id, initial_state)
-        update_agent_run_status(settings, run_id, "completed")
-        return {"run_id": run_id, "status": "completed"}
+        forwarder = LangSmithEventForwarder(run_id)
+        try:
+            run_agentic_workflow(settings, run_id, initial_state, event_callback=forwarder.on_event)
+            update_agent_run_status(settings, run_id, "completed")
+            forwarder.close(status="completed")
+            return {"run_id": run_id, "status": "completed"}
+        except Exception as exc:  # noqa: BLE001
+            forwarder.close(status="failed", error=str(exc))
+            raise
     raise ValueError(f"Unsupported job_type: {job_type}")
 
 
@@ -2228,7 +2235,7 @@ def set_tenant_scope(payload: TenantScopeUpsertRequest) -> dict:
         domain_id=domain_id,
         connection_id=payload.connection_id,
         database_name=payload.database,
-        schema_name=payload.schema,
+        schema_name=payload.schema_name,
         tables=payload.tables,
     )
     return {"ok": True}
@@ -2251,7 +2258,7 @@ def get_tenant_scope_api(tenant_id: str, domain_id: str | None = None) -> Tenant
         domain_id=row.get("domain_id"),
         connection_id=row.get("connection_id"),
         database=row.get("database_name"),
-        schema=row.get("schema_name"),
+        schema_name=row.get("schema_name"),
         tables=row.get("tables"),
         status=row.get("status"),
     )
@@ -5704,6 +5711,21 @@ def entities_mappings(tenant_id: str, limit: int = 50) -> dict:
                                 },
                                 "mode": "full",
                             },
+                        },
+                        "start_with_runtime_tuning": {
+                            "summary": "Start run with performance tuning (single full run)",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "mode": "full",
+                                "runtime_tuning": {
+                                    "chart_max_charts": 5,
+                                    "chart_line_multi_limit": 250,
+                                    "join_coverage_max_joins": 3,
+                                    "join_coverage_left_sample_limit": 100000,
+                                    "join_coverage_right_sample_limit": 100000
+                                }
+                            }
                         }
                     }
                 }
@@ -5776,6 +5798,7 @@ def start_agentic_run(payload: dict) -> dict:
         "schema_name": payload.get("schema_name") or "public",
         "connection_id": payload.get("connection_id") or connection_id,
         "database_name": payload.get("database") or database,
+        "runtime_tuning": payload.get("runtime_tuning") or {},
     }
     job = create_job(
         settings,
@@ -6268,7 +6291,7 @@ def list_views_endpoint(tenant_id: str, domain_id: str | None = None) -> ViewLis
 def view_schema_endpoint(view_name: str, tenant_id: str, schema: str | None = None) -> ViewSchemaResponse:
     schema_name = schema or settings.db_schema
     columns = load_view_schema(settings, schema_name, view_name)
-    return ViewSchemaResponse(view_name=view_name, schema=schema_name, columns=columns)
+    return ViewSchemaResponse(view_name=view_name, schema_name=schema_name, columns=columns)
 
 
 @app.post(
@@ -9298,6 +9321,81 @@ def suggested_metrics_async(
     return JobCreateResponse(job_id=job["job_id"], status=job["status"])
 
 
+def _suggested_metrics_impl(
+    request: OnboardScanRequest,
+    persist: bool = True,
+    progress_cb: Callable[[int, str], None] | None = None,
+) -> SuggestedMetricsResponse:
+    if not request.tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    if progress_cb:
+        progress_cb(5, "resolve_scope")
+    domain_id = _resolve_domain_id(request.tenant_id, None)
+    connection_id, database_name, schema_name, tables = _resolve_scope_values(
+        request.tenant_id,
+        domain_id,
+    )
+    schema_payload = load_latest_scan_for_scope(
+        settings,
+        request.tenant_id,
+        domain_id,
+        connection_id,
+        database_name,
+        schema_name,
+    )
+    if not schema_payload:
+        raise HTTPException(status_code=400, detail="No scan results found for scope")
+    tables = schema_payload.get("tables", [])
+    logger.info(
+        "metrics_suggested: start | tenant=%s domain=%s tables=%s persist=%s",
+        request.tenant_id,
+        domain_id,
+        len(tables),
+        persist,
+    )
+    if progress_cb:
+        progress_cb(20, "detect_measures")
+    measures = detect_measures(tables)
+    if progress_cb:
+        progress_cb(40, "detect_time_columns")
+    low_confidence_measures = [
+        measure
+        for measure in measures
+        if measure.get("confidence", 0) < LOW_CONFIDENCE_THRESHOLD
+    ]
+    high_confidence_measures = [
+        measure
+        for measure in measures
+        if measure.get("confidence", 0) >= LOW_CONFIDENCE_THRESHOLD
+    ]
+    time_columns = detect_time_columns(tables)
+    if progress_cb:
+        progress_cb(55, "map_entities")
+    ontology = load_pack(f"packs/{domain_id}").get("ontology", {})
+    entity_candidates = map_entities(tables, ontology)
+    if progress_cb:
+        progress_cb(75, "persist_metrics" if persist else "skip_persist")
+    if persist:
+        persist_suggested_metrics(
+            settings,
+            request.tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+            measures,
+        )
+    if progress_cb:
+        progress_cb(95, "finalize_response")
+    return SuggestedMetricsResponse(
+        measures=high_confidence_measures,
+        low_confidence_measures=low_confidence_measures,
+        low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,
+        time_columns=time_columns,
+        entity_candidates=entity_candidates,
+    )
+
+
 @app.post(
     "/metrics/suggested",
     response_model=SuggestedMetricsResponse,
@@ -9372,76 +9470,8 @@ def suggested_metrics_async(
 def suggested_metrics(
     request: OnboardScanRequest,
     persist: bool = True,
-    progress_cb: Callable[[int, str], None] | None = None,
 ) -> SuggestedMetricsResponse:
-    if not request.tenant_id:
-        raise HTTPException(status_code=400, detail="tenant_id is required")
-    if progress_cb:
-        progress_cb(5, "resolve_scope")
-    domain_id = _resolve_domain_id(request.tenant_id, None)
-    connection_id, database_name, schema_name, tables = _resolve_scope_values(
-        request.tenant_id,
-        domain_id,
-    )
-    schema_payload = load_latest_scan_for_scope(
-        settings,
-        request.tenant_id,
-        domain_id,
-        connection_id,
-        database_name,
-        schema_name,
-    )
-    if not schema_payload:
-        raise HTTPException(status_code=400, detail="No scan results found for scope")
-    tables = schema_payload.get("tables", [])
-    logger.info(
-        "metrics_suggested: start | tenant=%s domain=%s tables=%s persist=%s",
-        request.tenant_id,
-        domain_id,
-        len(tables),
-        persist,
-    )
-    if progress_cb:
-        progress_cb(20, "detect_measures")
-    measures = detect_measures(tables)
-    if progress_cb:
-        progress_cb(40, "detect_time_columns")
-    low_confidence_measures = [
-        measure
-        for measure in measures
-        if measure.get("confidence", 0) < LOW_CONFIDENCE_THRESHOLD
-    ]
-    high_confidence_measures = [
-        measure
-        for measure in measures
-        if measure.get("confidence", 0) >= LOW_CONFIDENCE_THRESHOLD
-    ]
-    time_columns = detect_time_columns(tables)
-    if progress_cb:
-        progress_cb(55, "map_entities")
-    ontology = load_pack(f"packs/{domain_id}").get("ontology", {})
-    entity_candidates = map_entities(tables, ontology)
-    if progress_cb:
-        progress_cb(75, "persist_metrics" if persist else "skip_persist")
-    if persist:
-        persist_suggested_metrics(
-            settings,
-            request.tenant_id,
-            domain_id,
-            connection_id,
-            database_name,
-            schema_name,
-            measures,
-        )
-    if progress_cb:
-        progress_cb(95, "finalize_response")
-    return SuggestedMetricsResponse(
-        measures=high_confidence_measures,
-        low_confidence_measures=low_confidence_measures,
-        low_confidence_threshold=LOW_CONFIDENCE_THRESHOLD,
-        time_columns=time_columns,
-        entity_candidates=entity_candidates,
-    )
+    return _suggested_metrics_impl(request, persist=persist, progress_cb=None)
 
 
 def _validate_contract_metrics(request: ContractValidateRequest) -> ContractValidateResponse:

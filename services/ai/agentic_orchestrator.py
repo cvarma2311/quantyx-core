@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
+import os
+import time
 
 try:
     from langgraph.graph import StateGraph, END
@@ -30,6 +32,26 @@ from services.ai.charts import build_chart_payload
 from services.ai.db import run_query
 
 
+def _qident(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _resolve_int_setting(
+    state: dict[str, Any],
+    state_key: str,
+    env_key: str,
+    default: int,
+    minimum: int = 1,
+) -> int:
+    tuning = state.get("runtime_tuning") or {}
+    raw = tuning.get(state_key, os.getenv(env_key, default))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
 def _log_agent_conversation(settings, run_id: str, payload: dict[str, Any], event_type: str) -> None:
     append_agent_run_event(
         settings,
@@ -43,9 +65,12 @@ def _log_agent_conversation(settings, run_id: str, payload: dict[str, Any], even
 
 def _check_unique(settings, schema_name: str, table: str, column: str) -> tuple[bool | None, dict[str, Any]]:
     try:
+        q_schema = _qident(schema_name)
+        q_table = _qident(table)
+        q_col = _qident(column)
         rows = run_query(
             settings,
-            f"SELECT COUNT(*) AS cnt, COUNT(DISTINCT {column}) AS distinct_cnt FROM {schema_name}.{table}",
+            f"SELECT COUNT(*) AS cnt, COUNT(DISTINCT {q_col}) AS distinct_cnt FROM {q_schema}.{q_table}",
             [],
         )
         if not rows:
@@ -58,10 +83,30 @@ def _check_unique(settings, schema_name: str, table: str, column: str) -> tuple[
 from services.ai.rollups import create_rollup, build_rollup_table, update_rollup_status
 
 
-def _emit(settings, run_id: str, agent_name: str, status: str, message: str, artifacts: dict[str, Any] | None = None) -> None:
+def _emit(
+    settings,
+    run_id: str,
+    agent_name: str,
+    status: str,
+    message: str,
+    artifacts: dict[str, Any] | None = None,
+    event_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> None:
+    event_payload = {
+        "run_id": run_id,
+        "agent_name": agent_name,
+        "status": status,
+        "message": message,
+        "artifacts": artifacts or {},
+    }
     append_agent_run_event(settings, run_id, agent_name, status, message, artifacts)
     if status in {"running", "completed", "failed"}:
         append_agent_chat_log(settings, run_id, "agent", message, artifacts)
+    if event_callback:
+        try:
+            event_callback(event_payload)
+        except Exception:
+            logging.getLogger(__name__).exception("agentic.event_callback_failed")
     logging.getLogger(__name__).info(
         "agentic.%s | status=%s message=%s artifacts=%s",
         agent_name,
@@ -165,14 +210,19 @@ def _qualify_formula(formula: str, table_ref: str, table_profile: dict[str, Any]
     return qualified
 
 
-def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -> dict[str, Any]:
+def run_agentic_workflow(
+    settings,
+    run_id: str,
+    initial_state: dict[str, Any],
+    event_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     if StateGraph is None:
         raise RuntimeError("LangGraph is not available")
 
     graph = StateGraph(dict)
 
     def schema_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "SchemaAgent", "running", "Schema Agent started")
+        _emit(settings, run_id, "SchemaAgent", "running", "Schema Agent started", event_callback=event_callback)
         append_agent_chat_log(settings, run_id, "system", "Scanning schema for tables.")
         schema_payload = state.get("schema_payload") or {}
         state["schema_graph"] = build_schema_graph(schema_payload)
@@ -187,11 +237,12 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                 "table_names": [t.get("name") for t in state["schema_graph"].get("tables", [])],
                 "tables_detail": state["schema_graph"].get("tables", []),
             },
+            event_callback=event_callback,
         )
         return state
 
     def profiling_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "ProfilingAgent", "running", "Profiling Agent started")
+        _emit(settings, run_id, "ProfilingAgent", "running", "Profiling Agent started", event_callback=event_callback)
         schema_name = state.get("schema_name") or "public"
         state["profiling_stats"] = profile_tables(settings, state.get("schema_graph", {}), schema_name)
         append_agent_chat_log(
@@ -211,11 +262,12 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                 "tables": len(state["profiling_stats"].get("tables", [])),
                 "profiles": state["profiling_stats"].get("tables", []),
             },
+            event_callback=event_callback,
         )
         return state
 
     def context_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "ContextAgent", "running", "Context Agent started")
+        _emit(settings, run_id, "ContextAgent", "running", "Context Agent started", event_callback=event_callback)
         context_text = state.get("context_text")
         extracted = extract_context(settings, context_text, state.get("schema_graph", {}))
         state["context_entities"] = extracted.get("context_entities", [])
@@ -238,6 +290,7 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                 "sample_entities": state["context_entities"][:10],
                 "glossary_terms": state["glossary_terms"],
             },
+            event_callback=event_callback,
         )
         if state.get("context_entities"):
             append_agent_chat_log(
@@ -249,7 +302,7 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
         return state
 
     def glossary_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "GlossaryAgent", "running", "Glossary Agent started")
+        _emit(settings, run_id, "GlossaryAgent", "running", "Glossary Agent started", event_callback=event_callback)
         if "glossary_terms" not in state:
             state["glossary_terms"] = []
         if not state["glossary_terms"] and state.get("profiling_stats"):
@@ -270,11 +323,12 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
             "completed",
             "Glossary Agent completed",
             {"terms": len(state["glossary_terms"]), "terms_detail": state["glossary_terms"]},
+            event_callback=event_callback,
         )
         return state
 
     def ontology_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "OntologyAgent", "running", "Ontology Agent started")
+        _emit(settings, run_id, "OntologyAgent", "running", "Ontology Agent started", event_callback=event_callback)
         ontology = propose_ontology(
             state.get("context_entities") or [],
             state.get("hierarchy_hints") or [],
@@ -303,21 +357,80 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                 "hierarchy_edges_detail": ontology.get("hierarchy_edges", []),
                 "synonym_edges_detail": ontology.get("synonym_edges", []),
             },
+            event_callback=event_callback,
         )
         return state
 
     def join_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "JoinAgent", "running", "Join Agent started")
+        _emit(settings, run_id, "JoinAgent", "running", "Join Agent started", event_callback=event_callback)
         state["join_edges"] = propose_joins(
             state.get("schema_graph", {}),
             state.get("profiling_stats", {}),
         )
+        _emit(
+            settings,
+            run_id,
+            "JoinAgent",
+            "running",
+            "Join Agent proposed join candidates",
+            {"candidates": len(state.get("join_edges") or [])},
+            event_callback=event_callback,
+        )
         schema_name = state.get("schema_name") or "public"
+        profiling_map = {t.get("name"): t for t in (state.get("profiling_stats", {}).get("tables") or [])}
+        max_validation_rows = _resolve_int_setting(
+            state,
+            "join_validation_max_rows",
+            "AGENTIC_JOIN_VALIDATION_MAX_ROWS",
+            500_000,
+        )
+        max_coverage_left_rows = _resolve_int_setting(
+            state,
+            "join_coverage_left_sample_limit",
+            "AGENTIC_JOIN_COVERAGE_LEFT_SAMPLE_LIMIT",
+            200_000,
+        )
+        max_coverage_right_rows = _resolve_int_setting(
+            state,
+            "join_coverage_right_sample_limit",
+            "AGENTIC_JOIN_COVERAGE_RIGHT_SAMPLE_LIMIT",
+            200_000,
+        )
+        max_uniqueness_joins = _resolve_int_setting(
+            state,
+            "join_uniqueness_max_joins",
+            "AGENTIC_JOIN_UNIQUENESS_MAX_JOINS",
+            2,
+        )
+        max_coverage_joins = _resolve_int_setting(
+            state,
+            "join_coverage_max_joins",
+            "AGENTIC_JOIN_COVERAGE_MAX_JOINS",
+            5,
+        )
+        _emit(
+            settings,
+            run_id,
+            "JoinAgent",
+            "running",
+            "Join Agent validating uniqueness on top joins",
+            {"max_joins": max_uniqueness_joins, "max_rows": max_validation_rows},
+            event_callback=event_callback,
+        )
         # Agent-to-agent validation for first few joins
-        for join in state["join_edges"][:2]:
+        for join in state["join_edges"][:max_uniqueness_joins]:
             table = join.get("left_table")
             column = join.get("left_key")
             if not table or not column:
+                continue
+            row_count = int((profiling_map.get(table) or {}).get("row_count") or 0)
+            if row_count > max_validation_rows:
+                join["uniqueness_check"] = {
+                    "status": "skipped",
+                    "reason": "table_too_large",
+                    "row_count": row_count,
+                    "max_rows": max_validation_rows,
+                }
                 continue
             request_payload = {
                 "from_agent": "JoinAgent",
@@ -339,21 +452,83 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
             if answer is not None:
                 base_conf = join.get("confidence") or 0.5
                 join["confidence"] = min(1.0, (base_conf + response_payload["confidence"]) / 2)
+                join["uniqueness_check"] = {
+                    "status": "completed",
+                    "row_count": evidence.get("row_count"),
+                    "distinct_count": evidence.get("distinct_count"),
+                }
+        _emit(
+            settings,
+            run_id,
+            "JoinAgent",
+            "running",
+            "Join Agent computing join coverage ratios",
+            {"max_joins": max_coverage_joins, "sample_limit": max_coverage_left_rows},
+            event_callback=event_callback,
+        )
         # Join coverage check for top joins
-        for join in state["join_edges"][:5]:
+        for idx, join in enumerate(state["join_edges"][:max_coverage_joins], start=1):
             left_table = join.get("left_table")
             right_table = join.get("right_table")
             left_key = join.get("left_key")
             right_key = join.get("right_key")
             if not (left_table and right_table and left_key and right_key):
                 continue
+            left_row_count = int((profiling_map.get(left_table) or {}).get("row_count") or 0)
+            right_row_count = int((profiling_map.get(right_table) or {}).get("row_count") or 0)
+            _emit(
+                settings,
+                run_id,
+                "JoinAgent",
+                "running",
+                f"Join Agent coverage check {idx}/5: {left_table}.{left_key} -> {right_table}.{right_key}",
+                {
+                    "left_rows": left_row_count,
+                    "right_rows": right_row_count,
+                    "left_table": left_table,
+                    "right_table": right_table,
+                },
+                event_callback=event_callback,
+            )
+            if left_row_count > max_validation_rows:
+                join["coverage_check"] = {
+                    "status": "skipped",
+                    "reason": "left_table_too_large",
+                    "row_count": left_row_count,
+                    "max_rows": max_validation_rows,
+                }
+                continue
+            if right_row_count > max_validation_rows:
+                join["coverage_check"] = {
+                    "status": "skipped",
+                    "reason": "right_table_too_large",
+                    "row_count": right_row_count,
+                    "max_rows": max_validation_rows,
+                }
+                continue
             try:
+                q_schema = _qident(schema_name)
+                q_left_table = _qident(left_table)
+                q_right_table = _qident(right_table)
+                q_left_key = _qident(left_key)
+                q_right_key = _qident(right_key)
                 sql = (
+                    "WITH l AS ("
+                    f"SELECT {q_left_key} AS join_key "
+                    f"FROM {q_schema}.{q_left_table} "
+                    f"WHERE {q_left_key} IS NOT NULL "
+                    f"LIMIT {max_coverage_left_rows}"
+                    "), r AS ("
+                    f"SELECT {q_right_key} AS join_key "
+                    f"FROM {q_schema}.{q_right_table} "
+                    f"WHERE {q_right_key} IS NOT NULL "
+                    f"LIMIT {max_coverage_right_rows}"
+                    ") "
                     f"SELECT COUNT(*) AS total, "
-                    f"COUNT(*) FILTER (WHERE r.{right_key} IS NOT NULL) AS matched "
-                    f"FROM {schema_name}.{left_table} l "
-                    f"LEFT JOIN {schema_name}.{right_table} r "
-                    f"ON l.{left_key} = r.{right_key}"
+                    "COUNT(*) FILTER (WHERE r.join_key IS NOT NULL) AS matched "
+                    "FROM l "
+                    "LEFT JOIN r "
+                    "ON l.join_key = r.join_key"
                 )
                 rows = run_query(settings, sql, [])
                 if rows:
@@ -362,7 +537,13 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                     join["coverage_ratio"] = (matched / total) if total else None
                     join["coverage_total"] = total
                     join["coverage_matched"] = matched
+                    join["coverage_check"] = {
+                        "status": "completed",
+                        "sample_limit": max_coverage_left_rows,
+                        "right_sample_limit": max_coverage_right_rows,
+                    }
             except Exception:
+                join["coverage_check"] = {"status": "failed"}
                 continue
         _emit(
             settings,
@@ -374,11 +555,12 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                 "joins": len(state["join_edges"]),
                 "join_edges_detail": state["join_edges"],
             },
+            event_callback=event_callback,
         )
         return state
 
     def metric_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "MetricAgent", "running", "Metric Agent started")
+        _emit(settings, run_id, "MetricAgent", "running", "Metric Agent started", event_callback=event_callback)
         state["metric_defs"] = propose_metrics(state.get("profiling_stats", {}))
         if state.get("metric_defs"):
             append_agent_chat_log(
@@ -395,11 +577,19 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
             "completed",
             "Metric Agent completed",
             {"metrics": len(state["metric_defs"]), "metric_defs_detail": state["metric_defs"]},
+            event_callback=event_callback,
         )
         return state
 
     def model_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "SemanticModelAgent", "running", "Semantic Model Agent started")
+        _emit(
+            settings,
+            run_id,
+            "SemanticModelAgent",
+            "running",
+            "Semantic Model Agent started",
+            event_callback=event_callback,
+        )
         state["model_classifications"] = classify_models(state.get("profiling_stats", {}))
         append_agent_chat_log(settings, run_id, "system", "Semantic model classified.")
         _emit(
@@ -412,11 +602,19 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                 "models": len(state["model_classifications"]),
                 "model_classifications_detail": state["model_classifications"],
             },
+            event_callback=event_callback,
         )
         return state
 
     def rollup_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "RollupPlannerAgent", "running", "Rollup Planner Agent started")
+        _emit(
+            settings,
+            run_id,
+            "RollupPlannerAgent",
+            "running",
+            "Rollup Planner Agent started",
+            event_callback=event_callback,
+        )
         rollups = propose_rollups(state.get("metric_defs", []), state.get("profiling_stats", {}))
         created = 0
         created_defs: list[dict[str, Any]] = []
@@ -444,19 +642,34 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
             "completed",
             "Rollup Planner Agent completed",
             {"rollups": created, "rollup_defs": created_defs, "rollup_candidates": rollups},
+            event_callback=event_callback,
         )
         if created:
             append_agent_chat_log(settings, run_id, "system", f"Rollups created: {created}")
         return state
 
     def chart_planner_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "ChartPlannerAgent", "running", "Chart Planner started")
+        _emit(settings, run_id, "ChartPlannerAgent", "running", "Chart Planner started", event_callback=event_callback)
+        min_charts = _resolve_int_setting(
+            state,
+            "chart_min_charts",
+            "AGENTIC_CHART_MIN_CHARTS",
+            4,
+        )
+        max_charts = _resolve_int_setting(
+            state,
+            "chart_max_charts",
+            "AGENTIC_CHART_MAX_CHARTS",
+            8,
+        )
+        if min_charts > max_charts:
+            min_charts = max_charts
         candidates = propose_chart_candidates(
             state.get("profiling_stats", {}),
             state.get("metric_defs", []),
             state.get("join_edges", []),
         )
-        selected = select_charts(candidates, min_charts=4, max_charts=8)
+        selected = select_charts(candidates, min_charts=min_charts, max_charts=max_charts)
         state["chart_candidates"] = candidates
         state["chart_plan"] = selected
         _emit(
@@ -468,13 +681,16 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
             {
                 "candidates": len(candidates),
                 "selected": len(selected),
+                "min_charts": min_charts,
+                "max_charts": max_charts,
                 "chart_plan": selected,
             },
+            event_callback=event_callback,
         )
         return state
 
     def quality_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "QualityGateAgent", "running", "Quality Gate started")
+        _emit(settings, run_id, "QualityGateAgent", "running", "Quality Gate started", event_callback=event_callback)
         low_conf = 0
         total = 0
         low_conf_edges: list[dict[str, Any]] = []
@@ -500,12 +716,14 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                 "threshold": 0.7,
                 "low_confidence_edges": low_conf_edges,
             },
+            event_callback=event_callback,
         )
         return state
 
     def dashboard_node(state: dict[str, Any]) -> dict[str, Any]:
         logger = logging.getLogger(__name__)
-        _emit(settings, run_id, "DashboardAgent", "running", "Dashboard Agent started")
+        _emit(settings, run_id, "DashboardAgent", "running", "Dashboard Agent started", event_callback=event_callback)
+        dashboard_start = time.perf_counter()
         dashboard_spec = build_dashboard_spec(
             state.get("metric_defs", []),
             state.get("profiling_stats", {}),
@@ -515,6 +733,36 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
         dashboard_spec["chart_candidates"] = state.get("chart_candidates") or []
         chart_ids = []
         schema_name = state.get("schema_name") or "public"
+        line_single_limit = _resolve_int_setting(
+            state,
+            "chart_line_single_limit",
+            "AGENTIC_CHART_LINE_SINGLE_LIMIT",
+            200,
+        )
+        line_multi_limit = _resolve_int_setting(
+            state,
+            "chart_line_multi_limit",
+            "AGENTIC_CHART_LINE_MULTI_LIMIT",
+            500,
+        )
+        category_limit = _resolve_int_setting(
+            state,
+            "chart_category_limit",
+            "AGENTIC_CHART_CATEGORY_LIMIT",
+            50,
+        )
+        bar_limit = _resolve_int_setting(
+            state,
+            "chart_bar_limit",
+            "AGENTIC_CHART_BAR_LIMIT",
+            20,
+        )
+        pie_limit = _resolve_int_setting(
+            state,
+            "chart_pie_limit",
+            "AGENTIC_CHART_PIE_LIMIT",
+            10,
+        )
         enriched_charts = []
         profiling_map = {t.get("name"): t for t in (state.get("profiling_stats", {}).get("tables") or [])}
         join_edges = state.get("join_edges") or []
@@ -540,15 +788,19 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
 
             metric_expr = chart.get("metric_expr")
             metric_name = chart.get("metric") or metric_name
+            q_schema = _qident(schema_name)
+            q_fact_table = _qident(fact_table) if fact_table else None
+            table_alias = "t"
+            sql_from = f"{q_schema}.{q_fact_table} {table_alias}" if q_fact_table else None
             if table_ref and metric_col:
                 table_profile = profiling_map.get(table_name) or {}
                 numeric_cols = set(table_profile.get("numeric_columns") or [])
                 if metric_col in numeric_cols:
-                    metric_expr = f"SUM({table_ref}.{metric_col})"
+                    metric_expr = f"SUM({table_alias}.{_qident(metric_col)})"
                 else:
                     metric_expr = (
-                        f"SUM(CASE WHEN {table_ref}.{metric_col}::text ~ '^[0-9]+(\\\\.[0-9]+)?$' "
-                        f"THEN {table_ref}.{metric_col}::numeric END)"
+                        f"SUM(CASE WHEN {table_alias}.{_qident(metric_col)}::text ~ '^[0-9]+(\\\\.[0-9]+)?$' "
+                        f"THEN {table_alias}.{_qident(metric_col)}::numeric END)"
                     )
                     logger.warning(
                         "dashboard.chart.metric_cast | table=%s column=%s",
@@ -556,7 +808,7 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                         metric_col,
                     )
             if metric_expr and table_ref and not metric_expr.startswith("SUM("):
-                metric_expr = _qualify_formula(metric_expr, table_ref, profiling_map.get(table_name) or {})
+                metric_expr = _qualify_formula(metric_expr, table_alias, profiling_map.get(table_name) or {})
             if not metric_expr:
                 logger.warning(
                     "dashboard.chart.skip | title=%s reason=invalid_metric metric=%s table=%s",
@@ -580,50 +832,50 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
             if table_ref and metric_col:
                 if chart_type == "line":
                     if time_col:
-                        dim_expr = f"date_trunc('month', {table_ref}.{time_col})"
+                        dim_expr = f"date_trunc('month', {table_alias}.{_qident(time_col)})"
                         dim_alias = "period"
                         if category_col:
                             cat_alias = "category"
                             sql = (
                                 f"SELECT {dim_expr} AS {dim_alias}, "
-                                f"{table_ref}.{category_col} AS {cat_alias}, "
+                                f"{table_alias}.{_qident(category_col)} AS {cat_alias}, "
                                 f"{metric_expr} AS \"{metric_name}\" "
-                                f"FROM {table_ref} "
+                                f"FROM {sql_from} "
                                 f"GROUP BY {dim_alias}, {cat_alias} "
                                 f"ORDER BY {dim_alias} ASC "
-                                f"LIMIT 500"
+                                f"LIMIT {line_multi_limit}"
                             )
                             dimensions = [dim_alias, cat_alias]
                         else:
                             sql = (
                                 f"SELECT {dim_expr} AS {dim_alias}, "
                                 f"{metric_expr} AS \"{metric_name}\" "
-                                f"FROM {table_ref} "
+                                f"FROM {sql_from} "
                                 f"GROUP BY {dim_alias} "
                                 f"ORDER BY {dim_alias} ASC "
-                                f"LIMIT 200"
+                                f"LIMIT {line_single_limit}"
                             )
                             dimensions = [dim_alias]
                     elif category_col:
                         dim_alias = "category"
                         sql = (
-                            f"SELECT {table_ref}.{category_col} AS {dim_alias}, "
+                            f"SELECT {table_alias}.{_qident(category_col)} AS {dim_alias}, "
                             f"{metric_expr} AS \"{metric_name}\" "
-                            f"FROM {table_ref} "
+                            f"FROM {sql_from} "
                             f"GROUP BY {dim_alias} "
                             f"ORDER BY \"{metric_name}\" DESC "
-                            f"LIMIT 50"
+                            f"LIMIT {category_limit}"
                         )
                         dimensions = [dim_alias]
                 elif chart_type in {"bar", "pie"}:
                     dim_col = category_col or time_col
                     if dim_col:
                         dim_alias = "category"
-                        limit = 20 if chart_type == "bar" else 10
+                        limit = bar_limit if chart_type == "bar" else pie_limit
                         sql = (
-                            f"SELECT {table_ref}.{dim_col} AS {dim_alias}, "
+                            f"SELECT {table_alias}.{_qident(dim_col)} AS {dim_alias}, "
                             f"{metric_expr} AS \"{metric_name}\" "
-                            f"FROM {table_ref} "
+                            f"FROM {sql_from} "
                             f"GROUP BY {dim_alias} "
                             f"ORDER BY \"{metric_name}\" DESC "
                             f"LIMIT {limit}"
@@ -732,33 +984,114 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
             "system",
             f"Dashboard ready: {dashboard_spec.get('title')}",
         )
-        counts = persist_semantic_graph(
+        fast_mode = os.getenv("AGENTIC_DASHBOARD_FAST_MODE", "false").lower() in {"1", "true", "yes"}
+        counts = {"nodes": 0, "edges": 0}
+        created_views: list[str] = []
+        joined_views: list[dict[str, Any]] = []
+        if fast_mode:
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent fast mode enabled: skipping semantic graph and view persistence",
+                {"fast_mode": True},
+                event_callback=event_callback,
+            )
+        else:
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent persisting semantic graph",
+                {},
+                event_callback=event_callback,
+            )
+            t0 = time.perf_counter()
+            counts = persist_semantic_graph(
+                settings,
+                state.get("domain_id") or "",
+                state.get("schema_graph", {}),
+                state.get("profiling_stats", {}),
+                state.get("join_edges", []),
+                state.get("metric_defs", []),
+                glossary_terms=state.get("glossary_terms", []),
+                hierarchy_hints=state.get("hierarchy_hints", []),
+                ontology=state.get("ontology", {}),
+                model_classifications=state.get("model_classifications", []),
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent semantic graph persisted",
+                {"elapsed_ms": round((time.perf_counter() - t0) * 1000, 1), **counts},
+                event_callback=event_callback,
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent creating registered views",
+                {},
+                event_callback=event_callback,
+            )
+            t1 = time.perf_counter()
+            created_views = create_views_from_schema(
+                settings,
+                state.get("tenant_id") or "",
+                state.get("domain_id") or "",
+                state.get("connection_id") or "",
+                state.get("database_name") or "",
+                state.get("schema_name") or "public",
+                state.get("schema_payload") or {},
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent registered views created",
+                {"elapsed_ms": round((time.perf_counter() - t1) * 1000, 1), "views": len(created_views)},
+                event_callback=event_callback,
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent creating joined views",
+                {},
+                event_callback=event_callback,
+            )
+            t2 = time.perf_counter()
+            joined_views = create_joined_views(
+                settings,
+                state.get("tenant_id") or "",
+                state.get("domain_id") or "",
+                state.get("schema_name") or "public",
+                state.get("join_edges") or [],
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent joined views created",
+                {"elapsed_ms": round((time.perf_counter() - t2) * 1000, 1), "joined_views": len(joined_views)},
+                event_callback=event_callback,
+            )
+        _emit(
             settings,
-            state.get("domain_id") or "",
-            state.get("schema_graph", {}),
-            state.get("profiling_stats", {}),
-            state.get("join_edges", []),
-            state.get("metric_defs", []),
-            glossary_terms=state.get("glossary_terms", []),
-            hierarchy_hints=state.get("hierarchy_hints", []),
-            ontology=state.get("ontology", {}),
-            model_classifications=state.get("model_classifications", []),
-        )
-        created_views = create_views_from_schema(
-            settings,
-            state.get("tenant_id") or "",
-            state.get("domain_id") or "",
-            state.get("connection_id") or "",
-            state.get("database_name") or "",
-            state.get("schema_name") or "public",
-            state.get("schema_payload") or {},
-        )
-        joined_views = create_joined_views(
-            settings,
-            state.get("tenant_id") or "",
-            state.get("domain_id") or "",
-            state.get("schema_name") or "public",
-            state.get("join_edges") or [],
+            run_id,
+            "DashboardAgent",
+            "running",
+            "Dashboard Agent persisting dashboard spec",
+            {},
+            event_callback=event_callback,
         )
         dash_id = persist_dashboard_spec(
             settings,
@@ -782,7 +1115,10 @@ def run_agentic_workflow(settings, run_id: str, initial_state: dict[str, Any]) -
                 "chart_ids": chart_ids,
                 "chart_details": enriched_charts,
                 "views_detail": created_views,
+                "elapsed_ms": round((time.perf_counter() - dashboard_start) * 1000, 1),
+                "fast_mode": fast_mode,
             },
+            event_callback=event_callback,
         )
         return state
 

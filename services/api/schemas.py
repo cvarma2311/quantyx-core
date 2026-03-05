@@ -237,8 +237,9 @@ class ViewListResponse(BaseModel):
 
 class ViewSchemaResponse(BaseModel):
     view_name: str
-    schema: str
+    schema_name: str = Field(..., alias="schema")
     columns: List[dict]
+    model_config = {"populate_by_name": True}
 
 
 class ViewQueryRequest(BaseModel):
@@ -1836,8 +1837,9 @@ class TenantScopeUpsertRequest(BaseModel):
     domain_id: str = Field(..., examples=["manufacturing"])
     connection_id: str = Field(..., examples=["conn_prod"])
     database: str = Field(..., examples=["prod_warehouse"])
-    schema: str = Field(..., examples=["public"])
+    schema_name: str = Field(..., alias="schema", examples=["public"])
     tables: List[str] | None = Field(None, examples=[["fact_sales", "dim_customer"]])
+    model_config = {"populate_by_name": True}
 
 
 class TenantScopeResponse(BaseModel):
@@ -1845,9 +1847,10 @@ class TenantScopeResponse(BaseModel):
     domain_id: str
     connection_id: str
     database: str
-    schema: str
+    schema_name: str = Field(..., alias="schema")
     tables: List[str] | None = None
     status: str
+    model_config = {"populate_by_name": True}
 
 
 class MetricUpsertRequest(BaseModel):

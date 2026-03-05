@@ -1,10 +1,27 @@
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import date, datetime, time as dt_time
+from decimal import Decimal
 from typing import Any
+
+from psycopg2.extras import Json
 
 from services.ai.config import Settings
 from services.ai.db import run_query, execute_non_query
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (datetime, date, dt_time)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return str(value)
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, default=_json_default)
 
 
 def create_agent_run(settings: Settings, tenant_id: str, domain_id: str, status: str = "queued") -> str:
@@ -48,9 +65,16 @@ def append_agent_run_event(
         INSERT INTO public.quantyx_agent_run_events (
           event_id, run_id, agent_name, status, message, artifacts, created_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, now())
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb, now())
         """,
-        [event_id, run_id, agent_name, status, message, artifacts],
+        [
+            event_id,
+            run_id,
+            agent_name,
+            status,
+            message,
+            Json(artifacts, dumps=_json_dumps) if artifacts is not None else None,
+        ],
     )
     return event_id
 

@@ -1,10 +1,31 @@
 from __future__ import annotations
 
+import logging
+import json
+import time
 import uuid
+from datetime import date, datetime, time as dt_time
+from decimal import Decimal
 from typing import Any
+
+from psycopg2.extras import Json
 
 from services.ai.config import Settings
 from services.ai.db import run_query, execute_non_query
+
+logger = logging.getLogger(__name__)
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, (datetime, date, dt_time)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    return str(value)
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, default=_json_default)
 
 
 def _normalize(name: str) -> str:
@@ -33,10 +54,16 @@ def _ensure_node(
     node_type: str,
     name: str,
     metadata: dict[str, Any] | None = None,
+    node_cache: dict[tuple[str, str], str] | None = None,
 ) -> str:
     normalized = _normalize(name)
+    cache_key = (node_type, normalized)
+    if node_cache is not None and cache_key in node_cache:
+        return node_cache[cache_key]
     existing = _get_node_id(settings, domain_id, node_type, normalized)
     if existing:
+        if node_cache is not None:
+            node_cache[cache_key] = existing
         return existing
     node_id = f"node_{uuid.uuid4().hex[:12]}"
     execute_non_query(
@@ -45,10 +72,20 @@ def _ensure_node(
         INSERT INTO public.quantyx_semantic_nodes (
           node_id, node_type, name, normalized_name, domain_id, metadata, confidence, created_at, updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, now(), now())
+        VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, now(), now())
         """,
-        [node_id, node_type, name, normalized, domain_id, metadata, None],
+        [
+            node_id,
+            node_type,
+            name,
+            normalized,
+            domain_id,
+            Json(metadata, dumps=_json_dumps) if metadata is not None else None,
+            None,
+        ],
     )
+    if node_cache is not None:
+        node_cache[cache_key] = node_id
     return node_id
 
 
@@ -61,7 +98,7 @@ def _update_node_metadata(settings: Settings, node_id: str, metadata: dict[str, 
                updated_at = now()
          WHERE node_id = %s
         """,
-        [metadata, node_id],
+        [Json(metadata, dumps=_json_dumps), node_id],
     )
 
 
@@ -92,8 +129,12 @@ def _insert_edge(
     source: str = "rule",
     confidence: float | None = None,
     metadata: dict[str, Any] | None = None,
+    edge_cache: set[tuple[str, str, str]] | None = None,
 ) -> None:
-    if _edge_exists(settings, src, dst, edge_type):
+    cache_key = (src, dst, edge_type)
+    if edge_cache is not None and cache_key in edge_cache:
+        return
+    if edge_cache is None and _edge_exists(settings, src, dst, edge_type):
         return
     if confidence is not None and confidence < _QUALITY_THRESHOLD:
         metadata = dict(metadata or {})
@@ -106,10 +147,20 @@ def _insert_edge(
         INSERT INTO public.quantyx_semantic_edges (
           edge_id, src_node_id, dst_node_id, edge_type, confidence, source, metadata, created_at, updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, now(), now())
+        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, now(), now())
         """,
-        [edge_id, src, dst, edge_type, confidence, source, metadata],
+        [
+            edge_id,
+            src,
+            dst,
+            edge_type,
+            confidence,
+            source,
+            Json(metadata, dumps=_json_dumps) if metadata is not None else None,
+        ],
     )
+    if edge_cache is not None:
+        edge_cache.add(cache_key)
 
 
 def persist_semantic_graph(
@@ -124,10 +175,59 @@ def persist_semantic_graph(
     ontology: dict[str, Any] | None = None,
     model_classifications: list[dict[str, Any]] | None = None,
 ) -> dict[str, int]:
+    started = time.perf_counter()
     counts = {"nodes": 0, "edges": 0}
     glossary_terms = glossary_terms or []
     hierarchy_hints = hierarchy_hints or []
     ontology = ontology or {}
+    logger.info("semantic_graph.persist | stage=start domain=%s", domain_id)
+
+    existing_nodes = run_query(
+        settings,
+        """
+        SELECT node_id, node_type, normalized_name
+          FROM public.quantyx_semantic_nodes
+         WHERE domain_id = %s
+        """,
+        [domain_id],
+    )
+    node_cache: dict[tuple[str, str], str] = {}
+    for row in existing_nodes:
+        node_type = row.get("node_type")
+        normalized = row.get("normalized_name")
+        node_id = row.get("node_id")
+        if node_type and normalized and node_id:
+            node_cache[(str(node_type), str(normalized))] = str(node_id)
+    logger.info(
+        "semantic_graph.persist | stage=loaded_nodes domain=%s count=%s elapsed_ms=%.1f",
+        domain_id,
+        len(node_cache),
+        (time.perf_counter() - started) * 1000,
+    )
+
+    existing_edges = run_query(
+        settings,
+        """
+        SELECT e.src_node_id, e.dst_node_id, e.edge_type
+          FROM public.quantyx_semantic_edges e
+          JOIN public.quantyx_semantic_nodes s ON s.node_id = e.src_node_id
+         WHERE s.domain_id = %s
+        """,
+        [domain_id],
+    )
+    edge_cache: set[tuple[str, str, str]] = set()
+    for row in existing_edges:
+        src = row.get("src_node_id")
+        dst = row.get("dst_node_id")
+        edge_type = row.get("edge_type")
+        if src and dst and edge_type:
+            edge_cache.add((str(src), str(dst), str(edge_type)))
+    logger.info(
+        "semantic_graph.persist | stage=loaded_edges domain=%s count=%s elapsed_ms=%.1f",
+        domain_id,
+        len(edge_cache),
+        (time.perf_counter() - started) * 1000,
+    )
 
     dimension_names: set[str] = set()
     for table in profiling_stats.get("tables", []):
@@ -140,7 +240,7 @@ def persist_semantic_graph(
 
     # Model + column nodes
     for table in schema_graph.get("tables", []):
-        model_node = _ensure_node(settings, domain_id, "model", table.get("name"))
+        model_node = _ensure_node(settings, domain_id, "model", table.get("name"), node_cache=node_cache)
         meta = model_meta_map.get(table.get("name"))
         if meta:
             _update_node_metadata(
@@ -165,21 +265,33 @@ def persist_semantic_graph(
                 "column",
                 f"{table.get('name')}.{col_name}",
                 {"table": table.get("name"), "column": col_name, "data_type": col.get("data_type")},
+                node_cache=node_cache,
             )
             counts["nodes"] += 1
-            _insert_edge(settings, model_node, col_node, "model_column")
+            _insert_edge(settings, model_node, col_node, "model_column", edge_cache=edge_cache)
             counts["edges"] += 1
+    logger.info(
+        "semantic_graph.persist | stage=model_column_done domain=%s nodes=%s edges=%s elapsed_ms=%.1f",
+        domain_id,
+        counts["nodes"],
+        counts["edges"],
+        (time.perf_counter() - started) * 1000,
+    )
 
     # Dimensions from profiling (categorical + time)
     for table in profiling_stats.get("tables", []):
-        model_node = _ensure_node(settings, domain_id, "model", table.get("name"))
+        model_node = _ensure_node(settings, domain_id, "model", table.get("name"), node_cache=node_cache)
         for col in (table.get("categorical_columns") or []) + (table.get("time_columns") or []):
-            dim_node = _ensure_node(settings, domain_id, "dimension", col, {"table": table.get("name")})
+            dim_node = _ensure_node(
+                settings, domain_id, "dimension", col, {"table": table.get("name")}, node_cache=node_cache
+            )
             counts["nodes"] += 1
-            col_node = _ensure_node(settings, domain_id, "column", f"{table.get('name')}.{col}")
-            _insert_edge(settings, dim_node, col_node, "dimension_column")
+            col_node = _ensure_node(
+                settings, domain_id, "column", f"{table.get('name')}.{col}", node_cache=node_cache
+            )
+            _insert_edge(settings, dim_node, col_node, "dimension_column", edge_cache=edge_cache)
             counts["edges"] += 1
-            _insert_edge(settings, dim_node, model_node, "dimension_model")
+            _insert_edge(settings, dim_node, model_node, "dimension_model", edge_cache=edge_cache)
             counts["edges"] += 1
             if col in (table.get("time_columns") or []):
                 grain = "day"
@@ -189,9 +301,24 @@ def persist_semantic_graph(
                 elif "week" in lower:
                     grain = "week"
                 _update_node_metadata(settings, dim_node, {"time_grain": grain})
-                grain_node = _ensure_node(settings, domain_id, "time_grain", grain)
-                _insert_edge(settings, dim_node, grain_node, "dimension_time_grain", source="rule", confidence=0.7)
+                grain_node = _ensure_node(settings, domain_id, "time_grain", grain, node_cache=node_cache)
+                _insert_edge(
+                    settings,
+                    dim_node,
+                    grain_node,
+                    "dimension_time_grain",
+                    source="rule",
+                    confidence=0.7,
+                    edge_cache=edge_cache,
+                )
                 counts["edges"] += 1
+    logger.info(
+        "semantic_graph.persist | stage=dimensions_done domain=%s nodes=%s edges=%s elapsed_ms=%.1f",
+        domain_id,
+        counts["nodes"],
+        counts["edges"],
+        (time.perf_counter() - started) * 1000,
+    )
 
     # Metrics
     for metric in metrics:
@@ -201,13 +328,21 @@ def persist_semantic_graph(
             "metric",
             metric.get("metric_name"),
             {"formula": metric.get("formula")},
+            node_cache=node_cache,
         )
         counts["nodes"] += 1
         base_table = metric.get("base_table")
         if base_table:
-            model_node = _ensure_node(settings, domain_id, "model", base_table)
-            _insert_edge(settings, metric_node, model_node, "metric_model")
+            model_node = _ensure_node(settings, domain_id, "model", base_table, node_cache=node_cache)
+            _insert_edge(settings, metric_node, model_node, "metric_model", edge_cache=edge_cache)
             counts["edges"] += 1
+    logger.info(
+        "semantic_graph.persist | stage=metrics_done domain=%s nodes=%s edges=%s elapsed_ms=%.1f",
+        domain_id,
+        counts["nodes"],
+        counts["edges"],
+        (time.perf_counter() - started) * 1000,
+    )
 
     # Concepts + synonyms from glossary/context
     concept_names = set()
@@ -220,17 +355,21 @@ def persist_semantic_graph(
 
     concept_nodes: dict[str, str] = {}
     for concept in sorted(concept_names, key=lambda n: n.lower()):
-        node_id = _ensure_node(settings, domain_id, "concept", concept)
+        node_id = _ensure_node(settings, domain_id, "concept", concept, node_cache=node_cache)
         concept_nodes[concept.lower()] = node_id
         counts["nodes"] += 1
 
         if concept in dimension_names:
-            dim_node = _ensure_node(settings, domain_id, "dimension", concept)
-            _insert_edge(settings, node_id, dim_node, "concept_dimension", source="rule", confidence=0.8)
+            dim_node = _ensure_node(settings, domain_id, "dimension", concept, node_cache=node_cache)
+            _insert_edge(
+                settings, node_id, dim_node, "concept_dimension", source="rule", confidence=0.8, edge_cache=edge_cache
+            )
             counts["edges"] += 1
         if concept in metric_names:
-            metric_node = _ensure_node(settings, domain_id, "metric", concept)
-            _insert_edge(settings, node_id, metric_node, "concept_metric", source="rule", confidence=0.8)
+            metric_node = _ensure_node(settings, domain_id, "metric", concept, node_cache=node_cache)
+            _insert_edge(
+                settings, node_id, metric_node, "concept_metric", source="rule", confidence=0.8, edge_cache=edge_cache
+            )
             counts["edges"] += 1
 
     for term in glossary_terms:
@@ -239,13 +378,13 @@ def persist_semantic_graph(
             continue
         head_node = concept_nodes.get(head.lower())
         if not head_node:
-            head_node = _ensure_node(settings, domain_id, "concept", head)
+            head_node = _ensure_node(settings, domain_id, "concept", head, node_cache=node_cache)
             concept_nodes[head.lower()] = head_node
             counts["nodes"] += 1
         for syn in (term.get("synonyms") or []) + (term.get("abbreviations") or []):
             if not syn:
                 continue
-            syn_node = _ensure_node(settings, domain_id, "synonym", syn)
+            syn_node = _ensure_node(settings, domain_id, "synonym", syn, node_cache=node_cache)
             counts["nodes"] += 1
             _insert_edge(
                 settings,
@@ -255,24 +394,52 @@ def persist_semantic_graph(
                 source="glossary",
                 confidence=0.7,
                 metadata={"term": head},
+                edge_cache=edge_cache,
             )
             counts["edges"] += 1
             if syn in dimension_names:
-                dim_node = _ensure_node(settings, domain_id, "dimension", syn)
-                _insert_edge(settings, head_node, dim_node, "concept_dimension", source="glossary", confidence=0.7)
+                dim_node = _ensure_node(settings, domain_id, "dimension", syn, node_cache=node_cache)
+                _insert_edge(
+                    settings,
+                    head_node,
+                    dim_node,
+                    "concept_dimension",
+                    source="glossary",
+                    confidence=0.7,
+                    edge_cache=edge_cache,
+                )
                 counts["edges"] += 1
             if syn in metric_names:
-                metric_node = _ensure_node(settings, domain_id, "metric", syn)
-                _insert_edge(settings, head_node, metric_node, "concept_metric", source="glossary", confidence=0.7)
+                metric_node = _ensure_node(settings, domain_id, "metric", syn, node_cache=node_cache)
+                _insert_edge(
+                    settings,
+                    head_node,
+                    metric_node,
+                    "concept_metric",
+                    source="glossary",
+                    confidence=0.7,
+                    edge_cache=edge_cache,
+                )
                 counts["edges"] += 1
+    logger.info(
+        "semantic_graph.persist | stage=concepts_done domain=%s nodes=%s edges=%s elapsed_ms=%.1f",
+        domain_id,
+        counts["nodes"],
+        counts["edges"],
+        (time.perf_counter() - started) * 1000,
+    )
 
     for edge in ontology.get("hierarchy_edges", []) or []:
         parent = edge.get("parent")
         child = edge.get("child")
         if not parent or not child:
             continue
-        parent_node = concept_nodes.get(parent.lower()) or _ensure_node(settings, domain_id, "concept", parent)
-        child_node = concept_nodes.get(child.lower()) or _ensure_node(settings, domain_id, "concept", child)
+        parent_node = concept_nodes.get(parent.lower()) or _ensure_node(
+            settings, domain_id, "concept", parent, node_cache=node_cache
+        )
+        child_node = concept_nodes.get(child.lower()) or _ensure_node(
+            settings, domain_id, "concept", child, node_cache=node_cache
+        )
         _insert_edge(
             settings,
             parent_node,
@@ -280,6 +447,7 @@ def persist_semantic_graph(
             "hierarchy_parent",
             source=edge.get("source") or "context",
             confidence=edge.get("confidence") or 0.6,
+            edge_cache=edge_cache,
         )
         counts["edges"] += 1
 
@@ -289,8 +457,8 @@ def persist_semantic_graph(
         right = join.get("right_table")
         if not left or not right:
             continue
-        left_node = _ensure_node(settings, domain_id, "model", left)
-        right_node = _ensure_node(settings, domain_id, "model", right)
+        left_node = _ensure_node(settings, domain_id, "model", left, node_cache=node_cache)
+        right_node = _ensure_node(settings, domain_id, "model", right, node_cache=node_cache)
         _insert_edge(
             settings,
             left_node,
@@ -301,8 +469,23 @@ def persist_semantic_graph(
                 "left_key": join.get("left_key"),
                 "right_key": join.get("right_key"),
             },
+            edge_cache=edge_cache,
         )
         counts["edges"] += 1
+    logger.info(
+        "semantic_graph.persist | stage=joins_done domain=%s nodes=%s edges=%s elapsed_ms=%.1f",
+        domain_id,
+        counts["nodes"],
+        counts["edges"],
+        (time.perf_counter() - started) * 1000,
+    )
+    logger.info(
+        "semantic_graph.persist | stage=completed domain=%s nodes=%s edges=%s elapsed_ms=%.1f",
+        domain_id,
+        counts["nodes"],
+        counts["edges"],
+        (time.perf_counter() - started) * 1000,
+    )
 
     return counts
 
@@ -321,9 +504,9 @@ def persist_dashboard_spec(
         INSERT INTO public.quantyx_dashboard_specs (
           dashboard_id, tenant_id, domain_id, title, spec, created_at, updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, now(), now())
+        VALUES (%s, %s, %s, %s, %s::jsonb, now(), now())
         """,
-        [dashboard_id, tenant_id, domain_id, title, spec],
+        [dashboard_id, tenant_id, domain_id, title, Json(spec, dumps=_json_dumps)],
     )
     return dashboard_id
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
@@ -7,6 +8,37 @@ import psycopg2
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, run_query
+
+logger = logging.getLogger(__name__)
+
+
+def _registry_columns(settings: Settings) -> set[str]:
+    rows = run_query(
+        settings,
+        """
+        SELECT column_name
+          FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'quantyx_fact_views_registry'
+        """,
+        [],
+    )
+    return {str(r.get("column_name")) for r in rows if r.get("column_name")}
+
+
+def _insert_registry_row(settings: Settings, values: dict[str, Any]) -> None:
+    cols = _registry_columns(settings)
+    ordered = [k for k in values.keys() if k in cols]
+    if not ordered:
+        logger.warning("views.registry.insert_skipped | reason=no_compatible_columns")
+        return
+    placeholders = ", ".join(["%s"] * len(ordered))
+    sql = (
+        "INSERT INTO public.quantyx_fact_views_registry ("
+        + ", ".join(ordered)
+        + f") VALUES ({placeholders}) ON CONFLICT DO NOTHING"
+    )
+    execute_non_query(settings, sql, [values[k] for k in ordered])
 
 
 def ensure_fact_view(
@@ -37,40 +69,22 @@ def ensure_fact_view(
     finally:
         conn.close()
 
-    execute_non_query(
+    _insert_registry_row(
         settings,
-        """
-        INSERT INTO public.quantyx_fact_views_registry (
-          view_id,
-          tenant_id,
-          domain_id,
-          connection_id,
-          database_name,
-          schema_name,
-          view_name,
-          source_table,
-          view_type,
-          join_left_key,
-          join_right_key,
-          coverage_ratio
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT DO NOTHING
-        """,
-        [
-            f"fview_{uuid.uuid4().hex[:10]}",
-            tenant_id,
-            domain_id,
-            connection_id,
-            database_name,
-            schema_name,
-            fact_table,
-            source_table,
-            "fact",
-            None,
-            None,
-            None,
-        ],
+        {
+            "view_id": f"fview_{uuid.uuid4().hex[:10]}",
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "connection_id": connection_id,
+            "database_name": database_name,
+            "schema_name": schema_name,
+            "view_name": fact_table,
+            "source_table": source_table,
+            "view_type": "fact",
+            "join_left_key": None,
+            "join_right_key": None,
+            "coverage_ratio": None,
+        },
     )
     return fact_table
 
@@ -80,11 +94,17 @@ def list_views(
     tenant_id: str,
     domain_id: str | None,
 ) -> list[dict[str, Any]]:
+    cols = _registry_columns(settings)
+    view_type_expr = "view_type" if "view_type" in cols else "'fact' AS view_type"
+    join_left_key_expr = "join_left_key" if "join_left_key" in cols else "NULL AS join_left_key"
+    join_right_key_expr = "join_right_key" if "join_right_key" in cols else "NULL AS join_right_key"
+    coverage_ratio_expr = "coverage_ratio" if "coverage_ratio" in cols else "NULL AS coverage_ratio"
     if domain_id:
         return run_query(
             settings,
-            """
-            SELECT view_name, schema_name, source_table, created_at, view_type, join_left_key, join_right_key, coverage_ratio
+            f"""
+            SELECT view_name, schema_name, source_table, created_at,
+                   {view_type_expr}, {join_left_key_expr}, {join_right_key_expr}, {coverage_ratio_expr}
               FROM public.quantyx_fact_views_registry
              WHERE tenant_id = %s AND domain_id = %s
              ORDER BY created_at DESC
@@ -93,8 +113,9 @@ def list_views(
         )
     return run_query(
         settings,
-        """
-        SELECT view_name, schema_name, source_table, created_at, view_type, join_left_key, join_right_key, coverage_ratio
+        f"""
+        SELECT view_name, schema_name, source_table, created_at,
+               {view_type_expr}, {join_left_key_expr}, {join_right_key_expr}, {coverage_ratio_expr}
           FROM public.quantyx_fact_views_registry
          WHERE tenant_id = %s
          ORDER BY created_at DESC
@@ -170,40 +191,22 @@ def create_joined_views(
         )
         try:
             execute_non_query(settings, sql, [])
-            execute_non_query(
+            _insert_registry_row(
                 settings,
-                """
-                INSERT INTO public.quantyx_fact_views_registry (
-                  view_id,
-                  tenant_id,
-                  domain_id,
-                  connection_id,
-                  database_name,
-                  schema_name,
-                  view_name,
-                  source_table,
-                  view_type,
-                  join_left_key,
-                  join_right_key,
-                  coverage_ratio
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                """,
-                [
-                    f"jview_{uuid.uuid4().hex[:10]}",
-                    tenant_id,
-                    domain_id,
-                    "",
-                    "",
-                    schema_name,
-                    view_name,
-                    f"{left}__{right}",
-                    "joined",
-                    left_key,
-                    right_key,
-                    edge.get("coverage_ratio"),
-                ],
+                {
+                    "view_id": f"jview_{uuid.uuid4().hex[:10]}",
+                    "tenant_id": tenant_id,
+                    "domain_id": domain_id,
+                    "connection_id": "",
+                    "database_name": "",
+                    "schema_name": schema_name,
+                    "view_name": view_name,
+                    "source_table": f"{left}__{right}",
+                    "view_type": "joined",
+                    "join_left_key": left_key,
+                    "join_right_key": right_key,
+                    "coverage_ratio": edge.get("coverage_ratio"),
+                },
             )
             created.append(
                 {
