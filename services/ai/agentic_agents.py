@@ -23,6 +23,11 @@ TIME_TYPES = {
 }
 
 
+def _qident(name: str) -> str:
+    # Defensive quoting for mixed-case/special-character identifiers.
+    return '"' + str(name).replace('"', '""') + '"'
+
+
 def build_schema_graph(schema_payload: dict) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
     tables = []
@@ -62,7 +67,7 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
         try:
             rows = run_query(
                 settings,
-                f"SELECT COUNT(*) AS cnt FROM {schema_name}.{name}",
+                f"SELECT COUNT(*) AS cnt FROM {_qident(schema_name)}.{_qident(name)}",
                 [],
             )
             row_count = rows[0]["cnt"] if rows else None
@@ -81,7 +86,11 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
             try:
                 sample_rows = run_query(
                     settings,
-                    f"SELECT DISTINCT {col} AS value FROM {schema_name}.{name} WHERE {col} IS NOT NULL LIMIT 5000",
+                    (
+                        f"SELECT DISTINCT {_qident(col)} AS value "
+                        f"FROM {_qident(schema_name)}.{_qident(name)} "
+                        f"WHERE {_qident(col)} IS NOT NULL LIMIT 5000"
+                    ),
                     [],
                 )
                 samples[col] = [r["value"] for r in sample_rows]
@@ -94,7 +103,10 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
             try:
                 distinct_rows = run_query(
                     settings,
-                    f"SELECT COUNT(DISTINCT {col}) AS distinct_cnt FROM {schema_name}.{name}",
+                    (
+                        f"SELECT COUNT(DISTINCT {_qident(col)}) AS distinct_cnt "
+                        f"FROM {_qident(schema_name)}.{_qident(name)}"
+                    ),
                     [],
                 )
                 distinct_cnt = distinct_rows[0]["distinct_cnt"] if distinct_rows else None
