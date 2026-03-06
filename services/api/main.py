@@ -128,8 +128,10 @@ from services.ai.agentic_store import (
     update_agent_run_status,
     append_agent_run_event,
     list_agent_run_events,
+    list_agent_run_events_stage_aware,
     get_agent_run,
     list_agent_chat_log,
+    get_agent_event_artifact,
     append_plan_summary,
 )
 from services.ai.agentic_orchestrator import run_agentic_workflow
@@ -202,7 +204,27 @@ from services.ai.semantic_feedback_store import (
     list_semantic_feedback,
     apply_semantic_feedback,
 )
-from services.ai.semantic_graph_store import list_dashboard_specs, get_dashboard_spec
+from services.ai.semantic_graph_store import list_dashboard_specs, get_dashboard_spec, update_dashboard_spec
+from services.ai.dashboard_refresh_store import (
+    create_dashboard_refresh_run,
+    update_dashboard_refresh_status,
+    get_dashboard_refresh_run,
+    append_dashboard_refresh_event,
+    list_dashboard_refresh_events,
+    get_dashboard_insights,
+    upsert_dashboard_insights_artifact,
+    create_dashboard_chart_snapshot,
+)
+from services.ai.dashboard_insights import (
+    chart_stats as dashboard_chart_stats,
+    chart_insight as dashboard_chart_insight,
+    build_dashboard_evidence,
+    deterministic_dashboard_summary,
+    deterministic_dashboard_inference,
+    llm_rewrite_text,
+    render_summary_html,
+    render_inference_html,
+)
 from services.api.schemas import (
     EntitiesResponse,
     EntitiesAllResponse,
@@ -295,6 +317,7 @@ from services.api.schemas import (
     ViewQueryResponse,
     DashboardListResponse,
     DashboardResponse,
+    DashboardUpdateRequest,
     ScenariosResponse,
     ScenarioCreateRequest,
     ScenarioUpdateRequest,
@@ -920,6 +943,206 @@ def _execute_job(job: dict) -> dict:
             update_chat_request(settings, chat_id, status="failed", error_message=str(exc))
             create_chat_event(settings, chat_id, "failed", "Chat request failed", {"error": str(exc)})
             raise
+    if job_type == "dashboard_refresh":
+        refresh_id = payload.get("refresh_id")
+        dashboard_id = payload.get("dashboard_id")
+        if not refresh_id or not dashboard_id:
+            raise HTTPException(status_code=400, detail="refresh_id and dashboard_id are required")
+        refresh_row = get_dashboard_refresh_run(settings, dashboard_id, refresh_id)
+        if not refresh_row:
+            raise HTTPException(status_code=404, detail="Dashboard refresh run not found")
+        dashboard_row = get_dashboard_spec(settings, dashboard_id)
+        if not dashboard_row:
+            update_dashboard_refresh_status(settings, refresh_id, "failed", error_message="Dashboard not found")
+            raise HTTPException(status_code=404, detail="Dashboard not found")
+        update_dashboard_refresh_status(settings, refresh_id, "running")
+        append_dashboard_refresh_event(
+            settings,
+            refresh_id=refresh_id,
+            dashboard_id=dashboard_id,
+            stage_name="running",
+            message="Dashboard refresh started",
+            artifacts={},
+        )
+        spec = dashboard_row.get("spec") or {}
+        charts = spec.get("charts") or []
+        chart_results: list[dict] = []
+        failed_charts: list[dict] = []
+        for idx, chart in enumerate(charts):
+            chart_obj = chart if isinstance(chart, dict) else {}
+            chart_id = chart_obj.get("chart_id") or f"dash_chart_{idx+1}"
+            chart_type = chart_obj.get("chart_type") or chart_obj.get("type") or "bar"
+            metric_name = chart_obj.get("metric_name") or chart_obj.get("metric")
+            dimensions = chart_obj.get("dimensions") or []
+            sql = chart_obj.get("sql")
+            params = chart_obj.get("params") or []
+            if chart_obj.get("chart_id"):
+                chart_row = get_chart_request(settings, chart_obj.get("chart_id"))
+                if chart_row:
+                    sql = sql or chart_row.get("sql")
+                    params = params or chart_row.get("params") or []
+                    if not metric_name:
+                        qp = chart_row.get("query_payload") or {}
+                        metrics_from_qp = qp.get("metrics") or []
+                        if metrics_from_qp:
+                            metric_name = metrics_from_qp[0]
+                        dimensions = dimensions or qp.get("dimensions") or []
+                    chart_type = chart_type or chart_row.get("chart_type") or "bar"
+            rows: list[dict] = []
+            status = "ok"
+            error_message = None
+            try:
+                if sql:
+                    rows = run_query(settings, sql, params if isinstance(params, list) else [])
+                elif chart_obj.get("chart_data") and isinstance(chart_obj.get("chart_data"), list):
+                    rows = chart_obj.get("chart_data") or []
+                elif chart_obj.get("rows") and isinstance(chart_obj.get("rows"), list):
+                    rows = chart_obj.get("rows") or []
+                else:
+                    status = "failed"
+                    error_message = "No SQL or chart data available for refresh"
+            except Exception as exc:  # noqa: BLE001
+                status = "failed"
+                error_message = str(exc)
+            metric_key = metric_name
+            if rows and not metric_key:
+                for key in rows[0].keys():
+                    if key not in {"category", "date", "period"}:
+                        try:
+                            float(rows[0].get(key))
+                            metric_key = key
+                            break
+                        except (TypeError, ValueError):
+                            continue
+            stats = dashboard_chart_stats(rows, metric_key)
+            insight = dashboard_chart_insight(rows, metric_key, chart_type)
+            if not dimensions:
+                if chart_type in {"bar", "pie"}:
+                    dimensions = ["category"]
+                elif chart_type == "line":
+                    dimensions = ["date"]
+            payload_obj = build_chart_payload(chart_type, rows, metric_key or "value", dimensions or ["category"])
+            if chart_obj.get("chart_id") and status == "ok":
+                update_chart_request(
+                    settings,
+                    chart_obj.get("chart_id"),
+                    status="ready",
+                    sql=sql,
+                    params=params if isinstance(params, list) else [],
+                    rows_json=rows,
+                    chart_type=chart_type,
+                    chart_payload=payload_obj.get("chart_payload"),
+                    chart_data=payload_obj.get("data"),
+                )
+            create_dashboard_chart_snapshot(
+                settings,
+                refresh_id=refresh_id,
+                dashboard_id=dashboard_id,
+                chart_id=chart_id,
+                chart_type=chart_type,
+                sql=sql,
+                params=params if isinstance(params, list) else [],
+                data_json=rows,
+                stats_json=stats,
+                insight_json={**insight, "status": status, "error_message": error_message},
+            )
+            result_item = {
+                "chart_id": chart_id,
+                "chart_type": chart_type,
+                "metric_name": metric_key,
+                "rows_count": len(rows),
+                "stats": stats,
+                "insight": insight,
+                "status": status,
+            }
+            chart_results.append(result_item)
+            if status != "ok":
+                failed_charts.append(
+                    {"chart_id": chart_id, "error_message": error_message or "unknown_error"}
+                )
+
+        append_dashboard_refresh_event(
+            settings,
+            refresh_id=refresh_id,
+            dashboard_id=dashboard_id,
+            stage_name="charts_refreshed",
+            message=f"Dashboard charts refreshed: {len(chart_results) - len(failed_charts)}/{len(chart_results)}",
+            artifacts={"chart_count": len(chart_results), "failed_charts": failed_charts},
+        )
+        update_dashboard_refresh_status(settings, refresh_id, "charts_refreshed")
+
+        evidence = build_dashboard_evidence(chart_results)
+        quality_confidence = 1.0 if evidence.get("total_charts", 0) == 0 else max(
+            0.0,
+            min(
+                1.0,
+                (evidence.get("refreshed_charts", 0) / max(1, evidence.get("total_charts", 0))),
+            ),
+        )
+        warnings = []
+        if failed_charts:
+            warnings.append("some_chart_refreshes_failed")
+        if evidence.get("refreshed_charts", 0) == 0:
+            warnings.append("no_refreshed_charts")
+        quality = {"confidence": round(quality_confidence, 3), "warnings": warnings}
+
+        summary_base = deterministic_dashboard_summary(evidence)
+        inference_base = deterministic_dashboard_inference(evidence)
+        summary_raw_text = llm_rewrite_text(
+            settings,
+            kind="summary",
+            base_text=summary_base,
+            evidence=evidence,
+        )
+        inference_raw_text = llm_rewrite_text(
+            settings,
+            kind="inference",
+            base_text=inference_base,
+            evidence=evidence,
+        )
+        summary_html = render_summary_html(summary_raw_text, evidence)
+        inference_html = render_inference_html(inference_raw_text, evidence)
+
+        upsert_dashboard_insights_artifact(
+            settings,
+            refresh_id=refresh_id,
+            dashboard_id=dashboard_id,
+            summary_raw_text=summary_raw_text,
+            summary_html=summary_html,
+            inference_raw_text=inference_raw_text,
+            inference_html=inference_html,
+            evidence_json=evidence,
+            quality_json=quality,
+        )
+        append_dashboard_refresh_event(
+            settings,
+            refresh_id=refresh_id,
+            dashboard_id=dashboard_id,
+            stage_name="summary_ready",
+            message="Dashboard summary ready",
+            artifacts={"confidence": quality.get("confidence"), "warnings": warnings},
+        )
+        update_dashboard_refresh_status(settings, refresh_id, "summary_ready")
+        append_dashboard_refresh_event(
+            settings,
+            refresh_id=refresh_id,
+            dashboard_id=dashboard_id,
+            stage_name="inference_ready",
+            message="Dashboard inference ready",
+            artifacts={"confidence": quality.get("confidence"), "warnings": warnings},
+        )
+        update_dashboard_refresh_status(settings, refresh_id, "inference_ready")
+        final_status = "partial_completed" if failed_charts else "completed"
+        append_dashboard_refresh_event(
+            settings,
+            refresh_id=refresh_id,
+            dashboard_id=dashboard_id,
+            stage_name=final_status,
+            message="Dashboard refresh completed" if not failed_charts else "Dashboard refresh partially completed",
+            artifacts={"failed_charts": failed_charts, "confidence": quality.get("confidence")},
+        )
+        update_dashboard_refresh_status(settings, refresh_id, final_status)
+        return {"refresh_id": refresh_id, "dashboard_id": dashboard_id, "status": final_status}
     if job_type == "agentic_run":
         run_id = payload.get("run_id")
         if not run_id:
@@ -5906,9 +6129,81 @@ def get_agentic_run(run_id: str) -> dict:
         }
     },
 )
-def get_agentic_run_events(run_id: str, limit: int = 200) -> dict:
-    events = list_agent_run_events(settings, run_id, limit=limit)
-    return {"events": events}
+def get_agentic_run_events(
+    run_id: str,
+    limit: int = 200,
+    include: str | None = None,
+    compact: bool = True,
+    stage_name: str | None = None,
+    agent_name: str | None = None,
+) -> dict:
+    del compact  # reserved for store-side compaction behavior
+    events = _list_events_v2(
+        run_id=run_id,
+        limit=limit,
+        include=include,
+        stage_name=stage_name,
+        agent_name=agent_name,
+    )
+    return {"events": events, "paging": {"limit": limit, "returned": len(events)}}
+
+
+def _parse_include_tokens(include: str | None) -> set[str]:
+    if not include:
+        return {"summary", "inference"}
+    tokens = {token.strip().lower() for token in include.split(",") if token.strip()}
+    return tokens or {"summary", "inference"}
+
+
+def _filter_artifact_payload(artifact: dict | None, include_tokens: set[str]) -> dict:
+    if not artifact:
+        return {}
+    filtered: dict = {}
+    if "raw_json" in include_tokens and artifact.get("raw_json") is not None:
+        filtered["raw_json"] = artifact.get("raw_json")
+    if "summary" in include_tokens:
+        if artifact.get("summary_raw_text") is not None:
+            filtered["summary_raw_text"] = artifact.get("summary_raw_text")
+        if "html" in include_tokens and artifact.get("summary_html") is not None:
+            filtered["summary_html"] = artifact.get("summary_html")
+    if "inference" in include_tokens:
+        if artifact.get("inference_raw_text") is not None:
+            filtered["inference_raw_text"] = artifact.get("inference_raw_text")
+        if "html" in include_tokens and artifact.get("inference_html") is not None:
+            filtered["inference_html"] = artifact.get("inference_html")
+    if artifact.get("truncation") is not None:
+        filtered["truncation"] = artifact.get("truncation")
+    return filtered
+
+
+def _list_events_v2(
+    run_id: str,
+    limit: int,
+    include: str | None,
+    stage_name: str | None,
+    agent_name: str | None,
+) -> list[dict]:
+    include_tokens = _parse_include_tokens(include)
+    rows = list_agent_run_events_stage_aware(settings, run_id, limit=limit)
+    events: list[dict] = []
+    for row in rows:
+        if stage_name and row.get("stage_name") != stage_name:
+            continue
+        if agent_name and row.get("agent_name") != agent_name:
+            continue
+        item = dict(row)
+        event_id = item.get("event_id")
+        artifact_payload = item.get("artifacts")
+        if event_id:
+            try:
+                artifact_row = get_agent_event_artifact(settings, run_id, str(event_id))
+            except Exception:
+                artifact_row = None
+            if artifact_row:
+                artifact_payload = _filter_artifact_payload(artifact_row, include_tokens)
+        item["artifacts"] = _filter_artifact_payload(artifact_payload, include_tokens)
+        events.append(item)
+    return events
 
 
 def _latest_agent_event(run_id: str, agent_name: str, status: str = "completed") -> dict | None:
@@ -5917,6 +6212,30 @@ def _latest_agent_event(run_id: str, agent_name: str, status: str = "completed")
         if event.get("agent_name") == agent_name and event.get("status") == status:
             return event
     return None
+
+
+@app.get(
+    "/agentic/runs/{run_id}/events/{event_id}/artifacts",
+    tags=["agentic"],
+    summary="Get artifacts for an event stage",
+)
+def get_agentic_run_event_artifacts(run_id: str, event_id: str, include: str | None = None) -> dict:
+    include_tokens = _parse_include_tokens(include)
+    try:
+        artifact = get_agent_event_artifact(settings, run_id, event_id)
+    except Exception:
+        artifact = None
+    if not artifact:
+        raise HTTPException(status_code=404, detail=f"Artifacts not found for event_id={event_id}")
+    payload = dict(artifact)
+    payload_filtered = _filter_artifact_payload(payload, include_tokens)
+    payload["raw_json"] = payload_filtered.get("raw_json")
+    payload["summary_raw_text"] = payload_filtered.get("summary_raw_text")
+    payload["summary_html"] = payload_filtered.get("summary_html")
+    payload["inference_raw_text"] = payload_filtered.get("inference_raw_text")
+    payload["inference_html"] = payload_filtered.get("inference_html")
+    payload["truncation"] = payload_filtered.get("truncation")
+    return payload
 
 
 @app.get(
@@ -6128,7 +6447,7 @@ def agentic_run_stream(run_id: str):
     def _event_stream():
         last_count = 0
         while True:
-            events = list_agent_run_events(settings, run_id, limit=2000)
+            events = list_agent_run_events_stage_aware(settings, run_id, limit=2000)
             new_events = events[last_count:]
             for event in new_events:
                 payload = json.dumps(event, default=str)
@@ -6179,9 +6498,34 @@ def agentic_run_stream(run_id: str):
         }
     },
 )
-def get_agentic_run_chat(run_id: str, limit: int = 200) -> dict:
-    messages = list_agent_chat_log(settings, run_id, limit=limit)
-    return {"messages": messages}
+def get_agentic_run_chat(
+    run_id: str,
+    limit: int = 200,
+    include: str | None = None,
+    include_stages: bool = True,
+    sender: str | None = None,
+) -> dict:
+    include_tokens = _parse_include_tokens(include)
+    rows = list_agent_chat_log(settings, run_id, limit=limit)
+    messages: list[dict] = []
+    for row in rows:
+        if sender and row.get("sender") != sender:
+            continue
+        item = dict(row)
+        event_id = item.get("event_id")
+        if include_stages and event_id:
+            try:
+                artifact = get_agent_event_artifact(settings, run_id, str(event_id))
+            except Exception:
+                artifact = None
+            if artifact:
+                item["artifacts"] = _filter_artifact_payload(artifact, include_tokens)
+        if not include_stages:
+            item.pop("event_id", None)
+            item.pop("stage_name", None)
+            item.pop("logical_event_id", None)
+        messages.append(item)
+    return {"messages": messages, "paging": {"limit": limit, "returned": len(messages)}}
 
 
 @app.get(
@@ -6352,6 +6696,10 @@ def views_query(request: ViewQueryRequest) -> ViewQueryResponse:
                                             "tenant_id": "VC_101",
                                             "domain_id": "lpg_production_distribution",
                                             "title": "Auto Dashboard",
+                                            "name": "Auto Dashboard",
+                                            "chart_count": 6,
+                                            "latest_agentic_run_id": "run_123abc456def",
+                                            "latest_refresh_id": "dref_a1b2c3d4e5f6",
                                         }
                                     ]
                                 },
@@ -6364,16 +6712,66 @@ def views_query(request: ViewQueryRequest) -> ViewQueryResponse:
     },
 )
 def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> DashboardListResponse:
+    def _latest_agentic_run_id_for_dashboard(dashboard_id: str) -> str | None:
+        rows = run_query(
+            settings,
+            """
+            SELECT run_id
+              FROM public.quantyx_agent_run_events
+             WHERE agent_name = 'DashboardAgent'
+               AND status = 'completed'
+               AND (
+                 artifacts->>'dashboard_id' = %s
+                 OR artifacts->'raw_json'->>'dashboard_id' = %s
+               )
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            [dashboard_id, dashboard_id],
+        )
+        return rows[0].get("run_id") if rows else None
+
+    def _latest_refresh_id_for_dashboard(dashboard_id: str) -> str | None:
+        rows = run_query(
+            settings,
+            """
+            SELECT refresh_id
+              FROM public.quantyx_dashboard_refresh_runs
+             WHERE dashboard_id = %s
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            [dashboard_id],
+        )
+        return rows[0].get("refresh_id") if rows else None
+
     dashboards = list_dashboard_specs(settings, tenant_id, domain_id)
     payload = []
     for dash in dashboards:
         spec = dash.get("spec") or {}
+        charts = spec.get("charts") or []
+        dashboard_id = dash.get("dashboard_id")
+        latest_run_id = None
+        latest_refresh_id = None
+        if dashboard_id:
+            try:
+                latest_run_id = _latest_agentic_run_id_for_dashboard(dashboard_id)
+            except Exception:
+                latest_run_id = None
+            try:
+                latest_refresh_id = _latest_refresh_id_for_dashboard(dashboard_id)
+            except Exception:
+                latest_refresh_id = None
         payload.append(
             {
-                "dashboard_id": dash.get("dashboard_id"),
+                "dashboard_id": dashboard_id,
                 "tenant_id": dash.get("tenant_id"),
                 "domain_id": dash.get("domain_id"),
                 "title": dash.get("title"),
+                "name": dash.get("title"),
+                "chart_count": len(charts),
+                "latest_agentic_run_id": latest_run_id,
+                "latest_refresh_id": latest_refresh_id,
                 "created_at": dash.get("created_at"),
                 "chart_plan": spec.get("chart_plan") or [],
             }
@@ -6427,6 +6825,483 @@ def get_dashboard_endpoint(dashboard_id: str) -> DashboardResponse:
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
+
+
+@app.put(
+    "/dashboards/{dashboard_id}",
+    tags=["dashboards"],
+    summary="Update dashboard",
+    description="Update dashboard spec. Currently supports deleting a chart.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "delete_by_chart_id": {
+                            "summary": "Delete chart by chart_id",
+                            "value": {
+                                "action": "delete_chart",
+                                "chart_id": "chart_abc123",
+                            },
+                        },
+                        "delete_by_index": {
+                            "summary": "Delete chart by chart index",
+                            "value": {
+                                "action": "delete_chart",
+                                "chart_index": 2,
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "updated": {
+                                "summary": "Dashboard chart deleted",
+                                "value": {
+                                    "dashboard_id": "dash_123",
+                                    "status": "updated",
+                                    "removed_chart_id": "chart_abc123",
+                                    "removed_count": 1,
+                                    "chart_count": 5,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def update_dashboard_endpoint(dashboard_id: str, payload: DashboardUpdateRequest) -> dict:
+    row = get_dashboard_spec(settings, dashboard_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    if payload.action != "delete_chart":
+        raise HTTPException(status_code=400, detail="Unsupported action. Use action=delete_chart")
+
+    spec = dict(row.get("spec") or {})
+    charts = list(spec.get("charts") or [])
+    if not charts:
+        raise HTTPException(status_code=400, detail="Dashboard has no charts to delete")
+
+    removed_chart_id: str | None = None
+    removed_count = 0
+    updated_charts = charts
+
+    if payload.chart_id:
+        removed_chart_id = payload.chart_id
+        updated_charts = []
+        for item in charts:
+            chart = item if isinstance(item, dict) else {}
+            cid = chart.get("chart_id")
+            if cid == payload.chart_id:
+                removed_count += 1
+                continue
+            updated_charts.append(item)
+    elif payload.chart_index is not None:
+        if payload.chart_index < 0 or payload.chart_index >= len(charts):
+            raise HTTPException(status_code=400, detail="chart_index out of range")
+        removed = charts[payload.chart_index]
+        if isinstance(removed, dict):
+            removed_chart_id = removed.get("chart_id")
+        updated_charts = [c for idx, c in enumerate(charts) if idx != payload.chart_index]
+        removed_count = 1
+    elif payload.chart_title:
+        updated_charts = []
+        for item in charts:
+            chart = item if isinstance(item, dict) else {}
+            title = (chart.get("title") or "").strip().lower()
+            if title == payload.chart_title.strip().lower():
+                removed_count += 1
+                if removed_chart_id is None:
+                    removed_chart_id = chart.get("chart_id")
+                continue
+            updated_charts.append(item)
+    else:
+        raise HTTPException(status_code=400, detail="Provide chart_id, chart_index, or chart_title")
+
+    if removed_count == 0:
+        raise HTTPException(status_code=404, detail="No matching chart found to delete")
+
+    spec["charts"] = updated_charts
+    if isinstance(spec.get("chart_plan"), list):
+        updated_plan = []
+        for item in spec.get("chart_plan") or []:
+            chart = item if isinstance(item, dict) else {}
+            if payload.chart_id and chart.get("chart_id") == payload.chart_id:
+                continue
+            updated_plan.append(item)
+        spec["chart_plan"] = updated_plan
+    if isinstance(spec.get("chart_candidates"), list) and payload.chart_id:
+        updated_candidates = []
+        for item in spec.get("chart_candidates") or []:
+            chart = item if isinstance(item, dict) else {}
+            if chart.get("chart_id") == payload.chart_id:
+                continue
+            updated_candidates.append(item)
+        spec["chart_candidates"] = updated_candidates
+
+    update_dashboard_spec(settings, dashboard_id, spec=spec)
+    updated = get_dashboard_spec(settings, dashboard_id) or {"spec": spec}
+    updated_spec = updated.get("spec") or {}
+    return {
+        "dashboard_id": dashboard_id,
+        "status": "updated",
+        "removed_chart_id": removed_chart_id,
+        "removed_count": removed_count,
+        "chart_count": len(updated_spec.get("charts") or []),
+        "updated_at": updated.get("updated_at"),
+    }
+
+
+@app.post(
+    "/dashboards/{dashboard_id}/refresh",
+    tags=["dashboards"],
+    summary="Start dashboard refresh",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "refresh_request": {
+                            "summary": "Start a dashboard refresh",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "trigger_source": "user",
+                                "requested_by": "analyst@company.com",
+                                "include_insights": True,
+                                "force_recompute": False,
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "queued": {
+                                "summary": "Refresh queued",
+                                "value": {
+                                    "refresh_id": "dref_a1b2c3d4e5f6",
+                                    "dashboard_id": "dash_123",
+                                    "status": "queued",
+                                    "job_id": "job_abc123",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def start_dashboard_refresh(dashboard_id: str, payload: dict | None = None) -> dict:
+    payload = payload or {}
+    dashboard = get_dashboard_spec(settings, dashboard_id)
+    if not dashboard:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    tenant_id = payload.get("tenant_id") or dashboard.get("tenant_id")
+    domain_id = payload.get("domain_id") or dashboard.get("domain_id")
+    trigger_source = payload.get("trigger_source") or "user"
+    requested_by = payload.get("requested_by")
+    refresh_id = create_dashboard_refresh_run(
+        settings,
+        dashboard_id=dashboard_id,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        trigger_source=trigger_source,
+        requested_by=requested_by,
+        request_payload=payload,
+    )
+    append_dashboard_refresh_event(
+        settings,
+        refresh_id=refresh_id,
+        dashboard_id=dashboard_id,
+        stage_name="queued",
+        message="Dashboard refresh queued",
+        artifacts={},
+    )
+    job = create_job(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        job_type="dashboard_refresh",
+        payload={"refresh_id": refresh_id, "dashboard_id": dashboard_id},
+        idempotency_key=None,
+    )
+    return {
+        "refresh_id": refresh_id,
+        "dashboard_id": dashboard_id,
+        "status": "queued",
+        "job_id": job.get("job_id"),
+    }
+
+
+@app.get(
+    "/dashboards/{dashboard_id}/refresh/{refresh_id}",
+    tags=["dashboards"],
+    summary="Get dashboard refresh status",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "running": {
+                                "summary": "Refresh in progress",
+                                "value": {
+                                    "refresh_id": "dref_a1b2c3d4e5f6",
+                                    "dashboard_id": "dash_123",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "status": "running",
+                                    "trigger_source": "user",
+                                    "requested_by": "analyst@company.com",
+                                    "request_payload": {"include_insights": True},
+                                    "error_message": None,
+                                    "started_at": "2026-03-06T11:20:00Z",
+                                    "completed_at": None,
+                                    "created_at": "2026-03-06T11:19:59Z",
+                                    "updated_at": "2026-03-06T11:20:02Z",
+                                },
+                            },
+                            "completed": {
+                                "summary": "Refresh completed",
+                                "value": {
+                                    "refresh_id": "dref_a1b2c3d4e5f6",
+                                    "dashboard_id": "dash_123",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "status": "completed",
+                                    "trigger_source": "user",
+                                    "requested_by": "analyst@company.com",
+                                    "request_payload": {"include_insights": True},
+                                    "error_message": None,
+                                    "started_at": "2026-03-06T11:20:00Z",
+                                    "completed_at": "2026-03-06T11:20:07Z",
+                                    "created_at": "2026-03-06T11:19:59Z",
+                                    "updated_at": "2026-03-06T11:20:07Z",
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_dashboard_refresh(dashboard_id: str, refresh_id: str) -> dict:
+    row = get_dashboard_refresh_run(settings, dashboard_id, refresh_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dashboard refresh run not found")
+    return row
+
+
+@app.get(
+    "/dashboards/{dashboard_id}/refresh/{refresh_id}/events",
+    tags=["dashboards"],
+    summary="List dashboard refresh events",
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "limit",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "default": 200, "minimum": 1, "maximum": 2000},
+                "description": "Maximum number of refresh events to return.",
+            }
+        ],
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "events": {
+                                "summary": "Refresh stage events",
+                                "value": {
+                                    "events": [
+                                        {
+                                            "event_id": "drevt_111",
+                                            "refresh_id": "dref_a1b2c3d4e5f6",
+                                            "dashboard_id": "dash_123",
+                                            "stage_name": "running",
+                                            "message": "Dashboard refresh started",
+                                            "artifacts": {},
+                                            "created_at": "2026-03-06T11:20:00Z",
+                                        },
+                                        {
+                                            "event_id": "drevt_222",
+                                            "refresh_id": "dref_a1b2c3d4e5f6",
+                                            "dashboard_id": "dash_123",
+                                            "stage_name": "charts_refreshed",
+                                            "message": "Dashboard charts refreshed: 6",
+                                            "artifacts": {"chart_count": 6},
+                                            "created_at": "2026-03-06T11:20:03Z",
+                                        },
+                                        {
+                                            "event_id": "drevt_333",
+                                            "refresh_id": "dref_a1b2c3d4e5f6",
+                                            "dashboard_id": "dash_123",
+                                            "stage_name": "completed",
+                                            "message": "Dashboard refresh completed",
+                                            "artifacts": {"chart_count": 6},
+                                            "created_at": "2026-03-06T11:20:07Z",
+                                        },
+                                    ],
+                                    "paging": {"limit": 200, "returned": 3},
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def get_dashboard_refresh_events(dashboard_id: str, refresh_id: str, limit: int = 200) -> dict:
+    row = get_dashboard_refresh_run(settings, dashboard_id, refresh_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dashboard refresh run not found")
+    events = list_dashboard_refresh_events(
+        settings,
+        dashboard_id=dashboard_id,
+        refresh_id=refresh_id,
+        limit=limit,
+    )
+    return {"events": events, "paging": {"limit": limit, "returned": len(events)}}
+
+
+@app.get(
+    "/dashboards/{dashboard_id}/refresh/{refresh_id}/stream",
+    tags=["dashboards"],
+    summary="Stream dashboard refresh events",
+    description="Server-sent events stream of dashboard refresh progress.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "text/event-stream": {
+                        "examples": {
+                            "refresh_event": {
+                                "summary": "Refresh stage event",
+                                "value": "data: {\"stage_name\":\"charts_refreshed\",\"message\":\"Dashboard charts refreshed: 6/6\"}\n\n",
+                            },
+                            "heartbeat": {
+                                "summary": "SSE heartbeat",
+                                "value": ": heartbeat\n\n",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def dashboard_refresh_stream(dashboard_id: str, refresh_id: str):
+    from fastapi.responses import StreamingResponse
+
+    row = get_dashboard_refresh_run(settings, dashboard_id, refresh_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Dashboard refresh run not found")
+
+    def _event_stream():
+        last_count = 0
+        while True:
+            events = list_dashboard_refresh_events(
+                settings,
+                dashboard_id=dashboard_id,
+                refresh_id=refresh_id,
+                limit=2000,
+            )
+            new_events = events[last_count:]
+            for event in new_events:
+                payload = json.dumps(event, default=str)
+                yield f"data: {payload}\n\n"
+            last_count = len(events)
+            if not new_events:
+                yield ": heartbeat\n\n"
+            if events and (events[-1].get("stage_name") in {"completed", "partial_completed", "failed"}):
+                break
+            time.sleep(1.0)
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
+
+
+@app.get(
+    "/dashboards/{dashboard_id}/insights",
+    tags=["dashboards"],
+    summary="Get dashboard insights",
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "refresh_id",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Specific refresh id. If omitted, latest completed refresh is returned.",
+            },
+            {
+                "name": "as_of",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string", "format": "date-time"},
+                "description": "Return latest refresh completed at or before this timestamp.",
+            },
+        ],
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "latest": {
+                                "summary": "Latest dashboard insights",
+                                "value": {
+                                    "artifact_id": "dins_123abc456def",
+                                    "refresh_id": "dref_a1b2c3d4e5f6",
+                                    "dashboard_id": "dash_123",
+                                    "summary_raw_text": "Dashboard refreshed with 6 charts.",
+                                    "summary_html": "<section><h4>Dashboard Summary</h4><p>Dashboard refreshed with 6 charts.</p></section>",
+                                    "inference_raw_text": "Composite inference generation will include chart-level deltas and trend direction.",
+                                    "inference_html": "<section><h4>Dashboard Inference</h4><p>Composite inference generation will include chart-level deltas and trend direction.</p></section>",
+                                    "evidence_json": {"chart_count": 6},
+                                    "quality_json": {"confidence": 0.6, "warnings": ["phase_23_1_placeholder_insights"]},
+                                    "created_at": "2026-03-06T11:20:07Z",
+                                    "updated_at": "2026-03-06T11:20:07Z",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def get_dashboard_insights_endpoint(
+    dashboard_id: str,
+    refresh_id: str | None = None,
+    as_of: str | None = None,
+) -> dict:
+    dashboard = get_dashboard_spec(settings, dashboard_id)
+    if not dashboard:
+        raise HTTPException(status_code=404, detail="Dashboard not found")
+    row = get_dashboard_insights(
+        settings,
+        dashboard_id=dashboard_id,
+        refresh_id=refresh_id,
+        as_of=as_of,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Dashboard insights not found")
+    return row
 
 
 @app.get(

@@ -61,6 +61,97 @@ GET /agentic/runs/run_123/chat
 **Notes:**
 - `/events` contains structured agent events.
 - `/chat` contains safe summarized progress for end users.
+- With Phase 22, each agent emits staged statuses:
+  - `queued`
+  - `running`
+  - `raw_json_ready`
+  - `summary_ready`
+  - `inference_ready`
+  - `completed`
+- UI should render these as progressive cards, not a single terminal event.
+
+SSE payload shape:
+```text
+event: agent_stage
+data: {"run_id":"run_123","event_id":"event_456","logical_event_id":"le_abc","agent_name":"ProfilingAgent","status":"summary_ready","stage_name":"summary_ready","stage_seq":4,"message":"Profiling summary ready","payload_compacted":true,"artifacts":{"summary_raw_text":"Detected 4 fact-like tables and 18 dimensions."},"created_at":"2026-03-06T10:00:01Z"}
+```
+
+### 3.1) Fetch Rich Stage Artifacts
+
+After receiving an event with `event_id` from stream/events, UI can fetch full payload:
+
+```http
+GET /agentic/runs/{run_id}/events/{event_id}/artifacts
+```
+
+For chat history replay with full stage data:
+
+```http
+GET /agentic/runs/{run_id}/chat?include_stages=true&include=raw_json,summary,inference,html
+```
+
+Events API request example:
+```http
+GET /agentic/runs/{run_id}/events?include=raw_json,summary,inference,html&compact=true&limit=200
+```
+
+Events API response example:
+```json
+{
+  "events": [
+    {
+      "event_id": "event_455",
+      "logical_event_id": "le_abc",
+      "agent_name": "ProfilingAgent",
+      "status": "raw_json_ready",
+      "stage_name": "raw_json_ready",
+      "stage_seq": 3,
+      "message": "Profiling raw payload ready",
+      "payload_compacted": true,
+      "artifacts": {
+        "raw_json": {
+          "tables": 4,
+          "sample_values": {
+            "sap_id": {"sent_count": 50, "total_count": 3452, "truncated": true}
+          }
+        }
+      },
+      "created_at": "2026-03-06T10:00:00Z"
+    }
+  ]
+}
+```
+
+Artifacts API response example:
+```json
+{
+  "event_id": "event_456",
+  "logical_event_id": "le_abc",
+  "stage_name": "summary_ready",
+  "summary_raw_text": "Detected 4 fact-like tables and 18 dimensions.",
+  "summary_html": "<section><h4>Profiling Summary</h4><p>...</p></section>",
+  "inference_raw_text": null,
+  "inference_html": null,
+  "created_at": "2026-03-06T10:00:01Z",
+  "updated_at": "2026-03-06T10:00:01Z"
+}
+```
+
+Expected chat item shape:
+```json
+{
+  "message_id": "msg_123",
+  "event_id": "event_456",
+  "logical_event_id": "le_abc",
+  "stage_name": "summary_ready",
+  "message": "Profiling summary ready",
+  "artifacts": {
+    "summary_raw_text": "...",
+    "summary_html": "<section>...</section>"
+  },
+  "created_at": "2026-03-06T10:00:01Z"
+}
+```
 
 ---
 
@@ -175,8 +266,9 @@ POST /views/query
 
 1. `POST /agentic/runs`
 2. `GET /agentic/runs/{run_id}/stream`
-3. `POST /chat` (sync)
-4. Render chart payload in UI
+3. `GET /agentic/runs/{run_id}/chat?include_stages=true`
+4. `POST /chat` (sync)
+5. Render chart payload in UI
 
 ---
 
@@ -184,7 +276,15 @@ POST /views/query
 
 1. `POST /agentic/runs`
 2. `GET /agentic/runs/{run_id}/stream`
-3. `POST /chat` (async)
-4. `GET /chat/{chat_id}/stream`
-5. `GET /chat/{chat_id}`
-6. `GET /charts/{chart_id}`
+3. On each stage event, `GET /agentic/runs/{run_id}/events/{event_id}/artifacts`
+4. `GET /agentic/runs/{run_id}/chat?include_stages=true`
+5. `POST /chat` (async)
+6. `GET /chat/{chat_id}/stream`
+7. `GET /chat/{chat_id}`
+8. `GET /charts/{chart_id}`
+
+---
+
+## Dependencies
+- Depends on Phase 11 for stream/chat persistence.
+- Depends on Phase 22 for staged metadata lifecycle and artifact retrieval.

@@ -547,3 +547,32 @@ def get_dashboard_spec(settings: Settings, dashboard_id: str) -> dict[str, Any] 
         [dashboard_id],
     )
     return rows[0] if rows else None
+
+
+def update_dashboard_spec(
+    settings: Settings,
+    dashboard_id: str,
+    *,
+    spec: dict[str, Any] | None = None,
+    title: str | None = None,
+) -> None:
+    updates = []
+    values: list[Any] = []
+    if title is not None:
+        updates.append("title = %s")
+        values.append(title)
+    if spec is not None:
+        updates.append("spec = %s::jsonb")
+        values.append(Json(spec, dumps=_json_dumps))
+    if not updates:
+        return
+    updates.append("updated_at = now()")
+    execute_non_query(
+        settings,
+        f"""
+        UPDATE public.quantyx_dashboard_specs
+           SET {", ".join(updates)}
+         WHERE dashboard_id = %s
+        """,
+        [*values, dashboard_id],
+    )

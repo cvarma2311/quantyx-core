@@ -269,6 +269,17 @@ class DashboardResponse(BaseModel):
     updated_at: Optional[str] = None
 
 
+class DashboardUpdateRequest(BaseModel):
+    action: str = Field(..., description="Currently supported: delete_chart")
+    chart_id: Optional[str] = Field(None, description="Chart id to delete from dashboard spec")
+    chart_index: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Fallback chart index to delete when chart_id is unavailable",
+    )
+    chart_title: Optional[str] = Field(None, description="Fallback chart title to delete")
+
+
 class TenantCreateRequest(BaseModel):
     tenant_id: str = Field(..., description="Tenant identifier", examples=["VC_101"])
     display_name: Optional[str] = Field(None, description="Tenant display name", examples=["HPCL LPG"])

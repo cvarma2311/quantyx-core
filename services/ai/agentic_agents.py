@@ -486,6 +486,54 @@ def _pick_dashboard_table(profiling: dict[str, Any]) -> dict[str, Any] | None:
     return scored[0][1]
 
 
+def _pretty_name(value: str | None) -> str:
+    if not value:
+        return ""
+    return str(value).replace("_", " ").strip().title()
+
+
+def _contextual_dashboard_title(metric_name: str | None, table_name: str | None) -> str:
+    metric_label = _pretty_name(metric_name or "KPI")
+    table_label = _pretty_name(table_name)
+    if table_label:
+        return f"{table_label} Performance Overview"
+    return f"{metric_label} Performance Dashboard"
+
+
+def _contextual_chart_title(
+    *,
+    intent: str | None,
+    metric_name: str | None,
+    category_column: str | None,
+    time_column: str | None,
+    table_name: str | None,
+) -> str:
+    metric_label = _pretty_name(metric_name or "Metric")
+    category_label = _pretty_name(category_column)
+    table_label = _pretty_name(table_name)
+    if intent == "trend":
+        if time_column:
+            return f"{metric_label} Trend Over {_pretty_name(time_column)}"
+        return f"{metric_label} Trend"
+    if intent == "multi_series":
+        if category_label:
+            return f"{metric_label} Trend by {category_label}"
+        return f"{metric_label} Multi-Series Trend"
+    if intent in {"breakdown", "join_breakdown"}:
+        if category_label:
+            return f"{metric_label} by {category_label}"
+        if table_label:
+            return f"{metric_label} Breakdown for {table_label}"
+        return f"{metric_label} Breakdown"
+    if intent == "share":
+        if category_label:
+            return f"{category_label} Share of {metric_label}"
+        return f"{metric_label} Contribution Share"
+    if table_label:
+        return f"{metric_label} Overview for {table_label}"
+    return f"{metric_label} Overview"
+
+
 def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any]) -> dict[str, Any]:
     charts = []
     view_suggestions = []
@@ -544,7 +592,14 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
     charts.append(
         {
             "type": "line",
-            "title": "Trend",
+            "intent": "trend",
+            "title": _contextual_chart_title(
+                intent="trend",
+                metric_name=metric_name,
+                category_column=category_col,
+                time_column=time_col,
+                table_name=table_name,
+            ),
             "metric": metric_name,
             "table": table_name,
             "metric_column": metric_col,
@@ -555,7 +610,14 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
     charts.append(
         {
             "type": "bar",
-            "title": "Breakdown",
+            "intent": "breakdown",
+            "title": _contextual_chart_title(
+                intent="breakdown",
+                metric_name=metric_name,
+                category_column=category_col,
+                time_column=time_col,
+                table_name=table_name,
+            ),
             "metric": metric_name,
             "table": table_name,
             "metric_column": metric_col,
@@ -566,7 +628,14 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
     charts.append(
         {
             "type": "pie",
-            "title": "Share",
+            "intent": "share",
+            "title": _contextual_chart_title(
+                intent="share",
+                metric_name=metric_name,
+                category_column=category_col,
+                time_column=time_col,
+                table_name=table_name,
+            ),
             "metric": metric_name,
             "table": table_name,
             "metric_column": metric_col,
@@ -574,12 +643,13 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
             "category_column": category_col,
         }
     )
+    dashboard_title = _contextual_dashboard_title(metric_name, table_name)
     return {
-        "title": "Auto Dashboard",
+        "title": dashboard_title,
         "charts": charts,
         "view_suggestions": view_suggestions,
         "story": {
-            "title": "KPI Overview",
+            "title": dashboard_title,
             "cards": [
                 {"title": "Trend", "summary": "Track the KPI trend over time."},
                 {"title": "Breakdown", "summary": "Compare categories to spot leaders."},
@@ -624,6 +694,13 @@ def propose_chart_candidates(
                 {
                     "type": "line",
                     "intent": "trend",
+                    "title": _contextual_chart_title(
+                        intent="trend",
+                        metric_name=metric_name,
+                        category_column=None,
+                        time_column=time_cols[0],
+                        table_name=table_name,
+                    ),
                     "table": table_name,
                     "metric": metric_name,
                     "metric_column": metric_col,
@@ -643,6 +720,13 @@ def propose_chart_candidates(
                 {
                     "type": "bar",
                     "intent": "breakdown",
+                    "title": _contextual_chart_title(
+                        intent="breakdown",
+                        metric_name=metric_name,
+                        category_column=best_cat,
+                        time_column=None,
+                        table_name=table_name,
+                    ),
                     "table": table_name,
                     "metric": metric_name,
                     "metric_column": metric_col,
@@ -655,6 +739,13 @@ def propose_chart_candidates(
                     {
                         "type": "pie",
                         "intent": "share",
+                        "title": _contextual_chart_title(
+                            intent="share",
+                            metric_name=metric_name,
+                            category_column=best_cat,
+                            time_column=None,
+                            table_name=table_name,
+                        ),
                         "table": table_name,
                         "metric": metric_name,
                         "metric_column": metric_col,
@@ -670,6 +761,13 @@ def propose_chart_candidates(
                         {
                             "type": "line",
                             "intent": "multi_series",
+                            "title": _contextual_chart_title(
+                                intent="multi_series",
+                                metric_name=metric_name,
+                                category_column=col,
+                                time_column=time_cols[0],
+                                table_name=table_name,
+                            ),
                             "table": table_name,
                             "metric": metric_name,
                             "metric_column": metric_col,
@@ -692,6 +790,13 @@ def propose_chart_candidates(
                 {
                     "type": "bar",
                     "intent": "join_breakdown",
+                    "title": _contextual_chart_title(
+                        intent="join_breakdown",
+                        metric_name=metric.get("metric_name"),
+                        category_column=edge.get("left_key"),
+                        time_column=None,
+                        table_name=left_table,
+                    ),
                     "table": left_table,
                     "metric": metric.get("metric_name"),
                     "metric_column": None,

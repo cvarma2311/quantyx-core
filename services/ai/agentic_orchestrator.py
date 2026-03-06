@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from html import escape
+import json
 import os
 import time
+import urllib.request
 
 try:
     from langgraph.graph import StateGraph, END
@@ -10,7 +14,13 @@ except Exception:  # pragma: no cover
     StateGraph = None
     END = None
 
-from services.ai.agentic_store import append_agent_run_event, append_agent_chat_log
+from services.ai.agentic_store import (
+    append_agent_run_event,
+    append_agent_chat_log,
+    append_agent_run_stage_event,
+    append_agent_chat_log_stage,
+    upsert_agent_event_artifact,
+)
 import logging
 from services.ai.agentic_agents import (
     build_schema_graph,
@@ -82,6 +92,274 @@ def _check_unique(settings, schema_name: str, table: str, column: str) -> tuple[
         return None, {}
 from services.ai.rollups import create_rollup, build_rollup_table, update_rollup_status
 
+_POSTPROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=max(2, int(os.getenv("AGENTIC_POSTPROCESS_MAX_WORKERS", "4"))))
+_RUN_POSTPROCESS_FUTURES: dict[str, list[Future]] = {}
+
+
+def _stream_sample_limit() -> int:
+    try:
+        value = int(os.getenv("AGENTIC_STREAM_SAMPLE_LIMIT", "50"))
+    except (TypeError, ValueError):
+        value = 50
+    return max(1, min(value, 100))
+
+
+def _compact_sample_values(sample_values: dict[str, Any], sample_limit: int) -> tuple[dict[str, Any], list[str]]:
+    compacted: dict[str, Any] = {}
+    truncated_fields: list[str] = []
+    for col, values in sample_values.items():
+        field_path = f"sample_values.{col}"
+        if isinstance(values, list):
+            total = len(values)
+            sent = values[:sample_limit]
+            truncated = total > sample_limit
+            if truncated:
+                truncated_fields.append(field_path)
+            compacted[col] = {
+                "values": sent,
+                "sent_count": len(sent),
+                "total_count": total,
+                "truncated": truncated,
+            }
+            continue
+        if isinstance(values, dict) and isinstance(values.get("values"), list):
+            raw_values = values.get("values") or []
+            total = len(raw_values)
+            sent = raw_values[:sample_limit]
+            truncated = total > sample_limit
+            if truncated:
+                truncated_fields.append(f"{field_path}.values")
+            item = dict(values)
+            item["values"] = sent
+            item["sent_count"] = len(sent)
+            item["total_count"] = total
+            item["truncated"] = truncated
+            compacted[col] = item
+            continue
+        compacted[col] = values
+    return compacted, truncated_fields
+
+
+def _compact_event_artifacts(artifacts: dict[str, Any] | None, sample_limit: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not artifacts:
+        return {}, {"applied": False, "sample_limit": sample_limit, "fields_truncated": []}
+    compacted = dict(artifacts)
+    truncated_fields: list[str] = []
+    if isinstance(compacted.get("sample_values"), dict):
+        sample_compacted, sample_fields = _compact_sample_values(compacted.get("sample_values") or {}, sample_limit)
+        compacted["sample_values"] = sample_compacted
+        truncated_fields.extend(sample_fields)
+    if isinstance(compacted.get("profiles"), list):
+        profiles = []
+        for idx, profile in enumerate(compacted.get("profiles") or []):
+            if not isinstance(profile, dict):
+                profiles.append(profile)
+                continue
+            item = dict(profile)
+            if isinstance(item.get("sample_values"), dict):
+                sample_compacted, sample_fields = _compact_sample_values(item.get("sample_values") or {}, sample_limit)
+                item["sample_values"] = sample_compacted
+                truncated_fields.extend([f"profiles[{idx}].{field}" for field in sample_fields])
+            profiles.append(item)
+        compacted["profiles"] = profiles
+    return compacted, {"applied": bool(truncated_fields), "sample_limit": sample_limit, "fields_truncated": truncated_fields}
+
+
+def _summary_text(agent_name: str, raw_json: dict[str, Any]) -> str:
+    parts = [f"{agent_name} generated {len(raw_json)} top-level fields."]
+    for key, value in list(raw_json.items())[:4]:
+        if isinstance(value, list):
+            parts.append(f"{key}: {len(value)} items")
+        elif isinstance(value, dict):
+            parts.append(f"{key}: {len(value)} entries")
+        else:
+            parts.append(f"{key}: available")
+    return " ".join(parts)
+
+
+def _summary_html(agent_name: str, summary_raw_text: str, raw_json: dict[str, Any]) -> str:
+    bullets = []
+    for key, value in list(raw_json.items())[:5]:
+        if isinstance(value, list):
+            val = f"{len(value)} items"
+        elif isinstance(value, dict):
+            val = f"{len(value)} entries"
+        else:
+            val = "available"
+        bullets.append(f"<li><strong>{escape(str(key))}</strong>: {escape(val)}</li>")
+    return (
+        f"<section><h4>{escape(agent_name)} Summary</h4>"
+        f"<p>{escape(summary_raw_text)}</p>"
+        f"<ul>{''.join(bullets)}</ul></section>"
+    )[:32768]
+
+
+def _inference_text(agent_name: str, raw_json: dict[str, Any]) -> str:
+    if "tables" in raw_json and isinstance(raw_json.get("tables"), int):
+        return f"{agent_name} suggests table coverage is {raw_json.get('tables')} and suitable for downstream modeling."
+    if "joins" in raw_json and isinstance(raw_json.get("joins"), int):
+        return f"{agent_name} detected {raw_json.get('joins')} join candidates for semantic relationship graphing."
+    if "metrics" in raw_json and isinstance(raw_json.get("metrics"), int):
+        return f"{agent_name} identified {raw_json.get('metrics')} metrics to seed deterministic query planning."
+    return f"{agent_name} output is ready for downstream agent consumption."
+
+
+def _inference_html(agent_name: str, inference_raw_text: str) -> str:
+    return (
+        f"<section><h4>{escape(agent_name)} Inference</h4>"
+        f"<p>{escape(inference_raw_text)}</p></section>"
+    )[:32768]
+
+
+def _clip_text(value: str, max_chars: int = 4096) -> str:
+    text = str(value or "").strip()
+    return text[:max_chars]
+
+
+def _llm_enabled(settings) -> bool:
+    mode = os.getenv("AGENTIC_SUMMARY_INFERENCE_MODE", "auto").lower()
+    if mode in {"off", "false", "0"}:
+        return False
+    if mode in {"on", "true", "1"}:
+        return bool(getattr(settings, "openai_api_key", None))
+    return bool(getattr(settings, "openai_api_key", None))
+
+
+def _llm_extract_text(
+    settings,
+    *,
+    agent_name: str,
+    kind: str,
+    raw_json: dict[str, Any],
+) -> str | None:
+    if not _llm_enabled(settings):
+        return None
+    model = os.getenv("AGENTIC_SUMMARY_INFERENCE_MODEL", getattr(settings, "openai_model", "gpt-4o-mini"))
+    timeout_sec = int(os.getenv("AGENTIC_SUMMARY_INFERENCE_TIMEOUT_SEC", "30"))
+    raw_payload = json.dumps(raw_json, default=str)
+    if len(raw_payload) > 12000:
+        raw_payload = raw_payload[:12000]
+    system_prompt = (
+        "You summarize agent outputs for users. "
+        "Return JSON only with key 'text'. "
+        "No chain-of-thought. Keep it concise and factual."
+    )
+    user_payload = {
+        "agent_name": agent_name,
+        "kind": kind,
+        "raw_json": raw_payload,
+        "output_requirements": {
+            "summary": "What happened and what artifacts were produced.",
+            "inference": "What likely meaning or implication can be drawn.",
+        },
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload)},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        content = body["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        text = parsed.get("text")
+        if isinstance(text, str) and text.strip():
+            return _clip_text(text, max_chars=2048)
+    except Exception:
+        logging.getLogger(__name__).warning("agentic.%s_llm_failed", kind, exc_info=True)
+    return None
+
+
+def _safe_event_callback(event_callback: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]) -> None:
+    if not event_callback:
+        return
+    try:
+        event_callback(payload)
+    except Exception:
+        logging.getLogger(__name__).exception("agentic.event_callback_failed")
+
+
+def _emit_stage_event(
+    settings,
+    run_id: str,
+    agent_name: str,
+    stage_name: str,
+    message: str,
+    *,
+    logical_event_id: str | None = None,
+    artifacts: dict[str, Any] | None = None,
+    payload_compacted: bool = False,
+    event_callback: Callable[[dict[str, Any]], None] | None = None,
+    sender: str = "agent",
+) -> dict[str, str]:
+    logger = logging.getLogger(__name__)
+    event_meta: dict[str, str] | None = None
+    try:
+        event_meta = append_agent_run_stage_event(
+            settings,
+            run_id,
+            agent_name,
+            stage_name,
+            message,
+            logical_event_id=logical_event_id,
+            artifacts=artifacts,
+            payload_compacted=payload_compacted,
+        )
+    except Exception:
+        # Fallback for environments without Phase 22 migration applied yet.
+        event_id = append_agent_run_event(settings, run_id, agent_name, stage_name, message, artifacts)
+        event_meta = {"event_id": event_id, "logical_event_id": logical_event_id or ""}
+    try:
+        append_agent_chat_log_stage(
+            settings,
+            run_id,
+            sender,
+            message,
+            event_id=event_meta.get("event_id"),
+            logical_event_id=event_meta.get("logical_event_id"),
+            stage_name=stage_name,
+        )
+    except Exception:
+        append_agent_chat_log(settings, run_id, sender, message)
+    event_payload = {
+        "run_id": run_id,
+        "event_id": event_meta.get("event_id"),
+        "logical_event_id": event_meta.get("logical_event_id"),
+        "agent_name": agent_name,
+        "status": stage_name,
+        "stage_name": stage_name,
+        "message": message,
+        "payload_compacted": payload_compacted,
+        "artifacts": artifacts or {},
+    }
+    logger.info(
+        "agentic.%s | stage=%s status=%s event_id=%s logical_event_id=%s payload_compacted=%s message=%s artifacts=%s",
+        agent_name,
+        stage_name,
+        stage_name,
+        event_payload.get("event_id"),
+        event_payload.get("logical_event_id"),
+        payload_compacted,
+        message,
+        "none" if not artifacts else list((artifacts or {}).keys()),
+    )
+    _safe_event_callback(event_callback, event_payload)
+    return event_meta
+
 
 def _emit(
     settings,
@@ -92,21 +370,163 @@ def _emit(
     artifacts: dict[str, Any] | None = None,
     event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
-    event_payload = {
-        "run_id": run_id,
-        "agent_name": agent_name,
-        "status": status,
-        "message": message,
-        "artifacts": artifacts or {},
-    }
-    append_agent_run_event(settings, run_id, agent_name, status, message, artifacts)
-    if status in {"running", "completed", "failed"}:
-        append_agent_chat_log(settings, run_id, "agent", message, artifacts)
-    if event_callback:
-        try:
-            event_callback(event_payload)
-        except Exception:
-            logging.getLogger(__name__).exception("agentic.event_callback_failed")
+    if status == "completed":
+        sample_limit = _stream_sample_limit()
+        compact_raw, truncation = _compact_event_artifacts(artifacts or {}, sample_limit)
+        raw_meta = _emit_stage_event(
+            settings,
+            run_id,
+            agent_name,
+            "raw_json_ready",
+            f"{agent_name} raw payload ready",
+            artifacts={"raw_json": compact_raw, "truncation": truncation},
+            payload_compacted=bool(truncation.get("applied")),
+            event_callback=event_callback,
+        )
+        logical_event_id = raw_meta.get("logical_event_id")
+
+        def _summary_job() -> dict[str, Any]:
+            summary_raw_text = _llm_extract_text(
+                settings,
+                agent_name=agent_name,
+                kind="summary",
+                raw_json=compact_raw,
+            ) or _summary_text(agent_name, compact_raw)
+            summary_html = _summary_html(agent_name, summary_raw_text, compact_raw)
+            summary_meta = _emit_stage_event(
+                settings,
+                run_id,
+                agent_name,
+                "summary_ready",
+                f"{agent_name} summary ready",
+                logical_event_id=logical_event_id,
+                artifacts={"summary_raw_text": summary_raw_text, "summary_html": summary_html},
+                payload_compacted=bool(truncation.get("applied")),
+                event_callback=event_callback,
+            )
+            try:
+                upsert_agent_event_artifact(
+                    settings,
+                    event_id=summary_meta.get("event_id") or "",
+                    run_id=run_id,
+                    agent_name=agent_name,
+                    stage_name="summary_ready",
+                    logical_event_id=logical_event_id or "",
+                    summary_raw_text=summary_raw_text,
+                    summary_html=summary_html,
+                    truncation=truncation,
+                )
+            except Exception:
+                pass
+            return {"summary_raw_text": summary_raw_text, "summary_html": summary_html}
+
+        def _inference_job() -> dict[str, Any]:
+            inference_raw_text = _llm_extract_text(
+                settings,
+                agent_name=agent_name,
+                kind="inference",
+                raw_json=compact_raw,
+            ) or _inference_text(agent_name, compact_raw)
+            inference_html = _inference_html(agent_name, inference_raw_text)
+            inference_meta = _emit_stage_event(
+                settings,
+                run_id,
+                agent_name,
+                "inference_ready",
+                f"{agent_name} inference ready",
+                logical_event_id=logical_event_id,
+                artifacts={"inference_raw_text": inference_raw_text, "inference_html": inference_html},
+                payload_compacted=bool(truncation.get("applied")),
+                event_callback=event_callback,
+            )
+            try:
+                upsert_agent_event_artifact(
+                    settings,
+                    event_id=inference_meta.get("event_id") or "",
+                    run_id=run_id,
+                    agent_name=agent_name,
+                    stage_name="inference_ready",
+                    logical_event_id=logical_event_id or "",
+                    inference_raw_text=inference_raw_text,
+                    inference_html=inference_html,
+                    truncation=truncation,
+                )
+            except Exception:
+                pass
+            return {"inference_raw_text": inference_raw_text, "inference_html": inference_html}
+
+        summary_future = _POSTPROCESS_EXECUTOR.submit(_summary_job)
+        inference_future = _POSTPROCESS_EXECUTOR.submit(_inference_job)
+
+        def _complete_job() -> None:
+            wait([summary_future, inference_future])
+            summary_data = {}
+            inference_data = {}
+            try:
+                summary_data = summary_future.result() or {}
+            except Exception:
+                summary_data = {}
+            try:
+                inference_data = inference_future.result() or {}
+            except Exception:
+                inference_data = {}
+            completed_meta = _emit_stage_event(
+                settings,
+                run_id,
+                agent_name,
+                "completed",
+                message,
+                logical_event_id=logical_event_id,
+                artifacts={
+                    "raw_json": compact_raw,
+                    **summary_data,
+                    **inference_data,
+                    "truncation": truncation,
+                },
+                payload_compacted=bool(truncation.get("applied")),
+                event_callback=event_callback,
+            )
+            try:
+                upsert_agent_event_artifact(
+                    settings,
+                    event_id=raw_meta.get("event_id") or "",
+                    run_id=run_id,
+                    agent_name=agent_name,
+                    stage_name="raw_json_ready",
+                    logical_event_id=logical_event_id or "",
+                    raw_json=compact_raw,
+                    truncation=truncation,
+                )
+                upsert_agent_event_artifact(
+                    settings,
+                    event_id=completed_meta.get("event_id") or "",
+                    run_id=run_id,
+                    agent_name=agent_name,
+                    stage_name="completed",
+                    logical_event_id=logical_event_id or "",
+                    raw_json=compact_raw,
+                    summary_raw_text=summary_data.get("summary_raw_text"),
+                    summary_html=summary_data.get("summary_html"),
+                    inference_raw_text=inference_data.get("inference_raw_text"),
+                    inference_html=inference_data.get("inference_html"),
+                    truncation=truncation,
+                )
+            except Exception:
+                pass
+
+        completion_future = _POSTPROCESS_EXECUTOR.submit(_complete_job)
+        _RUN_POSTPROCESS_FUTURES.setdefault(run_id, []).append(completion_future)
+    else:
+        _emit_stage_event(
+            settings,
+            run_id,
+            agent_name,
+            status,
+            message,
+            artifacts=artifacts,
+            payload_compacted=False,
+            event_callback=event_callback,
+        )
     logging.getLogger(__name__).info(
         "agentic.%s | status=%s message=%s artifacts=%s",
         agent_name,
@@ -772,6 +1192,19 @@ def run_agentic_workflow(
             table_name = chart.get("table")
             time_col = chart.get("time_column")
             category_col = chart.get("category_column")
+            chart_title = chart.get("title")
+            if not chart_title:
+                if chart.get("intent") == "trend":
+                    chart_title = f"{metric_name} Trend Over {time_col or 'Time'}"
+                elif chart.get("intent") in {"breakdown", "join_breakdown"}:
+                    chart_title = f"{metric_name} by {category_col or 'Category'}"
+                elif chart.get("intent") == "share":
+                    chart_title = f"{category_col or 'Category'} Share of {metric_name}"
+                elif chart.get("intent") == "multi_series":
+                    chart_title = f"{metric_name} Trend by {category_col or 'Category'}"
+                else:
+                    chart_title = f"{metric_name} {chart.get('type') or 'Overview'}"
+            chart["title"] = chart_title
 
             if table_name:
                 fact_table = table_name if table_name.startswith("fact_") else f"fact_{table_name}"
@@ -811,11 +1244,11 @@ def run_agentic_workflow(
                 metric_expr = _qualify_formula(metric_expr, table_alias, profiling_map.get(table_name) or {})
             if not metric_expr:
                 logger.warning(
-                    "dashboard.chart.skip | title=%s reason=invalid_metric metric=%s table=%s",
-                    chart.get("title"),
-                    metric_col,
-                    table_name,
-                )
+                        "dashboard.chart.skip | title=%s reason=invalid_metric metric=%s table=%s",
+                        chart_title,
+                        metric_col,
+                        table_name,
+                    )
                 enriched_charts.append({**chart, "skipped": True, "reason": "invalid_metric"})
                 continue
 
@@ -887,20 +1320,20 @@ def run_agentic_workflow(
                     rows = run_query(settings, sql, params)
                     logger.info(
                         "dashboard.chart.sql_ok | title=%s rows=%s",
-                        chart.get("title"),
+                        chart_title,
                         len(rows),
                     )
                 except Exception as exc:
                     logger.exception(
                         "dashboard.chart.sql_failed | title=%s sql=%s params=%s",
-                        chart.get("title"),
+                        chart_title,
                         sql,
                         params,
                     )
                     rows = []
             logger.info(
                 "dashboard.chart | title=%s type=%s table=%s sql=%s rows=%s",
-                chart.get("title"),
+                chart_title,
                 chart_type,
                 table_ref,
                 sql,
@@ -911,7 +1344,7 @@ def run_agentic_workflow(
                 settings,
                 state.get("tenant_id") or "",
                 state.get("domain_id"),
-                question=chart.get("title"),
+                question=chart_title,
                 query_payload={
                     "metrics": [metric_name],
                     "dimensions": dimensions,
@@ -1098,6 +1531,7 @@ def run_agentic_workflow(
             state.get("tenant_id") or "",
             state.get("domain_id") or "",
             dashboard_spec,
+            title=dashboard_spec.get("title") or "Auto Dashboard",
         )
         _emit(
             settings,
@@ -1154,4 +1588,8 @@ def run_agentic_workflow(
     graph.add_edge("dashboard", END)
 
     app = graph.compile()
-    return app.invoke(initial_state)
+    result = app.invoke(initial_state)
+    pending = _RUN_POSTPROCESS_FUTURES.pop(run_id, [])
+    if pending:
+        wait(pending)
+    return result

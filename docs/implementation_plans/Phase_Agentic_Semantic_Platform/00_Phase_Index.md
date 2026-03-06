@@ -61,7 +61,15 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 19. **Phase 21: UI-to-API Flow (End-to-End)**
    - Ordered UI call sequence from schema selection to chat completion.
 
+20. **Phase 22: Agent Metadata Summary + Inference Stream Compaction**
+   - Add staged raw/summary/inference event lifecycle, HTML-friendly metadata, and payload compaction.
+
+21. **Phase 23: Dashboard Refresh + Composite Insights**
+   - Add dashboard refresh lifecycle, chart data recompute, and dashboard-wide summary/inference persistence + APIs.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
 - Phase 05 can run after 02 (semantic graph ready).
+- Phase 22 depends on Phase 11 (streaming/chat logs), Phase 12 (storage), and Phase 20 (orchestration behavior).
+- Phase 23 depends on Phase 05 (dashboard generation), Phase 11/22 (staged stream + artifacts), and Phase 20 (orchestration behavior).

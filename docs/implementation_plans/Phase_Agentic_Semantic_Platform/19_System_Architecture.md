@@ -19,6 +19,9 @@ flowchart TB
 
   subgraph API
     F["/agentic/runs"]
+    F1["/agentic/runs/{run_id}/events"]
+    F2["/agentic/runs/{run_id}/chat"]
+    F3["/agentic/runs/{run_id}/events/{event_id}/artifacts"]
     G["/query"]
     H["/charts/{id}"]
     I["/dashboards"]
@@ -31,6 +34,7 @@ flowchart TB
   subgraph Orchestration
     L[Agent Orchestrator]
     M[(LangGraph optional)]
+    N[Metadata Post-Processor]
   end
 
   subgraph Agents
@@ -57,9 +61,13 @@ flowchart TB
     T5[(quantyx_agent_run_events)]
     T6[(quantyx_agent_chat_log)]
     T7[(quantyx_chat_requests)]
+    T8[(quantyx_agent_event_artifacts)]
   end
 
   A --> F --> L --> S1
+  B --> F1
+  B --> F2
+  B --> F3
   L --> S2
   L --> S3
   S2 --> S5
@@ -88,6 +96,13 @@ flowchart TB
   S11 --> T5
   S12 --> T2
   L --> T6
+  L --> N
+  N --> T5
+  N --> T8
+  N --> T6
+  F1 --> T5
+  F2 --> T6
+  F3 --> T8
 
   G --> T1
   G --> T2
@@ -113,6 +128,7 @@ sequenceDiagram
   participant UI
   participant API
   participant Orchestrator
+  participant PostProcessor
   participant Agents
   participant DB
 
@@ -121,8 +137,13 @@ sequenceDiagram
   API->>Orchestrator: enqueue agentic run
   Orchestrator->>Agents: execute LangGraph workflow
   Agents->>DB: read schema + profile data
-  Agents-->>API: emit progress events
-  API-->>UI: stream /agentic/runs/{run_id}/stream
+  Agents-->>API: emit progress events (queued/running/raw_json_ready)
+  Orchestrator->>PostProcessor: trigger summary + inference (parallel)
+  PostProcessor->>DB: persist summary_ready + inference_ready + completed stages
+  PostProcessor-->>API: emit stage events
+  API-->>UI: stream /agentic/runs/{run_id}/stream (stage events)
+  UI->>API: GET /agentic/runs/{run_id}/events?include=summary,inference,html
+  UI->>API: GET /agentic/runs/{run_id}/events/{event_id}/artifacts
 
   Agents->>DB: write semantic graph + rollups (parallel branches)
   Agents->>DB: ChartPlannerAgent ranks chart candidates
@@ -149,3 +170,8 @@ sequenceDiagram
 - **Agent Orchestrator** can be our existing job system + event stream.
 - **All outputs persist into quantyx_* tables**.
 - **Agent-to-agent interactions are live**: JoinAgent issues SchemaAgent uniqueness checks and records request/response in `quantyx_agent_run_events`.
+- **Phase 22 update**: each stage (`raw_json_ready`, `summary_ready`, `inference_ready`, `completed`) is persisted as a DB event and linked to rich artifacts (`quantyx_agent_event_artifacts`) and chat history rows.
+- **API contracts for stage playback**:
+  - event timeline: `/agentic/runs/{run_id}/events`
+  - chat-safe timeline: `/agentic/runs/{run_id}/chat`
+  - full stage artifact lookup: `/agentic/runs/{run_id}/events/{event_id}/artifacts`

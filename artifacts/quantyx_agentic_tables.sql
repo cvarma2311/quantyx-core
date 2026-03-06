@@ -16,16 +16,52 @@ CREATE TABLE IF NOT EXISTS public.quantyx_agent_run_events (
   status TEXT NOT NULL,
   message TEXT NOT NULL,
   artifacts JSONB NULL,
+  stage_name TEXT NULL,
+  stage_seq INT NULL,
+  logical_event_id TEXT NULL,
+  payload_compacted BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_events_run_stage
+  ON public.quantyx_agent_run_events (run_id, created_at, stage_seq);
 
 CREATE TABLE IF NOT EXISTS public.quantyx_agent_chat_log (
   message_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
   sender TEXT NOT NULL,
   message TEXT NOT NULL,
+  event_id TEXT NULL,
+  stage_name TEXT NULL,
+  logical_event_id TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_agent_chat_log_run_stage
+  ON public.quantyx_agent_chat_log (run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_agent_event_artifacts (
+  artifact_id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL,
+  logical_event_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  agent_name TEXT NOT NULL,
+  stage_name TEXT NOT NULL,
+  raw_json JSONB NULL,
+  summary_raw_text TEXT NULL,
+  summary_html TEXT NULL,
+  inference_raw_text TEXT NULL,
+  inference_html TEXT NULL,
+  truncation JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_event_artifacts_run
+  ON public.quantyx_agent_event_artifacts (run_id, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_event_artifacts_stage
+  ON public.quantyx_agent_event_artifacts (logical_event_id, stage_name);
 
 CREATE TABLE IF NOT EXISTS public.quantyx_semantic_nodes (
   node_id TEXT PRIMARY KEY,
