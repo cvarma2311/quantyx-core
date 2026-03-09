@@ -6148,11 +6148,12 @@ def get_agentic_run_events(
     return {"events": events, "paging": {"limit": limit, "returned": len(events)}}
 
 
-def _parse_include_tokens(include: str | None) -> set[str]:
+def _parse_include_tokens(include: str | None, default_tokens: set[str] | None = None) -> set[str]:
+    default = default_tokens or {"raw_json", "summary", "inference", "html"}
     if not include:
-        return {"summary", "inference"}
+        return default
     tokens = {token.strip().lower() for token in include.split(",") if token.strip()}
-    return tokens or {"summary", "inference"}
+    return tokens or default
 
 
 def _filter_artifact_payload(artifact: dict | None, include_tokens: set[str]) -> dict:
@@ -6183,7 +6184,7 @@ def _list_events_v2(
     stage_name: str | None,
     agent_name: str | None,
 ) -> list[dict]:
-    include_tokens = _parse_include_tokens(include)
+    include_tokens = _parse_include_tokens(include, default_tokens={"raw_json", "summary", "inference", "html"})
     rows = list_agent_run_events_stage_aware(settings, run_id, limit=limit)
     events: list[dict] = []
     for row in rows:
@@ -6204,6 +6205,61 @@ def _list_events_v2(
         item["artifacts"] = _filter_artifact_payload(artifact_payload, include_tokens)
         events.append(item)
     return events
+
+
+def _events_as_chat_messages(
+    *,
+    run_id: str,
+    limit: int,
+    include: str | None,
+    stage_name: str | None = None,
+    agent_name: str | None = None,
+) -> list[dict]:
+    events = _list_events_v2(
+        run_id=run_id,
+        limit=limit,
+        include=include,
+        stage_name=stage_name,
+        agent_name=agent_name,
+    )
+    messages: list[dict] = []
+    for event in events:
+        artifacts = event.get("artifacts") or {}
+        raw_json = artifacts.get("raw_json") if isinstance(artifacts, dict) else None
+        dashboard_id = None
+        dashboard_title = None
+        chart_ids: list[str] = []
+        if isinstance(raw_json, dict):
+            dashboard_id = raw_json.get("dashboard_id")
+            dashboard_title = raw_json.get("title") or raw_json.get("dashboard_title")
+            charts = raw_json.get("charts")
+            if isinstance(charts, list):
+                for chart in charts:
+                    if isinstance(chart, dict):
+                        cid = chart.get("chart_id")
+                        if cid:
+                            chart_ids.append(str(cid))
+        messages.append(
+            {
+                "message_id": f"evtmsg_{event.get('event_id')}",
+                "run_id": run_id,
+                "sender": "agent",
+                "agent_name": event.get("agent_name"),
+                "status": event.get("status"),
+                "message": event.get("message"),
+                "event_id": event.get("event_id"),
+                "logical_event_id": event.get("logical_event_id"),
+                "stage_name": event.get("stage_name"),
+                "stage_seq": event.get("stage_seq"),
+                "payload_compacted": event.get("payload_compacted"),
+                "artifacts": artifacts,
+                "dashboard_id": dashboard_id,
+                "dashboard_title": dashboard_title,
+                "chart_ids": chart_ids,
+                "created_at": event.get("created_at"),
+            }
+        )
+    return messages
 
 
 def _latest_agent_event(run_id: str, agent_name: str, status: str = "completed") -> dict | None:
@@ -6505,13 +6561,14 @@ def get_agentic_run_chat(
     include_stages: bool = True,
     sender: str | None = None,
 ) -> dict:
-    include_tokens = _parse_include_tokens(include)
-    rows = list_agent_chat_log(settings, run_id, limit=limit)
-    messages: list[dict] = []
+    include_tokens = _parse_include_tokens(include, default_tokens={"raw_json", "summary", "inference", "html"})
+    rows = list_agent_chat_log(settings, run_id, limit=max(limit, 2000))
+    base_messages: list[dict] = []
     for row in rows:
-        if sender and row.get("sender") != sender:
-            continue
         item = dict(row)
+        if include_stages and item.get("sender") == "agent":
+            # Agent lifecycle replay comes from stage-aware events to keep parity with stream payloads.
+            continue
         event_id = item.get("event_id")
         if include_stages and event_id:
             try:
@@ -6524,7 +6581,35 @@ def get_agentic_run_chat(
             item.pop("event_id", None)
             item.pop("stage_name", None)
             item.pop("logical_event_id", None)
-        messages.append(item)
+        base_messages.append(item)
+
+    if include_stages:
+        stage_messages = _events_as_chat_messages(run_id=run_id, limit=max(limit, 2000), include=include)
+        all_messages = base_messages + stage_messages
+    else:
+        all_messages = base_messages
+
+    # De-duplicate replay records while preserving chronological order.
+    deduped: list[dict] = []
+    seen = set()
+    for msg in all_messages:
+        key = (
+            msg.get("sender"),
+            msg.get("message"),
+            msg.get("created_at"),
+            msg.get("event_id"),
+            msg.get("stage_name"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(msg)
+
+    if sender:
+        deduped = [msg for msg in deduped if msg.get("sender") == sender]
+
+    deduped.sort(key=lambda item: str(item.get("created_at") or ""))
+    messages = deduped[:limit]
     return {"messages": messages, "paging": {"limit": limit, "returned": len(messages)}}
 
 
