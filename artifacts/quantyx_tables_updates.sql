@@ -808,6 +808,84 @@ COMMENT ON COLUMN public.quantyx_flow_node_data_registry.node_id IS 'Node identi
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.node_type IS 'Node type: source|fact|dimension|derived_view|join|metric_input.';
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.artifact_key IS 'Stable logical key: flow_id::node_id.';
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.version_no IS 'Version number for artifact_key.';
+
+ALTER TABLE public.quantyx_agent_runs
+  ADD COLUMN IF NOT EXISTS is_canonical BOOLEAN NOT NULL DEFAULT false;
+
+ALTER TABLE public.quantyx_agent_runs
+  ADD COLUMN IF NOT EXISTS version_no INTEGER NOT NULL DEFAULT 1;
+
+ALTER TABLE public.quantyx_agent_runs
+  ADD COLUMN IF NOT EXISTS display_name TEXT NULL;
+
+ALTER TABLE public.quantyx_agent_runs
+  ADD COLUMN IF NOT EXISTS superseded_by_run_id TEXT NULL;
+
+ALTER TABLE public.quantyx_agent_runs
+  ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_runs_canonical_scope
+  ON public.quantyx_agent_runs (tenant_id, domain_id)
+  WHERE is_canonical = true;
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_scope_version
+  ON public.quantyx_agent_runs (tenant_id, domain_id, version_no DESC, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_workspace_conversations (
+  conversation_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  title TEXT NULL,
+  display_name TEXT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_by TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_conversations_scope
+  ON public.quantyx_workspace_conversations (tenant_id, domain_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_conversations_run
+  ON public.quantyx_workspace_conversations (run_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_workspace_messages (
+  message_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  message_text TEXT NOT NULL,
+  sql_text TEXT NULL,
+  data_json JSONB NULL,
+  chart_json JSONB NULL,
+  inference_json JSONB NULL,
+  summary_json JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_messages_conversation
+  ON public.quantyx_workspace_messages (conversation_id, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_messages_scope
+  ON public.quantyx_workspace_messages (tenant_id, domain_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_workspace_conversation_memory (
+  memory_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  summary_text TEXT NULL,
+  memory_json JSONB NOT NULL,
+  last_message_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_memory_conversation
+  ON public.quantyx_workspace_conversation_memory (conversation_id);
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.is_current IS 'True for the active version row.';
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.storage_engine IS 'Physical storage engine enum (default parquet).';
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.query_engine IS 'Execution engine enum (default pyiceberg).';

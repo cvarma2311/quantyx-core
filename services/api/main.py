@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, List, TypeVar
+from typing import Callable, Iterator, List, TypeVar
 
 import base64
 import io
@@ -13,6 +13,7 @@ import threading
 import uuid
 import zipfile
 import xml.etree.ElementTree as ElementTree
+import urllib.request
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
@@ -225,6 +226,32 @@ from services.ai.dashboard_insights import (
     render_summary_html,
     render_inference_html,
 )
+from services.ai.workspace_store import (
+    STATUS_ACTIVE as WORKSPACE_STATUS_ACTIVE,
+    STATUS_ARCHIVED as WORKSPACE_STATUS_ARCHIVED,
+    STATUS_DELETED as WORKSPACE_STATUS_DELETED,
+    create_workspace_conversation,
+    create_workspace_message,
+    finalize_canonical_deployment,
+    generate_conversation_title,
+    generate_run_display_name,
+    get_current_deployment,
+    get_workspace_conversation,
+    get_workspace_memory,
+    get_workspace_message,
+    initialize_run_metadata,
+    list_deployments,
+    list_workspace_conversations,
+    list_workspace_conversations_for_tenant,
+    list_workspace_messages,
+    mark_run_status,
+    next_run_version,
+    recent_workspace_messages,
+    soft_delete_workspace_conversation,
+    update_deployment,
+    update_workspace_conversation,
+    upsert_workspace_memory,
+)
 from services.api.schemas import (
     EntitiesResponse,
     EntitiesAllResponse,
@@ -377,6 +404,7 @@ app = FastAPI(
         {"name": "governance", "description": "Semantic feedback and governance endpoints."},
         {"name": "views", "description": "View explorer and SQL editor endpoints."},
         {"name": "dashboards", "description": "Dashboard listing and retrieval endpoints."},
+        {"name": "workspace", "description": "Deployment-scoped conversational workspace APIs."},
     ],
 )
 
@@ -1150,15 +1178,19 @@ def _execute_job(job: dict) -> dict:
         run = get_agent_run(settings, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
-        update_agent_run_status(settings, run_id, "running")
+        mark_run_status(settings, run_id, "running")
         initial_state = payload.get("initial_state") or {}
+        canonicalize_on_success = bool(payload.get("canonicalize_on_success"))
         forwarder = LangSmithEventForwarder(run_id)
         try:
             run_agentic_workflow(settings, run_id, initial_state, event_callback=forwarder.on_event)
-            update_agent_run_status(settings, run_id, "completed")
+            mark_run_status(settings, run_id, "completed")
+            if canonicalize_on_success:
+                finalize_canonical_deployment(settings, run_id)
             forwarder.close(status="completed")
             return {"run_id": run_id, "status": "completed"}
         except Exception as exc:  # noqa: BLE001
+            mark_run_status(settings, run_id, "failed")
             forwarder.close(status="failed", error=str(exc))
             raise
     raise ValueError(f"Unsupported job_type: {job_type}")
@@ -1283,6 +1315,39 @@ def _resolve_domain_id(tenant_id: str, request_domain_id: str | None = None) -> 
         )
         return request_domain_id
     raise HTTPException(status_code=400, detail="domain_id not configured for tenant")
+
+
+def _latest_run_for_scope(tenant_id: str, domain_id: str) -> dict | None:
+    rows = run_query(
+        settings,
+        """
+        SELECT run_id, tenant_id, domain_id, status, created_at, updated_at
+          FROM public.quantyx_agent_runs
+         WHERE tenant_id = %s
+           AND domain_id = %s
+         ORDER BY created_at DESC
+         LIMIT 1
+        """,
+        [tenant_id, domain_id],
+    )
+    return rows[0] if rows else None
+
+
+def _inflight_run_for_scope(tenant_id: str, domain_id: str) -> dict | None:
+    rows = run_query(
+        settings,
+        """
+        SELECT run_id, tenant_id, domain_id, status, created_at, updated_at
+          FROM public.quantyx_agent_runs
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND status IN ('queued', 'running')
+         ORDER BY created_at DESC
+         LIMIT 1
+        """,
+        [tenant_id, domain_id],
+    )
+    return rows[0] if rows else None
 
 
 def _model_schema_map() -> dict[str, str]:
@@ -5898,7 +5963,7 @@ def entities_mappings(tenant_id: str, limit: int = 50) -> dict:
     "/agentic/runs",
     tags=["agentic"],
     summary="Start agentic run",
-    description="Start a multi-agent semantic build run.",
+    description="Start a multi-agent semantic build run. Customer-facing flow enforces one deployment run per tenant/domain; use /workspace/deployments for first build or versioned redeployments.",
     openapi_extra={
         "requestBody": {
             "content": {
@@ -5970,6 +6035,26 @@ def entities_mappings(tenant_id: str, limit: int = 50) -> dict:
                         }
                     }
                 }
+            },
+            "409": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "single_run_guardrail": {
+                                "summary": "Single deployment run guardrail",
+                                "value": {
+                                        "detail": {
+                                        "message": "Customer flow allows a single deployment run per tenant/domain. Use /workspace/deployments for first build or a new version.",
+                                        "tenant_id": "VC_101",
+                                        "domain_id": "lpg_production_distribution",
+                                        "existing_run_id": "run_1a0f427c86ec",
+                                        "existing_status": "completed"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         },
     },
@@ -5979,7 +6064,22 @@ def start_agentic_run(payload: dict) -> dict:
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
     domain_id = _resolve_domain_id(tenant_id, payload.get("domain_id"))
+    existing = _latest_run_for_scope(tenant_id, domain_id)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Customer flow allows a single deployment run per tenant/domain. Use /workspace/deployments for first build or a new version.",
+                "tenant_id": tenant_id,
+                "domain_id": domain_id,
+                "existing_run_id": existing.get("run_id"),
+                "existing_status": existing.get("status"),
+            },
+        )
     logger.info("agentic.start | tenant=%s domain=%s", tenant_id, domain_id)
+    connection_id = payload.get("connection_id")
+    database = payload.get("database")
+    schema = payload.get("schema_name") or "public"
     if not payload.get("schema_payload"):
         connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
         logger.info(
@@ -5997,6 +6097,8 @@ def start_agentic_run(payload: dict) -> dict:
             raise HTTPException(status_code=400, detail="schema_payload is required")
         payload["schema_payload"] = schema_payload
         payload["schema_name"] = schema
+    if not connection_id or not database:
+        connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
     logger.info("agentic.start | context_present=%s", bool(payload.get("context_text")))
     run_id = create_agent_run(settings, tenant_id, domain_id, status="queued")
     append_agent_run_event(
@@ -6033,6 +6135,1564 @@ def start_agentic_run(payload: dict) -> dict:
     )
     update_agent_run_status(settings, run_id, "queued")
     return {"run_id": run_id, "status": job.get("status", "queued"), "job_id": job.get("job_id")}
+
+
+def _workspace_query_response(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    question: str,
+    metrics: list[str] | None = None,
+    dimensions: list[str] | None = None,
+    limit: int = 200,
+) -> tuple[dict, str, dict, dict]:
+    query_result = query(
+        QueryRequest(
+            question=question,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            metrics=metrics or [],
+            dimensions=dimensions or [],
+            filters=[],
+            limit=limit,
+            explain=False,
+        )
+    )
+    chart_payload = None
+    chart_type = None
+    if query_result.rows and query_result.metrics:
+        chart_type = infer_chart_type(query_result.dimensions, query_result.rows, query_result.metrics)
+        if chart_type:
+            chart_payload = build_chart_payload(
+                chart_type,
+                query_result.rows,
+                query_result.metrics[0],
+                query_result.dimensions,
+            )
+    response_payload = {
+        "metrics": query_result.metrics,
+        "dimensions": query_result.dimensions,
+        "chart_id": query_result.chart_id,
+        "chart_type": chart_type,
+        "chart_payload": chart_payload.get("chart_payload") if chart_payload else None,
+        "data": chart_payload.get("data") if chart_payload else query_result.rows,
+        "sql": query_result.sql,
+        "rows": query_result.rows,
+    }
+    metric_label = ", ".join(query_result.metrics[:2]) if query_result.metrics else "requested metrics"
+    assistant_text = f"Returned {len(query_result.rows)} rows for {metric_label}."
+    summary_json = {
+        "text": assistant_text,
+        "row_count": len(query_result.rows),
+        "metrics": query_result.metrics,
+        "dimensions": query_result.dimensions,
+    }
+    inference_json = {
+        "text": "Use filters or follow-up prompts to drill deeper by region, plant, or time period.",
+        "confidence": 0.75 if query_result.rows else 0.4,
+    }
+    return response_payload, assistant_text, summary_json, inference_json
+
+
+def _workspace_llm_stream_enabled() -> bool:
+    return bool(getattr(settings, "openai_api_key", None))
+
+
+def _workspace_narration_prompt(question: str, response_payload: dict, summary_json: dict) -> tuple[str, str]:
+    safe_rows = (response_payload.get("rows") or [])[:5]
+    payload = {
+        "question": question,
+        "metrics": response_payload.get("metrics") or [],
+        "dimensions": response_payload.get("dimensions") or [],
+        "row_count": len(response_payload.get("rows") or []),
+        "sample_rows": safe_rows,
+        "base_summary": summary_json.get("text"),
+    }
+    system_prompt = (
+        "You are an analytics assistant. "
+        "Respond with concise factual analysis based only on provided data. "
+        "Do not invent numbers."
+    )
+    user_prompt = (
+        "Write a concise answer for the user query using the analytics payload below.\n"
+        f"{json.dumps(payload, default=str)}"
+    )
+    return system_prompt, user_prompt
+
+
+def _stream_openai_tokens(system_prompt: str, user_prompt: str) -> Iterator[str]:
+    if not _workspace_llm_stream_enabled():
+        return iter(())
+    payload = {
+        "model": settings.openai_model,
+        "stream": True,
+        "temperature": 0.2,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    def _iter() -> Iterator[str]:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            while True:
+                line = resp.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="ignore").strip()
+                if not text.startswith("data: "):
+                    continue
+                data = text[6:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                delta = ((chunk.get("choices") or [{}])[0].get("delta") or {}).get("content")
+                if delta:
+                    yield str(delta)
+
+    return _iter()
+
+
+def _workspace_scan_table_count(result_payload: dict | None) -> int:
+    if not isinstance(result_payload, dict):
+        return 0
+    count = 0
+    for connection in result_payload.get("connections", []) or []:
+        for database in connection.get("databases", []) or []:
+            for schema in database.get("schemas", []) or []:
+                tables = schema.get("tables") or []
+                if isinstance(tables, list):
+                    count += len(tables)
+    return count
+
+
+def _extract_user_query(payload: dict | None, *, required: bool = False) -> str | None:
+    data = payload or {}
+    for key in ("user_query", "query", "message_text", "first_question"):
+        value = data.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    if required:
+        raise HTTPException(
+            status_code=400,
+            detail="user_query is required (aliases accepted: query, message_text, first_question)",
+        )
+    return None
+
+
+@app.get(
+    "/workspace/tenants",
+    tags=["workspace"],
+    summary="List workspace tenants",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "tenants": {
+                                "summary": "Workspace tenants",
+                                "value": {
+                                    "tenants": [
+                                        {
+                                            "tenant_id": "VC_101",
+                                            "tenant_name": "HPCL VC 101",
+                                            "status": "active",
+                                            "domain_id": "lpg_production_distribution",
+                                            "metadata": {},
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_list_tenants(limit: int = 200) -> dict:
+    rows = list_tenants(settings, limit=limit)
+    items: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        tenant_id = row.get("tenant_id")
+        if not tenant_id or tenant_id in seen:
+            continue
+        seen.add(tenant_id)
+        items.append(
+            {
+                "tenant_id": tenant_id,
+                "tenant_name": row.get("display_name") or tenant_id,
+                "status": row.get("status") or "active",
+                "domain_id": row.get("domain_id"),
+                "metadata": row.get("metadata") or {},
+            }
+        )
+    return {"tenants": items}
+
+
+@app.get(
+    "/workspace/tenants/{tenant_id}/domains",
+    tags=["workspace"],
+    summary="List tenant domains with readiness",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "domains": {
+                                "summary": "Tenant domains",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domains": [
+                                        {
+                                            "domain_id": "lpg_production_distribution",
+                                            "display_name": "Lpg Production Distribution",
+                                            "scan_status": "completed",
+                                            "deployment_status": "completed",
+                                            "current_run_id": "run_1a0f427c86ec",
+                                            "current_run_display_name": "Lpg Production Distribution Deployment v4",
+                                            "last_scan_id": "scan_2233e9a1",
+                                            "last_scanned_at": "2026-02-23T05:31:07.901Z",
+                                            "tables_detected": 9,
+                                        }
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_list_domains_for_tenant(tenant_id: str) -> dict:
+    domains: set[str] = set()
+    domain_row = get_tenant_domain(settings, tenant_id)
+    if domain_row and domain_row.get("domain_id"):
+        domains.add(domain_row["domain_id"])
+    run_rows = run_query(
+        settings,
+        """
+        SELECT DISTINCT domain_id
+          FROM public.quantyx_agent_runs
+         WHERE tenant_id = %s
+        """,
+        [tenant_id],
+    )
+    for row in run_rows:
+        if row.get("domain_id"):
+            domains.add(row["domain_id"])
+    convo_rows = run_query(
+        settings,
+        """
+        SELECT DISTINCT domain_id
+          FROM public.quantyx_workspace_conversations
+         WHERE tenant_id = %s
+        """,
+        [tenant_id],
+    )
+    for row in convo_rows:
+        if row.get("domain_id"):
+            domains.add(row["domain_id"])
+
+    domain_items: list[dict] = []
+    for domain_id in sorted(domains):
+        scan_rows = run_query(
+            settings,
+            """
+            SELECT scan_id, status, created_at, result_payload
+              FROM public.quantyx_schema_scans
+             WHERE tenant_id = %s
+               AND domain_id = %s
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            [tenant_id, domain_id],
+        )
+        scan = scan_rows[0] if scan_rows else None
+        deployment = get_current_deployment(settings, tenant_id, domain_id)
+        domain_items.append(
+            {
+                "domain_id": domain_id,
+                "display_name": domain_id.replace("_", " ").replace("-", " ").title(),
+                "scan_status": (scan or {}).get("status") or "not_started",
+                "deployment_status": (deployment or {}).get("status") or "not_started",
+                "current_run_id": (deployment or {}).get("run_id"),
+                "current_run_display_name": (deployment or {}).get("display_name"),
+                "last_scan_id": (scan or {}).get("scan_id"),
+                "last_scanned_at": (scan or {}).get("created_at"),
+                "tables_detected": _workspace_scan_table_count((scan or {}).get("result_payload")),
+            }
+        )
+    return {"tenant_id": tenant_id, "domains": domain_items}
+
+
+@app.get(
+    "/workspace/tenants/{tenant_id}/domains/{domain_id}/scan-status",
+    tags=["workspace"],
+    summary="Get scan status for tenant/domain",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "scan_status": {
+                                "summary": "Latest scan status",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "scan_status": "completed",
+                                    "last_scan_id": "scan_2233e9a1",
+                                    "last_scanned_at": "2026-02-23T05:31:07.901Z",
+                                    "tables_detected": 9,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_scan_status(tenant_id: str, domain_id: str) -> dict:
+    rows = run_query(
+        settings,
+        """
+        SELECT scan_id, status, created_at, result_payload
+          FROM public.quantyx_schema_scans
+         WHERE tenant_id = %s
+           AND domain_id = %s
+         ORDER BY created_at DESC
+         LIMIT 1
+        """,
+        [tenant_id, domain_id],
+    )
+    if not rows:
+        return {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "scan_status": "not_started",
+            "last_scan_id": None,
+            "last_scanned_at": None,
+            "tables_detected": 0,
+        }
+    row = rows[0]
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "scan_status": row.get("status") or "unknown",
+        "last_scan_id": row.get("scan_id"),
+        "last_scanned_at": row.get("created_at"),
+        "tables_detected": _workspace_scan_table_count(row.get("result_payload")),
+    }
+
+
+@app.get(
+    "/workspace/tenants/{tenant_id}/domains/{domain_id}/deployment-status",
+    tags=["workspace"],
+    summary="Get deployment status for tenant/domain",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "deployment_status": {
+                                "summary": "Deployment status",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "status": "completed",
+                                    "run_id": "run_1a0f427c86ec",
+                                    "display_name": "Lpg Production Distribution Deployment v4",
+                                    "version_no": 4,
+                                    "completed_at": "2026-03-06T21:54:18.326901Z",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_deployment_status(tenant_id: str, domain_id: str) -> dict:
+    deployment = get_current_deployment(settings, tenant_id, domain_id)
+    if deployment:
+        return {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "status": deployment.get("status"),
+            "run_id": deployment.get("run_id"),
+            "display_name": deployment.get("display_name"),
+            "version_no": deployment.get("version_no"),
+            "completed_at": deployment.get("completed_at"),
+        }
+    latest = list_deployments(settings, tenant_id, domain_id, limit=1)
+    if latest:
+        row = latest[0]
+        return {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "status": row.get("status"),
+            "run_id": row.get("run_id"),
+            "display_name": row.get("display_name"),
+            "version_no": row.get("version_no"),
+            "completed_at": row.get("completed_at"),
+        }
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "status": "not_started",
+        "run_id": None,
+        "display_name": None,
+        "version_no": None,
+        "completed_at": None,
+    }
+
+
+@app.get(
+    "/workspace/deployments/current",
+    tags=["workspace"],
+    summary="Get current canonical deployment",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "current": {
+                                "summary": "Current deployment",
+                                "value": {
+                                    "run_id": "run_1a0f427c86ec",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "status": "completed",
+                                    "is_canonical": True,
+                                    "version_no": 4,
+                                    "display_name": "Lpg Production Distribution Deployment v4",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_current_deployment(tenant_id: str, domain_id: str | None = None) -> dict:
+    resolved_domain = _resolve_domain_id(tenant_id, domain_id)
+    current = get_current_deployment(settings, tenant_id, resolved_domain)
+    if not current:
+        raise HTTPException(status_code=404, detail="No completed deployment found for tenant/domain")
+    return current
+
+
+@app.get(
+    "/workspace/deployments",
+    tags=["workspace"],
+    summary="List deployment history",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "history": {
+                                "summary": "Deployment history",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "deployments": [
+                                        {
+                                            "run_id": "run_1a0f427c86ec",
+                                            "status": "completed",
+                                            "version_no": 4,
+                                            "display_name": "Lpg Production Distribution Deployment v4",
+                                        }
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_list_deployments(tenant_id: str, domain_id: str | None = None, limit: int = 50) -> dict:
+    resolved_domain = _resolve_domain_id(tenant_id, domain_id)
+    rows = list_deployments(settings, tenant_id, resolved_domain, limit=limit)
+    return {"tenant_id": tenant_id, "domain_id": resolved_domain, "deployments": rows}
+
+
+def _start_workspace_deployment(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, payload.get("domain_id"))
+    inflight = _inflight_run_for_scope(tenant_id, domain_id)
+    if inflight:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "A deployment run is already in progress for this tenant/domain.",
+                "tenant_id": tenant_id,
+                "domain_id": domain_id,
+                "run_id": inflight.get("run_id"),
+                "status": inflight.get("status"),
+            },
+        )
+    connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
+    schema_payload = payload.get("schema_payload")
+    if not schema_payload:
+        schema_payload = load_latest_scan_for_scope(settings, tenant_id, domain_id, connection_id, database, schema)
+    if not schema_payload:
+        raise HTTPException(status_code=400, detail="schema_payload is required")
+    run_id = create_agent_run(settings, tenant_id, domain_id, status="queued")
+    version_no = next_run_version(settings, tenant_id, domain_id)
+    display_name = payload.get("display_name") or generate_run_display_name(domain_id, version_no)
+    initialize_run_metadata(
+        settings,
+        run_id,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        version_no=version_no,
+        display_name=display_name,
+        is_canonical=False,
+    )
+    append_agent_run_event(
+        settings,
+        run_id,
+        "PlanningAgent",
+        "completed",
+        "Plan created",
+        {"steps": ["Scan schema", "Build semantics", "Create dashboards"]},
+    )
+    append_plan_summary(settings, run_id, ["Scan schema", "Build semantics", "Create dashboards"])
+    initial_state = {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "schema_ids": payload.get("schema_ids") or [],
+        "context_text": payload.get("context_text"),
+        "schema_payload": schema_payload or {},
+        "schema_name": payload.get("schema_name") or schema,
+        "connection_id": payload.get("connection_id") or connection_id,
+        "database_name": payload.get("database") or database,
+        "runtime_tuning": payload.get("runtime_tuning") or {},
+    }
+    job = create_job(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        job_type="agentic_run",
+        payload={
+            "run_id": run_id,
+            "initial_state": initial_state,
+            "canonicalize_on_success": True,
+        },
+        idempotency_key=None,
+    )
+    mark_run_status(settings, run_id, "queued")
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "display_name": display_name,
+        "version_no": version_no,
+        "status": "queued",
+        "job_id": job.get("job_id"),
+    }
+
+
+@app.post(
+    "/workspace/deployments",
+    tags=["workspace"],
+    summary="Create deployment (first build or new version)",
+    description="Canonical deployment entry point. Creates first deployment if none exists, or a new version when one exists. Fails with 409 if another deployment run is already queued/running for the same scope.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "create_or_redeploy": {
+                            "summary": "Create deployment or next version",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "mode": "full",
+                            },
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "queued": {
+                                "summary": "Deployment queued",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "run_id": "run_abc123",
+                                    "display_name": "Lpg Production Distribution Deployment v5",
+                                    "version_no": 5,
+                                    "status": "queued",
+                                    "job_id": "job_123",
+                                },
+                            }
+                        }
+                    }
+                }
+            },
+            "409": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "inflight_blocked": {
+                                "summary": "Deployment already in progress",
+                                "value": {
+                                    "detail": {
+                                        "message": "A deployment run is already in progress for this tenant/domain.",
+                                        "tenant_id": "VC_101",
+                                        "domain_id": "lpg_production_distribution",
+                                        "run_id": "run_9f2d1a8c45e1",
+                                        "status": "running"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def workspace_create_deployment(payload: dict) -> dict:
+    return _start_workspace_deployment(payload)
+
+
+@app.put(
+    "/workspace/deployments/{run_id}",
+    tags=["workspace"],
+    summary="Update deployment metadata",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "rename": {
+                            "summary": "Rename deployment",
+                            "value": {"display_name": "LPG Ops Deployment v5", "make_canonical": False},
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_update_deployment(run_id: str, payload: dict) -> dict:
+    updated = update_deployment(
+        settings,
+        run_id,
+        display_name=payload.get("display_name"),
+        make_canonical=bool(payload.get("make_canonical")),
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Deployment run not found")
+    return updated
+
+
+@app.post(
+    "/workspace/conversations",
+    tags=["workspace"],
+    summary="Create a new conversation",
+    description="Create conversation metadata. Use `user_query` for initial intent/title generation (aliases accepted: `query`, `message_text`, `first_question`).",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "create": {
+                            "summary": "Create conversation",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "user_query": "North zone pending trend",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_create_conversation(payload: dict) -> dict:
+    tenant_id = payload.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    domain_id = _resolve_domain_id(tenant_id, payload.get("domain_id"))
+    deployment = get_current_deployment(settings, tenant_id, domain_id)
+    if not deployment or deployment.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="No completed deployment available for tenant/domain")
+    title = payload.get("title") or generate_conversation_title(_extract_user_query(payload), domain_id)
+    conversation = create_workspace_conversation(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=deployment.get("run_id"),
+        title=title,
+        display_name=payload.get("display_name") or title,
+        created_by=payload.get("created_by"),
+    )
+    return {
+        **conversation,
+        "run_display_name": deployment.get("display_name"),
+    }
+
+
+@app.post(
+    "/workspace/tenants/{tenant_id}/domains/{domain_id}/conversations",
+    tags=["workspace"],
+    summary="Create a new conversation for tenant/domain",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "create_scope": {
+                            "summary": "Create from scope",
+                            "value": {"user_query": "Show production by plant"},
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_create_conversation_for_scope(tenant_id: str, domain_id: str, payload: dict | None = None) -> dict:
+    data = payload or {}
+    return workspace_create_conversation(
+        {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "title": data.get("title"),
+            "display_name": data.get("display_name"),
+            "user_query": _extract_user_query(data),
+            "created_by": data.get("created_by"),
+        }
+    )
+
+
+@app.get(
+    "/workspace/conversations",
+    tags=["workspace"],
+    summary="List conversations",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "conversations": {
+                                "summary": "Conversation list",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "conversations": [
+                                        {
+                                            "conversation_id": "conv_6f0f0f",
+                                            "title": "North Zone Bottleneck Analysis",
+                                            "display_name": "North Zone Bottleneck Analysis",
+                                            "run_display_name": "Lpg Production Distribution Deployment v4",
+                                            "message_count": 24,
+                                        }
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_list_conversations(
+    tenant_id: str,
+    domain_id: str | None = None,
+    status: str = WORKSPACE_STATUS_ACTIVE,
+    limit: int = 50,
+) -> dict:
+    resolved_domain = _resolve_domain_id(tenant_id, domain_id)
+    rows = list_workspace_conversations(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=resolved_domain,
+        status=status,
+        limit=limit,
+    )
+    return {"tenant_id": tenant_id, "domain_id": resolved_domain, "conversations": rows}
+
+
+@app.get(
+    "/workspace/tenants/{tenant_id}/domains/{domain_id}/conversations",
+    tags=["workspace"],
+    summary="List conversations for tenant/domain",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "scope_conversations": {
+                                "summary": "Scope conversation list",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "conversations": [
+                                        {"conversation_id": "conv_6f0f0f", "title": "North Zone Bottleneck Analysis"}
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_list_conversations_for_scope(
+    tenant_id: str,
+    domain_id: str,
+    status: str = WORKSPACE_STATUS_ACTIVE,
+    limit: int = 50,
+) -> dict:
+    rows = list_workspace_conversations(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        status=status,
+        limit=limit,
+    )
+    return {"tenant_id": tenant_id, "domain_id": domain_id, "conversations": rows}
+
+
+@app.get(
+    "/workspace/tenants/{tenant_id}/conversations",
+    tags=["workspace"],
+    summary="List tenant-wide conversation history (all domains)",
+    description="Returns all conversations for a tenant across domains. Optionally filter by domain_id or status.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "tenant_history": {
+                                "summary": "Tenant-wide conversation history",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domain_id": None,
+                                    "status": "active",
+                                    "conversations": [
+                                        {
+                                            "conversation_id": "conv_6f0f0f",
+                                            "domain_id": "lpg_production_distribution",
+                                            "title": "North Zone Bottleneck Analysis",
+                                            "run_id": "run_1a0f427c86ec",
+                                            "run_display_name": "Lpg Production Distribution Deployment v4",
+                                            "message_count": 24,
+                                        },
+                                        {
+                                            "conversation_id": "conv_8a7b6c",
+                                            "domain_id": "retail_sales",
+                                            "title": "Retail Throughput Trend",
+                                            "run_id": "run_4b6d9a0e1122",
+                                            "run_display_name": "Retail Sales Deployment v2",
+                                            "message_count": 11,
+                                        },
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_list_conversations_for_tenant(
+    tenant_id: str,
+    status: str = WORKSPACE_STATUS_ACTIVE,
+    domain_id: str | None = None,
+    limit: int = 100,
+) -> dict:
+    rows = list_workspace_conversations_for_tenant(
+        settings,
+        tenant_id=tenant_id,
+        status=status,
+        domain_id=domain_id,
+        limit=limit,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "status": status,
+        "conversations": rows,
+    }
+
+
+@app.get(
+    "/workspace/tenants/{tenant_id}/domains/{domain_id}/runs/{run_id}/conversations",
+    tags=["workspace"],
+    summary="List conversations for a specific deployment run",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "run_history": {
+                                "summary": "Run-scoped conversation list",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "run_id": "run_1a0f427c86ec",
+                                    "conversations": [
+                                        {"conversation_id": "conv_6f0f0f", "title": "North Zone Bottleneck Analysis"}
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_list_conversations_for_run(
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    status: str = WORKSPACE_STATUS_ACTIVE,
+    limit: int = 50,
+) -> dict:
+    rows = list_workspace_conversations(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        status=status,
+        limit=limit,
+    )
+    rows = [item for item in rows if item.get("run_id") == run_id]
+    return {"tenant_id": tenant_id, "domain_id": domain_id, "run_id": run_id, "conversations": rows}
+
+
+@app.get(
+    "/workspace/conversations/{conversation_id}",
+    tags=["workspace"],
+    summary="Get conversation",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "conversation": {
+                                "summary": "Conversation metadata",
+                                "value": {
+                                    "conversation_id": "conv_6f0f0f",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "run_id": "run_1a0f427c86ec",
+                                    "title": "North Zone Bottleneck Analysis",
+                                    "status": "active",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_get_conversation(conversation_id: str) -> dict:
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
+
+
+@app.put(
+    "/workspace/conversations/{conversation_id}",
+    tags=["workspace"],
+    summary="Update conversation",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "update": {
+                            "summary": "Rename/archive/switch",
+                            "value": {
+                                "title": "Updated Conversation Title",
+                                "status": "archived",
+                                "switch_to_latest_run": False,
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_update_conversation(conversation_id: str, payload: dict) -> dict:
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    run_id = None
+    if payload.get("switch_to_latest_run"):
+        latest = get_current_deployment(settings, conversation["tenant_id"], conversation["domain_id"])
+        if latest:
+            run_id = latest.get("run_id")
+    status = payload.get("status")
+    if status and status not in {WORKSPACE_STATUS_ACTIVE, WORKSPACE_STATUS_ARCHIVED, WORKSPACE_STATUS_DELETED}:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    updated = update_workspace_conversation(
+        settings,
+        conversation_id,
+        title=payload.get("title"),
+        display_name=payload.get("display_name"),
+        status=status,
+        run_id=run_id,
+    )
+    return updated or {}
+
+
+@app.delete(
+    "/workspace/conversations/{conversation_id}",
+    tags=["workspace"],
+    summary="Soft delete conversation",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "deleted": {
+                                "summary": "Conversation soft deleted",
+                                "value": {"conversation_id": "conv_6f0f0f", "status": "deleted"},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_delete_conversation(conversation_id: str) -> dict:
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    soft_delete_workspace_conversation(settings, conversation_id)
+    return {"conversation_id": conversation_id, "status": WORKSPACE_STATUS_DELETED}
+
+
+@app.get(
+    "/workspace/conversations/{conversation_id}/messages",
+    tags=["workspace"],
+    summary="List conversation messages",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "messages": {
+                                "summary": "Conversation message list",
+                                "value": {
+                                    "conversation_id": "conv_6f0f0f",
+                                    "messages": [
+                                        {"sender": "user", "message_text": "Show production trend"},
+                                        {"sender": "assistant", "message_text": "Returned 120 rows for production_mt."},
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_list_conversation_messages(conversation_id: str, limit: int = 200) -> dict:
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    rows = list_workspace_messages(settings, conversation_id, limit=limit)
+    return {"conversation_id": conversation_id, "messages": rows}
+
+
+@app.get(
+    "/workspace/conversations/{conversation_id}/messages/{message_id}",
+    tags=["workspace"],
+    summary="Get conversation message",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "message": {
+                                "summary": "Single message with artifacts",
+                                "value": {
+                                    "message_id": "wmsg_abc123",
+                                    "sender": "assistant",
+                                    "message_text": "Returned 120 rows for production_mt.",
+                                    "sql_text": "SELECT ...",
+                                    "chart_json": {"chart_type": "line"},
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_get_conversation_message(conversation_id: str, message_id: str) -> dict:
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    row = get_workspace_message(settings, conversation_id, message_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return row
+
+
+@app.get(
+    "/workspace/conversations/{conversation_id}/memory",
+    tags=["workspace"],
+    summary="Get conversation memory",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "memory": {
+                                "summary": "Persisted memory",
+                                "value": {
+                                    "conversation_id": "conv_6f0f0f",
+                                    "memory": {
+                                        "summary_text": "Latest topic: pending trend in North zone",
+                                        "memory_json": {"last_user_question": "Show pending trend"},
+                                    },
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_get_memory(conversation_id: str) -> dict:
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    memory = get_workspace_memory(settings, conversation_id)
+    return {"conversation_id": conversation_id, "memory": memory}
+
+
+@app.get(
+    "/workspace/conversations/{conversation_id}/context",
+    tags=["workspace"],
+    summary="Get context package",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "context": {
+                                "summary": "Context package",
+                                "value": {
+                                    "conversation_id": "conv_6f0f0f",
+                                    "run_id": "run_1a0f427c86ec",
+                                    "recent_turns": [{"sender": "user", "message_text": "Show pending trend"}],
+                                    "memory": {"summary_text": "Latest topic: pending trend"},
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_get_context(conversation_id: str, last_turns: int = 12) -> dict:
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    memory = get_workspace_memory(settings, conversation_id)
+    turns = recent_workspace_messages(settings, conversation_id, limit=last_turns)
+    return {
+        "conversation_id": conversation_id,
+        "run_id": conversation.get("run_id"),
+        "recent_turns": turns,
+        "memory": memory,
+    }
+
+
+@app.put(
+    "/workspace/conversations/{conversation_id}/context/rebuild",
+    tags=["workspace"],
+    summary="Rebuild context memory",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "rebuilt": {
+                                "summary": "Memory rebuilt",
+                                "value": {
+                                    "conversation_id": "conv_6f0f0f",
+                                    "memory": {"summary_text": "Latest topic: production trend"},
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_rebuild_context(conversation_id: str) -> dict:
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    turns = recent_workspace_messages(settings, conversation_id, limit=12)
+    last_user = next((t for t in reversed(turns) if t.get("sender") == "user"), None)
+    summary = f"Latest topic: {(last_user or {}).get('message_text') or 'conversation context'}"
+    memory = upsert_workspace_memory(
+        settings,
+        conversation_id=conversation_id,
+        tenant_id=conversation["tenant_id"],
+        domain_id=conversation["domain_id"],
+        run_id=conversation["run_id"],
+        summary_text=summary,
+        memory_json={
+            "last_user_question": (last_user or {}).get("message_text"),
+            "turn_count": len(turns),
+        },
+    )
+    return {"conversation_id": conversation_id, "memory": memory}
+
+
+@app.put(
+    "/workspace/conversations/{conversation_id}/memory",
+    tags=["workspace"],
+    summary="Override conversation memory",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "override": {
+                            "summary": "Override memory",
+                            "value": {
+                                "summary_text": "North zone pending analysis",
+                                "memory_json": {"active_filters": ["zone=North"]},
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def workspace_override_memory(conversation_id: str, payload: dict) -> dict:
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    memory = upsert_workspace_memory(
+        settings,
+        conversation_id=conversation_id,
+        tenant_id=conversation["tenant_id"],
+        domain_id=conversation["domain_id"],
+        run_id=conversation["run_id"],
+        summary_text=payload.get("summary_text") or "",
+        memory_json=payload.get("memory_json") or {},
+    )
+    return {"conversation_id": conversation_id, "memory": memory}
+
+
+@app.post(
+    "/workspace/conversations/{conversation_id}/messages",
+    tags=["workspace"],
+    summary="Send conversation message",
+    description="Canonical request field is `user_query`. Backward-compatible aliases accepted: `query`, `message_text`, `first_question`.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "stream_default": {
+                            "summary": "Stream response by default",
+                            "value": {
+                                "user_query": "Show production trend by plant for last 30 days",
+                                "resume_context": True,
+                                "stream": True,
+                            },
+                        },
+                        "sync": {
+                            "summary": "Synchronous response",
+                            "value": {
+                                "user_query": "Show production trend by plant for last 30 days",
+                                "resume_context": True,
+                                "stream": False,
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "text/event-stream": {
+                        "examples": {
+                            "sse_token": {
+                                "summary": "Token event",
+                                "value": "data: {\"event\":\"token\",\"text\":\"Returned \"}\n\n",
+                            },
+                            "sse_done": {
+                                "summary": "Done event",
+                                "value": "data: {\"event\":\"done\"}\n\n",
+                            },
+                        }
+                    },
+                    "application/json": {
+                        "examples": {
+                            "sync_response": {
+                                "summary": "Non-stream response",
+                                "value": {
+                                    "conversation_id": "conv_6f0f0f",
+                                    "response": {"chart_type": "line", "sql": "SELECT ..."},
+                                    "context_used": {"resume_context": True, "run_id": "run_1a0f427c86ec"},
+                                },
+                            }
+                        }
+                    },
+                }
+            }
+        },
+    },
+)
+def workspace_send_message(conversation_id: str, payload: dict):
+    from fastapi.responses import StreamingResponse
+
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conversation.get("status") == WORKSPACE_STATUS_DELETED:
+        raise HTTPException(status_code=400, detail="Conversation is deleted")
+    user_query = _extract_user_query(payload, required=True) or ""
+    stream = payload.get("stream")
+    if stream is None:
+        stream = True
+    resume_context = payload.get("resume_context")
+    if resume_context is None:
+        resume_context = True
+
+    user_msg = create_workspace_message(
+        settings,
+        conversation_id=conversation_id,
+        tenant_id=conversation["tenant_id"],
+        domain_id=conversation["domain_id"],
+        run_id=conversation["run_id"],
+        sender="user",
+        message_text=user_query,
+    )
+    memory = get_workspace_memory(settings, conversation_id)
+    effective_question = user_query
+    if resume_context and memory and memory.get("summary_text"):
+        effective_question = f"{user_query}\n\nConversation context: {memory.get('summary_text')}"
+
+    def _persist_assistant(
+        *,
+        response_payload: dict,
+        assistant_text: str,
+        summary_json: dict,
+        inference_json: dict,
+    ) -> dict:
+        assistant_msg = create_workspace_message(
+            settings,
+            conversation_id=conversation_id,
+            tenant_id=conversation["tenant_id"],
+            domain_id=conversation["domain_id"],
+            run_id=conversation["run_id"],
+            sender="assistant",
+            message_text=assistant_text,
+            sql_text=response_payload.get("sql"),
+            data_json={"rows": response_payload.get("rows")},
+            chart_json={
+                "chart_id": response_payload.get("chart_id"),
+                "chart_type": response_payload.get("chart_type"),
+                "chart_payload": response_payload.get("chart_payload"),
+                "data": response_payload.get("data"),
+            },
+            summary_json=summary_json,
+            inference_json=inference_json,
+        )
+        new_memory = upsert_workspace_memory(
+            settings,
+            conversation_id=conversation_id,
+            tenant_id=conversation["tenant_id"],
+            domain_id=conversation["domain_id"],
+            run_id=conversation["run_id"],
+            summary_text=summary_json.get("text") or assistant_text,
+            memory_json={
+                "last_user_question": user_query,
+                "last_assistant_summary": summary_json.get("text"),
+                "metrics": response_payload.get("metrics") or [],
+                "dimensions": response_payload.get("dimensions") or [],
+                "sql_present": bool(response_payload.get("sql")),
+            },
+        )
+        return {"assistant_message": assistant_msg, "memory": new_memory}
+
+    def _compute_sync_result() -> dict:
+        response_payload, assistant_text_base, summary_json, inference_json = _workspace_query_response(
+            tenant_id=conversation["tenant_id"],
+            domain_id=conversation["domain_id"],
+            question=effective_question,
+            metrics=payload.get("metrics") or [],
+            dimensions=payload.get("dimensions") or [],
+            limit=int(payload.get("limit") or 200),
+        )
+        assistant_text = assistant_text_base
+        if _workspace_llm_stream_enabled():
+            try:
+                sys_prompt, usr_prompt = _workspace_narration_prompt(user_query, response_payload, summary_json)
+                collected = "".join(_stream_openai_tokens(sys_prompt, usr_prompt)).strip()
+                if collected:
+                    assistant_text = collected
+            except Exception:
+                logger.exception("workspace.message.llm_stream_failed")
+        persisted = _persist_assistant(
+            response_payload=response_payload,
+            assistant_text=assistant_text,
+            summary_json=summary_json,
+            inference_json=inference_json,
+        )
+        context_used = {
+            "resume_context": bool(resume_context and memory),
+            "memory_present": bool(memory),
+            "run_id": conversation["run_id"],
+            "streamed_tokens": False,
+            "llm_stream_used": bool(_workspace_llm_stream_enabled()),
+        }
+        return {
+            "conversation_id": conversation_id,
+            "user_message": user_msg,
+            "assistant_message": persisted.get("assistant_message"),
+            "response": response_payload,
+            "summary_json": summary_json,
+            "inference_json": inference_json,
+            "context_used": context_used,
+            "memory": persisted.get("memory"),
+        }
+
+    if not stream:
+        return _compute_sync_result()
+
+    def _event_stream():
+        try:
+            yield f"data: {json.dumps({'event': 'message_start', 'conversation_id': conversation_id})}\n\n"
+            yield f"data: {json.dumps({'event': 'status', 'stage': 'query_started'})}\n\n"
+            response_payload, assistant_text_base, summary_json, inference_json = _workspace_query_response(
+                tenant_id=conversation["tenant_id"],
+                domain_id=conversation["domain_id"],
+                question=effective_question,
+                metrics=payload.get("metrics") or [],
+                dimensions=payload.get("dimensions") or [],
+                limit=int(payload.get("limit") or 200),
+            )
+            yield f"data: {json.dumps({'event': 'status', 'stage': 'query_completed', 'row_count': len(response_payload.get('rows') or [])})}\n\n"
+            assistant_text = assistant_text_base
+            streamed = False
+            if _workspace_llm_stream_enabled():
+                yield f"data: {json.dumps({'event': 'status', 'stage': 'narration_started'})}\n\n"
+                try:
+                    sys_prompt, usr_prompt = _workspace_narration_prompt(user_query, response_payload, summary_json)
+                    assistant_text = ""
+                    for token in _stream_openai_tokens(sys_prompt, usr_prompt):
+                        streamed = True
+                        assistant_text += token
+                        yield f"data: {json.dumps({'event': 'token', 'text': token})}\n\n"
+                except Exception:
+                    logger.exception("workspace.message.llm_stream_failed")
+            if not streamed:
+                for token in assistant_text.split(" "):
+                    if not token:
+                        continue
+                    yield f"data: {json.dumps({'event': 'token', 'text': token + ' '})}\n\n"
+            persisted = _persist_assistant(
+                response_payload=response_payload,
+                assistant_text=assistant_text.strip(),
+                summary_json=summary_json,
+                inference_json=inference_json,
+            )
+            context_used = {
+                "resume_context": bool(resume_context and memory),
+                "memory_present": bool(memory),
+                "run_id": conversation["run_id"],
+                "streamed_tokens": streamed,
+                "llm_stream_used": bool(_workspace_llm_stream_enabled()),
+            }
+            result = {
+                "response": response_payload,
+                "summary_json": summary_json,
+                "inference_json": inference_json,
+                "context_used": context_used,
+            }
+            yield f"data: {json.dumps({'event': 'artifact', 'name': 'response', 'payload': result.get('response')})}\n\n"
+            yield f"data: {json.dumps({'event': 'artifact', 'name': 'summary', 'payload': result.get('summary_json')})}\n\n"
+            yield f"data: {json.dumps({'event': 'artifact', 'name': 'inference', 'payload': result.get('inference_json')})}\n\n"
+            yield f"data: {json.dumps({'event': 'artifact', 'name': 'context_used', 'payload': result.get('context_used')})}\n\n"
+            yield (
+                f"data: "
+                f"{json.dumps({'event': 'message_end', 'assistant_message_id': (persisted.get('assistant_message') or {}).get('message_id')})}\n\n"
+            )
+            yield f"data: {json.dumps({'event': 'done'})}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            yield f"data: {json.dumps({'event': 'error', 'error': str(exc)})}\n\n"
+
+    return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
 
 @app.get(

@@ -67,9 +67,21 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 21. **Phase 23: Dashboard Refresh + Composite Insights**
    - Add dashboard refresh lifecycle, chart data recompute, and dashboard-wide summary/inference persistence + APIs.
 
+22. **Phase 24: Tenant/Domain Deployment Run + Conversational Workspace**
+   - Enforce one canonical deployment run per tenant/domain and persist workspace-scoped chat conversations with analytics artifacts.
+
+23. **Phase 25: Tenant-First Chat Entry and History APIs**
+   - Add tenant/domain discovery, scan/deployment readiness, and conversation history APIs with SSE-first chat entry.
+
+24. **Phase 26: Workspace UI Sequential API Flow**
+   - Define end-to-end UI call order (new tenant and existing tenant paths) with sequence diagrams and canonical payload rules.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
 - Phase 05 can run after 02 (semantic graph ready).
 - Phase 22 depends on Phase 11 (streaming/chat logs), Phase 12 (storage), and Phase 20 (orchestration behavior).
 - Phase 23 depends on Phase 05 (dashboard generation), Phase 11/22 (staged stream + artifacts), and Phase 20 (orchestration behavior).
+- Phase 24 depends on Phase 11/22 (run events and artifacts), Phase 12 (storage), and Phase 23 for dashboard-linked insights continuity.
+- Phase 25 depends on Phase 24 (conversation/deployment model) and Phase 11/22 for SSE and run event consistency.
+- Phase 26 depends on Phases 24 and 25 (workspace APIs) and standardizes UI integration sequencing.

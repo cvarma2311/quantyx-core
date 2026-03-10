@@ -5,9 +5,21 @@ CREATE TABLE IF NOT EXISTS public.quantyx_agent_runs (
   tenant_id TEXT NOT NULL,
   domain_id TEXT NOT NULL,
   status TEXT NOT NULL,
+  is_canonical BOOLEAN NOT NULL DEFAULT false,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  display_name TEXT NULL,
+  superseded_by_run_id TEXT NULL,
+  completed_at TIMESTAMPTZ NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_runs_canonical_scope
+  ON public.quantyx_agent_runs (tenant_id, domain_id)
+  WHERE is_canonical = true;
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_scope_version
+  ON public.quantyx_agent_runs (tenant_id, domain_id, version_no DESC, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS public.quantyx_agent_run_events (
   event_id TEXT PRIMARY KEY,
@@ -135,3 +147,59 @@ CREATE TABLE IF NOT EXISTS public.quantyx_semantic_feedback (
   notes TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS public.quantyx_workspace_conversations (
+  conversation_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  title TEXT NULL,
+  display_name TEXT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_by TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_conversations_scope
+  ON public.quantyx_workspace_conversations (tenant_id, domain_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_conversations_run
+  ON public.quantyx_workspace_conversations (run_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_workspace_messages (
+  message_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  message_text TEXT NOT NULL,
+  sql_text TEXT NULL,
+  data_json JSONB NULL,
+  chart_json JSONB NULL,
+  inference_json JSONB NULL,
+  summary_json JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_messages_conversation
+  ON public.quantyx_workspace_messages (conversation_id, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_messages_scope
+  ON public.quantyx_workspace_messages (tenant_id, domain_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_workspace_conversation_memory (
+  memory_id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  summary_text TEXT NULL,
+  memory_json JSONB NOT NULL,
+  last_message_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_memory_conversation
+  ON public.quantyx_workspace_conversation_memory (conversation_id);
