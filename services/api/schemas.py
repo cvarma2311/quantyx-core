@@ -270,7 +270,15 @@ class DashboardResponse(BaseModel):
 
 
 class DashboardUpdateRequest(BaseModel):
-    action: str = Field(..., description="Currently supported: delete_chart")
+    action: Optional[str] = Field(
+        None,
+        description="Supported: delete_chart, update_titles. For update_titles, send title and/or chart_updates.",
+    )
+    title: Optional[str] = Field(None, description="Dashboard title override")
+    chart_updates: Optional[List[dict]] = Field(
+        None,
+        description="Chart title overrides, e.g. [{\"chart_id\":\"chart_123\",\"title\":\"Production Trend by Month\"}]",
+    )
     chart_id: Optional[str] = Field(None, description="Chart id to delete from dashboard spec")
     chart_index: Optional[int] = Field(
         None,

@@ -1148,6 +1148,12 @@ def run_agentic_workflow(
             state.get("metric_defs", []),
             state.get("profiling_stats", {}),
         )
+        dashboard_title = (dashboard_spec.get("title") or "").strip()
+        if not dashboard_title:
+            domain_label = str(state.get("domain_id") or "Auto").replace("_", " ").replace("-", " ").strip()
+            dashboard_title = f"{domain_label.title()} Dashboard" if domain_label else "Auto Dashboard"
+        dashboard_spec["title"] = dashboard_title
+        dashboard_spec["dashboard_title"] = dashboard_title
         charts_spec = state.get("chart_plan") or dashboard_spec.get("charts", [])
         dashboard_spec["chart_plan"] = state.get("chart_plan") or []
         dashboard_spec["chart_candidates"] = state.get("chart_candidates") or []
@@ -1349,6 +1355,9 @@ def run_agentic_workflow(
                     "metrics": [metric_name],
                     "dimensions": dimensions,
                     "chart": chart_type,
+                    "chart_title": chart_title,
+                    "dashboard_title": dashboard_title,
+                    "table": table_name,
                 },
                 sql=sql,
                 params=params,
@@ -1386,14 +1395,15 @@ def run_agentic_workflow(
                         "narrative": narrative,
                         "chart_payload": payload.get("chart_payload"),
                         "chart_data": payload.get("data"),
+                        "dashboard_title": dashboard_title,
                     }
                 )
             else:
-                enriched_charts.append(chart)
+                enriched_charts.append({**chart, "dashboard_title": dashboard_title})
 
         dashboard_spec["charts"] = enriched_charts
         dashboard_spec["story"] = {
-            "title": dashboard_spec.get("title") or "Auto Dashboard",
+            "title": dashboard_title,
             "cards": [
                 {
                     "title": "Trend",
@@ -1415,7 +1425,7 @@ def run_agentic_workflow(
             settings,
             run_id,
             "system",
-            f"Dashboard ready: {dashboard_spec.get('title')}",
+            f"Dashboard ready: {dashboard_title}",
         )
         fast_mode = os.getenv("AGENTIC_DASHBOARD_FAST_MODE", "false").lower() in {"1", "true", "yes"}
         counts = {"nodes": 0, "edges": 0}
@@ -1531,7 +1541,7 @@ def run_agentic_workflow(
             state.get("tenant_id") or "",
             state.get("domain_id") or "",
             dashboard_spec,
-            title=dashboard_spec.get("title") or "Auto Dashboard",
+            title=dashboard_title,
         )
         _emit(
             settings,
@@ -1544,9 +1554,11 @@ def run_agentic_workflow(
                 "semantic_nodes": counts.get("nodes"),
                 "semantic_edges": counts.get("edges"),
                 "dashboard_id": dash_id,
+                "dashboard_title": dashboard_title,
                 "views": len(created_views),
                 "joined_views": joined_views,
                 "chart_ids": chart_ids,
+                "chart_titles": [c.get("title") for c in enriched_charts if c.get("title")],
                 "chart_details": enriched_charts,
                 "views_detail": created_views,
                 "elapsed_ms": round((time.perf_counter() - dashboard_start) * 1000, 1),

@@ -76,6 +76,9 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 24. **Phase 26: Workspace UI Sequential API Flow**
    - Define end-to-end UI call order (new tenant and existing tenant paths) with sequence diagrams and canonical payload rules.
 
+25. **Phase 27: Agentic Dashboard and Chart Title Generation**
+   - Enforce contextual, agent-generated titles for dashboards/charts with deterministic fallback, overrides, and refresh consistency.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -85,3 +88,4 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 24 depends on Phase 11/22 (run events and artifacts), Phase 12 (storage), and Phase 23 for dashboard-linked insights continuity.
 - Phase 25 depends on Phase 24 (conversation/deployment model) and Phase 11/22 for SSE and run event consistency.
 - Phase 26 depends on Phases 24 and 25 (workspace APIs) and standardizes UI integration sequencing.
+- Phase 27 depends on Phase 05/23 (dashboard and refresh flows) and Phase 24+ for consistent workspace/API exposure.

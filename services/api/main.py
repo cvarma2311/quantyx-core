@@ -992,6 +992,8 @@ def _execute_job(job: dict) -> dict:
             message="Dashboard refresh started",
             artifacts={},
         )
+        request_payload = (refresh_row.get("request_payload") or {}) if isinstance(refresh_row, dict) else {}
+        regenerate_titles = bool((request_payload or {}).get("regenerate_titles"))
         spec = dashboard_row.get("spec") or {}
         charts = spec.get("charts") or []
         chart_results: list[dict] = []
@@ -1078,6 +1080,7 @@ def _execute_job(job: dict) -> dict:
                 "chart_id": chart_id,
                 "chart_type": chart_type,
                 "metric_name": metric_key,
+                "table": chart_obj.get("table"),
                 "rows_count": len(rows),
                 "stats": stats,
                 "insight": insight,
@@ -1089,13 +1092,51 @@ def _execute_job(job: dict) -> dict:
                     {"chart_id": chart_id, "error_message": error_message or "unknown_error"}
                 )
 
+        regenerated_count = 0
+        if regenerate_titles:
+            regenerated_dashboard_title = _regenerated_dashboard_title(dashboard_row.get("domain_id"), charts)
+            updated_charts: list[dict] = []
+            for chart in charts:
+                chart_obj = dict(chart) if isinstance(chart, dict) else {}
+                chart_obj["title"] = _regenerated_chart_title(chart_obj)
+                chart_obj["chart_title"] = chart_obj["title"]
+                chart_obj["dashboard_title"] = regenerated_dashboard_title
+                updated_charts.append(chart_obj)
+            spec["charts"] = updated_charts
+            spec["title"] = regenerated_dashboard_title
+            spec["dashboard_title"] = regenerated_dashboard_title
+            update_dashboard_spec(
+                settings,
+                dashboard_id,
+                spec=spec,
+                title=regenerated_dashboard_title,
+            )
+            regenerated_count = len(updated_charts)
+            append_dashboard_refresh_event(
+                settings,
+                refresh_id=refresh_id,
+                dashboard_id=dashboard_id,
+                stage_name="titles_regenerated",
+                message=f"Dashboard/chart titles regenerated: {regenerated_count}",
+                artifacts={
+                    "regenerate_titles": True,
+                    "dashboard_title": regenerated_dashboard_title,
+                    "chart_titles": [c.get("title") for c in updated_charts if isinstance(c, dict)],
+                },
+            )
+
         append_dashboard_refresh_event(
             settings,
             refresh_id=refresh_id,
             dashboard_id=dashboard_id,
             stage_name="charts_refreshed",
             message=f"Dashboard charts refreshed: {len(chart_results) - len(failed_charts)}/{len(chart_results)}",
-            artifacts={"chart_count": len(chart_results), "failed_charts": failed_charts},
+            artifacts={
+                "chart_count": len(chart_results),
+                "failed_charts": failed_charts,
+                "regenerate_titles": regenerate_titles,
+                "regenerated_chart_titles": regenerated_count,
+            },
         )
         update_dashboard_refresh_status(settings, refresh_id, "charts_refreshed")
 
@@ -6055,6 +6096,18 @@ def entities_mappings(tenant_id: str, limit: int = 50) -> dict:
                         }
                     }
                 }
+            },
+            "400": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "schema_required": {
+                                "summary": "Scoped schema payload unavailable",
+                                "value": {"detail": "schema_payload is required"},
+                            }
+                        }
+                    }
+                }
             }
         },
     },
@@ -6169,11 +6222,23 @@ def _workspace_query_response(
                 query_result.metrics[0],
                 query_result.dimensions,
             )
+    metric_name = (query_result.metrics or [None])[0]
+    dimension_name = (query_result.dimensions or [None])[0]
+    if metric_name and dimension_name:
+        chart_title = f"{str(metric_name).replace('_', ' ').title()} by {str(dimension_name).replace('_', ' ').title()}"
+    elif metric_name:
+        chart_title = f"{str(metric_name).replace('_', ' ').title()} Trend"
+    else:
+        chart_title = "Data Trend"
+    dashboard_title = f"{str(domain_id).replace('_', ' ').replace('-', ' ').title()} Dashboard"
+
     response_payload = {
         "metrics": query_result.metrics,
         "dimensions": query_result.dimensions,
         "chart_id": query_result.chart_id,
         "chart_type": chart_type,
+        "chart_title": chart_title,
+        "dashboard_title": dashboard_title,
         "chart_payload": chart_payload.get("chart_payload") if chart_payload else None,
         "data": chart_payload.get("data") if chart_payload else query_result.rows,
         "sql": query_result.sql,
@@ -6809,7 +6874,28 @@ def workspace_create_deployment(payload: dict) -> dict:
                     }
                 }
             }
-        }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "updated": {
+                                "summary": "Deployment metadata updated",
+                                "value": {
+                                    "run_id": "run_1a0f427c86ec",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "display_name": "LPG Ops Deployment v5",
+                                    "is_canonical": True,
+                                    "version_no": 5
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
     },
 )
 def workspace_update_deployment(run_id: str, payload: dict) -> dict:
@@ -7501,7 +7587,12 @@ def workspace_override_memory(conversation_id: str, payload: dict) -> dict:
                                 "summary": "Non-stream response",
                                 "value": {
                                     "conversation_id": "conv_6f0f0f",
-                                    "response": {"chart_type": "line", "sql": "SELECT ..."},
+                                    "response": {
+                                        "chart_type": "line",
+                                        "chart_title": "Total Production Trend by Plant",
+                                        "dashboard_title": "Lpg Production Distribution Dashboard",
+                                        "sql": "SELECT ..."
+                                    },
                                     "context_used": {"resume_context": True, "run_id": "run_1a0f427c86ec"},
                                 },
                             }
@@ -7562,6 +7653,8 @@ def workspace_send_message(conversation_id: str, payload: dict):
             chart_json={
                 "chart_id": response_payload.get("chart_id"),
                 "chart_type": response_payload.get("chart_type"),
+                "chart_title": response_payload.get("chart_title"),
+                "dashboard_title": response_payload.get("dashboard_title"),
                 "chart_payload": response_payload.get("chart_payload"),
                 "data": response_payload.get("data"),
             },
@@ -7774,10 +7867,17 @@ def get_agentic_run(run_id: str) -> dict:
                                             "artifacts": {"tables": 12},
                                         },
                                         {
-                                            "agent_name": "ChartPlannerAgent",
+                                            "agent_name": "DashboardAgent",
                                             "status": "completed",
-                                            "message": "Chart Planner completed",
-                                            "artifacts": {"selected": 6},
+                                            "stage_name": "completed",
+                                            "message": "Dashboard Agent completed",
+                                            "dashboard_id": "dash_123",
+                                            "dashboard_title": "Lpg Production Distribution Dashboard",
+                                            "chart_ids": ["chart_a1b2c3", "chart_d4e5f6"],
+                                            "chart_titles": [
+                                                "Total Production Trend Over Process Date",
+                                                "Total Production by Plant Name"
+                                            ],
                                         }
                                     ]
                                 },
@@ -7889,9 +7989,25 @@ def _events_as_chat_messages(
         dashboard_id = None
         dashboard_title = None
         chart_ids: list[str] = []
+        chart_titles: list[str] = []
+        if isinstance(artifacts, dict):
+            dashboard_id = artifacts.get("dashboard_id") or dashboard_id
+            dashboard_title = artifacts.get("dashboard_title") or dashboard_title
+            for value in artifacts.get("chart_ids") or []:
+                if value:
+                    chart_ids.append(str(value))
+            for value in artifacts.get("chart_titles") or []:
+                if value:
+                    chart_titles.append(str(value))
+            if isinstance(artifacts.get("chart_details"), list):
+                for chart in artifacts.get("chart_details") or []:
+                    if isinstance(chart, dict):
+                        title = chart.get("title") or chart.get("chart_title")
+                        if title:
+                            chart_titles.append(str(title))
         if isinstance(raw_json, dict):
-            dashboard_id = raw_json.get("dashboard_id")
-            dashboard_title = raw_json.get("title") or raw_json.get("dashboard_title")
+            dashboard_id = dashboard_id or raw_json.get("dashboard_id")
+            dashboard_title = dashboard_title or raw_json.get("title") or raw_json.get("dashboard_title")
             charts = raw_json.get("charts")
             if isinstance(charts, list):
                 for chart in charts:
@@ -7899,6 +8015,11 @@ def _events_as_chat_messages(
                         cid = chart.get("chart_id")
                         if cid:
                             chart_ids.append(str(cid))
+                        title = chart.get("title") or chart.get("chart_title")
+                        if title:
+                            chart_titles.append(str(title))
+        chart_ids = list(dict.fromkeys(chart_ids))
+        chart_titles = list(dict.fromkeys(chart_titles))
         messages.append(
             {
                 "message_id": f"evtmsg_{event.get('event_id')}",
@@ -7916,6 +8037,7 @@ def _events_as_chat_messages(
                 "dashboard_id": dashboard_id,
                 "dashboard_title": dashboard_title,
                 "chart_ids": chart_ids,
+                "chart_titles": chart_titles,
                 "created_at": event.get("created_at"),
             }
         )
@@ -7934,6 +8056,39 @@ def _latest_agent_event(run_id: str, agent_name: str, status: str = "completed")
     "/agentic/runs/{run_id}/events/{event_id}/artifacts",
     tags=["agentic"],
     summary="Get artifacts for an event stage",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "dashboard_completed_artifacts": {
+                                "summary": "Dashboard stage artifacts",
+                                "value": {
+                                    "event_id": "evt_123",
+                                    "run_id": "run_1a0f427c86ec",
+                                    "agent_name": "DashboardAgent",
+                                    "stage_name": "completed",
+                                    "raw_json": {
+                                        "dashboard_id": "dash_123",
+                                        "dashboard_title": "Lpg Production Distribution Dashboard",
+                                        "chart_ids": ["chart_a1b2c3", "chart_d4e5f6"],
+                                        "chart_titles": [
+                                            "Total Production Trend Over Process Date",
+                                            "Total Production by Plant Name"
+                                        ]
+                                    },
+                                    "summary_raw_text": "Dashboard and charts were generated successfully.",
+                                    "inference_raw_text": "The dashboard emphasizes production trend and plant-wise distribution.",
+                                    "truncation": {"applied": False, "sample_limit": 50, "fields_truncated": []}
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_agentic_run_event_artifacts(run_id: str, event_id: str, include: str | None = None) -> dict:
     include_tokens = _parse_include_tokens(include)
@@ -8202,8 +8357,20 @@ def agentic_run_stream(run_id: str):
                                 "value": {
                                     "messages": [
                                         {"sender": "system", "message": "Plan created: Scan schema; Build semantics; Create dashboards"},
-                                        {"sender": "agent", "message": "Schema Agent completed"},
-                                        {"sender": "system", "message": "Dashboard ready: Auto Dashboard"}
+                                        {
+                                            "sender": "agent",
+                                            "agent_name": "DashboardAgent",
+                                            "stage_name": "completed",
+                                            "message": "Dashboard Agent completed",
+                                            "dashboard_id": "dash_123",
+                                            "dashboard_title": "Lpg Production Distribution Dashboard",
+                                            "chart_ids": ["chart_a1b2c3", "chart_d4e5f6"],
+                                            "chart_titles": [
+                                                "Total Production Trend Over Process Date",
+                                                "Total Production by Plant Name"
+                                            ]
+                                        },
+                                        {"sender": "system", "message": "Dashboard ready: Lpg Production Distribution Dashboard"}
                                     ]
                                 },
                             }
@@ -8421,6 +8588,75 @@ def views_query(request: ViewQueryRequest) -> ViewQueryResponse:
     return ViewQueryResponse(rows=rows, columns=columns, row_count=len(rows), chart=chart)
 
 
+def _default_dashboard_title(domain_id: str | None) -> str:
+    label = str(domain_id or "Auto").replace("_", " ").replace("-", " ").strip()
+    return f"{label.title()} Dashboard" if label else "Auto Dashboard"
+
+
+def _default_chart_title(chart: dict) -> str:
+    metric_name = chart.get("metric_name") or chart.get("metric") or "Metric"
+    intent = str(chart.get("intent") or "").strip().lower()
+    chart_type = str(chart.get("chart_type") or chart.get("type") or "overview").strip().lower()
+    time_column = chart.get("time_column")
+    category_column = chart.get("category_column")
+    if intent == "trend" or chart_type == "line":
+        return f"{metric_name} Trend Over {time_column or 'Time'}"
+    if intent in {"breakdown", "join_breakdown"} or chart_type == "bar":
+        return f"{metric_name} by {category_column or 'Category'}"
+    if intent == "share" or chart_type == "pie":
+        return f"{category_column or 'Category'} Share of {metric_name}"
+    return f"{metric_name} {chart_type.title()}"
+
+
+def _regenerated_dashboard_title(domain_id: str | None, charts: list[dict]) -> str:
+    metric_name = None
+    table_name = None
+    for chart in charts:
+        if not isinstance(chart, dict):
+            continue
+        if not metric_name:
+            metric_name = chart.get("metric_name") or chart.get("metric")
+        if not table_name:
+            table_name = chart.get("table")
+        if metric_name and table_name:
+            break
+    if metric_name and table_name:
+        metric_label = str(metric_name).replace("_", " ").strip().title()
+        table_label = str(table_name).replace("fact_", "").replace("_", " ").strip().title()
+        return f"{table_label} {metric_label} Overview".strip()
+    return _default_dashboard_title(domain_id)
+
+
+def _regenerated_chart_title(chart: dict) -> str:
+    return _default_chart_title(chart)
+
+
+def _normalize_dashboard_spec_titles(
+    spec: dict | None,
+    *,
+    domain_id: str | None,
+    dashboard_title: str | None,
+) -> tuple[dict, str]:
+    normalized = dict(spec or {})
+    resolved_title = (dashboard_title or normalized.get("title") or normalized.get("dashboard_title") or "").strip()
+    if not resolved_title:
+        resolved_title = _default_dashboard_title(domain_id)
+    normalized["title"] = resolved_title
+    normalized["dashboard_title"] = resolved_title
+    charts = []
+    for item in normalized.get("charts") or []:
+        chart = dict(item) if isinstance(item, dict) else {}
+        title = (chart.get("title") or "").strip()
+        if not title:
+            title = _default_chart_title(chart)
+        chart["title"] = title
+        chart["chart_title"] = title
+        chart["dashboard_title"] = resolved_title
+        charts.append(chart)
+    normalized["charts"] = charts
+    return normalized, resolved_title
+
+
 @app.get(
     "/dashboards",
     response_model=DashboardListResponse,
@@ -8440,9 +8676,14 @@ def views_query(request: ViewQueryRequest) -> ViewQueryResponse:
                                             "dashboard_id": "dash_123",
                                             "tenant_id": "VC_101",
                                             "domain_id": "lpg_production_distribution",
-                                            "title": "Auto Dashboard",
-                                            "name": "Auto Dashboard",
+                                            "title": "Lpg Production Distribution Dashboard",
+                                            "name": "Lpg Production Distribution Dashboard",
+                                            "dashboard_title": "Lpg Production Distribution Dashboard",
                                             "chart_count": 6,
+                                            "chart_titles": [
+                                                "Total Production Trend Over Process Date",
+                                                "Total Production by Plant Name"
+                                            ],
                                             "latest_agentic_run_id": "run_123abc456def",
                                             "latest_refresh_id": "dref_a1b2c3d4e5f6",
                                         }
@@ -8493,7 +8734,11 @@ def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> Da
     dashboards = list_dashboard_specs(settings, tenant_id, domain_id)
     payload = []
     for dash in dashboards:
-        spec = dash.get("spec") or {}
+        spec, resolved_title = _normalize_dashboard_spec_titles(
+            dash.get("spec") or {},
+            domain_id=dash.get("domain_id"),
+            dashboard_title=dash.get("title"),
+        )
         charts = spec.get("charts") or []
         dashboard_id = dash.get("dashboard_id")
         latest_run_id = None
@@ -8512,9 +8757,11 @@ def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> Da
                 "dashboard_id": dashboard_id,
                 "tenant_id": dash.get("tenant_id"),
                 "domain_id": dash.get("domain_id"),
-                "title": dash.get("title"),
-                "name": dash.get("title"),
+                "title": resolved_title,
+                "name": resolved_title,
+                "dashboard_title": resolved_title,
                 "chart_count": len(charts),
+                "chart_titles": [c.get("title") for c in charts if isinstance(c, dict) and c.get("title")],
                 "latest_agentic_run_id": latest_run_id,
                 "latest_refresh_id": latest_refresh_id,
                 "created_at": dash.get("created_at"),
@@ -8541,8 +8788,19 @@ def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> Da
                                     "dashboard_id": "dash_123",
                                     "tenant_id": "VC_101",
                                     "domain_id": "lpg_production_distribution",
-                                    "title": "Auto Dashboard",
-                                    "spec": {"charts": []},
+                                    "title": "Lpg Production Distribution Dashboard",
+                                    "spec": {
+                                        "title": "Lpg Production Distribution Dashboard",
+                                        "dashboard_title": "Lpg Production Distribution Dashboard",
+                                        "charts": [
+                                            {
+                                                "chart_id": "chart_a1b2c3",
+                                                "title": "Total Production Trend Over Process Date",
+                                                "chart_title": "Total Production Trend Over Process Date",
+                                                "dashboard_title": "Lpg Production Distribution Dashboard"
+                                            }
+                                        ]
+                                    },
                                 },
                             }
                         }
@@ -8556,7 +8814,11 @@ def get_dashboard_endpoint(dashboard_id: str) -> DashboardResponse:
     row = get_dashboard_spec(settings, dashboard_id)
     if not row:
         raise HTTPException(status_code=404, detail="Dashboard not found")
-    spec = row.get("spec") or {}
+    spec, resolved_title = _normalize_dashboard_spec_titles(
+        row.get("spec") or {},
+        domain_id=row.get("domain_id"),
+        dashboard_title=row.get("title"),
+    )
     if row.get("spec") and row["spec"].get("chart_plan"):
         spec["chart_plan"] = row["spec"].get("chart_plan")
     if row.get("spec") and row["spec"].get("chart_candidates"):
@@ -8565,7 +8827,7 @@ def get_dashboard_endpoint(dashboard_id: str) -> DashboardResponse:
         dashboard_id=row["dashboard_id"],
         tenant_id=row["tenant_id"],
         domain_id=row["domain_id"],
-        title=row["title"],
+        title=resolved_title,
         spec=spec,
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
@@ -8576,12 +8838,22 @@ def get_dashboard_endpoint(dashboard_id: str) -> DashboardResponse:
     "/dashboards/{dashboard_id}",
     tags=["dashboards"],
     summary="Update dashboard",
-    description="Update dashboard spec. Currently supports deleting a chart.",
+    description="Update dashboard spec. Supports title updates (`update_titles`) and chart deletion (`delete_chart`).",
     openapi_extra={
         "requestBody": {
             "content": {
                 "application/json": {
                     "examples": {
+                        "update_titles": {
+                            "summary": "Update dashboard and chart titles",
+                            "value": {
+                                "action": "update_titles",
+                                "title": "North Zone LPG Distribution Command Center",
+                                "chart_updates": [
+                                    {"chart_id": "chart_abc123", "title": "North Zone Pending Volume Trend"}
+                                ],
+                            },
+                        },
                         "delete_by_chart_id": {
                             "summary": "Delete chart by chart_id",
                             "value": {
@@ -8605,11 +8877,23 @@ def get_dashboard_endpoint(dashboard_id: str) -> DashboardResponse:
                 "content": {
                     "application/json": {
                         "examples": {
+                            "titles_updated": {
+                                "summary": "Dashboard/chart titles updated",
+                                "value": {
+                                    "dashboard_id": "dash_123",
+                                    "status": "updated",
+                                    "dashboard_title": "North Zone LPG Distribution Command Center",
+                                    "updated_dashboard_title": True,
+                                    "updated_chart_titles": 1,
+                                    "chart_count": 6
+                                }
+                            },
                             "updated": {
                                 "summary": "Dashboard chart deleted",
                                 "value": {
                                     "dashboard_id": "dash_123",
                                     "status": "updated",
+                                    "dashboard_title": "Lpg Production Distribution Dashboard",
                                     "removed_chart_id": "chart_abc123",
                                     "removed_count": 1,
                                     "chart_count": 5,
@@ -8626,11 +8910,73 @@ def update_dashboard_endpoint(dashboard_id: str, payload: DashboardUpdateRequest
     row = get_dashboard_spec(settings, dashboard_id)
     if not row:
         raise HTTPException(status_code=404, detail="Dashboard not found")
-    if payload.action != "delete_chart":
-        raise HTTPException(status_code=400, detail="Unsupported action. Use action=delete_chart")
-
-    spec = dict(row.get("spec") or {})
+    spec, resolved_title = _normalize_dashboard_spec_titles(
+        row.get("spec") or {},
+        domain_id=row.get("domain_id"),
+        dashboard_title=row.get("title"),
+    )
     charts = list(spec.get("charts") or [])
+    action = (payload.action or "").strip().lower()
+    wants_title_update = bool((payload.title or "").strip() or payload.chart_updates)
+
+    if action == "update_titles" or (action != "delete_chart" and wants_title_update):
+        dashboard_title = resolved_title
+        updated_dashboard_title = False
+        if (payload.title or "").strip():
+            dashboard_title = payload.title.strip()
+            updated_dashboard_title = True
+            spec["title"] = dashboard_title
+            spec["dashboard_title"] = dashboard_title
+            for chart in charts:
+                if isinstance(chart, dict):
+                    chart["dashboard_title"] = dashboard_title
+
+        chart_updates = payload.chart_updates or []
+        title_by_chart_id: dict[str, str] = {}
+        for item in chart_updates:
+            if not isinstance(item, dict):
+                continue
+            chart_id = str(item.get("chart_id") or "").strip()
+            chart_title = str(item.get("title") or "").strip()
+            if chart_id and chart_title:
+                title_by_chart_id[chart_id] = chart_title
+        if chart_updates and not title_by_chart_id:
+            raise HTTPException(status_code=400, detail="chart_updates must include chart_id and title")
+
+        updated_chart_titles = 0
+        if title_by_chart_id:
+            for item in charts:
+                chart = item if isinstance(item, dict) else {}
+                chart_id = str(chart.get("chart_id") or "").strip()
+                if chart_id in title_by_chart_id:
+                    chart["title"] = title_by_chart_id[chart_id]
+                    chart["chart_title"] = title_by_chart_id[chart_id]
+                    chart["dashboard_title"] = dashboard_title
+                    updated_chart_titles += 1
+            if isinstance(spec.get("chart_plan"), list):
+                for item in spec.get("chart_plan") or []:
+                    chart = item if isinstance(item, dict) else {}
+                    chart_id = str(chart.get("chart_id") or "").strip()
+                    if chart_id in title_by_chart_id:
+                        chart["title"] = title_by_chart_id[chart_id]
+            if updated_chart_titles == 0:
+                raise HTTPException(status_code=404, detail="No matching chart_id found in chart_updates")
+
+        spec["charts"] = charts
+        update_dashboard_spec(settings, dashboard_id, spec=spec, title=dashboard_title)
+        updated = get_dashboard_spec(settings, dashboard_id) or {"spec": spec, "title": dashboard_title}
+        return {
+            "dashboard_id": dashboard_id,
+            "status": "updated",
+            "dashboard_title": dashboard_title,
+            "updated_dashboard_title": updated_dashboard_title,
+            "updated_chart_titles": updated_chart_titles,
+            "chart_count": len((updated.get("spec") or {}).get("charts") or []),
+            "updated_at": updated.get("updated_at"),
+        }
+
+    if action != "delete_chart":
+        raise HTTPException(status_code=400, detail="Unsupported action. Use delete_chart or update_titles")
     if not charts:
         raise HTTPException(status_code=400, detail="Dashboard has no charts to delete")
 
@@ -8691,12 +9037,13 @@ def update_dashboard_endpoint(dashboard_id: str, payload: DashboardUpdateRequest
             updated_candidates.append(item)
         spec["chart_candidates"] = updated_candidates
 
-    update_dashboard_spec(settings, dashboard_id, spec=spec)
+    update_dashboard_spec(settings, dashboard_id, spec=spec, title=spec.get("title") or row.get("title"))
     updated = get_dashboard_spec(settings, dashboard_id) or {"spec": spec}
     updated_spec = updated.get("spec") or {}
     return {
         "dashboard_id": dashboard_id,
         "status": "updated",
+        "dashboard_title": updated.get("title") or spec.get("title"),
         "removed_chart_id": removed_chart_id,
         "removed_count": removed_count,
         "chart_count": len(updated_spec.get("charts") or []),
@@ -8722,7 +9069,19 @@ def update_dashboard_endpoint(dashboard_id: str, payload: DashboardUpdateRequest
                                 "requested_by": "analyst@company.com",
                                 "include_insights": True,
                                 "force_recompute": False,
+                                "regenerate_titles": False,
                             },
+                        },
+                        "refresh_with_title_regeneration": {
+                            "summary": "Refresh and regenerate dashboard/chart titles",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "trigger_source": "user",
+                                "requested_by": "analyst@company.com",
+                                "include_insights": True,
+                                "regenerate_titles": True
+                            }
                         }
                     }
                 }
@@ -8811,7 +9170,7 @@ def start_dashboard_refresh(dashboard_id: str, payload: dict | None = None) -> d
                                     "status": "running",
                                     "trigger_source": "user",
                                     "requested_by": "analyst@company.com",
-                                    "request_payload": {"include_insights": True},
+                                    "request_payload": {"include_insights": True, "regenerate_titles": True},
                                     "error_message": None,
                                     "started_at": "2026-03-06T11:20:00Z",
                                     "completed_at": None,
@@ -8829,7 +9188,7 @@ def start_dashboard_refresh(dashboard_id: str, payload: dict | None = None) -> d
                                     "status": "completed",
                                     "trigger_source": "user",
                                     "requested_by": "analyst@company.com",
-                                    "request_payload": {"include_insights": True},
+                                    "request_payload": {"include_insights": True, "regenerate_titles": True},
                                     "error_message": None,
                                     "started_at": "2026-03-06T11:20:00Z",
                                     "completed_at": "2026-03-06T11:20:07Z",
@@ -8887,9 +9246,25 @@ def get_dashboard_refresh(dashboard_id: str, refresh_id: str) -> dict:
                                             "event_id": "drevt_222",
                                             "refresh_id": "dref_a1b2c3d4e5f6",
                                             "dashboard_id": "dash_123",
+                                            "stage_name": "titles_regenerated",
+                                            "message": "Dashboard/chart titles regenerated: 6",
+                                            "artifacts": {
+                                                "regenerate_titles": true,
+                                                "dashboard_title": "Lpg Plant Operations Total Production Overview",
+                                                "chart_titles": [
+                                                    "Total Production Trend Over Process Date",
+                                                    "Total Production by Plant Name"
+                                                ]
+                                            },
+                                            "created_at": "2026-03-06T11:20:02Z",
+                                        },
+                                        {
+                                            "event_id": "drevt_223",
+                                            "refresh_id": "dref_a1b2c3d4e5f6",
+                                            "dashboard_id": "dash_123",
                                             "stage_name": "charts_refreshed",
                                             "message": "Dashboard charts refreshed: 6",
-                                            "artifacts": {"chart_count": 6},
+                                            "artifacts": {"chart_count": 6, "regenerate_titles": true, "regenerated_chart_titles": 6},
                                             "created_at": "2026-03-06T11:20:03Z",
                                         },
                                         {
@@ -8902,7 +9277,7 @@ def get_dashboard_refresh(dashboard_id: str, refresh_id: str) -> dict:
                                             "created_at": "2026-03-06T11:20:07Z",
                                         },
                                     ],
-                                    "paging": {"limit": 200, "returned": 3},
+                                    "paging": {"limit": 200, "returned": 4},
                                 },
                             }
                         }
@@ -8939,6 +9314,10 @@ def get_dashboard_refresh_events(dashboard_id: str, refresh_id: str, limit: int 
                             "refresh_event": {
                                 "summary": "Refresh stage event",
                                 "value": "data: {\"stage_name\":\"charts_refreshed\",\"message\":\"Dashboard charts refreshed: 6/6\"}\n\n",
+                            },
+                            "titles_regenerated_event": {
+                                "summary": "Titles regenerated stage",
+                                "value": "data: {\"stage_name\":\"titles_regenerated\",\"message\":\"Dashboard/chart titles regenerated: 6\",\"artifacts\":{\"dashboard_title\":\"Lpg Plant Operations Total Production Overview\"}}\n\n",
                             },
                             "heartbeat": {
                                 "summary": "SSE heartbeat",
