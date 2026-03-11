@@ -40,6 +40,7 @@ from services.ai.views import create_views_from_schema, create_joined_views
 from services.ai.charts_store import create_chart_request, update_chart_request
 from services.ai.charts import build_chart_payload
 from services.ai.db import run_query
+from services.ai.quality_gate import evaluate_quality_report
 
 
 def _qident(name: str) -> str:
@@ -623,10 +624,24 @@ def _chart_narrative(rows: list[dict], metric_name: str, dim_key: str | None) ->
 
 
 def _qualify_formula(formula: str, table_ref: str, table_profile: dict[str, Any]) -> str:
-    cols = set((table_profile.get("numeric_columns") or []) + (table_profile.get("time_columns") or []) + (table_profile.get("categorical_columns") or []))
-    qualified = formula
+    cols = set(
+        (table_profile.get("eligible_numeric_columns") or [])
+        + (table_profile.get("numeric_columns") or [])
+        + (table_profile.get("time_columns") or [])
+        + (table_profile.get("categorical_columns") or [])
+    )
+    qualified = str(formula or "")
     for col in sorted(cols, key=len, reverse=True):
-        qualified = qualified.replace(col, f"{table_ref}.{col}")
+        if not col:
+            continue
+        qcol = _qident(col)
+        replacement = f"{table_ref}.{qcol}"
+        # Replace quoted identifier usage: "col"
+        quoted_pat = re.compile(rf'(?<![\w\.])"{re.escape(col)}"(?![\w])')
+        qualified = quoted_pat.sub(replacement, qualified)
+        # Replace bare identifier usage: col
+        bare_pat = re.compile(rf"(?<![\w\.\"]){re.escape(col)}(?![\w\"])")
+        qualified = bare_pat.sub(replacement, qualified)
     return qualified
 
 
@@ -981,7 +996,10 @@ def run_agentic_workflow(
 
     def metric_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(settings, run_id, "MetricAgent", "running", "Metric Agent started", event_callback=event_callback)
-        state["metric_defs"] = propose_metrics(state.get("profiling_stats", {}))
+        state["metric_defs"] = propose_metrics(
+            state.get("profiling_stats", {}),
+            domain_id=state.get("domain_id"),
+        )
         if state.get("metric_defs"):
             append_agent_chat_log(
                 settings,
@@ -1090,8 +1108,10 @@ def run_agentic_workflow(
             state.get("join_edges", []),
         )
         selected = select_charts(candidates, min_charts=min_charts, max_charts=max_charts)
+        rejected = [cand for cand in candidates if cand.get("skipped")]
         state["chart_candidates"] = candidates
         state["chart_plan"] = selected
+        state["chart_candidate_rejections"] = rejected
         _emit(
             settings,
             run_id,
@@ -1101,9 +1121,11 @@ def run_agentic_workflow(
             {
                 "candidates": len(candidates),
                 "selected": len(selected),
+                "rejected": len(rejected),
                 "min_charts": min_charts,
                 "max_charts": max_charts,
                 "chart_plan": selected,
+                "chart_rejections": rejected,
             },
             event_callback=event_callback,
         )
@@ -1111,31 +1133,15 @@ def run_agentic_workflow(
 
     def quality_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(settings, run_id, "QualityGateAgent", "running", "Quality Gate started", event_callback=event_callback)
-        low_conf = 0
-        total = 0
-        low_conf_edges: list[dict[str, Any]] = []
-        for edge in (state.get("join_edges") or []):
-            total += 1
-            if edge.get("confidence") is not None and edge.get("confidence") < 0.7:
-                low_conf += 1
-                low_conf_edges.append(edge)
-        for edge in (state.get("ontology", {}).get("hierarchy_edges") or []):
-            total += 1
-            if edge.get("confidence") is not None and edge.get("confidence") < 0.7:
-                low_conf += 1
-                low_conf_edges.append(edge)
+        quality_report = evaluate_quality_report(state)
+        state["quality_report"] = quality_report
         _emit(
             settings,
             run_id,
             "QualityGateAgent",
             "completed",
             "Quality Gate completed",
-            {
-                "edges_checked": total,
-                "low_confidence": low_conf,
-                "threshold": 0.7,
-                "low_confidence_edges": low_conf_edges,
-            },
+            quality_report,
             event_callback=event_callback,
         )
         return state
@@ -1233,20 +1239,17 @@ def run_agentic_workflow(
             sql_from = f"{q_schema}.{q_fact_table} {table_alias}" if q_fact_table else None
             if table_ref and metric_col:
                 table_profile = profiling_map.get(table_name) or {}
-                numeric_cols = set(table_profile.get("numeric_columns") or [])
-                if metric_col in numeric_cols:
+                eligible_numeric_cols = set(table_profile.get("eligible_numeric_columns") or [])
+                if metric_col in eligible_numeric_cols:
                     metric_expr = f"SUM({table_alias}.{_qident(metric_col)})"
                 else:
-                    metric_expr = (
-                        f"SUM(CASE WHEN {table_alias}.{_qident(metric_col)}::text ~ '^[0-9]+(\\\\.[0-9]+)?$' "
-                        f"THEN {table_alias}.{_qident(metric_col)}::numeric END)"
-                    )
                     logger.warning(
-                        "dashboard.chart.metric_cast | table=%s column=%s",
+                        "dashboard.chart.metric_blocked | table=%s column=%s reason=invalid_metric_role",
                         table_name,
                         metric_col,
                     )
-            if metric_expr and table_ref and not metric_expr.startswith("SUM("):
+                    metric_expr = None
+            if metric_expr and table_ref:
                 metric_expr = _qualify_formula(metric_expr, table_alias, profiling_map.get(table_name) or {})
             if not metric_expr:
                 logger.warning(
@@ -1255,7 +1258,17 @@ def run_agentic_workflow(
                         metric_col,
                         table_name,
                     )
-                enriched_charts.append({**chart, "skipped": True, "reason": "invalid_metric"})
+                enriched_charts.append(
+                    {
+                        **chart,
+                        "skipped": True,
+                        "reason": "invalid_metric",
+                        "semantic_validation": {
+                            "status": "rejected",
+                            "reason": "invalid_metric_role_or_expression",
+                        },
+                    }
+                )
                 continue
 
             # choose a better dimension using join metadata if none provided
@@ -1357,6 +1370,7 @@ def run_agentic_workflow(
                     "chart": chart_type,
                     "chart_title": chart_title,
                     "dashboard_title": dashboard_title,
+                    "metric_intent": chart.get("metric_intent"),
                     "table": table_name,
                 },
                 sql=sql,
@@ -1396,6 +1410,10 @@ def run_agentic_workflow(
                         "chart_payload": payload.get("chart_payload"),
                         "chart_data": payload.get("data"),
                         "dashboard_title": dashboard_title,
+                        "semantic_validation": {
+                            "status": "passed",
+                            "reason": "eligible_metric",
+                        },
                     }
                 )
             else:
@@ -1420,6 +1438,8 @@ def run_agentic_workflow(
             ],
         }
         dashboard_spec["insights"] = [chart.get("insight") for chart in enriched_charts if chart.get("insight")]
+        if state.get("quality_report"):
+            dashboard_spec["quality"] = state.get("quality_report")
         state["dashboard_spec"] = dashboard_spec
         append_agent_chat_log(
             settings,
@@ -1560,6 +1580,7 @@ def run_agentic_workflow(
                 "chart_ids": chart_ids,
                 "chart_titles": [c.get("title") for c in enriched_charts if c.get("title")],
                 "chart_details": enriched_charts,
+                "quality_report": state.get("quality_report"),
                 "views_detail": created_views,
                 "elapsed_ms": round((time.perf_counter() - dashboard_start) * 1000, 1),
                 "fast_mode": fast_mode,
@@ -1593,10 +1614,10 @@ def run_agentic_workflow(
     graph.add_edge("glossary", "join")
     graph.add_edge("join", "metric")
     graph.add_edge("metric", "model")
-    graph.add_edge("model", "quality")
-    graph.add_edge("quality", "rollup")
+    graph.add_edge("model", "rollup")
     graph.add_edge("rollup", "chart_planner")
-    graph.add_edge("chart_planner", "dashboard")
+    graph.add_edge("chart_planner", "quality")
+    graph.add_edge("quality", "dashboard")
     graph.add_edge("dashboard", END)
 
     app = graph.compile()

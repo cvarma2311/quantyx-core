@@ -1,0 +1,3816 @@
+{
+  "dashboard_id": "dash_5d6924a3f3",
+  "tenant_id": "BT_01",
+  "domain_id": "lpg_production_distribution",
+  "title": "Auto Dashboard",
+  "spec": {
+    "story": {
+      "cards": [
+        {
+          "title": "Trend",
+          "summary": "Track change over time with a KPI trend chart."
+        },
+        {
+          "title": "Breakdown",
+          "summary": "Compare categories to identify top contributors."
+        },
+        {
+          "title": "Share",
+          "summary": "Visualize distribution across key categories."
+        }
+      ],
+      "title": "Auto Dashboard"
+    },
+    "title": "Auto Dashboard",
+    "charts": [
+      {
+        "sql": "SELECT date_trunc('month', t.\"Execution_Date\") AS period, SUM(t.\"JDEDistributorCode\") AS \"sum_JDEDistributorCode\" FROM \"public\".\"fact_lpg_cdcms_last_three_months_summary\" t GROUP BY period ORDER BY period ASC LIMIT 200",
+        "type": "line",
+        "stats": {
+          "avg": 57321868279690.75,
+          "max": 80221605294513,
+          "min": 22821593168924,
+          "count": 4,
+          "total": 229287473118763
+        },
+        "table": "lpg_cdcms_last_three_months_summary",
+        "intent": "trend",
+        "metric": "sum_JDEDistributorCode",
+        "insight": {
+          "type": "line",
+          "value": 56219296678830,
+          "summary": "Latest sum_JDEDistributorCode: 56219296678830.00 (Δ -24002308615683.00)"
+        },
+        "chart_id": "chart_f7d6ff8f47",
+        "narrative": {
+          "top": "2026-01-01T00:00:00",
+          "bottom": "2025-11-01T00:00:00",
+          "summary": "Top period: 2026-01-01 00:00:00 (80221605294513.00); Lowest period: 2025-11-01 00:00:00 (22821593168924.00)"
+        },
+        "chart_data": [
+          {
+            "date": "2025-11-01T00:00:00",
+            "value": 22821593168924
+          },
+          {
+            "date": "2025-12-01T00:00:00",
+            "value": 70024977976496
+          },
+          {
+            "date": "2026-01-01T00:00:00",
+            "value": 80221605294513
+          },
+          {
+            "date": "2026-02-01T00:00:00",
+            "value": 56219296678830
+          }
+        ],
+        "chart_type": "line",
+        "dimensions": [
+          "period"
+        ],
+        "rows_count": 4,
+        "metric_name": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "chart_payload": {
+          "root": {
+            "useTheme": "Animated"
+          },
+          "chart": {
+            "panX": true,
+            "panY": false,
+            "type": "XYChart"
+          },
+          "xAxis": {
+            "type": "DateAxis",
+            "baseInterval": {
+              "count": 1,
+              "timeUnit": "day"
+            }
+          },
+          "yAxis": {
+            "type": "ValueAxis"
+          },
+          "legend": {
+            "type": "Legend"
+          },
+          "series": [
+            {
+              "name": "sum_JDEDistributorCode",
+              "type": "LineSeries",
+              "valueXField": "date",
+              "valueYField": "value"
+            }
+          ]
+        },
+        "metric_column": "JDEDistributorCode",
+        "category_column": null,
+        "title": "sum_JDEDistributorCode Trend Over Execution_Date",
+        "chart_title": "sum_JDEDistributorCode Trend Over Execution_Date",
+        "dashboard_title": "Auto Dashboard"
+      },
+      {
+        "sql": "SELECT date_trunc('month', t.\"Execution_Date\") AS period, t.\"ConsumerType\" AS category, SUM(t.\"JDEDistributorCode\") AS \"sum_JDEDistributorCode\" FROM \"public\".\"fact_lpg_cdcms_last_three_months_summary\" t GROUP BY period, category ORDER BY period ASC LIMIT 500",
+        "type": "line",
+        "stats": {
+          "avg": 28660934139845.375,
+          "max": 49387161247180,
+          "min": 8466077571857,
+          "count": 8,
+          "total": 229287473118763
+        },
+        "table": "lpg_cdcms_last_three_months_summary",
+        "intent": "multi_series",
+        "metric": "sum_JDEDistributorCode",
+        "insight": {
+          "type": "line",
+          "value": 22152224554844,
+          "summary": "Latest sum_JDEDistributorCode: 22152224554844.00 (Δ -11914847569142.00)"
+        },
+        "chart_id": "chart_af76ed5f90",
+        "narrative": {
+          "top": "2026-01-01T00:00:00",
+          "bottom": "2025-11-01T00:00:00",
+          "summary": "Top period: 2026-01-01 00:00:00 (49387161247180.00); Lowest period: 2025-11-01 00:00:00 (8466077571857.00)"
+        },
+        "chart_data": [
+          {
+            "date": "2025-11-01T00:00:00",
+            "value": 14355515597067,
+            "category": "NPMUY"
+          },
+          {
+            "date": "2025-11-01T00:00:00",
+            "value": 8466077571857,
+            "category": "PMUY"
+          },
+          {
+            "date": "2025-12-01T00:00:00",
+            "value": 44167739953037,
+            "category": "NPMUY"
+          },
+          {
+            "date": "2025-12-01T00:00:00",
+            "value": 25857238023459,
+            "category": "PMUY"
+          },
+          {
+            "date": "2026-01-01T00:00:00",
+            "value": 49387161247180,
+            "category": "NPMUY"
+          },
+          {
+            "date": "2026-01-01T00:00:00",
+            "value": 30834444047333,
+            "category": "PMUY"
+          },
+          {
+            "date": "2026-02-01T00:00:00",
+            "value": 34067072123986,
+            "category": "NPMUY"
+          },
+          {
+            "date": "2026-02-01T00:00:00",
+            "value": 22152224554844,
+            "category": "PMUY"
+          }
+        ],
+        "chart_type": "line",
+        "dimensions": [
+          "period",
+          "category"
+        ],
+        "rows_count": 8,
+        "metric_name": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "chart_payload": {
+          "root": {
+            "useTheme": "Animated"
+          },
+          "chart": {
+            "panX": true,
+            "panY": false,
+            "type": "XYChart"
+          },
+          "xAxis": {
+            "type": "DateAxis",
+            "baseInterval": {
+              "count": 1,
+              "timeUnit": "day"
+            }
+          },
+          "yAxis": {
+            "type": "ValueAxis"
+          },
+          "legend": {
+            "type": "Legend"
+          },
+          "series": [
+            {
+              "type": "LineSeries",
+              "nameField": "category",
+              "valueXField": "date",
+              "valueYField": "value"
+            }
+          ]
+        },
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType",
+        "title": "sum_JDEDistributorCode Trend Over Execution_Date",
+        "chart_title": "sum_JDEDistributorCode Trend Over Execution_Date",
+        "dashboard_title": "Auto Dashboard"
+      },
+      {
+        "sql": "SELECT date_trunc('month', t.\"Delivery_Date\") AS period, SUM(t.\"PaymentErrorCode\") AS \"sum_PaymentErrorCode\" FROM \"public\".\"fact_lpg_cdcms_subsidy_failure_statistics\" t GROUP BY period ORDER BY period ASC LIMIT 200",
+        "type": "line",
+        "stats": {
+          "avg": 1509497.3513513512,
+          "max": 3971100,
+          "min": 21002,
+          "count": 37,
+          "total": 55851402
+        },
+        "table": "lpg_cdcms_subsidy_failure_statistics",
+        "intent": "trend",
+        "metric": "sum_PaymentErrorCode",
+        "insight": {
+          "type": "line",
+          "value": 21002,
+          "summary": "Latest sum_PaymentErrorCode: 21002.00 (Δ -1808064.00)"
+        },
+        "chart_id": "chart_519e3c0763",
+        "narrative": {
+          "top": "2024-12-01T00:00:00",
+          "bottom": "2025-04-01T00:00:00",
+          "summary": "Top period: 2024-12-01 00:00:00 (3971100.00); Lowest period: 2025-04-01 00:00:00 (21002.00)"
+        },
+        "chart_data": [
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 317104
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 359040
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 428759
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 458977
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 478684
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 503660
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 519426
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 558061
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 613457
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 533152
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 499001
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 547155
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 1028053
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 1165430
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 1134573
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 1140213
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 1157342
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 1218581
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 1328455
+          },
+          {
+            "date": "2023-11-01T00:00:00",
+            "value": 1449964
+          },
+          {
+            "date": "2023-12-01T00:00:00",
+            "value": 1449090
+          },
+          {
+            "date": "2024-01-01T00:00:00",
+            "value": 1496930
+          },
+          {
+            "date": "2024-02-01T00:00:00",
+            "value": 1559245
+          },
+          {
+            "date": "2024-03-01T00:00:00",
+            "value": 2254659
+          },
+          {
+            "date": "2024-04-01T00:00:00",
+            "value": 2244925
+          },
+          {
+            "date": "2024-05-01T00:00:00",
+            "value": 2382788
+          },
+          {
+            "date": "2024-06-01T00:00:00",
+            "value": 2326540
+          },
+          {
+            "date": "2024-07-01T00:00:00",
+            "value": 2756699
+          },
+          {
+            "date": "2024-08-01T00:00:00",
+            "value": 2764454
+          },
+          {
+            "date": "2024-09-01T00:00:00",
+            "value": 2493418
+          },
+          {
+            "date": "2024-10-01T00:00:00",
+            "value": 2753972
+          },
+          {
+            "date": "2024-11-01T00:00:00",
+            "value": 2991792
+          },
+          {
+            "date": "2024-12-01T00:00:00",
+            "value": 3971100
+          },
+          {
+            "date": "2025-01-01T00:00:00",
+            "value": 3945545
+          },
+          {
+            "date": "2025-02-01T00:00:00",
+            "value": 3171090
+          },
+          {
+            "date": "2025-03-01T00:00:00",
+            "value": 1829066
+          },
+          {
+            "date": "2025-04-01T00:00:00",
+            "value": 21002
+          }
+        ],
+        "chart_type": "line",
+        "dimensions": [
+          "period"
+        ],
+        "rows_count": 37,
+        "metric_name": "sum_PaymentErrorCode",
+        "time_column": "Delivery_Date",
+        "chart_payload": {
+          "root": {
+            "useTheme": "Animated"
+          },
+          "chart": {
+            "panX": true,
+            "panY": false,
+            "type": "XYChart"
+          },
+          "xAxis": {
+            "type": "DateAxis",
+            "baseInterval": {
+              "count": 1,
+              "timeUnit": "day"
+            }
+          },
+          "yAxis": {
+            "type": "ValueAxis"
+          },
+          "legend": {
+            "type": "Legend"
+          },
+          "series": [
+            {
+              "name": "sum_PaymentErrorCode",
+              "type": "LineSeries",
+              "valueXField": "date",
+              "valueYField": "value"
+            }
+          ]
+        },
+        "metric_column": "PaymentErrorCode",
+        "category_column": null,
+        "title": "sum_PaymentErrorCode Trend Over Delivery_Date",
+        "chart_title": "sum_PaymentErrorCode Trend Over Delivery_Date",
+        "dashboard_title": "Auto Dashboard"
+      },
+      {
+        "sql": "SELECT date_trunc('month', t.\"Delivery_Date\") AS period, t.\"StateCode\" AS category, SUM(t.\"PaymentErrorCode\") AS \"sum_PaymentErrorCode\" FROM \"public\".\"fact_lpg_cdcms_subsidy_failure_statistics\" t GROUP BY period, category ORDER BY period ASC LIMIT 500",
+        "type": "line",
+        "stats": {
+          "avg": 26335.896,
+          "max": 153278,
+          "min": 10,
+          "count": 500,
+          "total": 13167948
+        },
+        "table": "lpg_cdcms_subsidy_failure_statistics",
+        "intent": "multi_series",
+        "metric": "sum_PaymentErrorCode",
+        "insight": {
+          "type": "line",
+          "value": 62492,
+          "summary": "Latest sum_PaymentErrorCode: 62492.00 (Δ 18078.00)"
+        },
+        "chart_id": "chart_298a489939",
+        "narrative": {
+          "top": "2023-09-01T00:00:00",
+          "bottom": "2022-07-01T00:00:00",
+          "summary": "Top period: 2023-09-01 00:00:00 (153278.00); Lowest period: 2022-07-01 00:00:00 (10.00)"
+        },
+        "chart_data": [
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 24182,
+            "category": "AP"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 3327,
+            "category": "AS"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 31986,
+            "category": "BR"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 506,
+            "category": "CH"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 7603,
+            "category": "CT"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 3114,
+            "category": "GJ"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 1174,
+            "category": "HP"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 7893,
+            "category": "HR"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 12990,
+            "category": "JH"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 7720,
+            "category": "JK"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 9816,
+            "category": "KA"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 46937,
+            "category": "MH"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 21195,
+            "category": "MP"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 12131,
+            "category": "OR"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 17490,
+            "category": "PB"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 872,
+            "category": "PY"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 12570,
+            "category": "RJ"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 22466,
+            "category": "TG"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 17735,
+            "category": "TN"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 68,
+            "category": "TR"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 30674,
+            "category": "UP"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 2728,
+            "category": "UT"
+          },
+          {
+            "date": "2022-04-01T00:00:00",
+            "value": 21927,
+            "category": "WB"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 25059,
+            "category": "AP"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 2653,
+            "category": "AS"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 45164,
+            "category": "BR"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 849,
+            "category": "CH"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 8000,
+            "category": "CT"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 68,
+            "category": "DL"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 7003,
+            "category": "GJ"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 1010,
+            "category": "HP"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 7499,
+            "category": "HR"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 15409,
+            "category": "JH"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 9113,
+            "category": "JK"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 13059,
+            "category": "KA"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 206,
+            "category": "KL"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 68,
+            "category": "LK"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 50812,
+            "category": "MH"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 24618,
+            "category": "MP"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 14881,
+            "category": "OR"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 17481,
+            "category": "PB"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 421,
+            "category": "PY"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 14989,
+            "category": "RJ"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 23555,
+            "category": "TG"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 14957,
+            "category": "TN"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 136,
+            "category": "TR"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 35590,
+            "category": "UP"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 2294,
+            "category": "UT"
+          },
+          {
+            "date": "2022-05-01T00:00:00",
+            "value": 24146,
+            "category": "WB"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 22976,
+            "category": "AP"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 3567,
+            "category": "AS"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 49310,
+            "category": "BR"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 367,
+            "category": "CH"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 8053,
+            "category": "CT"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 148,
+            "category": "DL"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 146,
+            "category": "DN"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 16735,
+            "category": "GJ"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 1619,
+            "category": "HP"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 8170,
+            "category": "HR"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 14848,
+            "category": "JH"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 11778,
+            "category": "JK"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 15459,
+            "category": "KA"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 550,
+            "category": "KL"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 136,
+            "category": "LK"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 61566,
+            "category": "MH"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 68,
+            "category": "ML"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 30848,
+            "category": "MP"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 68,
+            "category": "NL"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 17613,
+            "category": "OR"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 17003,
+            "category": "PB"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 635,
+            "category": "PY"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 23873,
+            "category": "RJ"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 24066,
+            "category": "TG"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 20167,
+            "category": "TN"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 46679,
+            "category": "UP"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 2781,
+            "category": "UT"
+          },
+          {
+            "date": "2022-06-01T00:00:00",
+            "value": 29530,
+            "category": "WB"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 27799,
+            "category": "AP"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 4061,
+            "category": "AS"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 47103,
+            "category": "BR"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 652,
+            "category": "CH"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 9003,
+            "category": "CT"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 369,
+            "category": "DL"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 10,
+            "category": "DN"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 16372,
+            "category": "GJ"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 1082,
+            "category": "HP"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 9106,
+            "category": "HR"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 14269,
+            "category": "JH"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 10687,
+            "category": "JK"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 17611,
+            "category": "KA"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 649,
+            "category": "KL"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 68,
+            "category": "LK"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 64541,
+            "category": "MH"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 34323,
+            "category": "MP"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 18135,
+            "category": "OR"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 18602,
+            "category": "PB"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 688,
+            "category": "PY"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 27462,
+            "category": "RJ"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 30789,
+            "category": "TG"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 20733,
+            "category": "TN"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 68,
+            "category": "TR"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 49958,
+            "category": "UP"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 3098,
+            "category": "UT"
+          },
+          {
+            "date": "2022-07-01T00:00:00",
+            "value": 31739,
+            "category": "WB"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 30833,
+            "category": "AP"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 3849,
+            "category": "AS"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 47948,
+            "category": "BR"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 706,
+            "category": "CH"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 10707,
+            "category": "CT"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 284,
+            "category": "DL"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 10,
+            "category": "DN"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 15947,
+            "category": "GJ"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 2085,
+            "category": "HP"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 10435,
+            "category": "HR"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 17206,
+            "category": "JH"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 11055,
+            "category": "JK"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 15732,
+            "category": "KA"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 496,
+            "category": "KL"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 190,
+            "category": "LK"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 67710,
+            "category": "MH"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 34823,
+            "category": "MP"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 68,
+            "category": "NL"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 21090,
+            "category": "OR"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 19831,
+            "category": "PB"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 885,
+            "category": "PY"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 28017,
+            "category": "RJ"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 28278,
+            "category": "TG"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 20063,
+            "category": "TN"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 52843,
+            "category": "UP"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 3232,
+            "category": "UT"
+          },
+          {
+            "date": "2022-08-01T00:00:00",
+            "value": 34361,
+            "category": "WB"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 30201,
+            "category": "AP"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 4577,
+            "category": "AS"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 54217,
+            "category": "BR"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 489,
+            "category": "CH"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 10011,
+            "category": "CT"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 437,
+            "category": "DL"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 68,
+            "category": "DN"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 16157,
+            "category": "GJ"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 1083,
+            "category": "HP"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 8881,
+            "category": "HR"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 19310,
+            "category": "JH"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 14066,
+            "category": "JK"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 19345,
+            "category": "KA"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 734,
+            "category": "KL"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 68,
+            "category": "LK"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 65088,
+            "category": "MH"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 36512,
+            "category": "MP"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 68,
+            "category": "NL"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 22043,
+            "category": "OR"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 20847,
+            "category": "PB"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 735,
+            "category": "PY"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 27878,
+            "category": "RJ"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 29410,
+            "category": "TG"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 20808,
+            "category": "TN"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 136,
+            "category": "TR"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 56317,
+            "category": "UP"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 2879,
+            "category": "UT"
+          },
+          {
+            "date": "2022-09-01T00:00:00",
+            "value": 41295,
+            "category": "WB"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 29858,
+            "category": "AP"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 4626,
+            "category": "AS"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 54126,
+            "category": "BR"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 964,
+            "category": "CH"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 10450,
+            "category": "CT"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 403,
+            "category": "DL"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 17458,
+            "category": "GJ"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 1724,
+            "category": "HP"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 11746,
+            "category": "HR"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 16240,
+            "category": "JH"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 14041,
+            "category": "JK"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 20553,
+            "category": "KA"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 472,
+            "category": "KL"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 136,
+            "category": "LK"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 70423,
+            "category": "MH"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 37411,
+            "category": "MP"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 25680,
+            "category": "OR"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 21598,
+            "category": "PB"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 879,
+            "category": "PY"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 29179,
+            "category": "RJ"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 32446,
+            "category": "TG"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 20247,
+            "category": "TN"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 136,
+            "category": "TR"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 54605,
+            "category": "UP"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 4138,
+            "category": "UT"
+          },
+          {
+            "date": "2022-10-01T00:00:00",
+            "value": 39887,
+            "category": "WB"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 34548,
+            "category": "AP"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 5035,
+            "category": "AS"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 56603,
+            "category": "BR"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 516,
+            "category": "CH"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 12552,
+            "category": "CT"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 362,
+            "category": "DL"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 22031,
+            "category": "GJ"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 1729,
+            "category": "HP"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 12711,
+            "category": "HR"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 19113,
+            "category": "JH"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 17463,
+            "category": "JK"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 20142,
+            "category": "KA"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 632,
+            "category": "KL"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 231,
+            "category": "LK"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 76787,
+            "category": "MH"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 37150,
+            "category": "MP"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 23464,
+            "category": "OR"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 21623,
+            "category": "PB"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 846,
+            "category": "PY"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 33149,
+            "category": "RJ"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 33866,
+            "category": "TG"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 23436,
+            "category": "TN"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 59928,
+            "category": "UP"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 3581,
+            "category": "UT"
+          },
+          {
+            "date": "2022-11-01T00:00:00",
+            "value": 40563,
+            "category": "WB"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 35507,
+            "category": "AP"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 6979,
+            "category": "AS"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 64056,
+            "category": "BR"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 747,
+            "category": "CH"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 10511,
+            "category": "CT"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 751,
+            "category": "DL"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 68,
+            "category": "DN"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 24386,
+            "category": "GJ"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 2123,
+            "category": "HP"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 15626,
+            "category": "HR"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 21503,
+            "category": "JH"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 20494,
+            "category": "JK"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 20812,
+            "category": "KA"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 947,
+            "category": "KL"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 95,
+            "category": "LK"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 83914,
+            "category": "MH"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 68,
+            "category": "ML"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 38627,
+            "category": "MP"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 68,
+            "category": "NL"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 26949,
+            "category": "OR"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 28128,
+            "category": "PB"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 960,
+            "category": "PY"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 35772,
+            "category": "RJ"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 34819,
+            "category": "TG"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 24751,
+            "category": "TN"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 68,
+            "category": "TR"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 64166,
+            "category": "UP"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 3276,
+            "category": "UT"
+          },
+          {
+            "date": "2022-12-01T00:00:00",
+            "value": 47286,
+            "category": "WB"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 30003,
+            "category": "AP"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 4087,
+            "category": "AS"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 51693,
+            "category": "BR"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 421,
+            "category": "CH"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 9738,
+            "category": "CT"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 427,
+            "category": "DL"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 78,
+            "category": "DN"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 19683,
+            "category": "GJ"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 1908,
+            "category": "HP"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 12716,
+            "category": "HR"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 16315,
+            "category": "JH"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 17271,
+            "category": "JK"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 19580,
+            "category": "KA"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 408,
+            "category": "KL"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 196,
+            "category": "LK"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 74095,
+            "category": "MH"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 68,
+            "category": "ML"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 38011,
+            "category": "MP"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 68,
+            "category": "NL"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 20377,
+            "category": "OR"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 26098,
+            "category": "PB"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 596,
+            "category": "PY"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 30186,
+            "category": "RJ"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 31241,
+            "category": "TG"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 23787,
+            "category": "TN"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 61714,
+            "category": "UP"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 3809,
+            "category": "UT"
+          },
+          {
+            "date": "2023-01-01T00:00:00",
+            "value": 38578,
+            "category": "WB"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 26474,
+            "category": "AP"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 3411,
+            "category": "AS"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 56420,
+            "category": "BR"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 411,
+            "category": "CH"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 8969,
+            "category": "CT"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 541,
+            "category": "DL"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 78,
+            "category": "DN"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 20154,
+            "category": "GJ"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 912,
+            "category": "HP"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 12376,
+            "category": "HR"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 16239,
+            "category": "JH"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 14907,
+            "category": "JK"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 19657,
+            "category": "KA"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 397,
+            "category": "KL"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 295,
+            "category": "LK"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 64349,
+            "category": "MH"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 38025,
+            "category": "MP"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 19695,
+            "category": "OR"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 22362,
+            "category": "PB"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 908,
+            "category": "PY"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 28199,
+            "category": "RJ"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 25564,
+            "category": "TG"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 21379,
+            "category": "TN"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 59035,
+            "category": "UP"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 2814,
+            "category": "UT"
+          },
+          {
+            "date": "2023-02-01T00:00:00",
+            "value": 35430,
+            "category": "WB"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 31388,
+            "category": "AP"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 5623,
+            "category": "AS"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 56711,
+            "category": "BR"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 316,
+            "category": "CH"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 9759,
+            "category": "CT"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 633,
+            "category": "DL"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 78,
+            "category": "DN"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 23032,
+            "category": "GJ"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 1254,
+            "category": "HP"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 12368,
+            "category": "HR"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 17187,
+            "category": "JH"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 16407,
+            "category": "JK"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 21292,
+            "category": "KA"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 736,
+            "category": "KL"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 227,
+            "category": "LK"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 72781,
+            "category": "MH"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 38496,
+            "category": "MP"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 68,
+            "category": "NL"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 22966,
+            "category": "OR"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 23211,
+            "category": "PB"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 336,
+            "category": "PY"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 30177,
+            "category": "RJ"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 32557,
+            "category": "TG"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 24882,
+            "category": "TN"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 58543,
+            "category": "UP"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 4158,
+            "category": "UT"
+          },
+          {
+            "date": "2023-03-01T00:00:00",
+            "value": 41969,
+            "category": "WB"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 63460,
+            "category": "AP"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 15945,
+            "category": "AS"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 106375,
+            "category": "BR"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 924,
+            "category": "CH"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 20164,
+            "category": "CT"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 870,
+            "category": "DL"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 128,
+            "category": "DN"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 36084,
+            "category": "GJ"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 3557,
+            "category": "HP"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 26163,
+            "category": "HR"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 32726,
+            "category": "JH"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 27755,
+            "category": "JK"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 42311,
+            "category": "KA"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 598,
+            "category": "KL"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 318,
+            "category": "LK"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 135166,
+            "category": "MH"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 73956,
+            "category": "MP"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 136,
+            "category": "NL"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 37660,
+            "category": "OR"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 39304,
+            "category": "PB"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 1704,
+            "category": "PY"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 50131,
+            "category": "RJ"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 58283,
+            "category": "TG"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 49506,
+            "category": "TN"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 136,
+            "category": "TR"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 118597,
+            "category": "UP"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 7658,
+            "category": "UT"
+          },
+          {
+            "date": "2023-04-01T00:00:00",
+            "value": 78438,
+            "category": "WB"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 57535,
+            "category": "AP"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 17369,
+            "category": "AS"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 146547,
+            "category": "BR"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 408,
+            "category": "CH"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 27273,
+            "category": "CT"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 1282,
+            "category": "DL"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 264,
+            "category": "DN"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 43101,
+            "category": "GJ"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 3339,
+            "category": "HP"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 23037,
+            "category": "HR"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 35860,
+            "category": "JH"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 36092,
+            "category": "JK"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 46045,
+            "category": "KA"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 1222,
+            "category": "KL"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 726,
+            "category": "LK"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 140845,
+            "category": "MH"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 68,
+            "category": "ML"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 83970,
+            "category": "MP"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 136,
+            "category": "NL"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 39609,
+            "category": "OR"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 42883,
+            "category": "PB"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 1464,
+            "category": "PY"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 64966,
+            "category": "RJ"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 64045,
+            "category": "TG"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 49275,
+            "category": "TN"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 146912,
+            "category": "UP"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 7916,
+            "category": "UT"
+          },
+          {
+            "date": "2023-05-01T00:00:00",
+            "value": 83241,
+            "category": "WB"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 59271,
+            "category": "AP"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 21708,
+            "category": "AS"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 135214,
+            "category": "BR"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 788,
+            "category": "CH"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 21844,
+            "category": "CT"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 1218,
+            "category": "DL"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 468,
+            "category": "GA"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 42744,
+            "category": "GJ"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 4074,
+            "category": "HP"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 22009,
+            "category": "HR"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 37476,
+            "category": "JH"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 31808,
+            "category": "JK"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 47321,
+            "category": "KA"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 806,
+            "category": "KL"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 318,
+            "category": "LK"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 142115,
+            "category": "MH"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 82144,
+            "category": "MP"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 136,
+            "category": "NL"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 42950,
+            "category": "OR"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 44018,
+            "category": "PB"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 1700,
+            "category": "PY"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 60354,
+            "category": "RJ"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 69239,
+            "category": "TG"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 47353,
+            "category": "TN"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 136,
+            "category": "TR"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 130006,
+            "category": "UP"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 6850,
+            "category": "UT"
+          },
+          {
+            "date": "2023-06-01T00:00:00",
+            "value": 80505,
+            "category": "WB"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 62629,
+            "category": "AP"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 18580,
+            "category": "AS"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 121538,
+            "category": "BR"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 476,
+            "category": "CH"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 24436,
+            "category": "CT"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 1098,
+            "category": "DL"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 284,
+            "category": "DN"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 156,
+            "category": "GA"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 41372,
+            "category": "GJ"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 3481,
+            "category": "HP"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 25290,
+            "category": "HR"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 37652,
+            "category": "JH"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 30757,
+            "category": "JK"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 50369,
+            "category": "KA"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 1666,
+            "category": "KL"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 318,
+            "category": "LK"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 141722,
+            "category": "MH"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 136,
+            "category": "ML"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 78250,
+            "category": "MP"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 53437,
+            "category": "OR"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 41726,
+            "category": "PB"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 2506,
+            "category": "PY"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 59778,
+            "category": "RJ"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 68796,
+            "category": "TG"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 50200,
+            "category": "TN"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 131680,
+            "category": "UP"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 6308,
+            "category": "UT"
+          },
+          {
+            "date": "2023-07-01T00:00:00",
+            "value": 85572,
+            "category": "WB"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 65737,
+            "category": "AP"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 16949,
+            "category": "AS"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 135593,
+            "category": "BR"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 598,
+            "category": "CH"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 24283,
+            "category": "CT"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 1266,
+            "category": "DL"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 148,
+            "category": "DN"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 43976,
+            "category": "GJ"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 2739,
+            "category": "HP"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 22833,
+            "category": "HR"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 36600,
+            "category": "JH"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 29867,
+            "category": "JK"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 53534,
+            "category": "KA"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 1288,
+            "category": "KL"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 318,
+            "category": "LK"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 142083,
+            "category": "MH"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 80508,
+            "category": "MP"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 136,
+            "category": "NL"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 49043,
+            "category": "OR"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 47221,
+            "category": "PB"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 1660,
+            "category": "PY"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 61567,
+            "category": "RJ"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 63470,
+            "category": "TG"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 48258,
+            "category": "TN"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 133978,
+            "category": "UP"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 6062,
+            "category": "UT"
+          },
+          {
+            "date": "2023-08-01T00:00:00",
+            "value": 87627,
+            "category": "WB"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 64584,
+            "category": "AP"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 21187,
+            "category": "AS"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 133755,
+            "category": "BR"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 536,
+            "category": "CH"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 27193,
+            "category": "CT"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 870,
+            "category": "DL"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 284,
+            "category": "DN"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 156,
+            "category": "GA"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 45961,
+            "category": "GJ"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 3688,
+            "category": "HP"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 26130,
+            "category": "HR"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 42523,
+            "category": "JH"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 32564,
+            "category": "JK"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 53055,
+            "category": "KA"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 2258,
+            "category": "KL"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 153278,
+            "category": "MH"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 68,
+            "category": "ML"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 85051,
+            "category": "MP"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 136,
+            "category": "NL"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 51851,
+            "category": "OR"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 46576,
+            "category": "PB"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 1580,
+            "category": "PY"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 67578,
+            "category": "RJ"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 66407,
+            "category": "TG"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 50549,
+            "category": "TN"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 140538,
+            "category": "UP"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 6766,
+            "category": "UT"
+          },
+          {
+            "date": "2023-09-01T00:00:00",
+            "value": 93459,
+            "category": "WB"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 82250,
+            "category": "AP"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 20452,
+            "category": "AS"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 145820,
+            "category": "BR"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 1118,
+            "category": "CH"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 25774,
+            "category": "CT"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 1410,
+            "category": "DL"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 264,
+            "category": "DN"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 45284,
+            "category": "GJ"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 4490,
+            "category": "HP"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 30259,
+            "category": "HR"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 43253,
+            "category": "JH"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 44414,
+            "category": "JK"
+          },
+          {
+            "date": "2023-10-01T00:00:00",
+            "value": 62492,
+            "category": "KA"
+          }
+        ],
+        "chart_type": "line",
+        "dimensions": [
+          "period",
+          "category"
+        ],
+        "rows_count": 500,
+        "metric_name": "sum_PaymentErrorCode",
+        "time_column": "Delivery_Date",
+        "chart_payload": {
+          "root": {
+            "useTheme": "Animated"
+          },
+          "chart": {
+            "panX": true,
+            "panY": false,
+            "type": "XYChart"
+          },
+          "xAxis": {
+            "type": "DateAxis",
+            "baseInterval": {
+              "count": 1,
+              "timeUnit": "day"
+            }
+          },
+          "yAxis": {
+            "type": "ValueAxis"
+          },
+          "legend": {
+            "type": "Legend"
+          },
+          "series": [
+            {
+              "type": "LineSeries",
+              "nameField": "category",
+              "valueXField": "date",
+              "valueYField": "value"
+            }
+          ]
+        },
+        "metric_column": "PaymentErrorCode",
+        "category_column": "StateCode",
+        "title": "sum_PaymentErrorCode Trend Over Delivery_Date",
+        "chart_title": "sum_PaymentErrorCode Trend Over Delivery_Date",
+        "dashboard_title": "Auto Dashboard"
+      },
+      {
+        "sql": "SELECT date_trunc('month', t.\"process_date\") AS period, SUM(t.\"normal_net_hours\") AS \"productivity_normal_total_production_per_normal_net_hours\" FROM \"public\".\"fact_lpg_plant_operations\" t GROUP BY period ORDER BY period ASC LIMIT 200",
+        "type": "line",
+        "stats": {
+          "avg": 20029.623333333333,
+          "max": 27476.18,
+          "min": 5320.33,
+          "count": 6,
+          "total": 120177.73999999999
+        },
+        "table": "lpg_plant_operations",
+        "intent": "trend",
+        "metric": "productivity_normal_total_production_per_normal_net_hours",
+        "insight": {
+          "type": "line",
+          "value": 16397.97,
+          "summary": "Latest productivity_normal_total_production_per_normal_net_hours: 16397.97 (Δ -7569.18)"
+        },
+        "chart_id": "chart_2e8a7f598b",
+        "narrative": {
+          "top": "2025-11-01T00:00:00+00:00",
+          "bottom": "2025-09-01T00:00:00+00:00",
+          "summary": "Top period: 2025-11-01 00:00:00+00:00 (27476.18); Lowest period: 2025-09-01 00:00:00+00:00 (5320.33)"
+        },
+        "chart_data": [
+          {
+            "date": "2025-09-01T00:00:00+00:00",
+            "value": 5320.33
+          },
+          {
+            "date": "2025-10-01T00:00:00+00:00",
+            "value": 22169.95
+          },
+          {
+            "date": "2025-11-01T00:00:00+00:00",
+            "value": 27476.18
+          },
+          {
+            "date": "2025-12-01T00:00:00+00:00",
+            "value": 24846.16
+          },
+          {
+            "date": "2026-01-01T00:00:00+00:00",
+            "value": 23967.15
+          },
+          {
+            "date": "2026-02-01T00:00:00+00:00",
+            "value": 16397.97
+          }
+        ],
+        "chart_type": "line",
+        "dimensions": [
+          "period"
+        ],
+        "rows_count": 6,
+        "metric_name": "productivity_normal_total_production_per_normal_net_hours",
+        "time_column": "process_date",
+        "chart_payload": {
+          "root": {
+            "useTheme": "Animated"
+          },
+          "chart": {
+            "panX": true,
+            "panY": false,
+            "type": "XYChart"
+          },
+          "xAxis": {
+            "type": "DateAxis",
+            "baseInterval": {
+              "count": 1,
+              "timeUnit": "day"
+            }
+          },
+          "yAxis": {
+            "type": "ValueAxis"
+          },
+          "legend": {
+            "type": "Legend"
+          },
+          "series": [
+            {
+              "name": "productivity_normal_total_production_per_normal_net_hours",
+              "type": "LineSeries",
+              "valueXField": "date",
+              "valueYField": "value"
+            }
+          ]
+        },
+        "metric_column": "normal_net_hours",
+        "category_column": null,
+        "title": "productivity_normal_total_production_per_normal_net_hours Trend Over process_date",
+        "chart_title": "productivity_normal_total_production_per_normal_net_hours Trend Over process_date",
+        "dashboard_title": "Auto Dashboard"
+      },
+      {
+        "sql": "SELECT date_trunc('month', t.\"process_date\") AS period, t.\"carousel\" AS category, SUM(t.\"normal_net_hours\") AS \"productivity_normal_total_production_per_normal_net_hours\" FROM \"public\".\"fact_lpg_plant_operations\" t GROUP BY period, category ORDER BY period ASC LIMIT 500",
+        "type": "line",
+        "stats": {
+          "avg": 6676.541111111111,
+          "max": 15447.67,
+          "min": 88.12,
+          "count": 18,
+          "total": 120177.73999999999
+        },
+        "table": "lpg_plant_operations",
+        "intent": "multi_series",
+        "metric": "productivity_normal_total_production_per_normal_net_hours",
+        "insight": {
+          "type": "line",
+          "value": 9398.64,
+          "summary": "Latest productivity_normal_total_production_per_normal_net_hours: 9398.64 (Δ 2654.42)"
+        },
+        "chart_id": "chart_a5cf8fa05d",
+        "narrative": {
+          "top": "2025-11-01T00:00:00+00:00",
+          "bottom": "2025-09-01T00:00:00+00:00",
+          "summary": "Top period: 2025-11-01 00:00:00+00:00 (15447.67); Lowest period: 2025-09-01 00:00:00+00:00 (88.12)"
+        },
+        "chart_data": [
+          {
+            "date": "2025-09-01T00:00:00+00:00",
+            "value": 3002.86,
+            "category": "1"
+          },
+          {
+            "date": "2025-09-01T00:00:00+00:00",
+            "value": 2229.35,
+            "category": "2"
+          },
+          {
+            "date": "2025-09-01T00:00:00+00:00",
+            "value": 88.12,
+            "category": "3"
+          },
+          {
+            "date": "2025-10-01T00:00:00+00:00",
+            "value": 12804.92,
+            "category": "1"
+          },
+          {
+            "date": "2025-10-01T00:00:00+00:00",
+            "value": 365.91,
+            "category": "3"
+          },
+          {
+            "date": "2025-10-01T00:00:00+00:00",
+            "value": 8999.12,
+            "category": "2"
+          },
+          {
+            "date": "2025-11-01T00:00:00+00:00",
+            "value": 11583.57,
+            "category": "2"
+          },
+          {
+            "date": "2025-11-01T00:00:00+00:00",
+            "value": 15447.67,
+            "category": "1"
+          },
+          {
+            "date": "2025-11-01T00:00:00+00:00",
+            "value": 444.94,
+            "category": "3"
+          },
+          {
+            "date": "2025-12-01T00:00:00+00:00",
+            "value": 10259.99,
+            "category": "2"
+          },
+          {
+            "date": "2025-12-01T00:00:00+00:00",
+            "value": 377.75,
+            "category": "3"
+          },
+          {
+            "date": "2025-12-01T00:00:00+00:00",
+            "value": 14208.42,
+            "category": "1"
+          },
+          {
+            "date": "2026-01-01T00:00:00+00:00",
+            "value": 380.38,
+            "category": "3"
+          },
+          {
+            "date": "2026-01-01T00:00:00+00:00",
+            "value": 13913.59,
+            "category": "1"
+          },
+          {
+            "date": "2026-01-01T00:00:00+00:00",
+            "value": 9673.18,
+            "category": "2"
+          },
+          {
+            "date": "2026-02-01T00:00:00+00:00",
+            "value": 255.10999999999999,
+            "category": "3"
+          },
+          {
+            "date": "2026-02-01T00:00:00+00:00",
+            "value": 6744.22,
+            "category": "2"
+          },
+          {
+            "date": "2026-02-01T00:00:00+00:00",
+            "value": 9398.64,
+            "category": "1"
+          }
+        ],
+        "chart_type": "line",
+        "dimensions": [
+          "period",
+          "category"
+        ],
+        "rows_count": 18,
+        "metric_name": "productivity_normal_total_production_per_normal_net_hours",
+        "time_column": "process_date",
+        "chart_payload": {
+          "root": {
+            "useTheme": "Animated"
+          },
+          "chart": {
+            "panX": true,
+            "panY": false,
+            "type": "XYChart"
+          },
+          "xAxis": {
+            "type": "DateAxis",
+            "baseInterval": {
+              "count": 1,
+              "timeUnit": "day"
+            }
+          },
+          "yAxis": {
+            "type": "ValueAxis"
+          },
+          "legend": {
+            "type": "Legend"
+          },
+          "series": [
+            {
+              "type": "LineSeries",
+              "nameField": "category",
+              "valueXField": "date",
+              "valueYField": "value"
+            }
+          ]
+        },
+        "metric_column": "normal_net_hours",
+        "category_column": "carousel",
+        "title": "productivity_normal_total_production_per_normal_net_hours Trend Over process_date",
+        "chart_title": "productivity_normal_total_production_per_normal_net_hours Trend Over process_date",
+        "dashboard_title": "Auto Dashboard"
+      },
+      {
+        "sql": "SELECT date_trunc('month', t.\"Execution_Date\") AS period, SUM(t.\"JDEDistributorCode\") AS \"sum_JDEDistributorCode\" FROM \"public\".\"fact_lpg_todays_cdcms_sales_summary\" t GROUP BY period ORDER BY period ASC LIMIT 200",
+        "type": "line",
+        "stats": {
+          "avg": 2982179646451,
+          "max": 2982179646451,
+          "min": 2982179646451,
+          "count": 1,
+          "total": 2982179646451
+        },
+        "table": "lpg_todays_cdcms_sales_summary",
+        "intent": "trend",
+        "metric": "sum_JDEDistributorCode",
+        "insight": {
+          "type": "line",
+          "value": 2982179646451,
+          "summary": "Latest sum_JDEDistributorCode: 2982179646451.00"
+        },
+        "chart_id": "chart_0c8b9d159f",
+        "narrative": {
+          "top": "2026-02-01T00:00:00",
+          "bottom": "2026-02-01T00:00:00",
+          "summary": "Top period: 2026-02-01 00:00:00 (2982179646451.00); Lowest period: 2026-02-01 00:00:00 (2982179646451.00)"
+        },
+        "chart_data": [
+          {
+            "date": "2026-02-01T00:00:00",
+            "value": 2982179646451
+          }
+        ],
+        "chart_type": "line",
+        "dimensions": [
+          "period"
+        ],
+        "rows_count": 1,
+        "metric_name": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "chart_payload": {
+          "root": {
+            "useTheme": "Animated"
+          },
+          "chart": {
+            "panX": true,
+            "panY": false,
+            "type": "XYChart"
+          },
+          "xAxis": {
+            "type": "DateAxis",
+            "baseInterval": {
+              "count": 1,
+              "timeUnit": "day"
+            }
+          },
+          "yAxis": {
+            "type": "ValueAxis"
+          },
+          "legend": {
+            "type": "Legend"
+          },
+          "series": [
+            {
+              "name": "sum_JDEDistributorCode",
+              "type": "LineSeries",
+              "valueXField": "date",
+              "valueYField": "value"
+            }
+          ]
+        },
+        "metric_column": "JDEDistributorCode",
+        "category_column": null,
+        "title": "sum_JDEDistributorCode Trend Over Execution_Date",
+        "chart_title": "sum_JDEDistributorCode Trend Over Execution_Date",
+        "dashboard_title": "Auto Dashboard"
+      },
+      {
+        "sql": "SELECT date_trunc('month', t.\"Execution_Date\") AS period, t.\"ConsumerType\" AS category, SUM(t.\"JDEDistributorCode\") AS \"sum_JDEDistributorCode\" FROM \"public\".\"fact_lpg_todays_cdcms_sales_summary\" t GROUP BY period, category ORDER BY period ASC LIMIT 500",
+        "type": "line",
+        "stats": {
+          "avg": 1491089823225.5,
+          "max": 1807443482088,
+          "min": 1174736164363,
+          "count": 2,
+          "total": 2982179646451
+        },
+        "table": "lpg_todays_cdcms_sales_summary",
+        "intent": "multi_series",
+        "metric": "sum_JDEDistributorCode",
+        "insight": {
+          "type": "line",
+          "value": 1807443482088,
+          "summary": "Latest sum_JDEDistributorCode: 1807443482088.00 (Δ 632707317725.00)"
+        },
+        "chart_id": "chart_1298e49e48",
+        "narrative": {
+          "top": "2026-02-01T00:00:00",
+          "bottom": "2026-02-01T00:00:00",
+          "summary": "Top period: 2026-02-01 00:00:00 (1807443482088.00); Lowest period: 2026-02-01 00:00:00 (1174736164363.00)"
+        },
+        "chart_data": [
+          {
+            "date": "2026-02-01T00:00:00",
+            "value": 1174736164363,
+            "category": "PMUY"
+          },
+          {
+            "date": "2026-02-01T00:00:00",
+            "value": 1807443482088,
+            "category": "NPMUY"
+          }
+        ],
+        "chart_type": "line",
+        "dimensions": [
+          "period",
+          "category"
+        ],
+        "rows_count": 2,
+        "metric_name": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "chart_payload": {
+          "root": {
+            "useTheme": "Animated"
+          },
+          "chart": {
+            "panX": true,
+            "panY": false,
+            "type": "XYChart"
+          },
+          "xAxis": {
+            "type": "DateAxis",
+            "baseInterval": {
+              "count": 1,
+              "timeUnit": "day"
+            }
+          },
+          "yAxis": {
+            "type": "ValueAxis"
+          },
+          "legend": {
+            "type": "Legend"
+          },
+          "series": [
+            {
+              "type": "LineSeries",
+              "nameField": "category",
+              "valueXField": "date",
+              "valueYField": "value"
+            }
+          ]
+        },
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType",
+        "title": "sum_JDEDistributorCode Trend Over Execution_Date",
+        "chart_title": "sum_JDEDistributorCode Trend Over Execution_Date",
+        "dashboard_title": "Auto Dashboard"
+      }
+    ],
+    "insights": [
+      {
+        "type": "line",
+        "value": 56219296678830,
+        "summary": "Latest sum_JDEDistributorCode: 56219296678830.00 (Δ -24002308615683.00)"
+      },
+      {
+        "type": "line",
+        "value": 22152224554844,
+        "summary": "Latest sum_JDEDistributorCode: 22152224554844.00 (Δ -11914847569142.00)"
+      },
+      {
+        "type": "line",
+        "value": 21002,
+        "summary": "Latest sum_PaymentErrorCode: 21002.00 (Δ -1808064.00)"
+      },
+      {
+        "type": "line",
+        "value": 62492,
+        "summary": "Latest sum_PaymentErrorCode: 62492.00 (Δ 18078.00)"
+      },
+      {
+        "type": "line",
+        "value": 16397.97,
+        "summary": "Latest productivity_normal_total_production_per_normal_net_hours: 16397.97 (Δ -7569.18)"
+      },
+      {
+        "type": "line",
+        "value": 9398.64,
+        "summary": "Latest productivity_normal_total_production_per_normal_net_hours: 9398.64 (Δ 2654.42)"
+      },
+      {
+        "type": "line",
+        "value": 2982179646451,
+        "summary": "Latest sum_JDEDistributorCode: 2982179646451.00"
+      },
+      {
+        "type": "line",
+        "value": 1807443482088,
+        "summary": "Latest sum_JDEDistributorCode: 1807443482088.00 (Δ 632707317725.00)"
+      }
+    ],
+    "chart_plan": [
+      {
+        "type": "line",
+        "table": "lpg_cdcms_last_three_months_summary",
+        "intent": "trend",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "metric_column": "JDEDistributorCode",
+        "category_column": null
+      },
+      {
+        "type": "line",
+        "table": "lpg_cdcms_last_three_months_summary",
+        "intent": "multi_series",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType"
+      },
+      {
+        "type": "line",
+        "table": "lpg_cdcms_subsidy_failure_statistics",
+        "intent": "trend",
+        "metric": "sum_PaymentErrorCode",
+        "time_column": "Delivery_Date",
+        "metric_column": "PaymentErrorCode",
+        "category_column": null
+      },
+      {
+        "type": "line",
+        "table": "lpg_cdcms_subsidy_failure_statistics",
+        "intent": "multi_series",
+        "metric": "sum_PaymentErrorCode",
+        "time_column": "Delivery_Date",
+        "metric_column": "PaymentErrorCode",
+        "category_column": "StateCode"
+      },
+      {
+        "type": "line",
+        "table": "lpg_plant_operations",
+        "intent": "trend",
+        "metric": "productivity_normal_total_production_per_normal_net_hours",
+        "time_column": "process_date",
+        "metric_column": "normal_net_hours",
+        "category_column": null
+      },
+      {
+        "type": "line",
+        "table": "lpg_plant_operations",
+        "intent": "multi_series",
+        "metric": "productivity_normal_total_production_per_normal_net_hours",
+        "time_column": "process_date",
+        "metric_column": "normal_net_hours",
+        "category_column": "carousel"
+      },
+      {
+        "type": "line",
+        "table": "lpg_todays_cdcms_sales_summary",
+        "intent": "trend",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "metric_column": "JDEDistributorCode",
+        "category_column": null
+      },
+      {
+        "type": "line",
+        "table": "lpg_todays_cdcms_sales_summary",
+        "intent": "multi_series",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType"
+      }
+    ],
+    "chart_candidates": [
+      {
+        "type": "bar",
+        "table": "event_log",
+        "intent": "breakdown",
+        "metric": "sum_event_log_id",
+        "time_column": null,
+        "metric_column": "event_log_id",
+        "category_column": "plant_name"
+      },
+      {
+        "type": "pie",
+        "table": "event_log",
+        "intent": "share",
+        "metric": "sum_event_log_id",
+        "time_column": null,
+        "metric_column": "event_log_id",
+        "category_column": "plant_name"
+      },
+      {
+        "type": "line",
+        "table": "lpg_cdcms_last_three_months_summary",
+        "intent": "trend",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "metric_column": "JDEDistributorCode",
+        "category_column": null
+      },
+      {
+        "type": "bar",
+        "table": "lpg_cdcms_last_three_months_summary",
+        "intent": "breakdown",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": null,
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType"
+      },
+      {
+        "type": "pie",
+        "table": "lpg_cdcms_last_three_months_summary",
+        "intent": "share",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": null,
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType"
+      },
+      {
+        "type": "line",
+        "table": "lpg_cdcms_last_three_months_summary",
+        "intent": "multi_series",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType"
+      },
+      {
+        "type": "line",
+        "table": "lpg_cdcms_subsidy_failure_statistics",
+        "intent": "trend",
+        "metric": "sum_PaymentErrorCode",
+        "time_column": "Delivery_Date",
+        "metric_column": "PaymentErrorCode",
+        "category_column": null
+      },
+      {
+        "type": "bar",
+        "table": "lpg_cdcms_subsidy_failure_statistics",
+        "intent": "breakdown",
+        "metric": "sum_PaymentErrorCode",
+        "time_column": null,
+        "metric_column": "PaymentErrorCode",
+        "category_column": "PaymentErrorName"
+      },
+      {
+        "type": "pie",
+        "table": "lpg_cdcms_subsidy_failure_statistics",
+        "intent": "share",
+        "metric": "sum_PaymentErrorCode",
+        "time_column": null,
+        "metric_column": "PaymentErrorCode",
+        "category_column": "PaymentErrorName"
+      },
+      {
+        "type": "line",
+        "table": "lpg_cdcms_subsidy_failure_statistics",
+        "intent": "multi_series",
+        "metric": "sum_PaymentErrorCode",
+        "time_column": "Delivery_Date",
+        "metric_column": "PaymentErrorCode",
+        "category_column": "StateCode"
+      },
+      {
+        "type": "bar",
+        "table": "lpg_distributor_mapping",
+        "intent": "breakdown",
+        "metric": "sum_customer",
+        "time_column": null,
+        "metric_column": "customer",
+        "category_column": "sales_district"
+      },
+      {
+        "type": "pie",
+        "table": "lpg_distributor_mapping",
+        "intent": "share",
+        "metric": "sum_customer",
+        "time_column": null,
+        "metric_column": "customer",
+        "category_column": "sales_district"
+      },
+      {
+        "type": "bar",
+        "table": "lpg_monthly_cdcms_sales_summary",
+        "intent": "breakdown",
+        "metric": "sum_Execution_Year",
+        "time_column": null,
+        "metric_column": "Execution_Year",
+        "category_column": "ZOName"
+      },
+      {
+        "type": "pie",
+        "table": "lpg_monthly_cdcms_sales_summary",
+        "intent": "share",
+        "metric": "sum_Execution_Year",
+        "time_column": null,
+        "metric_column": "Execution_Year",
+        "category_column": "ZOName"
+      },
+      {
+        "type": "line",
+        "table": "lpg_plant_operations",
+        "intent": "trend",
+        "metric": "productivity_normal_total_production_per_normal_net_hours",
+        "time_column": "process_date",
+        "metric_column": "normal_net_hours",
+        "category_column": null
+      },
+      {
+        "type": "bar",
+        "table": "lpg_plant_operations",
+        "intent": "breakdown",
+        "metric": "productivity_normal_total_production_per_normal_net_hours",
+        "time_column": null,
+        "metric_column": "normal_net_hours",
+        "category_column": "carousel"
+      },
+      {
+        "type": "pie",
+        "table": "lpg_plant_operations",
+        "intent": "share",
+        "metric": "productivity_normal_total_production_per_normal_net_hours",
+        "time_column": null,
+        "metric_column": "normal_net_hours",
+        "category_column": "carousel"
+      },
+      {
+        "type": "line",
+        "table": "lpg_plant_operations",
+        "intent": "multi_series",
+        "metric": "productivity_normal_total_production_per_normal_net_hours",
+        "time_column": "process_date",
+        "metric_column": "normal_net_hours",
+        "category_column": "carousel"
+      },
+      {
+        "type": "line",
+        "table": "lpg_todays_cdcms_sales_summary",
+        "intent": "trend",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "metric_column": "JDEDistributorCode",
+        "category_column": null
+      },
+      {
+        "type": "bar",
+        "table": "lpg_todays_cdcms_sales_summary",
+        "intent": "breakdown",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": null,
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType"
+      },
+      {
+        "type": "pie",
+        "table": "lpg_todays_cdcms_sales_summary",
+        "intent": "share",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": null,
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType"
+      },
+      {
+        "type": "line",
+        "table": "lpg_todays_cdcms_sales_summary",
+        "intent": "multi_series",
+        "metric": "sum_JDEDistributorCode",
+        "time_column": "Execution_Date",
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType"
+      },
+      {
+        "type": "line",
+        "table": "production_log",
+        "intent": "trend",
+        "metric": "sum_production_log_id",
+        "time_column": "process_date",
+        "metric_column": "production_log_id",
+        "category_column": null
+      },
+      {
+        "type": "bar",
+        "table": "production_log",
+        "intent": "breakdown",
+        "metric": "sum_production_log_id",
+        "time_column": null,
+        "metric_column": "production_log_id",
+        "category_column": "plant_name"
+      },
+      {
+        "type": "pie",
+        "table": "production_log",
+        "intent": "share",
+        "metric": "sum_production_log_id",
+        "time_column": null,
+        "metric_column": "production_log_id",
+        "category_column": "plant_name"
+      },
+      {
+        "type": "line",
+        "table": "production_log",
+        "intent": "multi_series",
+        "metric": "sum_production_log_id",
+        "time_column": "process_date",
+        "metric_column": "production_log_id",
+        "category_column": "plant_name"
+      }
+    ],
+    "view_suggestions": [
+      {
+        "table": "lpg_cdcms_last_three_months_summary",
+        "time_column": "Execution_Date",
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType",
+        "recommended_view": "lpg_cdcms_last_three_months_summary_overview"
+      },
+      {
+        "table": "lpg_cdcms_subsidy_failure_statistics",
+        "time_column": "Delivery_Date",
+        "metric_column": "PaymentErrorCode",
+        "category_column": "Month",
+        "recommended_view": "lpg_cdcms_subsidy_failure_statistics_overview"
+      },
+      {
+        "table": "lpg_plant_operations",
+        "time_column": "process_date",
+        "metric_column": "normal_net_hours",
+        "category_column": "carousel",
+        "recommended_view": "lpg_plant_operations_overview"
+      },
+      {
+        "table": "lpg_todays_cdcms_sales_summary",
+        "time_column": "Execution_Date",
+        "metric_column": "JDEDistributorCode",
+        "category_column": "ConsumerType",
+        "recommended_view": "lpg_todays_cdcms_sales_summary_overview"
+      },
+      {
+        "table": "production_log",
+        "time_column": "process_date",
+        "metric_column": "production_log_id",
+        "category_column": "plant_name",
+        "recommended_view": "production_log_overview"
+      }
+    ],
+    "dashboard_title": "Auto Dashboard"
+  },
+  "created_at": "2026-03-09T05:39:00.441952Z",
+  "updated_at": "2026-03-09T05:39:00.441952Z"
+}

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 import logging
+import os
 
 from services.ai.config import Settings
 from services.ai.db import run_query
 from services.ai.semantic_extraction import extract_semantic_contract
+from services.ai.semantic_layer.pack_loader import load_pack
 
 NUMERIC_TYPES = {
     "integer",
@@ -21,11 +23,266 @@ TIME_TYPES = {
     "timestamp without time zone",
     "timestamp with time zone",
 }
+BOOLEAN_TYPES = {"boolean", "bool"}
+MEASURE_HINT_TOKENS = {
+    "total",
+    "count",
+    "amount",
+    "volume",
+    "sales",
+    "production",
+    "hours",
+    "hour",
+    "pending",
+    "rejection",
+    "reject",
+    "utilization",
+    "throughput",
+    "qty",
+    "quantity",
+    "rate",
+    "avg",
+    "mean",
+}
+IDENTIFIER_CODE_TOKENS = {"code", "sap", "jde", "idx"}
+IDENTIFIER_KEY_TOKENS = {"id", "identifier", "key", "uuid"}
+STATUS_HINT_TOKENS = {"status", "flag", "active", "enabled", "valid", "is_"}
+INTENT_HINT_MAP = {
+    "production": "volume",
+    "sales": "volume",
+    "volume": "volume",
+    "pending": "backlog",
+    "reject": "quality",
+    "rejection": "quality",
+    "failure": "quality",
+    "utilization": "utilization",
+    "productivity": "productivity",
+    "hour": "utilization",
+    "count": "volume",
+}
 
 
 def _qident(name: str) -> str:
     # Defensive quoting for mixed-case/special-character identifiers.
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def _split_tokens(name: str | None) -> list[str]:
+    if not name:
+        return []
+    cleaned = str(name).strip().lower().replace(".", "_").replace("-", "_")
+    return [part for part in cleaned.split("_") if part]
+
+
+def _csv_lower_set(raw: str | None) -> set[str]:
+    if not raw:
+        return set()
+    return {item.strip().lower() for item in str(raw).split(",") if item.strip()}
+
+
+def _max_uniqueness_ratio() -> float:
+    raw = os.getenv("AGENTIC_MEASURE_MAX_UNIQUENESS_RATIO", "0.90")
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.90
+
+
+def _classify_column_semantic_role(name: str, data_type: str) -> str:
+    lower_name = (name or "").strip().lower()
+    dtype = (data_type or "").strip().lower()
+    tokens = _split_tokens(lower_name)
+    if dtype in TIME_TYPES:
+        return "time_dimension"
+    if dtype in BOOLEAN_TYPES:
+        return "status_flag"
+    if lower_name.endswith("_id") or lower_name == "id" or any(tok in IDENTIFIER_KEY_TOKENS for tok in tokens):
+        return "identifier_key"
+    if lower_name.endswith("_code") or "code" in tokens or any(tok in IDENTIFIER_CODE_TOKENS for tok in tokens):
+        return "identifier_code"
+    if any(tok in STATUS_HINT_TOKENS for tok in tokens) or lower_name.startswith("is_"):
+        return "status_flag"
+    if dtype in NUMERIC_TYPES:
+        if any(tok in MEASURE_HINT_TOKENS for tok in tokens):
+            return "measure_additive"
+        return "measure_non_additive"
+    return "dimension_attribute"
+
+
+def _is_measure_eligible(
+    *,
+    col_name: str,
+    data_type: str,
+    semantic_role: str,
+    uniqueness_ratio: float | None,
+) -> tuple[bool, str]:
+    lower = (col_name or "").strip().lower()
+    allowlist = _csv_lower_set(os.getenv("AGENTIC_MEASURE_ALLOWLIST"))
+    denylist = _csv_lower_set(os.getenv("AGENTIC_MEASURE_DENYLIST"))
+    if lower in allowlist:
+        return True, "allowlist_override"
+    if lower in denylist:
+        return False, "denylist_override"
+    if semantic_role in {"identifier_code", "identifier_key", "time_dimension"}:
+        return False, f"semantic_role_{semantic_role}"
+    if data_type not in NUMERIC_TYPES:
+        return False, "non_numeric_type"
+    if lower.endswith("_id") or lower.endswith("_code"):
+        return False, "blocked_id_code_suffix"
+    if uniqueness_ratio is not None and uniqueness_ratio >= _max_uniqueness_ratio():
+        return False, "high_uniqueness_ratio"
+    if semantic_role in {"measure_additive", "measure_ratio_component"}:
+        return True, "measure_role_pass"
+    if semantic_role == "measure_non_additive":
+        # Keep these disabled in Phase 29 until template-first metrics are fully wired.
+        return False, "measure_non_additive_not_enabled"
+    return False, "unsupported_role"
+
+
+def _derive_metric_intent(name: str | None) -> str:
+    lower = (name or "").strip().lower()
+    for token, intent in INTENT_HINT_MAP.items():
+        if token in lower:
+            return intent
+    return "volume"
+
+
+def _eligible_cols_by_token(table: dict[str, Any], tokens: list[str]) -> list[str]:
+    allowed = set(table.get("eligible_numeric_columns") or [])
+    matches: list[str] = []
+    for col in allowed:
+        lower = str(col).lower()
+        if any(tok in lower for tok in tokens):
+            matches.append(col)
+    return matches
+
+
+def _load_domain_templates(domain_id: str | None) -> list[dict[str, Any]]:
+    if not domain_id:
+        return []
+    try:
+        pack = load_pack(f"packs/{domain_id}")
+    except Exception:
+        return []
+    templates = (pack.get("metric_templates") or {}).get("templates") or []
+    return [t for t in templates if isinstance(t, dict) and t.get("name")]
+
+
+def _propose_template_metrics(profiling: dict[str, Any], domain_id: str | None) -> list[dict[str, Any]]:
+    templates = _load_domain_templates(domain_id)
+    if not templates:
+        return []
+    result: list[dict[str, Any]] = []
+    for template in templates:
+        tname = str(template.get("name") or "").strip().lower()
+        ttype = str(template.get("type") or "").strip().lower()
+        for table in profiling.get("tables", []):
+            table_name = table.get("name")
+            if not table_name:
+                continue
+            production_cols = _eligible_cols_by_token(table, ["production", "sales", "volume"])
+            hours_cols = _eligible_cols_by_token(table, ["hour", "hours", "time", "net"])
+            rejection_cols = _eligible_cols_by_token(table, ["reject", "rejection", "failure"])
+            handled_cols = _eligible_cols_by_token(table, ["handled", "total", "count"])
+            if tname.startswith("production"):
+                if not production_cols:
+                    continue
+                pcol = production_cols[0]
+                result.append(
+                    {
+                        "metric_name": tname,
+                        "formula": f"SUM({pcol})",
+                        "base_table": table_name,
+                        "metric_type": "sum",
+                        "metric_intent": "volume",
+                        "semantic_role": "measure_additive",
+                        "measure_confidence": 0.92,
+                        "is_executive_kpi": True,
+                        "metric_source": "template",
+                    }
+                )
+            elif tname == "utilization_pct":
+                if not hours_cols:
+                    continue
+                num = hours_cols[0]
+                den = None
+                for col in hours_cols[1:]:
+                    if "total" in str(col).lower() or "available" in str(col).lower():
+                        den = col
+                        break
+                if not den:
+                    den = hours_cols[1] if len(hours_cols) > 1 else None
+                if not den:
+                    continue
+                result.append(
+                    {
+                        "metric_name": tname,
+                        "formula": f"(SUM({num}) / NULLIF(SUM({den}), 0)) * 100.0",
+                        "base_table": table_name,
+                        "metric_type": "ratio",
+                        "metric_intent": "utilization",
+                        "semantic_role": "measure_ratio_component",
+                        "measure_confidence": 0.88,
+                        "is_executive_kpi": True,
+                        "metric_source": "template",
+                    }
+                )
+            elif tname == "rejection_rate_pct":
+                if not rejection_cols or not handled_cols:
+                    continue
+                rcol = rejection_cols[0]
+                hcol = handled_cols[0]
+                result.append(
+                    {
+                        "metric_name": tname,
+                        "formula": f"(SUM({rcol}) / NULLIF(SUM({hcol}), 0)) * 100.0",
+                        "base_table": table_name,
+                        "metric_type": "ratio",
+                        "metric_intent": "quality",
+                        "semantic_role": "measure_ratio_component",
+                        "measure_confidence": 0.9,
+                        "is_executive_kpi": True,
+                        "metric_source": "template",
+                    }
+                )
+            elif tname == "productivity_avg":
+                if production_cols and hours_cols:
+                    pcol = production_cols[0]
+                    hcol = hours_cols[0]
+                    result.append(
+                        {
+                            "metric_name": tname,
+                            "formula": f"SUM({pcol}) / NULLIF(SUM({hcol}), 0)",
+                            "base_table": table_name,
+                            "metric_type": "ratio",
+                            "metric_intent": "productivity",
+                            "semantic_role": "measure_ratio_component",
+                            "measure_confidence": 0.87,
+                            "is_executive_kpi": True,
+                            "metric_source": "template",
+                        }
+                    )
+                elif production_cols and ttype in {"avg", "average"}:
+                    pcol = production_cols[0]
+                    result.append(
+                        {
+                            "metric_name": tname,
+                            "formula": f"AVG({pcol})",
+                            "base_table": table_name,
+                            "metric_type": "avg",
+                            "metric_intent": "productivity",
+                            "semantic_role": "measure_non_additive",
+                            "measure_confidence": 0.8,
+                            "is_executive_kpi": True,
+                            "metric_source": "template",
+                        }
+                    )
+    dedup: dict[tuple[str, str], dict[str, Any]] = {}
+    for metric in result:
+        key = (metric.get("base_table"), metric.get("metric_name"))
+        if key not in dedup:
+            dedup[key] = metric
+    return list(dedup.values())
 
 
 def _extract_table_candidates(schema_payload: dict) -> list[Any]:
@@ -116,6 +373,8 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
         categorical = [c["name"] for c in columns if c.get("data_type") not in NUMERIC_TYPES | TIME_TYPES]
         samples: dict[str, list[Any]] = {}
         candidate_keys: list[dict[str, Any]] = []
+        key_profile_map: dict[str, dict[str, Any]] = {}
+        column_semantics: list[dict[str, Any]] = []
         row_count = None
         try:
             rows = run_query(
@@ -151,8 +410,13 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
                 logger.warning("profile_tables: failed sampling %s.%s", name, col)
                 samples[col] = []
         # candidate key profiling for id/code columns
-        key_cols = [c.get("name") for c in columns if c.get("name") and (c.get("name").endswith("_id") or c.get("name").endswith("_code"))]
-        for col in key_cols[:3]:
+        key_cols = [
+            c.get("name")
+            for c in columns
+            if c.get("name")
+            and (str(c.get("name")).lower().endswith("_id") or str(c.get("name")).lower().endswith("_code"))
+        ]
+        for col in key_cols:
             try:
                 distinct_rows = run_query(
                     settings,
@@ -171,17 +435,48 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
                         "uniqueness_ratio": (distinct_cnt / row_count) if row_count and distinct_cnt is not None else None,
                     }
                 )
+                key_profile_map[col] = candidate_keys[-1]
             except Exception:
                 logger.warning("profile_tables: failed distinct count %s.%s", name, col)
+        for col in columns:
+            col_name = col.get("name")
+            if not col_name:
+                continue
+            data_type = str(col.get("data_type") or "").lower()
+            semantic_role = _classify_column_semantic_role(str(col_name), data_type)
+            uniqueness_ratio = (key_profile_map.get(col_name) or {}).get("uniqueness_ratio")
+            eligible_measure, eligibility_reason = _is_measure_eligible(
+                col_name=str(col_name),
+                data_type=data_type,
+                semantic_role=semantic_role,
+                uniqueness_ratio=uniqueness_ratio,
+            )
+            column_semantics.append(
+                {
+                    "name": col_name,
+                    "data_type": data_type,
+                    "semantic_role": semantic_role,
+                    "eligible_measure": eligible_measure,
+                    "eligibility_reason": eligibility_reason,
+                    "uniqueness_ratio": uniqueness_ratio,
+                }
+            )
+        eligible_numeric_columns = [
+            c.get("name")
+            for c in column_semantics
+            if c.get("eligible_measure") and c.get("data_type") in NUMERIC_TYPES
+        ]
         profiling["tables"].append(
             {
                 "name": name,
                 "row_count": row_count,
                 "numeric_columns": numeric,
+                "eligible_numeric_columns": eligible_numeric_columns,
                 "time_columns": time_cols,
                 "categorical_columns": categorical,
                 "sample_values": samples,
                 "candidate_keys": candidate_keys,
+                "column_semantics": column_semantics,
             }
         )
     return profiling
@@ -373,46 +668,82 @@ def propose_joins(schema_graph: dict[str, Any], profiling: dict[str, Any] | None
     return joins
 
 
-def propose_metrics(profiling: dict[str, Any]) -> list[dict[str, Any]]:
+def propose_metrics(profiling: dict[str, Any], domain_id: str | None = None) -> list[dict[str, Any]]:
     metrics = []
+    metrics.extend(_propose_template_metrics(profiling, domain_id))
+    existing = {(m.get("base_table"), m.get("metric_name")) for m in metrics}
     for table in profiling.get("tables", []):
-        numeric_cols = table.get("numeric_columns", [])[:10]
+        semantic_map = {c.get("name"): c for c in (table.get("column_semantics") or []) if c.get("name")}
+        numeric_cols = (table.get("eligible_numeric_columns") or [])[:10]
         for col in numeric_cols:
+            semantic_col = semantic_map.get(col) or {}
+            metric_name = f"sum_{col}"
+            if (table.get("name"), metric_name) in existing:
+                continue
             metrics.append(
                 {
-                    "metric_name": f"sum_{col}",
+                    "metric_name": metric_name,
                     "formula": f"SUM({col})",
                     "base_table": table.get("name"),
+                    "semantic_role": semantic_col.get("semantic_role"),
+                    "eligible_measure": True,
+                    "eligibility_reason": semantic_col.get("eligibility_reason"),
+                    "metric_type": "sum",
+                    "metric_intent": _derive_metric_intent(col),
+                    "measure_confidence": 0.72,
+                    "is_executive_kpi": False,
+                    "metric_source": "fallback",
                 }
             )
+            existing.add((table.get("name"), metric_name))
         # derived metrics (productivity / efficiency style)
-        cols = set(table.get("numeric_columns", []) or [])
+        cols = set(table.get("eligible_numeric_columns", []) or [])
         production_cols = [c for c in cols if "production" in c]
         hours_cols = [c for c in cols if "hour" in c]
         if production_cols and hours_cols:
             prod_col = production_cols[0]
             hour_col = hours_cols[0]
+            metric_name = f"productivity_{prod_col}_per_{hour_col}"
+            if (table.get("name"), metric_name) in existing:
+                metric_name = f"{metric_name}_derived"
             metrics.append(
                 {
-                    "metric_name": f"productivity_{prod_col}_per_{hour_col}",
+                    "metric_name": metric_name,
                     "formula": f"SUM({prod_col}) / NULLIF(SUM({hour_col}), 0)",
                     "base_table": table.get("name"),
                     "metric_type": "efficiency",
+                    "eligible_measure": True,
+                    "eligibility_reason": "derived_from_eligible_measures",
+                    "metric_intent": "productivity",
+                    "measure_confidence": 0.84,
+                    "is_executive_kpi": True,
+                    "metric_source": "derived",
                 }
             )
+            existing.add((table.get("name"), metric_name))
         handled_cols = [c for c in cols if "handled" in c]
         reject_cols = [c for c in cols if "rejection" in c or "reject" in c]
         if handled_cols and reject_cols:
             hcol = handled_cols[0]
             rcol = reject_cols[0]
+            metric_name = f"rejection_rate_{rcol}_per_{hcol}"
+            if (table.get("name"), metric_name) in existing:
+                metric_name = f"{metric_name}_derived"
             metrics.append(
                 {
-                    "metric_name": f"rejection_rate_{rcol}_per_{hcol}",
+                    "metric_name": metric_name,
                     "formula": f"SUM({rcol}) / NULLIF(SUM({hcol}), 0)",
                     "base_table": table.get("name"),
                     "metric_type": "rate",
+                    "eligible_measure": True,
+                    "eligibility_reason": "derived_from_eligible_measures",
+                    "metric_intent": "quality",
+                    "measure_confidence": 0.86,
+                    "is_executive_kpi": True,
+                    "metric_source": "derived",
                 }
             )
+            existing.add((table.get("name"), metric_name))
         # utilization metrics (run_time / total_time)
         time_cols = [c for c in cols if "time" in c or "hours" in c]
         run_cols = [c for c in time_cols if "run" in c or "net" in c]
@@ -420,28 +751,48 @@ def propose_metrics(profiling: dict[str, Any]) -> list[dict[str, Any]]:
         if run_cols and total_cols:
             rcol = run_cols[0]
             tcol = total_cols[0]
+            metric_name = f"utilization_{rcol}_per_{tcol}"
+            if (table.get("name"), metric_name) in existing:
+                metric_name = f"{metric_name}_derived"
             metrics.append(
                 {
-                    "metric_name": f"utilization_{rcol}_per_{tcol}",
+                    "metric_name": metric_name,
                     "formula": f"SUM({rcol}) / NULLIF(SUM({tcol}), 0)",
                     "base_table": table.get("name"),
                     "metric_type": "utilization",
+                    "eligible_measure": True,
+                    "eligibility_reason": "derived_from_eligible_measures",
+                    "metric_intent": "utilization",
+                    "measure_confidence": 0.84,
+                    "is_executive_kpi": True,
+                    "metric_source": "derived",
                 }
             )
+            existing.add((table.get("name"), metric_name))
         # yield metrics (good / total)
         good_cols = [c for c in cols if "good" in c or "pass" in c or "ok" in c]
         total_cols = [c for c in cols if "total" in c]
         if good_cols and total_cols:
             gcol = good_cols[0]
             tcol = total_cols[0]
+            metric_name = f"yield_{gcol}_per_{tcol}"
+            if (table.get("name"), metric_name) in existing:
+                metric_name = f"{metric_name}_derived"
             metrics.append(
                 {
-                    "metric_name": f"yield_{gcol}_per_{tcol}",
+                    "metric_name": metric_name,
                     "formula": f"SUM({gcol}) / NULLIF(SUM({tcol}), 0)",
                     "base_table": table.get("name"),
                     "metric_type": "yield",
+                    "eligible_measure": True,
+                    "eligibility_reason": "derived_from_eligible_measures",
+                    "metric_intent": "quality",
+                    "measure_confidence": 0.82,
+                    "is_executive_kpi": True,
+                    "metric_source": "derived",
                 }
             )
+            existing.add((table.get("name"), metric_name))
     return metrics
 
 
@@ -522,7 +873,7 @@ def _pick_dashboard_table(profiling: dict[str, Any]) -> dict[str, Any] | None:
         return None
     scored = []
     for table in tables:
-        numeric = table.get("numeric_columns") or []
+        numeric = table.get("eligible_numeric_columns") or []
         time_cols = table.get("time_columns") or []
         categorical = table.get("categorical_columns") or []
         if not numeric:
@@ -597,7 +948,7 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
     table_name = None
     if picked:
         table_name = picked.get("name")
-        numeric = picked.get("numeric_columns") or []
+        numeric = picked.get("eligible_numeric_columns") or []
         time_cols = picked.get("time_columns") or []
         categorical = picked.get("categorical_columns") or []
         metric_col = numeric[0] if numeric else None
@@ -605,13 +956,22 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
         category_col = categorical[0] if categorical else None
 
     metric_name = None
+    metric_expr = None
+    metric_intent = None
     if metric_col:
         # prefer derived metrics for the picked table if available
-        derived = [m for m in metrics if m.get("base_table") == table_name and m.get("metric_type")]
-        if derived:
-            metric_name = derived[0].get("metric_name")
+        table_metrics = [m for m in metrics if m.get("base_table") == table_name]
+        preferred = [m for m in table_metrics if m.get("is_executive_kpi")]
+        if not preferred:
+            preferred = [m for m in table_metrics if m.get("metric_type")]
+        if preferred:
+            metric_name = preferred[0].get("metric_name")
+            metric_expr = preferred[0].get("formula")
+            metric_intent = preferred[0].get("metric_intent")
+            metric_col = None
         else:
             metric_name = f"sum_{metric_col}"
+            metric_intent = _derive_metric_intent(metric_col)
 
     if table_name:
         view_suggestions.append(
@@ -627,20 +987,23 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
     for table in profiling.get("tables", []):
         if table.get("name") == table_name:
             continue
-        if not (table.get("numeric_columns") and table.get("time_columns")):
+        if not (table.get("eligible_numeric_columns") and table.get("time_columns")):
             continue
         view_suggestions.append(
             {
                 "table": table.get("name"),
                 "time_column": (table.get("time_columns") or [None])[0],
                 "category_column": (table.get("categorical_columns") or [None])[0],
-                "metric_column": (table.get("numeric_columns") or [None])[0],
+                "metric_column": (table.get("eligible_numeric_columns") or [None])[0],
                 "recommended_view": f"{table.get('name')}_overview",
             }
         )
     if not metric_name and metrics:
         metric_name = metrics[0].get("metric_name")
+        metric_expr = metrics[0].get("formula")
+        metric_intent = metrics[0].get("metric_intent")
     metric_name = metric_name or "metric"
+    metric_intent = metric_intent or _derive_metric_intent(metric_name)
 
     charts.append(
         {
@@ -654,8 +1017,10 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
                 table_name=table_name,
             ),
             "metric": metric_name,
+            "metric_intent": metric_intent,
             "table": table_name,
             "metric_column": metric_col,
+            "metric_expr": metric_expr,
             "time_column": time_col,
             "category_column": category_col,
         }
@@ -672,8 +1037,10 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
                 table_name=table_name,
             ),
             "metric": metric_name,
+            "metric_intent": metric_intent,
             "table": table_name,
             "metric_column": metric_col,
+            "metric_expr": metric_expr,
             "time_column": time_col,
             "category_column": category_col,
         }
@@ -690,8 +1057,10 @@ def build_dashboard_spec(metrics: list[dict[str, Any]], profiling: dict[str, Any
                 table_name=table_name,
             ),
             "metric": metric_name,
+            "metric_intent": metric_intent,
             "table": table_name,
             "metric_column": metric_col,
+            "metric_expr": metric_expr,
             "time_column": time_col,
             "category_column": category_col,
         }
@@ -729,18 +1098,42 @@ def propose_chart_candidates(
         table_name = table.get("name")
         if not table_name:
             continue
-        numeric_cols = table.get("numeric_columns") or []
+        numeric_cols = table.get("eligible_numeric_columns") or []
         time_cols = table.get("time_columns") or []
         cat_cols = table.get("categorical_columns") or []
         samples = table.get("sample_values") or {}
-        if not numeric_cols:
+        table_metrics = metrics_by_table.get(table_name, [])
+        approved_metrics = [
+            m
+            for m in table_metrics
+            if m.get("formula")
+            and (m.get("is_executive_kpi") or m.get("metric_type") or m.get("eligible_measure"))
+        ]
+        approved_metrics.sort(
+            key=lambda m: (
+                1 if m.get("is_executive_kpi") else 0,
+                float(m.get("measure_confidence") or 0.0),
+            ),
+            reverse=True,
+        )
+        if not approved_metrics:
+            candidates.append(
+                {
+                    "table": table_name,
+                    "skipped": True,
+                    "reason": "missing_approved_metric",
+                    "semantic_validation": {
+                        "status": "rejected",
+                        "reason": "missing_metric_binding",
+                    },
+                }
+            )
             continue
-        metric_col = numeric_cols[0]
-        metric_name = f"sum_{metric_col}"
-        # prefer derived metrics when available
-        derived_metrics = [m for m in metrics_by_table.get(table_name, []) if m.get("metric_type")]
-        if derived_metrics:
-            metric_name = derived_metrics[0].get("metric_name")
+        selected_metric = approved_metrics[0]
+        metric_name = selected_metric.get("metric_name")
+        metric_expr = selected_metric.get("formula")
+        metric_intent = selected_metric.get("metric_intent") or _derive_metric_intent(metric_name)
+        metric_col = None
         # Trend candidate
         if time_cols:
             candidates.append(
@@ -756,7 +1149,9 @@ def propose_chart_candidates(
                     ),
                     "table": table_name,
                     "metric": metric_name,
+                    "metric_intent": metric_intent,
                     "metric_column": metric_col,
+                    "metric_expr": metric_expr,
                     "time_column": time_cols[0],
                     "category_column": None,
                 }
@@ -782,7 +1177,9 @@ def propose_chart_candidates(
                     ),
                     "table": table_name,
                     "metric": metric_name,
+                    "metric_intent": metric_intent,
                     "metric_column": metric_col,
+                    "metric_expr": metric_expr,
                     "time_column": None,
                     "category_column": best_cat,
                 }
@@ -801,7 +1198,9 @@ def propose_chart_candidates(
                         ),
                         "table": table_name,
                         "metric": metric_name,
+                        "metric_intent": metric_intent,
                         "metric_column": metric_col,
+                        "metric_expr": metric_expr,
                         "time_column": None,
                         "category_column": best_cat,
                     }
@@ -823,7 +1222,9 @@ def propose_chart_candidates(
                             ),
                             "table": table_name,
                             "metric": metric_name,
+                            "metric_intent": metric_intent,
                             "metric_column": metric_col,
+                            "metric_expr": metric_expr,
                             "time_column": time_cols[0],
                             "category_column": col,
                         }
@@ -835,9 +1236,21 @@ def propose_chart_candidates(
             left_table = edge.get("left_table")
             if not left_table:
                 continue
-            left_metrics = metrics_by_table.get(left_table, [])
+            left_metrics = [
+                m
+                for m in (metrics_by_table.get(left_table, []) or [])
+                if m.get("formula")
+                and (m.get("is_executive_kpi") or m.get("metric_type") or m.get("eligible_measure"))
+            ]
             if not left_metrics:
                 continue
+            left_metrics.sort(
+                key=lambda m: (
+                    1 if m.get("is_executive_kpi") else 0,
+                    float(m.get("measure_confidence") or 0.0),
+                ),
+                reverse=True,
+            )
             metric = left_metrics[0]
             candidates.append(
                 {
@@ -852,6 +1265,7 @@ def propose_chart_candidates(
                     ),
                     "table": left_table,
                     "metric": metric.get("metric_name"),
+                    "metric_intent": metric.get("metric_intent") or _derive_metric_intent(metric.get("metric_name")),
                     "metric_column": None,
                     "metric_expr": metric.get("formula"),
                     "time_column": None,
@@ -871,6 +1285,8 @@ def select_charts(
     # score candidates
     scored = []
     for cand in candidates:
+        if cand.get("skipped"):
+            continue
         score = 0
         if cand.get("intent") == "trend":
             score += 3

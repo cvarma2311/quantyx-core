@@ -7959,6 +7959,31 @@ def get_agentic_run(run_id: str) -> dict:
                                                 "Total Production Trend Over Process Date",
                                                 "Total Production by Plant Name"
                                             ],
+                                            "artifacts": {
+                                                "raw_json": {
+                                                    "quality_report": {
+                                                        "gate_passed": True,
+                                                        "quality_score": 0.9,
+                                                        "warnings": [],
+                                                        "blocked_patterns": [],
+                                                        "kpi_mix": {
+                                                            "trend": 2,
+                                                            "breakdown_or_share": 2,
+                                                            "quality_or_rate": 1
+                                                        }
+                                                    },
+                                                    "chart_details": [
+                                                        {
+                                                            "chart_id": "chart_a1b2c3",
+                                                            "metric_intent": "volume",
+                                                            "semantic_validation": {
+                                                                "status": "passed",
+                                                                "reason": "eligible_metric"
+                                                            }
+                                                        }
+                                                    ]
+                                                }
+                                            },
                                         }
                                     ]
                                 },
@@ -8159,6 +8184,37 @@ def _latest_agent_event(run_id: str, agent_name: str, status: str = "completed")
                                         "chart_titles": [
                                             "Total Production Trend Over Process Date",
                                             "Total Production by Plant Name"
+                                        ],
+                                        "quality_report": {
+                                            "gate_passed": True,
+                                            "quality_score": 0.9,
+                                            "warnings": [],
+                                            "blocked_patterns": [],
+                                            "kpi_mix": {
+                                                "trend": 2,
+                                                "breakdown_or_share": 2,
+                                                "quality_or_rate": 1
+                                            }
+                                        },
+                                        "chart_details": [
+                                            {
+                                                "chart_id": "chart_a1b2c3",
+                                                "title": "Total Production Trend Over Process Date",
+                                                "metric_intent": "volume",
+                                                "semantic_validation": {
+                                                    "status": "passed",
+                                                    "reason": "eligible_metric"
+                                                }
+                                            },
+                                            {
+                                                "title": "sum_PaymentErrorCode Trend",
+                                                "skipped": True,
+                                                "reason": "invalid_metric",
+                                                "semantic_validation": {
+                                                    "status": "rejected",
+                                                    "reason": "invalid_metric_role_or_expression"
+                                                }
+                                            }
                                         ]
                                     },
                                     "summary_raw_text": "Dashboard and charts were generated successfully.",
@@ -8442,7 +8498,35 @@ def agentic_run_stream(run_id: str):
                                             "chart_titles": [
                                                 "Total Production Trend Over Process Date",
                                                 "Total Production by Plant Name"
-                                            ]
+                                            ],
+                                            "artifacts": {
+                                                "raw_json": {
+                                                    "dashboard_id": "dash_123",
+                                                    "dashboard_title": "Lpg Production Distribution Dashboard",
+                                                    "quality_report": {
+                                                        "gate_passed": True,
+                                                        "quality_score": 0.9,
+                                                        "warnings": [],
+                                                        "blocked_patterns": [],
+                                                        "kpi_mix": {
+                                                            "trend": 2,
+                                                            "breakdown_or_share": 2,
+                                                            "quality_or_rate": 1
+                                                        }
+                                                    },
+                                                    "chart_details": [
+                                                        {
+                                                            "chart_id": "chart_a1b2c3",
+                                                            "title": "Total Production Trend Over Process Date",
+                                                            "metric_intent": "volume",
+                                                            "semantic_validation": {
+                                                                "status": "passed",
+                                                                "reason": "eligible_metric"
+                                                            }
+                                                        }
+                                                    ]
+                                                }
+                                            }
                                         },
                                         {"sender": "system", "message": "Dashboard ready: Lpg Production Distribution Dashboard"}
                                     ],
@@ -8828,6 +8912,8 @@ def _normalize_dashboard_spec_titles(
                                             ],
                                             "latest_agentic_run_id": "run_123abc456def",
                                             "latest_refresh_id": "dref_a1b2c3d4e5f6",
+                                            "quality_score": 0.9,
+                                            "quality_gate_passed": True,
                                         }
                                     ]
                                 },
@@ -8908,6 +8994,8 @@ def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> Da
                 "latest_refresh_id": latest_refresh_id,
                 "created_at": dash.get("created_at"),
                 "chart_plan": spec.get("chart_plan") or [],
+                "quality_score": ((spec.get("quality") or {}).get("quality_score") if isinstance(spec.get("quality"), dict) else None),
+                "quality_gate_passed": ((spec.get("quality") or {}).get("gate_passed") if isinstance(spec.get("quality"), dict) else None),
             }
         )
     return DashboardListResponse(dashboards=payload)
@@ -8939,9 +9027,25 @@ def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> Da
                                                 "chart_id": "chart_a1b2c3",
                                                 "title": "Total Production Trend Over Process Date",
                                                 "chart_title": "Total Production Trend Over Process Date",
-                                                "dashboard_title": "Lpg Production Distribution Dashboard"
+                                                "dashboard_title": "Lpg Production Distribution Dashboard",
+                                                "metric_intent": "volume",
+                                                "semantic_validation": {
+                                                    "status": "passed",
+                                                    "reason": "eligible_metric"
+                                                }
                                             }
-                                        ]
+                                        ],
+                                        "quality": {
+                                            "gate_passed": True,
+                                            "quality_score": 0.9,
+                                            "warnings": [],
+                                            "blocked_patterns": [],
+                                            "kpi_mix": {
+                                                "trend": 2,
+                                                "breakdown_or_share": 2,
+                                                "quality_or_rate": 1
+                                            }
+                                        }
                                     },
                                 },
                             }
@@ -9612,7 +9716,16 @@ def dashboard_refresh_stream(dashboard_id: str, refresh_id: str):
                                     "inference_raw_text": "Composite inference generation will include chart-level deltas and trend direction.",
                                     "inference_html": "<section><h4>Dashboard Inference</h4><p>Composite inference generation will include chart-level deltas and trend direction.</p></section>",
                                     "evidence_json": {"chart_count": 6},
-                                    "quality_json": {"confidence": 0.6, "warnings": ["phase_23_1_placeholder_insights"]},
+                                    "quality_json": {
+                                        "confidence": 0.9,
+                                        "warnings": [],
+                                        "gate_passed": True,
+                                        "kpi_mix": {
+                                            "trend": 2,
+                                            "breakdown_or_share": 2,
+                                            "quality_or_rate": 1
+                                        }
+                                    },
                                     "created_at": "2026-03-06T11:20:07Z",
                                     "updated_at": "2026-03-06T11:20:07Z",
                                 },
