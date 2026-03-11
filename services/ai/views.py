@@ -147,22 +147,61 @@ def create_views_from_schema(
     schema_name: str,
     schema_payload: dict[str, Any],
 ) -> list[str]:
+    def _table_names(payload: dict[str, Any]) -> list[str]:
+        names: list[str] = []
+        if isinstance(payload.get("tables"), list):
+            for item in payload.get("tables") or []:
+                if isinstance(item, str):
+                    names.append(item)
+                elif isinstance(item, dict):
+                    name = item.get("table") or item.get("name") or item.get("table_name")
+                    if name:
+                        names.append(str(name))
+        for schema in payload.get("schemas", []) or []:
+            if not isinstance(schema, dict):
+                continue
+            for item in schema.get("tables", []) or []:
+                if isinstance(item, str):
+                    names.append(item)
+                elif isinstance(item, dict):
+                    name = item.get("table") or item.get("name") or item.get("table_name")
+                    if name:
+                        names.append(str(name))
+        for connection in payload.get("connections", []) or []:
+            if not isinstance(connection, dict):
+                continue
+            for database in connection.get("databases", []) or []:
+                if not isinstance(database, dict):
+                    continue
+                for schema in database.get("schemas", []) or []:
+                    if not isinstance(schema, dict):
+                        continue
+                    for item in schema.get("tables", []) or []:
+                        if isinstance(item, str):
+                            names.append(item)
+                        elif isinstance(item, dict):
+                            name = item.get("table") or item.get("name") or item.get("table_name")
+                            if name:
+                                names.append(str(name))
+        # preserve order while deduping
+        return list(dict.fromkeys([n for n in names if n]))
+
     created: list[str] = []
-    for table in schema_payload.get("tables", []) or []:
-        name = table.get("table")
-        if not name:
-            continue
-        created.append(
-            ensure_fact_view(
-                settings,
-                tenant_id,
-                domain_id,
-                connection_id,
-                database_name,
-                schema_name,
-                name,
+    for name in _table_names(schema_payload):
+        try:
+            created.append(
+                ensure_fact_view(
+                    settings,
+                    tenant_id,
+                    domain_id,
+                    connection_id,
+                    database_name,
+                    schema_name,
+                    name,
+                )
             )
-        )
+        except Exception:
+            logger.warning("views.create_fact_view_failed | schema=%s table=%s", schema_name, name, exc_info=True)
     return created
 
 

@@ -28,13 +28,43 @@ def _qident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
+def _extract_table_candidates(schema_payload: dict) -> list[Any]:
+    # Supports multiple payload shapes:
+    # 1) {"tables":[...]}
+    # 2) {"schemas":[{"tables":[...]}]}
+    # 3) {"connections":[{"databases":[{"schemas":[{"tables":[...]}]}]}]}
+    tables: list[Any] = []
+    if isinstance(schema_payload.get("tables"), list):
+        tables.extend(schema_payload.get("tables") or [])
+    for schema in schema_payload.get("schemas", []) or []:
+        if isinstance(schema, dict) and isinstance(schema.get("tables"), list):
+            tables.extend(schema.get("tables") or [])
+    for connection in schema_payload.get("connections", []) or []:
+        if not isinstance(connection, dict):
+            continue
+        for database in connection.get("databases", []) or []:
+            if not isinstance(database, dict):
+                continue
+            for schema in database.get("schemas", []) or []:
+                if isinstance(schema, dict) and isinstance(schema.get("tables"), list):
+                    tables.extend(schema.get("tables") or [])
+    return tables
+
+
 def build_schema_graph(schema_payload: dict) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
     tables = []
-    for table in schema_payload.get("tables", []) or []:
-        table_name = table.get("table") or table.get("name") or table.get("table_name")
+    for table in _extract_table_candidates(schema_payload):
+        if isinstance(table, str):
+            table_name = table
+            table_columns = []
+        elif isinstance(table, dict):
+            table_name = table.get("table") or table.get("name") or table.get("table_name")
+            table_columns = table.get("columns", []) or []
+        else:
+            continue
         columns = []
-        for col in table.get("columns", []) or []:
+        for col in table_columns:
             col_name = col.get("name") or col.get("column") or col.get("column_name")
             col_type = col.get("data_type") or col.get("type") or col.get("column_type")
             columns.append(
@@ -57,7 +87,30 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
         name = table.get("name")
         if not name:
             continue
-        columns = table.get("columns", [])
+        columns = list(table.get("columns", []) or [])
+        if not columns:
+            try:
+                col_rows = run_query(
+                    settings,
+                    """
+                    SELECT column_name, data_type
+                      FROM information_schema.columns
+                     WHERE table_schema = %s
+                       AND table_name = %s
+                     ORDER BY ordinal_position
+                    """,
+                    [schema_name, name],
+                )
+                columns = [
+                    {
+                        "name": row.get("column_name"),
+                        "data_type": str(row.get("data_type") or "").lower(),
+                    }
+                    for row in col_rows
+                    if row.get("column_name")
+                ]
+            except Exception:
+                logger.warning("profile_tables: failed loading column metadata %s.%s", schema_name, name)
         numeric = [c["name"] for c in columns if c.get("data_type") in NUMERIC_TYPES]
         time_cols = [c["name"] for c in columns if c.get("data_type") in TIME_TYPES]
         categorical = [c["name"] for c in columns if c.get("data_type") not in NUMERIC_TYPES | TIME_TYPES]
