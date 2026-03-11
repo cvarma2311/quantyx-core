@@ -8421,30 +8421,6 @@ def agentic_run_stream(run_id: str):
     summary="List agentic run chat log",
     description="Return stored chat/summary stream messages for a run.",
     openapi_extra={
-        "parameters": [
-            {
-                "name": "limit",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "integer", "default": 50, "minimum": 1, "maximum": 2000},
-                "description": "Maximum number of chat summary messages to return in chronological order.",
-                "examples": {
-                    "first_page": {"summary": "Fetch first 50", "value": 50},
-                    "smaller_page": {"summary": "Fetch first 20", "value": 20},
-                },
-            },
-            {
-                "name": "cursor",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "description": "Opaque cursor for pagination. Use `paging.next_cursor` from previous response.",
-                "examples": {
-                    "first_page": {"summary": "First page request", "value": None},
-                    "second_page": {"summary": "Next page cursor from previous response", "value": "NTA="},
-                },
-            }
-        ],
         "responses": {
             "200": {
                 "content": {
@@ -8519,8 +8495,24 @@ def agentic_run_stream(run_id: str):
 )
 def get_agentic_run_chat(
     run_id: str,
-    limit: int = 50,
-    cursor: str | None = None,
+    limit: int = Query(
+        50,
+        ge=1,
+        le=2000,
+        description="Maximum number of chat summary messages to return in chronological order.",
+        openapi_examples={
+            "first_page": {"summary": "Fetch first 50", "value": 50},
+            "smaller_page": {"summary": "Fetch first 20", "value": 20},
+        },
+    ),
+    cursor: str | None = Query(
+        None,
+        description="Opaque cursor for pagination. Use `paging.next_cursor` from previous response.",
+        openapi_examples={
+            "first_page": {"summary": "First page request", "value": None},
+            "second_page": {"summary": "Next page cursor from previous response", "value": "NTA="},
+        },
+    ),
     include: str | None = None,
     include_stages: bool = True,
     sender: str | None = None,
