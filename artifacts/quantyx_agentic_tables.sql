@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS public.quantyx_agent_event_artifacts (
 CREATE INDEX IF NOT EXISTS idx_agent_event_artifacts_run
   ON public.quantyx_agent_event_artifacts (run_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_agent_event_artifacts_run_event
+  ON public.quantyx_agent_event_artifacts (run_id, event_id);
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_event_artifacts_stage
   ON public.quantyx_agent_event_artifacts (logical_event_id, stage_name);
 

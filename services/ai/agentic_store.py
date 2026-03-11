@@ -218,6 +218,34 @@ def get_agent_event_artifact(settings: Settings, run_id: str, event_id: str) -> 
     return rows[0] if rows else None
 
 
+def list_agent_event_artifacts_by_event_ids(
+    settings: Settings,
+    run_id: str,
+    event_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    ids = [str(eid) for eid in event_ids if str(eid).strip()]
+    if not ids:
+        return {}
+    rows = run_query(
+        settings,
+        """
+        SELECT artifact_id, event_id, logical_event_id, run_id, agent_name, stage_name,
+               raw_json, summary_raw_text, summary_html, inference_raw_text, inference_html, truncation,
+               created_at, updated_at
+          FROM public.quantyx_agent_event_artifacts
+         WHERE run_id = %s
+           AND event_id = ANY(%s)
+        """,
+        [run_id, ids],
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        eid = row.get("event_id")
+        if eid:
+            out[str(eid)] = row
+    return out
+
+
 def append_agent_chat_log_stage(
     settings: Settings,
     run_id: str,

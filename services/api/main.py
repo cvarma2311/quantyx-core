@@ -133,6 +133,7 @@ from services.ai.agentic_store import (
     get_agent_run,
     list_agent_chat_log,
     get_agent_event_artifact,
+    list_agent_event_artifacts_by_event_ids,
     append_plan_summary,
 )
 from services.ai.agentic_orchestrator import run_agentic_workflow
@@ -7310,19 +7311,75 @@ def workspace_delete_conversation(conversation_id: str) -> dict:
     tags=["workspace"],
     summary="List conversation messages",
     openapi_extra={
+        "parameters": [
+            {
+                "name": "limit",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "default": 200, "minimum": 1, "maximum": 2000},
+                "description": "Maximum number of messages to return.",
+            },
+            {
+                "name": "cursor",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Opaque cursor for pagination. Use `paging.next_cursor` from previous response.",
+            },
+        ],
         "responses": {
             "200": {
                 "content": {
                     "application/json": {
                         "examples": {
-                            "messages": {
-                                "summary": "Conversation message list",
+                            "first_page": {
+                                "summary": "First page",
                                 "value": {
                                     "conversation_id": "conv_6f0f0f",
                                     "messages": [
                                         {"sender": "user", "message_text": "Show production trend"},
                                         {"sender": "assistant", "message_text": "Returned 120 rows for production_mt."},
                                     ],
+                                    "paging": {
+                                        "limit": 50,
+                                        "cursor": None,
+                                        "returned": 50,
+                                        "has_more": True,
+                                        "next_cursor": "NTA="
+                                    }
+                                },
+                            },
+                            "next_page": {
+                                "summary": "Next page",
+                                "value": {
+                                    "conversation_id": "conv_6f0f0f",
+                                    "messages": [
+                                        {"sender": "user", "message_text": "Show pending by region"},
+                                        {"sender": "assistant", "message_text": "North leads pending backlog."}
+                                    ],
+                                    "paging": {
+                                        "limit": 50,
+                                        "cursor": "NTA=",
+                                        "returned": 50,
+                                        "has_more": True,
+                                        "next_cursor": "MTAw"
+                                    }
+                                },
+                            },
+                            "last_page": {
+                                "summary": "Last page",
+                                "value": {
+                                    "conversation_id": "conv_6f0f0f",
+                                    "messages": [
+                                        {"sender": "assistant", "message_text": "Conversation complete."}
+                                    ],
+                                    "paging": {
+                                        "limit": 50,
+                                        "cursor": "MTAw",
+                                        "returned": 8,
+                                        "has_more": False,
+                                        "next_cursor": None
+                                    }
                                 },
                             }
                         }
@@ -7332,12 +7389,36 @@ def workspace_delete_conversation(conversation_id: str) -> dict:
         }
     },
 )
-def workspace_list_conversation_messages(conversation_id: str, limit: int = 200) -> dict:
+def workspace_list_conversation_messages(conversation_id: str, limit: int = 200, cursor: str | None = None) -> dict:
     conversation = get_workspace_conversation(settings, conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    rows = list_workspace_messages(settings, conversation_id, limit=limit)
-    return {"conversation_id": conversation_id, "messages": rows}
+    bounded_limit = max(1, min(int(limit), 2000))
+    if cursor:
+        try:
+            cursor_value = _decode_cursor(cursor)
+            start_offset = max(0, int(cursor_value))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid cursor") from exc
+    else:
+        start_offset = 0
+    fetch_window = min(5000, start_offset + bounded_limit + 1)
+    rows = list_workspace_messages(settings, conversation_id, limit=fetch_window)
+    page = rows[start_offset : start_offset + bounded_limit + 1]
+    has_more = len(page) > bounded_limit
+    messages = page[:bounded_limit]
+    next_cursor = _encode_cursor(str(start_offset + bounded_limit)) if has_more else None
+    return {
+        "conversation_id": conversation_id,
+        "messages": messages,
+        "paging": {
+            "limit": bounded_limit,
+            "cursor": cursor,
+            "returned": len(messages),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+        },
+    }
 
 
 @app.get(
@@ -7946,6 +8027,13 @@ def _list_events_v2(
 ) -> list[dict]:
     include_tokens = _parse_include_tokens(include, default_tokens={"raw_json", "summary", "inference", "html"})
     rows = list_agent_run_events_stage_aware(settings, run_id, limit=limit)
+    event_ids = [str(row.get("event_id")) for row in rows if row.get("event_id")]
+    artifact_by_event_id: dict[str, dict] = {}
+    if event_ids:
+        try:
+            artifact_by_event_id = list_agent_event_artifacts_by_event_ids(settings, run_id, event_ids)
+        except Exception:
+            artifact_by_event_id = {}
     events: list[dict] = []
     for row in rows:
         if stage_name and row.get("stage_name") != stage_name:
@@ -7955,13 +8043,8 @@ def _list_events_v2(
         item = dict(row)
         event_id = item.get("event_id")
         artifact_payload = item.get("artifacts")
-        if event_id:
-            try:
-                artifact_row = get_agent_event_artifact(settings, run_id, str(event_id))
-            except Exception:
-                artifact_row = None
-            if artifact_row:
-                artifact_payload = _filter_artifact_payload(artifact_row, include_tokens)
+        if event_id and str(event_id) in artifact_by_event_id:
+            artifact_payload = _filter_artifact_payload(artifact_by_event_id[str(event_id)], include_tokens)
         item["artifacts"] = _filter_artifact_payload(artifact_payload, include_tokens)
         events.append(item)
     return events
@@ -8343,8 +8426,23 @@ def agentic_run_stream(run_id: str):
                 "name": "limit",
                 "in": "query",
                 "required": False,
-                "schema": {"type": "integer", "default": 200, "minimum": 1, "maximum": 2000},
+                "schema": {"type": "integer", "default": 50, "minimum": 1, "maximum": 2000},
                 "description": "Maximum number of chat summary messages to return in chronological order.",
+                "examples": {
+                    "first_page": {"summary": "Fetch first 50", "value": 50},
+                    "smaller_page": {"summary": "Fetch first 20", "value": 20},
+                },
+            },
+            {
+                "name": "cursor",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Opaque cursor for pagination. Use `paging.next_cursor` from previous response.",
+                "examples": {
+                    "first_page": {"summary": "First page request", "value": None},
+                    "second_page": {"summary": "Next page cursor from previous response", "value": "NTA="},
+                },
             }
         ],
         "responses": {
@@ -8352,8 +8450,8 @@ def agentic_run_stream(run_id: str):
                 "content": {
                     "application/json": {
                         "examples": {
-                            "chat": {
-                                "summary": "Chat summary",
+                            "first_50": {
+                                "summary": "First 50 messages (cursor omitted)",
                                 "value": {
                                     "messages": [
                                         {"sender": "system", "message": "Plan created: Scan schema; Build semantics; Create dashboards"},
@@ -8371,7 +8469,45 @@ def agentic_run_stream(run_id: str):
                                             ]
                                         },
                                         {"sender": "system", "message": "Dashboard ready: Lpg Production Distribution Dashboard"}
-                                    ]
+                                    ],
+                                    "paging": {
+                                        "limit": 50,
+                                        "cursor": None,
+                                        "returned": 50,
+                                        "has_more": True,
+                                        "next_cursor": "NTA="
+                                    }
+                                },
+                            },
+                            "next_50": {
+                                "summary": "Next 50 messages using previous next_cursor",
+                                "value": {
+                                    "messages": [
+                                        {"sender": "agent", "message": "Metric Agent completed"},
+                                        {"sender": "agent", "message": "Semantic Model Agent completed"}
+                                    ],
+                                    "paging": {
+                                        "limit": 50,
+                                        "cursor": "NTA=",
+                                        "returned": 50,
+                                        "has_more": True,
+                                        "next_cursor": "MTAw"
+                                    }
+                                },
+                            },
+                            "last_page": {
+                                "summary": "Last page (no more records)",
+                                "value": {
+                                    "messages": [
+                                        {"sender": "agent", "message": "Dashboard Agent completed"}
+                                    ],
+                                    "paging": {
+                                        "limit": 50,
+                                        "cursor": "MTAw",
+                                        "returned": 13,
+                                        "has_more": False,
+                                        "next_cursor": None
+                                    }
                                 },
                             }
                         }
@@ -8383,27 +8519,29 @@ def agentic_run_stream(run_id: str):
 )
 def get_agentic_run_chat(
     run_id: str,
-    limit: int = 200,
+    limit: int = 50,
+    cursor: str | None = None,
     include: str | None = None,
     include_stages: bool = True,
     sender: str | None = None,
 ) -> dict:
-    include_tokens = _parse_include_tokens(include, default_tokens={"raw_json", "summary", "inference", "html"})
-    rows = list_agent_chat_log(settings, run_id, limit=max(limit, 2000))
+    bounded_limit = max(1, min(int(limit), 2000))
+    if cursor:
+        try:
+            cursor_value = _decode_cursor(cursor)
+            start_offset = max(0, int(cursor_value))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid cursor") from exc
+    else:
+        start_offset = 0
+    fetch_window = min(2000, start_offset + bounded_limit + 1)
+    rows = list_agent_chat_log(settings, run_id, limit=fetch_window)
     base_messages: list[dict] = []
     for row in rows:
         item = dict(row)
         if include_stages and item.get("sender") == "agent":
             # Agent lifecycle replay comes from stage-aware events to keep parity with stream payloads.
             continue
-        event_id = item.get("event_id")
-        if include_stages and event_id:
-            try:
-                artifact = get_agent_event_artifact(settings, run_id, str(event_id))
-            except Exception:
-                artifact = None
-            if artifact:
-                item["artifacts"] = _filter_artifact_payload(artifact, include_tokens)
         if not include_stages:
             item.pop("event_id", None)
             item.pop("stage_name", None)
@@ -8411,7 +8549,7 @@ def get_agentic_run_chat(
         base_messages.append(item)
 
     if include_stages:
-        stage_messages = _events_as_chat_messages(run_id=run_id, limit=max(limit, 2000), include=include)
+        stage_messages = _events_as_chat_messages(run_id=run_id, limit=2000, include=include)
         all_messages = base_messages + stage_messages
     else:
         all_messages = base_messages
@@ -8436,8 +8574,20 @@ def get_agentic_run_chat(
         deduped = [msg for msg in deduped if msg.get("sender") == sender]
 
     deduped.sort(key=lambda item: str(item.get("created_at") or ""))
-    messages = deduped[:limit]
-    return {"messages": messages, "paging": {"limit": limit, "returned": len(messages)}}
+    page = deduped[start_offset : start_offset + bounded_limit + 1]
+    has_more = len(page) > bounded_limit
+    messages = page[:bounded_limit]
+    next_cursor = _encode_cursor(str(start_offset + bounded_limit)) if has_more else None
+    return {
+        "messages": messages,
+        "paging": {
+            "limit": bounded_limit,
+            "cursor": cursor,
+            "returned": len(messages),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+        },
+    }
 
 
 @app.get(
@@ -9222,6 +9372,13 @@ def get_dashboard_refresh(dashboard_id: str, refresh_id: str) -> dict:
                 "required": False,
                 "schema": {"type": "integer", "default": 200, "minimum": 1, "maximum": 2000},
                 "description": "Maximum number of refresh events to return.",
+            },
+            {
+                "name": "cursor",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Opaque cursor for pagination. Use `paging.next_cursor` from previous response.",
             }
         ],
         "responses": {
@@ -9229,8 +9386,8 @@ def get_dashboard_refresh(dashboard_id: str, refresh_id: str) -> dict:
                 "content": {
                     "application/json": {
                         "examples": {
-                            "events": {
-                                "summary": "Refresh stage events",
+                            "first_page": {
+                                "summary": "First page",
                                 "value": {
                                     "events": [
                                         {
@@ -9277,7 +9434,45 @@ def get_dashboard_refresh(dashboard_id: str, refresh_id: str) -> dict:
                                             "created_at": "2026-03-06T11:20:07Z",
                                         },
                                     ],
-                                    "paging": {"limit": 200, "returned": 4},
+                                    "paging": {
+                                        "limit": 2,
+                                        "cursor": None,
+                                        "returned": 2,
+                                        "has_more": True,
+                                        "next_cursor": "Mg=="
+                                    },
+                                },
+                            },
+                            "next_page": {
+                                "summary": "Next page",
+                                "value": {
+                                    "events": [
+                                        {
+                                            "event_id": "drevt_223",
+                                            "refresh_id": "dref_a1b2c3d4e5f6",
+                                            "dashboard_id": "dash_123",
+                                            "stage_name": "charts_refreshed",
+                                            "message": "Dashboard charts refreshed: 6",
+                                            "artifacts": {"chart_count": 6, "regenerate_titles": true},
+                                            "created_at": "2026-03-06T11:20:03Z"
+                                        },
+                                        {
+                                            "event_id": "drevt_333",
+                                            "refresh_id": "dref_a1b2c3d4e5f6",
+                                            "dashboard_id": "dash_123",
+                                            "stage_name": "completed",
+                                            "message": "Dashboard refresh completed",
+                                            "artifacts": {"chart_count": 6},
+                                            "created_at": "2026-03-06T11:20:07Z"
+                                        }
+                                    ],
+                                    "paging": {
+                                        "limit": 2,
+                                        "cursor": "Mg==",
+                                        "returned": 2,
+                                        "has_more": False,
+                                        "next_cursor": None
+                                    },
                                 },
                             }
                         }
@@ -9287,17 +9482,45 @@ def get_dashboard_refresh(dashboard_id: str, refresh_id: str) -> dict:
         },
     },
 )
-def get_dashboard_refresh_events(dashboard_id: str, refresh_id: str, limit: int = 200) -> dict:
+def get_dashboard_refresh_events(
+    dashboard_id: str,
+    refresh_id: str,
+    limit: int = 200,
+    cursor: str | None = None,
+) -> dict:
     row = get_dashboard_refresh_run(settings, dashboard_id, refresh_id)
     if not row:
         raise HTTPException(status_code=404, detail="Dashboard refresh run not found")
-    events = list_dashboard_refresh_events(
+    bounded_limit = max(1, min(int(limit), 2000))
+    if cursor:
+        try:
+            cursor_value = _decode_cursor(cursor)
+            start_offset = max(0, int(cursor_value))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid cursor") from exc
+    else:
+        start_offset = 0
+    fetch_window = min(5000, start_offset + bounded_limit + 1)
+    events_all = list_dashboard_refresh_events(
         settings,
         dashboard_id=dashboard_id,
         refresh_id=refresh_id,
-        limit=limit,
+        limit=fetch_window,
     )
-    return {"events": events, "paging": {"limit": limit, "returned": len(events)}}
+    page = events_all[start_offset : start_offset + bounded_limit + 1]
+    has_more = len(page) > bounded_limit
+    events = page[:bounded_limit]
+    next_cursor = _encode_cursor(str(start_offset + bounded_limit)) if has_more else None
+    return {
+        "events": events,
+        "paging": {
+            "limit": bounded_limit,
+            "cursor": cursor,
+            "returned": len(events),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+        },
+    }
 
 
 @app.get(
