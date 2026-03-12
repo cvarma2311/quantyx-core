@@ -51,9 +51,30 @@ def purge_tenant_data(
                 "quantyx_query_audit",
                 "quantyx_insight_events",
                 "quantyx_fact_views_registry",
+                "quantyx_agent_run_events",
+                "quantyx_agent_chat_log",
+                "quantyx_agent_event_artifacts",
+                "quantyx_chart_events",
+                "quantyx_dashboard_refresh_events",
+                "quantyx_dashboard_chart_snapshots",
+                "quantyx_dashboard_insight_artifacts",
             ]
             # Delete children before parents to avoid FK violations.
             deletion_order = [
+                "quantyx_workspace_conversation_memory",
+                "quantyx_workspace_messages",
+                "quantyx_workspace_conversations",
+                "quantyx_agent_event_artifacts",
+                "quantyx_agent_chat_log",
+                "quantyx_agent_run_events",
+                "quantyx_dashboard_refresh_events",
+                "quantyx_dashboard_chart_snapshots",
+                "quantyx_dashboard_insight_artifacts",
+                "quantyx_dashboard_refresh_runs",
+                "quantyx_chart_events",
+                "quantyx_chart_requests",
+                "quantyx_dashboard_specs",
+                "quantyx_agent_runs",
                 "quantyx_fact_views_registry",
                 "quantyx_context_extraction_agents",
                 "quantyx_context_file_links",
@@ -340,6 +361,188 @@ def purge_tenant_data(
                         USING public.quantyx_tenant_domains d
                         WHERE d.domain_id = i.domain_id
                           AND d.tenant_id = %s
+                        """,
+                        [tenant_id],
+                    )
+                    results.append({"table": table, "rows": cur.rowcount})
+                    continue
+                if table == "quantyx_agent_run_events":
+                    if dry_run:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS count
+                              FROM public.quantyx_agent_run_events e
+                              JOIN public.quantyx_agent_runs r
+                                ON r.run_id = e.run_id
+                             WHERE r.tenant_id = %s
+                            """,
+                            [tenant_id],
+                        )
+                        count = cur.fetchone()["count"]
+                        results.append({"table": table, "rows": int(count)})
+                        continue
+                    cur.execute(
+                        """
+                        DELETE FROM public.quantyx_agent_run_events e
+                        USING public.quantyx_agent_runs r
+                        WHERE r.run_id = e.run_id
+                          AND r.tenant_id = %s
+                        """,
+                        [tenant_id],
+                    )
+                    results.append({"table": table, "rows": cur.rowcount})
+                    continue
+                if table == "quantyx_agent_chat_log":
+                    if dry_run:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS count
+                              FROM public.quantyx_agent_chat_log l
+                              JOIN public.quantyx_agent_runs r
+                                ON r.run_id = l.run_id
+                             WHERE r.tenant_id = %s
+                            """,
+                            [tenant_id],
+                        )
+                        count = cur.fetchone()["count"]
+                        results.append({"table": table, "rows": int(count)})
+                        continue
+                    cur.execute(
+                        """
+                        DELETE FROM public.quantyx_agent_chat_log l
+                        USING public.quantyx_agent_runs r
+                        WHERE r.run_id = l.run_id
+                          AND r.tenant_id = %s
+                        """,
+                        [tenant_id],
+                    )
+                    results.append({"table": table, "rows": cur.rowcount})
+                    continue
+                if table == "quantyx_agent_event_artifacts":
+                    if dry_run:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS count
+                              FROM public.quantyx_agent_event_artifacts a
+                              JOIN public.quantyx_agent_runs r
+                                ON r.run_id = a.run_id
+                             WHERE r.tenant_id = %s
+                            """,
+                            [tenant_id],
+                        )
+                        count = cur.fetchone()["count"]
+                        results.append({"table": table, "rows": int(count)})
+                        continue
+                    cur.execute(
+                        """
+                        DELETE FROM public.quantyx_agent_event_artifacts a
+                        USING public.quantyx_agent_runs r
+                        WHERE r.run_id = a.run_id
+                          AND r.tenant_id = %s
+                        """,
+                        [tenant_id],
+                    )
+                    results.append({"table": table, "rows": cur.rowcount})
+                    continue
+                if table == "quantyx_chart_events":
+                    if dry_run:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS count
+                              FROM public.quantyx_chart_events e
+                              JOIN public.quantyx_chart_requests r
+                                ON r.chart_id = e.chart_id
+                             WHERE r.tenant_id = %s
+                            """,
+                            [tenant_id],
+                        )
+                        count = cur.fetchone()["count"]
+                        results.append({"table": table, "rows": int(count)})
+                        continue
+                    cur.execute(
+                        """
+                        DELETE FROM public.quantyx_chart_events e
+                        USING public.quantyx_chart_requests r
+                        WHERE r.chart_id = e.chart_id
+                          AND r.tenant_id = %s
+                        """,
+                        [tenant_id],
+                    )
+                    results.append({"table": table, "rows": cur.rowcount})
+                    continue
+                if table == "quantyx_dashboard_refresh_events":
+                    if dry_run:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS count
+                              FROM public.quantyx_dashboard_refresh_events e
+                              JOIN public.quantyx_dashboard_refresh_runs r
+                                ON r.refresh_id = e.refresh_id
+                             WHERE r.tenant_id = %s
+                            """,
+                            [tenant_id],
+                        )
+                        count = cur.fetchone()["count"]
+                        results.append({"table": table, "rows": int(count)})
+                        continue
+                    cur.execute(
+                        """
+                        DELETE FROM public.quantyx_dashboard_refresh_events e
+                        USING public.quantyx_dashboard_refresh_runs r
+                        WHERE r.refresh_id = e.refresh_id
+                          AND r.tenant_id = %s
+                        """,
+                        [tenant_id],
+                    )
+                    results.append({"table": table, "rows": cur.rowcount})
+                    continue
+                if table == "quantyx_dashboard_chart_snapshots":
+                    if dry_run:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS count
+                              FROM public.quantyx_dashboard_chart_snapshots s
+                              JOIN public.quantyx_dashboard_refresh_runs r
+                                ON r.refresh_id = s.refresh_id
+                             WHERE r.tenant_id = %s
+                            """,
+                            [tenant_id],
+                        )
+                        count = cur.fetchone()["count"]
+                        results.append({"table": table, "rows": int(count)})
+                        continue
+                    cur.execute(
+                        """
+                        DELETE FROM public.quantyx_dashboard_chart_snapshots s
+                        USING public.quantyx_dashboard_refresh_runs r
+                        WHERE r.refresh_id = s.refresh_id
+                          AND r.tenant_id = %s
+                        """,
+                        [tenant_id],
+                    )
+                    results.append({"table": table, "rows": cur.rowcount})
+                    continue
+                if table == "quantyx_dashboard_insight_artifacts":
+                    if dry_run:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS count
+                              FROM public.quantyx_dashboard_insight_artifacts a
+                              JOIN public.quantyx_dashboard_refresh_runs r
+                                ON r.refresh_id = a.refresh_id
+                             WHERE r.tenant_id = %s
+                            """,
+                            [tenant_id],
+                        )
+                        count = cur.fetchone()["count"]
+                        results.append({"table": table, "rows": int(count)})
+                        continue
+                    cur.execute(
+                        """
+                        DELETE FROM public.quantyx_dashboard_insight_artifacts a
+                        USING public.quantyx_dashboard_refresh_runs r
+                        WHERE r.refresh_id = a.refresh_id
+                          AND r.tenant_id = %s
                         """,
                         [tenant_id],
                     )

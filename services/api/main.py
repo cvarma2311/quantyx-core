@@ -2576,6 +2576,47 @@ def get_tenant_domain_api(tenant_id: str) -> dict:
     tags=["admin"],
     summary="Purge tenant data",
     description="Delete all rows in public tables that contain tenant_id.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "dry_run": {
+                            "summary": "Preview rows that would be deleted",
+                            "value": {"tenant_id": "DEBUG_LPG_001", "dry_run": True},
+                        },
+                        "purge_confirmed": {
+                            "summary": "Purge tenant data",
+                            "value": {"tenant_id": "DEBUG_LPG_001", "confirm": True, "dry_run": False},
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "result": {
+                                "summary": "Purge results by table",
+                                "value": {
+                                    "ok": True,
+                                    "dry_run": False,
+                                    "tenant_id": "DEBUG_LPG_001",
+                                    "tables": [
+                                        {"table": "quantyx_agent_runs", "rows": 1},
+                                        {"table": "quantyx_agent_run_events", "rows": 120},
+                                        {"table": "quantyx_workspace_messages", "rows": 42},
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
 )
 def purge_tenant(payload: dict) -> dict:
     tenant_id = payload.get("tenant_id")
