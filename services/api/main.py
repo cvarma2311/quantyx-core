@@ -128,6 +128,8 @@ from services.ai.agentic_store import (
     create_agent_run,
     update_agent_run_status,
     append_agent_run_event,
+    append_agent_run_stage_event,
+    append_agent_chat_log,
     list_agent_run_events,
     list_agent_run_events_stage_aware,
     get_agent_run,
@@ -1233,6 +1235,43 @@ def _execute_job(job: dict) -> dict:
             return {"run_id": run_id, "status": "completed"}
         except Exception as exc:  # noqa: BLE001
             mark_run_status(settings, run_id, "failed")
+            error_artifacts = {
+                "error_message": str(exc),
+                "error_type": exc.__class__.__name__,
+            }
+            try:
+                stage = append_agent_run_stage_event(
+                    settings,
+                    run_id,
+                    "WorkflowAgent",
+                    "failed",
+                    "Agentic workflow failed",
+                    artifacts=error_artifacts,
+                )
+                append_agent_chat_log(
+                    settings,
+                    run_id,
+                    sender="system",
+                    message=f"Run failed: {exc}",
+                    artifacts=error_artifacts,
+                )
+                logger.error(
+                    "agentic.run.failed | run_id=%s event_id=%s error_type=%s error=%s",
+                    run_id,
+                    stage.get("event_id"),
+                    exc.__class__.__name__,
+                    str(exc),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("agentic.run.failed_event_emit_failed | run_id=%s", run_id)
+                append_agent_run_event(
+                    settings,
+                    run_id,
+                    "WorkflowAgent",
+                    "failed",
+                    "Agentic workflow failed",
+                    error_artifacts,
+                )
             forwarder.close(status="failed", error=str(exc))
             raise
     raise ValueError(f"Unsupported job_type: {job_type}")
@@ -8439,6 +8478,10 @@ def agentic_debug_rollups(run_id: str) -> dict:
                             "completed_event": {
                                 "summary": "Agent completed",
                                 "value": "data: {\"agent_name\":\"JoinAgent\",\"status\":\"completed\",\"message\":\"Join Agent completed\",\"artifacts\":{\"joins\":7}}\n\n",
+                            },
+                            "failed_event": {
+                                "summary": "Run failed",
+                                "value": "data: {\"agent_name\":\"WorkflowAgent\",\"status\":\"failed\",\"stage_name\":\"failed\",\"message\":\"Agentic workflow failed\",\"artifacts\":{\"error_type\":\"NameError\",\"error_message\":\"name 're' is not defined\"}}\n\n",
                             },
                             "heartbeat": {
                                 "summary": "SSE heartbeat",
