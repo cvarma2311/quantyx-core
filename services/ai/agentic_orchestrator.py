@@ -25,6 +25,7 @@ from services.ai.agentic_store import (
 import logging
 from services.ai.agentic_agents import (
     build_schema_graph,
+    enrich_schema_graph_columns,
     profile_tables,
     extract_context,
     propose_ontology,
@@ -655,13 +656,44 @@ def run_agentic_workflow(
     if StateGraph is None:
         raise RuntimeError("LangGraph is not available")
 
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "agentic.workflow.start | run_id=%s tenant=%s domain=%s schema=%s connection_id=%s database=%s",
+        run_id,
+        initial_state.get("tenant_id"),
+        initial_state.get("domain_id"),
+        initial_state.get("schema_name"),
+        initial_state.get("connection_id"),
+        initial_state.get("database_name"),
+    )
+
     graph = StateGraph(dict)
 
     def schema_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(settings, run_id, "SchemaAgent", "running", "Schema Agent started", event_callback=event_callback)
         append_agent_chat_log(settings, run_id, "system", "Scanning schema for tables.")
         schema_payload = state.get("schema_payload") or {}
-        state["schema_graph"] = build_schema_graph(schema_payload)
+        schema_name = state.get("schema_name") or "public"
+        logger.info(
+            "agentic.schema.input | run_id=%s schema=%s payload_keys=%s",
+            run_id,
+            schema_name,
+            sorted(schema_payload.keys()) if isinstance(schema_payload, dict) else [],
+        )
+        state["schema_graph"] = enrich_schema_graph_columns(
+            settings,
+            build_schema_graph(schema_payload),
+            schema_name,
+        )
+        tables = state["schema_graph"].get("tables", []) or []
+        with_columns = sum(1 for t in tables if (t.get("columns") or []))
+        logger.info(
+            "agentic.schema.output | run_id=%s tables=%s with_columns=%s without_columns=%s",
+            run_id,
+            len(tables),
+            with_columns,
+            max(0, len(tables) - with_columns),
+        )
         _emit(
             settings,
             run_id,
@@ -681,6 +713,22 @@ def run_agentic_workflow(
         _emit(settings, run_id, "ProfilingAgent", "running", "Profiling Agent started", event_callback=event_callback)
         schema_name = state.get("schema_name") or "public"
         state["profiling_stats"] = profile_tables(settings, state.get("schema_graph", {}), schema_name)
+        prof_tables = state["profiling_stats"].get("tables", []) or []
+        logger.info(
+            "agentic.profiling.output | run_id=%s tables=%s sample=%s",
+            run_id,
+            len(prof_tables),
+            [
+                {
+                    "table": t.get("name"),
+                    "row_count": t.get("row_count"),
+                    "eligible_numeric_columns": len(t.get("eligible_numeric_columns") or []),
+                    "time_columns": len(t.get("time_columns") or []),
+                    "categorical_columns": len(t.get("categorical_columns") or []),
+                }
+                for t in prof_tables[:5]
+            ],
+        )
         append_agent_chat_log(
             settings,
             run_id,
@@ -705,6 +753,12 @@ def run_agentic_workflow(
     def context_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(settings, run_id, "ContextAgent", "running", "Context Agent started", event_callback=event_callback)
         context_text = state.get("context_text")
+        logger.info(
+            "agentic.context.input | run_id=%s has_context_text=%s context_len=%s",
+            run_id,
+            bool(context_text),
+            len(str(context_text or "")),
+        )
         extracted = extract_context(settings, context_text, state.get("schema_graph", {}))
         state["context_entities"] = extracted.get("context_entities", [])
         state["hierarchy_hints"] = extracted.get("hierarchy_hints", [])
@@ -735,6 +789,13 @@ def run_agentic_workflow(
                 "system",
                 "Context applied: %s terms detected." % len(state["context_entities"]),
             )
+        logger.info(
+            "agentic.context.output | run_id=%s entities=%s hierarchy_hints=%s glossary_terms=%s",
+            run_id,
+            len(state.get("context_entities") or []),
+            len(state.get("hierarchy_hints") or []),
+            len(state.get("glossary_terms") or []),
+        )
         return state
 
     def glossary_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -752,6 +813,11 @@ def run_agentic_workflow(
                 ):
                     inferred_terms.append({"term": col.replace("_", " "), "synonyms": [col], "abbreviations": []})
             state["glossary_terms"] = inferred_terms
+        logger.info(
+            "agentic.glossary.output | run_id=%s terms=%s",
+            run_id,
+            len(state.get("glossary_terms") or []),
+        )
         _emit(
             settings,
             run_id,
@@ -779,6 +845,13 @@ def run_agentic_workflow(
             if inferred:
                 ontology["concepts"] = inferred
         state["ontology"] = ontology
+        logger.info(
+            "agentic.ontology.output | run_id=%s concepts=%s hierarchy_edges=%s synonym_edges=%s",
+            run_id,
+            len(ontology.get("concepts", []) or []),
+            len(ontology.get("hierarchy_edges", []) or []),
+            len(ontology.get("synonym_edges", []) or []),
+        )
         _emit(
             settings,
             run_id,
@@ -802,6 +875,11 @@ def run_agentic_workflow(
         state["join_edges"] = propose_joins(
             state.get("schema_graph", {}),
             state.get("profiling_stats", {}),
+        )
+        logger.info(
+            "agentic.join.candidates | run_id=%s count=%s",
+            run_id,
+            len(state.get("join_edges") or []),
         )
         _emit(
             settings,
@@ -993,6 +1071,22 @@ def run_agentic_workflow(
             },
             event_callback=event_callback,
         )
+        logger.info(
+            "agentic.join.output | run_id=%s joins=%s sample=%s",
+            run_id,
+            len(state.get("join_edges") or []),
+            [
+                {
+                    "left": j.get("left_table"),
+                    "right": j.get("right_table"),
+                    "coverage_ratio": j.get("coverage_ratio"),
+                    "confidence": j.get("confidence"),
+                    "coverage_check": (j.get("coverage_check") or {}).get("status"),
+                    "uniqueness_check": (j.get("uniqueness_check") or {}).get("status"),
+                }
+                for j in (state.get("join_edges") or [])[:5]
+            ],
+        )
         return state
 
     def metric_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -1000,6 +1094,21 @@ def run_agentic_workflow(
         state["metric_defs"] = propose_metrics(
             state.get("profiling_stats", {}),
             domain_id=state.get("domain_id"),
+        )
+        logger.info(
+            "agentic.metrics.output | run_id=%s metrics=%s sample=%s",
+            run_id,
+            len(state.get("metric_defs") or []),
+            [
+                {
+                    "name": m.get("metric_name"),
+                    "table": m.get("base_table"),
+                    "type": m.get("metric_type"),
+                    "eligible_measure": m.get("eligible_measure"),
+                    "intent": m.get("metric_intent"),
+                }
+                for m in (state.get("metric_defs") or [])[:8]
+            ],
         )
         if state.get("metric_defs"):
             append_agent_chat_log(
@@ -1030,6 +1139,12 @@ def run_agentic_workflow(
             event_callback=event_callback,
         )
         state["model_classifications"] = classify_models(state.get("profiling_stats", {}))
+        logger.info(
+            "agentic.model.output | run_id=%s models=%s sample=%s",
+            run_id,
+            len(state.get("model_classifications") or []),
+            (state.get("model_classifications") or [])[:5],
+        )
         append_agent_chat_log(settings, run_id, "system", "Semantic model classified.")
         _emit(
             settings,
@@ -1055,6 +1170,11 @@ def run_agentic_workflow(
             event_callback=event_callback,
         )
         rollups = propose_rollups(state.get("metric_defs", []), state.get("profiling_stats", {}))
+        logger.info(
+            "agentic.rollup.candidates | run_id=%s candidates=%s",
+            run_id,
+            len(rollups or []),
+        )
         created = 0
         created_defs: list[dict[str, Any]] = []
         for rollup in rollups:
@@ -1085,6 +1205,11 @@ def run_agentic_workflow(
         )
         if created:
             append_agent_chat_log(settings, run_id, "system", f"Rollups created: {created}")
+        logger.info(
+            "agentic.rollup.output | run_id=%s created=%s",
+            run_id,
+            created,
+        )
         return state
 
     def chart_planner_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -1110,6 +1235,24 @@ def run_agentic_workflow(
         )
         selected = select_charts(candidates, min_charts=min_charts, max_charts=max_charts)
         rejected = [cand for cand in candidates if cand.get("skipped")]
+        logger.info(
+            "agentic.chart_planner.output | run_id=%s candidates=%s selected=%s rejected=%s sample_selected=%s",
+            run_id,
+            len(candidates),
+            len(selected),
+            len(rejected),
+            [
+                {
+                    "title": c.get("title"),
+                    "table": c.get("table"),
+                    "metric": c.get("metric"),
+                    "metric_expr": c.get("metric_expr"),
+                    "type": c.get("type"),
+                    "intent": c.get("intent"),
+                }
+                for c in selected[:8]
+            ],
+        )
         state["chart_candidates"] = candidates
         state["chart_plan"] = selected
         state["chart_candidate_rejections"] = rejected
@@ -1136,6 +1279,14 @@ def run_agentic_workflow(
         _emit(settings, run_id, "QualityGateAgent", "running", "Quality Gate started", event_callback=event_callback)
         quality_report = evaluate_quality_report(state)
         state["quality_report"] = quality_report
+        logger.info(
+            "agentic.quality.output | run_id=%s gate_passed=%s score=%s warnings=%s chart_rejections=%s",
+            run_id,
+            quality_report.get("gate_passed"),
+            quality_report.get("quality_score"),
+            quality_report.get("warnings"),
+            len(quality_report.get("chart_rejections") or []),
+        )
         _emit(
             settings,
             run_id,
@@ -1162,6 +1313,13 @@ def run_agentic_workflow(
         dashboard_spec["title"] = dashboard_title
         dashboard_spec["dashboard_title"] = dashboard_title
         charts_spec = state.get("chart_plan") or dashboard_spec.get("charts", [])
+        logger.info(
+            "agentic.dashboard.input | run_id=%s charts_spec=%s metrics=%s profiling_tables=%s",
+            run_id,
+            len(charts_spec or []),
+            len(state.get("metric_defs") or []),
+            len((state.get("profiling_stats") or {}).get("tables") or []),
+        )
         dashboard_spec["chart_plan"] = state.get("chart_plan") or []
         dashboard_spec["chart_candidates"] = state.get("chart_candidates") or []
         chart_ids = []
@@ -1238,6 +1396,20 @@ def run_agentic_workflow(
             q_fact_table = _qident(fact_table) if fact_table else None
             table_alias = "t"
             sql_from = f"{q_schema}.{q_fact_table} {table_alias}" if q_fact_table else None
+            logger.info(
+                "dashboard.chart.prep | run_id=%s title=%s table=%s fact_table=%s chart_type=%s metric=%s metric_col=%s metric_expr=%s time_col=%s category_col=%s sql_from=%s",
+                run_id,
+                chart_title,
+                table_name,
+                fact_table,
+                chart_type,
+                metric_name,
+                metric_col,
+                metric_expr,
+                time_col,
+                category_col,
+                sql_from,
+            )
             if table_ref and metric_col:
                 table_profile = profiling_map.get(table_name) or {}
                 eligible_numeric_cols = set(table_profile.get("eligible_numeric_columns") or [])
@@ -1252,6 +1424,12 @@ def run_agentic_workflow(
                     metric_expr = None
             if metric_expr and table_ref:
                 metric_expr = _qualify_formula(metric_expr, table_alias, profiling_map.get(table_name) or {})
+                logger.info(
+                    "dashboard.chart.metric_expr_qualified | run_id=%s title=%s qualified_metric_expr=%s",
+                    run_id,
+                    chart_title,
+                    metric_expr,
+                )
             if not metric_expr:
                 logger.warning(
                         "dashboard.chart.skip | title=%s reason=invalid_metric metric=%s table=%s",
@@ -1282,7 +1460,7 @@ def run_agentic_workflow(
                         category_col = edge.get("left_key")
                         break
 
-            if table_ref and metric_col:
+            if table_ref and metric_expr:
                 if chart_type == "line":
                     if time_col:
                         dim_expr = f"date_trunc('month', {table_alias}.{_qident(time_col)})"
@@ -1334,6 +1512,31 @@ def run_agentic_workflow(
                             f"LIMIT {limit}"
                         )
                         dimensions = [dim_alias]
+                if not sql:
+                    # Fallback for valid metrics when no chart dimension is available.
+                    sql = (
+                        f"SELECT {metric_expr} AS \"{metric_name}\" "
+                        f"FROM {sql_from}"
+                    )
+                    dimensions = []
+                    logger.info(
+                        "dashboard.chart.sql_fallback | run_id=%s title=%s sql=%s",
+                        run_id,
+                        chart_title,
+                        sql,
+                    )
+            if not sql:
+                logger.warning(
+                    "dashboard.chart.sql_missing | run_id=%s title=%s table=%s chart_type=%s table_ref=%s metric_expr=%s time_col=%s category_col=%s",
+                    run_id,
+                    chart_title,
+                    table_name,
+                    chart_type,
+                    table_ref,
+                    metric_expr,
+                    time_col,
+                    category_col,
+                )
 
             if sql:
                 try:
@@ -1378,6 +1581,14 @@ def run_agentic_workflow(
                 params=params,
                 rows_json=rows,
             ).get("chart_id")
+            logger.info(
+                "dashboard.chart.request_created | run_id=%s title=%s chart_id=%s sql_is_null=%s rows=%s",
+                run_id,
+                chart_title,
+                chart_id,
+                sql is None,
+                len(rows),
+            )
             if chart_id:
                 chart_ids.append(chart_id)
                 payload = build_chart_payload(chart_type, rows, metric_name, dimensions or ["category"])
@@ -1395,6 +1606,14 @@ def run_agentic_workflow(
                     chart_type=chart_type,
                     chart_payload=payload.get("chart_payload"),
                     chart_data=payload.get("data"),
+                )
+                logger.info(
+                    "dashboard.chart.request_updated | run_id=%s chart_id=%s status=ready sql_is_null=%s rows=%s dims=%s",
+                    run_id,
+                    chart_id,
+                    sql is None,
+                    len(rows),
+                    dimensions,
                 )
                 enriched_charts.append(
                     {
@@ -1418,6 +1637,12 @@ def run_agentic_workflow(
                     }
                 )
             else:
+                logger.warning(
+                    "dashboard.chart.request_missing_id | run_id=%s title=%s sql_is_null=%s",
+                    run_id,
+                    chart_title,
+                    sql is None,
+                )
                 enriched_charts.append({**chart, "dashboard_title": dashboard_title})
 
         dashboard_spec["charts"] = enriched_charts
@@ -1442,6 +1667,14 @@ def run_agentic_workflow(
         if state.get("quality_report"):
             dashboard_spec["quality"] = state.get("quality_report")
         state["dashboard_spec"] = dashboard_spec
+        null_sql_count = sum(1 for c in enriched_charts if c.get("sql") is None and not c.get("skipped"))
+        logger.info(
+            "agentic.dashboard.output | run_id=%s charts=%s null_sql_non_skipped=%s chart_ids=%s",
+            run_id,
+            len(enriched_charts),
+            null_sql_count,
+            len(chart_ids),
+        )
         append_agent_chat_log(
             settings,
             run_id,
@@ -1626,4 +1859,5 @@ def run_agentic_workflow(
     pending = _RUN_POSTPROCESS_FUTURES.pop(run_id, [])
     if pending:
         wait(pending)
+    logger.info("agentic.workflow.completed | run_id=%s", run_id)
     return result

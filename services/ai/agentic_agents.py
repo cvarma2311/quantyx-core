@@ -337,6 +337,41 @@ def build_schema_graph(schema_payload: dict) -> dict[str, Any]:
     return {"tables": tables}
 
 
+def enrich_schema_graph_columns(settings: Settings, schema_graph: dict[str, Any], schema_name: str) -> dict[str, Any]:
+    logger = logging.getLogger(__name__)
+    tables = list(schema_graph.get("tables", []) or [])
+    for table in tables:
+        name = table.get("name")
+        if not name:
+            continue
+        existing = list(table.get("columns", []) or [])
+        if existing:
+            continue
+        try:
+            col_rows = run_query(
+                settings,
+                """
+                SELECT column_name, data_type
+                  FROM information_schema.columns
+                 WHERE table_schema = %s
+                   AND table_name = %s
+                 ORDER BY ordinal_position
+                """,
+                [schema_name, name],
+            )
+            table["columns"] = [
+                {
+                    "name": row.get("column_name"),
+                    "data_type": str(row.get("data_type") or "").lower(),
+                }
+                for row in col_rows
+                if row.get("column_name")
+            ]
+        except Exception:
+            logger.warning("enrich_schema_graph_columns: failed loading column metadata %s.%s", schema_name, name)
+    return {"tables": tables}
+
+
 def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name: str) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
     profiling: dict[str, Any] = {"tables": []}
