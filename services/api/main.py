@@ -9663,7 +9663,7 @@ def get_dashboard_refresh(dashboard_id: str, refresh_id: str) -> dict:
                                             "stage_name": "titles_regenerated",
                                             "message": "Dashboard/chart titles regenerated: 6",
                                             "artifacts": {
-                                                "regenerate_titles": true,
+                                                "regenerate_titles": True,
                                                 "dashboard_title": "Lpg Plant Operations Total Production Overview",
                                                 "chart_titles": [
                                                     "Total Production Trend Over Process Date",
@@ -9678,7 +9678,7 @@ def get_dashboard_refresh(dashboard_id: str, refresh_id: str) -> dict:
                                             "dashboard_id": "dash_123",
                                             "stage_name": "charts_refreshed",
                                             "message": "Dashboard charts refreshed: 6",
-                                            "artifacts": {"chart_count": 6, "regenerate_titles": true, "regenerated_chart_titles": 6},
+                                            "artifacts": {"chart_count": 6, "regenerate_titles": True, "regenerated_chart_titles": 6},
                                             "created_at": "2026-03-06T11:20:03Z",
                                         },
                                         {
@@ -9710,7 +9710,7 @@ def get_dashboard_refresh(dashboard_id: str, refresh_id: str) -> dict:
                                             "dashboard_id": "dash_123",
                                             "stage_name": "charts_refreshed",
                                             "message": "Dashboard charts refreshed: 6",
-                                            "artifacts": {"chart_count": 6, "regenerate_titles": true},
+                                            "artifacts": {"chart_count": 6, "regenerate_titles": True},
                                             "created_at": "2026-03-06T11:20:03Z"
                                         },
                                         {
