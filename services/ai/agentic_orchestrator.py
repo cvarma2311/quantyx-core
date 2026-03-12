@@ -5,6 +5,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from html import escape
 import json
 import os
+import re
 import time
 import urllib.request
 

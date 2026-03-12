@@ -8741,12 +8741,68 @@ def list_views_endpoint(tenant_id: str, domain_id: str | None = None) -> ViewLis
     return ViewListResponse(views=payload)
 
 
+def _normalize_relation_name(raw: str) -> str:
+    token = str(raw or "").strip().strip(",;")
+    if not token:
+        return ""
+    # Remove alias tail: "schema.view v" -> "schema.view"
+    token = token.split()[0]
+    token = token.replace('"', "")
+    return token.lower()
+
+
+def _extract_sql_relation_refs(sql_text: str) -> list[str]:
+    refs: list[str] = []
+    for match in re.finditer(r"(?i)\b(?:from|join)\s+([a-zA-Z0-9_\"\.]+)", sql_text):
+        rel = _normalize_relation_name(match.group(1))
+        if not rel or rel == "select":
+            continue
+        refs.append(rel)
+    return list(dict.fromkeys(refs))
+
+
+def _allowed_view_refs_for_scope(tenant_id: str, domain_id: str) -> tuple[set[str], list[dict]]:
+    rows = list_registered_views(settings, tenant_id, domain_id)
+    refs: set[str] = set()
+    for row in rows:
+        view_name = str(row.get("view_name") or "").strip()
+        schema_name = str(row.get("schema_name") or "").strip()
+        if view_name:
+            refs.add(view_name.lower())
+        if schema_name and view_name:
+            refs.add(f"{schema_name.lower()}.{view_name.lower()}")
+    return refs, rows
+
+
 @app.get(
     "/views/{view_name}/schema",
     response_model=ViewSchemaResponse,
     tags=["views"],
     summary="Get view schema",
     openapi_extra={
+        "parameters": [
+            {
+                "name": "tenant_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "description": "Tenant identifier.",
+            },
+            {
+                "name": "domain_id",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Domain identifier for scoped view lookup.",
+            },
+            {
+                "name": "schema",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Database schema name. Defaults to registry schema for the view.",
+            },
+        ],
         "responses": {
             "200": {
                 "content": {
@@ -8762,6 +8818,30 @@ def list_views_endpoint(tenant_id: str, domain_id: str | None = None) -> ViewLis
                                         {"column_name": "process_date", "data_type": "date"},
                                     ],
                                 },
+                            },
+                            "schema_scoped": {
+                                "summary": "View schema scoped by tenant+domain registry",
+                                "value": {
+                                    "view_name": "fact_lpg_plant_operations",
+                                    "schema": "public",
+                                    "columns": [
+                                        {"column_name": "sap_id", "data_type": "character varying"},
+                                        {"column_name": "process_date", "data_type": "timestamp with time zone"},
+                                        {"column_name": "total_production", "data_type": "numeric"}
+                                    ]
+                                }
+                            },
+                        }
+                    }
+                }
+            },
+            "404": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "view_not_in_scope": {
+                                "summary": "View is not registered for tenant/domain scope",
+                                "value": {"detail": "View not found in tenant/domain scope"},
                             }
                         }
                     }
@@ -8770,8 +8850,27 @@ def list_views_endpoint(tenant_id: str, domain_id: str | None = None) -> ViewLis
         }
     },
 )
-def view_schema_endpoint(view_name: str, tenant_id: str, schema: str | None = None) -> ViewSchemaResponse:
-    schema_name = schema or settings.db_schema
+def view_schema_endpoint(
+    view_name: str,
+    tenant_id: str,
+    domain_id: str | None = None,
+    schema: str | None = None,
+) -> ViewSchemaResponse:
+    resolved_domain_id = _resolve_domain_id(tenant_id, domain_id)
+    allowed_refs, registry_rows = _allowed_view_refs_for_scope(tenant_id, resolved_domain_id)
+    requested = _normalize_relation_name(f"{schema or ''}.{view_name}" if schema else view_name)
+    if requested not in allowed_refs and _normalize_relation_name(view_name) not in allowed_refs:
+        raise HTTPException(
+            status_code=404,
+            detail="View not found in tenant/domain scope",
+        )
+    schema_name = schema
+    if not schema_name:
+        for row in registry_rows:
+            if str(row.get("view_name") or "").lower() == str(view_name).lower():
+                schema_name = row.get("schema_name")
+                break
+    schema_name = schema_name or settings.db_schema
     columns = load_view_schema(settings, schema_name, view_name)
     return ViewSchemaResponse(view_name=view_name, schema_name=schema_name, columns=columns)
 
@@ -8787,22 +8886,84 @@ def view_schema_endpoint(view_name: str, tenant_id: str, schema: str | None = No
                 "application/json": {
                     "examples": {
                         "query": {
-                            "summary": "SQL query",
+                            "summary": "SQL query scoped to tenant/domain views",
                             "value": {
                                 "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
                                 "sql": "SELECT * FROM public.fact_lpg_plant_operations LIMIT 100",
+                                "limit": 100
                             },
+                        },
+                        "join_query": {
+                            "summary": "Query over joined registered view",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "sql": "SELECT plant_name, SUM(total_production) AS total_production FROM public.view_fact_lpg_plant_operations_lpg_distributor_mapping GROUP BY plant_name ORDER BY total_production DESC LIMIT 50",
+                                "limit": 50
+                            }
                         }
                     }
                 }
             }
-        }
+        },
+        "responses": {
+            "400": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "outside_scope": {
+                                "summary": "SQL references relation outside scoped views",
+                                "value": {
+                                    "detail": {
+                                        "message": "Query references objects outside tenant/domain scoped views",
+                                        "invalid_relations": ["public.some_other_table"]
+                                    }
+                                }
+                            },
+                            "missing_relation": {
+                                "summary": "No FROM/JOIN relation found",
+                                "value": {"detail": "Query must reference at least one scoped view in FROM/JOIN"}
+                            }
+                        }
+                    }
+                }
+            },
+            "404": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "no_views_for_scope": {
+                                "summary": "No views registered for scope",
+                                "value": {"detail": "No registered views found for tenant/domain scope"}
+                            }
+                        }
+                    }
+                }
+            }
+        },
     },
 )
 def views_query(request: ViewQueryRequest) -> ViewQueryResponse:
+    resolved_domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
     sql_text = request.sql.strip().rstrip(";")
     if not sql_text.lower().startswith("select"):
         raise HTTPException(status_code=400, detail="Only SELECT queries are allowed")
+    allowed_refs, _ = _allowed_view_refs_for_scope(request.tenant_id, resolved_domain_id)
+    if not allowed_refs:
+        raise HTTPException(status_code=404, detail="No registered views found for tenant/domain scope")
+    relation_refs = _extract_sql_relation_refs(sql_text)
+    if not relation_refs:
+        raise HTTPException(status_code=400, detail="Query must reference at least one scoped view in FROM/JOIN")
+    disallowed = [ref for ref in relation_refs if ref not in allowed_refs]
+    if disallowed:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Query references objects outside tenant/domain scoped views",
+                "invalid_relations": disallowed,
+            },
+        )
     if "limit" not in sql_text.lower():
         sql_text = f"{sql_text} LIMIT {request.limit}"
     rows = run_query(settings, sql_text, [])

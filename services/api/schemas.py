@@ -244,6 +244,7 @@ class ViewSchemaResponse(BaseModel):
 
 class ViewQueryRequest(BaseModel):
     tenant_id: str
+    domain_id: str | None = Field(None, description="Domain identifier for scoped view validation", examples=["lpg_production_distribution"])
     sql: str
     limit: int = Field(200, ge=1, le=1000, description="Row limit")
 
