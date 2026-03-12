@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ElementTree
 import urllib.request
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Query
 
 from services.ai.catalog import Dimension, load_catalog_with_registry, resolve_ref
 from datetime import date as _date, timedelta as _timedelta
