@@ -1,6 +1,29 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+"""
+End-to-end workspace deployment demo for LPG scope.
+
+What it does:
+1) Bootstraps tenant domain/scope.
+2) Creates deployment via POST /workspace/deployments.
+3) Streams run progress from /agentic/runs/{run_id}/stream (or polls events).
+4) Prints final run status.
+
+Usage examples:
+  python3 scripts/demo_workspace_deployment_lpg.py
+
+  python3 scripts/demo_workspace_deployment_lpg.py \
+    --api-base http://localhost:8787 \
+    --tenant-id DEBUG_LPG_001 \
+    --domain-id lpg_production_distribution \
+    --connection-id 2 \
+    --database hpcl_ceg \
+    --schema public
+
+  python3 scripts/demo_workspace_deployment_lpg.py --mode poll
+"""
+
 import argparse
 import json
 import sys
@@ -159,7 +182,12 @@ def _poll_run_logs(api_base: str, run_id: str, interval_seconds: float = 2.0) ->
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Create a tenant deployment run and print agentic stream/logs end-to-end.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Create a tenant deployment run and print agentic stream/logs end-to-end. "
+            "This script auto-configures /tenant/domain and /tenant/scope first."
+        )
+    )
     parser.add_argument("--api-base", default="http://localhost:8787", help="API base URL")
     parser.add_argument("--tenant-id", default=None, help="Existing tenant_id. If omitted, a UUID is generated.")
     parser.add_argument("--domain-id", default="lpg_production_distribution")

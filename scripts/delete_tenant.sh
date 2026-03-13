@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Tenant cleanup helper.
+#
+# Usage:
+#   scripts/delete_tenant.sh <tenant_id> [dry_run|purge_only|purge_and_delete]
+#
+# Modes:
+#   dry_run          Preview rows that would be deleted (no data changes).
+#   purge_only       Purge tenant data from metadata/artifact tables only.
+#   purge_and_delete Purge tenant data and delete tenant registry row.
+#
+# Examples:
+#   scripts/delete_tenant.sh DEBUG_LPG_001 dry_run
+#   scripts/delete_tenant.sh DEBUG_LPG_001 purge_only
+#   scripts/delete_tenant.sh DEBUG_LPG_001 purge_and_delete
+#
+# Optional env:
+#   API_BASE=http://localhost:8787
+#
 API_BASE="${API_BASE:-http://localhost:8787}"
 TENANT_ID="${1:-}"
 MODE="${2:-purge_and_delete}" # dry_run | purge_only | purge_and_delete

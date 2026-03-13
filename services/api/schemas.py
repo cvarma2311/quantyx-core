@@ -250,10 +250,56 @@ class ViewQueryRequest(BaseModel):
 
 
 class ViewQueryResponse(BaseModel):
+    query_id: str
+    status: str
+    chart_status: str
+    inference_status: str
     rows: List[dict]
     columns: List[str]
     row_count: int
     chart: Optional[dict] = None
+    inference: Optional[dict] = None
+
+
+class ViewQueryStatusResponse(BaseModel):
+    query_id: str
+    tenant_id: str
+    domain_id: str
+    sql: str
+    limit: int
+    status: str
+    chart_status: str
+    inference_status: str
+    rows: List[dict]
+    columns: List[str]
+    row_count: int
+    chart: Optional[dict] = None
+    inference: Optional[dict] = None
+    chart_error: Optional[str] = None
+    inference_error: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ViewQueryHistoryItem(BaseModel):
+    query_id: str
+    tenant_id: str
+    domain_id: str
+    status: str
+    chart_status: str
+    inference_status: str
+    row_count: int
+    limit: int
+    sql_preview: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    chart_error: Optional[str] = None
+    inference_error: Optional[str] = None
+
+
+class ViewQueryHistoryResponse(BaseModel):
+    items: List[ViewQueryHistoryItem]
+    next_cursor: Optional[str] = None
 
 
 class DashboardListResponse(BaseModel):

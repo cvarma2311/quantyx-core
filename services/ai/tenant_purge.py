@@ -58,6 +58,7 @@ def purge_tenant_data(
                 "quantyx_dashboard_refresh_events",
                 "quantyx_dashboard_chart_snapshots",
                 "quantyx_dashboard_insight_artifacts",
+                "quantyx_view_query_runs",
             ]
             # Delete children before parents to avoid FK violations.
             deletion_order = [
@@ -70,6 +71,7 @@ def purge_tenant_data(
                 "quantyx_dashboard_refresh_events",
                 "quantyx_dashboard_chart_snapshots",
                 "quantyx_dashboard_insight_artifacts",
+                "quantyx_view_query_runs",
                 "quantyx_dashboard_refresh_runs",
                 "quantyx_chart_events",
                 "quantyx_chart_requests",

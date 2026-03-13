@@ -255,6 +255,15 @@ from services.ai.workspace_store import (
     update_workspace_conversation,
     upsert_workspace_memory,
 )
+from services.ai.view_query_store import (
+    create_view_query_run,
+    finalize_view_query,
+    get_view_query_run,
+    list_view_query_runs,
+    mark_view_query_running,
+    update_view_query_chart,
+    update_view_query_inference,
+)
 from services.api.schemas import (
     EntitiesResponse,
     EntitiesAllResponse,
@@ -345,6 +354,8 @@ from services.api.schemas import (
     ViewSchemaResponse,
     ViewQueryRequest,
     ViewQueryResponse,
+    ViewQueryHistoryResponse,
+    ViewQueryStatusResponse,
     DashboardListResponse,
     DashboardResponse,
     DashboardUpdateRequest,
@@ -8959,6 +8970,317 @@ def view_schema_endpoint(
     return ViewSchemaResponse(view_name=view_name, schema_name=schema_name, columns=columns)
 
 
+def _view_chart_palette() -> list[str]:
+    return ["#0077B6", "#00B4D8", "#90E0EF", "#2A9D8F", "#E9C46A", "#F4A261", "#E76F51", "#264653"]
+
+
+def _to_number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _deterministic_query_chart(rows: list[dict], columns: list[str]) -> dict:
+    if not rows or not columns:
+        return {
+            "status": "skipped",
+            "reason": "no_data",
+            "source": "deterministic",
+            "confidence": 0.0,
+            "chart_type": None,
+            "chart_payload": None,
+            "data": [],
+        }
+    numeric_cols: list[str] = []
+    dimension_cols: list[str] = []
+    for col in columns:
+        sample = next((row.get(col) for row in rows if row.get(col) is not None), None)
+        if _to_number(sample) is not None:
+            numeric_cols.append(col)
+        else:
+            dimension_cols.append(col)
+    if not numeric_cols:
+        return {
+            "status": "skipped",
+            "reason": "no_numeric_measure",
+            "source": "deterministic",
+            "confidence": 0.0,
+            "chart_type": None,
+            "chart_payload": None,
+            "data": [],
+        }
+    metric_col = numeric_cols[0]
+    dimensions = dimension_cols[:2] if dimension_cols else []
+    chart_type = infer_chart_type(dimensions, rows[:200], [metric_col]) if dimensions else "bar"
+    chart_type = chart_type or "bar"
+    data_rows = []
+    for row in rows[:200]:
+        point = dict(row)
+        metric_value = _to_number(row.get(metric_col))
+        if metric_value is None:
+            continue
+        point[metric_col] = metric_value
+        data_rows.append(point)
+    if not data_rows:
+        return {
+            "status": "skipped",
+            "reason": "no_numeric_rows",
+            "source": "deterministic",
+            "confidence": 0.0,
+            "chart_type": None,
+            "chart_payload": None,
+            "data": [],
+        }
+    payload = build_chart_payload(chart_type, data_rows, metric_col, dimensions or [columns[0]])
+    palette = _view_chart_palette()
+    payload["source"] = "deterministic"
+    payload["confidence"] = 0.55
+    payload["metric"] = metric_col
+    payload["dimensions"] = dimensions
+    payload["status"] = "ready"
+    if payload.get("chart_payload"):
+        payload["chart_payload"]["colors"] = palette
+    return payload
+
+
+def _view_llm_enabled() -> bool:
+    return bool(getattr(settings, "openai_api_key", None))
+
+
+def _call_openai_json(system_prompt: str, user_payload: dict, *, timeout_sec: int = 45) -> dict | None:
+    if not _view_llm_enabled():
+        return None
+    body = {
+        "model": settings.openai_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, default=str)},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    content = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content")
+    if not content:
+        return None
+    try:
+        return json.loads(str(content))
+    except json.JSONDecodeError:
+        return None
+
+
+def _call_openai_text(system_prompt: str, user_payload: dict, *, timeout_sec: int = 45) -> str | None:
+    if not _view_llm_enabled():
+        return None
+    body = {
+        "model": settings.openai_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload, default=str)},
+        ],
+        "temperature": 0.2,
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    text = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content")
+    return str(text).strip() if text else None
+
+
+def _generate_view_chart_with_llm(sql_text: str, rows: list[dict], columns: list[str]) -> dict | None:
+    if not rows or not columns:
+        return {
+            "status": "skipped",
+            "reason": "no_data",
+            "source": "llm",
+            "confidence": 0.0,
+            "chart_type": None,
+            "chart_payload": None,
+            "data": [],
+        }
+    numeric_cols: list[str] = []
+    dimension_cols: list[str] = []
+    for col in columns:
+        sample = next((row.get(col) for row in rows if row.get(col) is not None), None)
+        if _to_number(sample) is not None:
+            numeric_cols.append(col)
+        else:
+            dimension_cols.append(col)
+    if not numeric_cols:
+        return {
+            "status": "skipped",
+            "reason": "no_numeric_measure",
+            "source": "llm",
+            "confidence": 0.0,
+            "chart_type": None,
+            "chart_payload": None,
+            "data": [],
+        }
+    system_prompt = (
+        "You are a BI chart planner for AMCharts. "
+        "Return JSON only with keys chart_type, metric, dimensions, title, confidence. "
+        "chart_type must be one of: line, bar, pie, none. "
+        "Choose only fields that exist in provided columns."
+    )
+    user_payload = {
+        "sql": sql_text,
+        "columns": columns,
+        "numeric_columns": numeric_cols,
+        "dimension_columns": dimension_cols,
+        "sample_rows": rows[:25],
+    }
+    llm = _call_openai_json(system_prompt, user_payload)
+    if not llm:
+        return None
+    chart_type = str(llm.get("chart_type") or "").strip().lower()
+    if chart_type not in {"line", "bar", "pie"}:
+        if chart_type == "none":
+            return {
+                "status": "skipped",
+                "reason": "llm_no_chart",
+                "source": "llm",
+                "confidence": float(llm.get("confidence") or 0.0),
+                "chart_type": None,
+                "chart_payload": None,
+                "data": [],
+            }
+        return None
+    metric = str(llm.get("metric") or "").strip()
+    if metric not in columns:
+        metric = numeric_cols[0]
+    dims = [d for d in (llm.get("dimensions") or []) if isinstance(d, str) and d in columns and d != metric][:2]
+    if not dims and dimension_cols:
+        dims = dimension_cols[:1]
+    payload = build_chart_payload(chart_type, rows[:200], metric, dims or [columns[0]])
+    palette = _view_chart_palette()
+    if payload.get("chart_payload"):
+        payload["chart_payload"]["colors"] = palette
+    payload["status"] = "ready"
+    payload["source"] = "llm"
+    payload["confidence"] = float(llm.get("confidence") or 0.8)
+    payload["title"] = str(llm.get("title") or f"{metric} {chart_type.title()}").strip()
+    payload["metric"] = metric
+    payload["dimensions"] = dims
+    return payload
+
+
+def _generate_view_inference_with_llm(sql_text: str, rows: list[dict], columns: list[str]) -> dict:
+    system_prompt = (
+        "You are a concise analytics assistant. "
+        "Summarize key patterns from query results without inventing values."
+    )
+    payload = {
+        "sql": sql_text,
+        "columns": columns,
+        "row_count": len(rows),
+        "sample_rows": rows[:25],
+    }
+    text = _call_openai_text(system_prompt, payload)
+    if text:
+        return {
+            "status": "ready",
+            "source": "llm",
+            "confidence": 0.82,
+            "text": text,
+        }
+    if not rows:
+        fallback = "No rows were returned for this query."
+    else:
+        fallback = f"Returned {len(rows)} rows across {len(columns)} columns."
+    return {
+        "status": "ready",
+        "source": "deterministic_fallback",
+        "confidence": 0.4,
+        "text": fallback,
+    }
+
+
+def _process_view_query_artifacts(
+    query_id: str,
+    sql_text: str,
+    rows: list[dict],
+    columns: list[str],
+) -> None:
+    try:
+        mark_view_query_running(settings, query_id)
+        try:
+            update_view_query_chart(settings, query_id, chart_status="running", chart_payload=None, chart_error=None)
+            llm_chart = _generate_view_chart_with_llm(sql_text, rows, columns)
+            chart_payload = llm_chart if llm_chart is not None else _deterministic_query_chart(rows, columns)
+            update_view_query_chart(
+                settings,
+                query_id,
+                chart_status=str(chart_payload.get("status") or "ready"),
+                chart_payload=chart_payload,
+                chart_error=None,
+            )
+        except Exception as exc:
+            logger.exception("views.query.chart_generation_failed | query_id=%s", query_id)
+            update_view_query_chart(
+                settings,
+                query_id,
+                chart_status="failed",
+                chart_payload=None,
+                chart_error=str(exc),
+            )
+        try:
+            update_view_query_inference(
+                settings,
+                query_id,
+                inference_status="running",
+                inference_payload=None,
+                inference_error=None,
+            )
+            inference = _generate_view_inference_with_llm(sql_text, rows, columns)
+            update_view_query_inference(
+                settings,
+                query_id,
+                inference_status=str(inference.get("status") or "ready"),
+                inference_payload=inference,
+                inference_error=None,
+            )
+        except Exception as exc:
+            logger.exception("views.query.inference_generation_failed | query_id=%s", query_id)
+            update_view_query_inference(
+                settings,
+                query_id,
+                inference_status="failed",
+                inference_payload=None,
+                inference_error=str(exc),
+            )
+        finalize_view_query(settings, query_id)
+    except Exception:
+        logger.exception("views.query.background_failed | query_id=%s", query_id)
+
+
 @app.post(
     "/views/query",
     response_model=ViewQueryResponse,
@@ -8992,6 +9314,28 @@ def view_schema_endpoint(
             }
         },
         "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "started": {
+                                "summary": "Data returned immediately; chart/inference pending",
+                                "value": {
+                                    "query_id": "vq_3f7a2d1b98",
+                                    "status": "running",
+                                    "chart_status": "pending",
+                                    "inference_status": "pending",
+                                    "rows": [{"period": "2026-01-01T00:00:00", "production_mt": 1280.0}],
+                                    "columns": ["period", "production_mt"],
+                                    "row_count": 1,
+                                    "chart": None,
+                                    "inference": None
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             "400": {
                 "content": {
                     "application/json": {
@@ -9052,11 +9396,263 @@ def views_query(request: ViewQueryRequest) -> ViewQueryResponse:
         sql_text = f"{sql_text} LIMIT {request.limit}"
     rows = run_query(settings, sql_text, [])
     columns = list(rows[0].keys()) if rows else []
-    chart = {
-        "type": "table",
-        "payload": {"columns": columns},
-    }
-    return ViewQueryResponse(rows=rows, columns=columns, row_count=len(rows), chart=chart)
+    query_id = f"vq_{uuid.uuid4().hex[:10]}"
+    create_view_query_run(
+        settings,
+        query_id=query_id,
+        tenant_id=request.tenant_id,
+        domain_id=resolved_domain_id,
+        sql_text=sql_text,
+        limit_requested=request.limit,
+        data_payload={
+            "rows": rows,
+            "columns": columns,
+            "row_count": len(rows),
+        },
+    )
+    threading.Thread(
+        target=_process_view_query_artifacts,
+        args=(query_id, sql_text, rows, columns),
+        daemon=True,
+        name=f"view-query-{query_id}",
+    ).start()
+    return ViewQueryResponse(
+        query_id=query_id,
+        status="running",
+        chart_status="pending",
+        inference_status="pending",
+        rows=rows,
+        columns=columns,
+        row_count=len(rows),
+        chart=None,
+        inference=None,
+    )
+
+
+@app.get(
+    "/views/query/history",
+    response_model=ViewQueryHistoryResponse,
+    tags=["views"],
+    summary="List recent view queries for tenant/domain",
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "tenant_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "description": "Tenant identifier.",
+            },
+            {
+                "name": "domain_id",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Optional domain filter.",
+            },
+            {
+                "name": "limit",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
+                "description": "Page size.",
+            },
+            {
+                "name": "cursor",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Pagination cursor from previous response.",
+            },
+        ],
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "first_50": {
+                                "summary": "Fetch latest 50 queries",
+                                "value": {
+                                    "items": [
+                                        {
+                                            "query_id": "vq_3f7a2d1b98",
+                                            "tenant_id": "VC_101",
+                                            "domain_id": "lpg_production_distribution",
+                                            "status": "completed",
+                                            "chart_status": "ready",
+                                            "inference_status": "ready",
+                                            "row_count": 120,
+                                            "limit": 100,
+                                            "sql_preview": "SELECT date_trunc('month', process_date) AS period, SUM(total_production) AS production_mt FROM public.fact_lpg_plant_operations ...",
+                                            "created_at": "2026-03-12T14:20:00.123456+00:00",
+                                            "updated_at": "2026-03-12T14:20:04.453210+00:00",
+                                            "chart_error": None,
+                                            "inference_error": None
+                                        }
+                                    ],
+                                    "next_cursor": "eyJjcmVhdGVkX2F0IjogIjIwMjYtMDMtMTJUMTQ6MDA6MDAuMDAwMDAwKzAwOjAwIiwgInF1ZXJ5X2lkIjogInZxX2FiY2QxMjM0NTYifQ=="
+                                }
+                            },
+                            "next_50": {
+                                "summary": "Fetch next page using cursor",
+                                "value": {
+                                    "items": [],
+                                    "next_cursor": None
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def views_query_history(
+    tenant_id: str,
+    domain_id: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    cursor: str | None = None,
+) -> ViewQueryHistoryResponse:
+    rows = list_view_query_runs(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        limit=limit,
+        cursor=cursor,
+    )
+    return ViewQueryHistoryResponse(
+        items=rows.get("items") or [],
+        next_cursor=rows.get("next_cursor"),
+    )
+
+
+@app.get(
+    "/views/query/{query_id}",
+    response_model=ViewQueryStatusResponse,
+    tags=["views"],
+    summary="Get view query status, chart, and inference",
+    openapi_extra={
+        "parameters": [
+            {
+                "name": "tenant_id",
+                "in": "query",
+                "required": True,
+                "schema": {"type": "string"},
+                "description": "Tenant identifier used when the query was created.",
+            },
+            {
+                "name": "domain_id",
+                "in": "query",
+                "required": False,
+                "schema": {"type": "string"},
+                "description": "Optional domain check for scoped polling.",
+            },
+        ],
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "in_progress": {
+                                "summary": "Chart and inference still processing",
+                                "value": {
+                                    "query_id": "vq_3f7a2d1b98",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "sql": "SELECT date_trunc('month', process_date) AS period, SUM(total_production) AS production_mt FROM public.fact_lpg_plant_operations GROUP BY 1 ORDER BY 1",
+                                    "limit": 100,
+                                    "status": "running",
+                                    "chart_status": "running",
+                                    "inference_status": "pending",
+                                    "rows": [{"period": "2026-01-01T00:00:00", "production_mt": 1280.0}],
+                                    "columns": ["period", "production_mt"],
+                                    "row_count": 1,
+                                    "chart": None,
+                                    "inference": None,
+                                    "chart_error": None,
+                                    "inference_error": None
+                                }
+                            },
+                            "completed": {
+                                "summary": "Chart and inference ready",
+                                "value": {
+                                    "query_id": "vq_3f7a2d1b98",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "sql": "SELECT date_trunc('month', process_date) AS period, SUM(total_production) AS production_mt FROM public.fact_lpg_plant_operations GROUP BY 1 ORDER BY 1",
+                                    "limit": 100,
+                                    "status": "completed",
+                                    "chart_status": "ready",
+                                    "inference_status": "ready",
+                                    "rows": [{"period": "2026-01-01T00:00:00", "production_mt": 1280.0}],
+                                    "columns": ["period", "production_mt"],
+                                    "row_count": 1,
+                                    "chart": {
+                                        "status": "ready",
+                                        "source": "llm",
+                                        "chart_type": "line",
+                                        "title": "Production Trend Over Time"
+                                    },
+                                    "inference": {
+                                        "status": "ready",
+                                        "source": "llm",
+                                        "text": "Production is stable over the selected period."
+                                    },
+                                    "chart_error": None,
+                                    "inference_error": None
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "404": {
+                "content": {
+                    "application/json": {
+                        "example": {"detail": "Query not found"}
+                    }
+                }
+            }
+        }
+    },
+)
+def get_view_query_status(
+    query_id: str,
+    tenant_id: str,
+    domain_id: str | None = None,
+) -> ViewQueryStatusResponse:
+    row = get_view_query_run(settings, query_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Query not found")
+    row_tenant = str(row.get("tenant_id") or "")
+    row_domain = str(row.get("domain_id") or "")
+    if row_tenant != tenant_id:
+        raise HTTPException(status_code=404, detail="Query not found")
+    if domain_id and row_domain != domain_id:
+        raise HTTPException(status_code=404, detail="Query not found")
+    payload = row.get("data_payload") or {}
+    rows = payload.get("rows") or []
+    columns = payload.get("columns") or []
+    row_count = int(payload.get("row_count") or len(rows))
+    return ViewQueryStatusResponse(
+        query_id=str(row.get("query_id") or query_id),
+        tenant_id=str(row.get("tenant_id") or ""),
+        domain_id=str(row.get("domain_id") or ""),
+        sql=str(row.get("sql_text") or ""),
+        limit=int(row.get("limit_requested") or 200),
+        status=str(row.get("status") or "running"),
+        chart_status=str(row.get("chart_status") or "pending"),
+        inference_status=str(row.get("inference_status") or "pending"),
+        rows=rows,
+        columns=columns,
+        row_count=row_count,
+        chart=row.get("chart_payload"),
+        inference=row.get("inference_payload"),
+        chart_error=row.get("chart_error"),
+        inference_error=row.get("inference_error"),
+        created_at=str(row.get("created_at") or "") or None,
+        updated_at=str(row.get("updated_at") or "") or None,
+    )
 
 
 def _default_dashboard_title(domain_id: str | None) -> str:
