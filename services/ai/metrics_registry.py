@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Iterable
 
@@ -7,6 +8,8 @@ import psycopg2
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, run_query
+
+logger = logging.getLogger(__name__)
 
 
 def fetch_registry_metrics(
@@ -16,6 +19,7 @@ def fetch_registry_metrics(
     connection_id: str | None = None,
     database_name: str | None = None,
     schema_name: str | None = None,
+    source_run_id: str | None = None,
     statuses: Iterable[str] | None = None,
     include_all_statuses: bool = False,
 ) -> list[dict[str, Any]]:
@@ -40,6 +44,9 @@ def fetch_registry_metrics(
     if schema_name:
         filters.append("schema_name = %s")
         params.append(schema_name)
+    if source_run_id:
+        filters.append("source_run_id = %s")
+        params.append(source_run_id)
     where_clause = " AND ".join(filters)
     sql = f"""
     SELECT metric_id, metric_name, display_name, description, type, sql, grain, dimensions,
@@ -50,7 +57,20 @@ def fetch_registry_metrics(
     WHERE {where_clause}
     """
     try:
-        return run_query(settings, sql, params)
+        rows = run_query(settings, sql, params)
+        logger.info(
+            "metrics_registry.fetch | tenant=%s domain=%s connection=%s db=%s schema=%s source_run_id=%s include_all_statuses=%s statuses=%s count=%s",
+            tenant_id,
+            domain_id,
+            connection_id,
+            database_name,
+            schema_name,
+            source_run_id,
+            include_all_statuses,
+            list(statuses) if statuses else None,
+            len(rows),
+        )
+        return rows
     except psycopg2.errors.UndefinedTable:
         return []
 
@@ -145,6 +165,23 @@ def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
         payload.get("version"),
     ]
     execute_non_query(settings, sql, params)
+    logger.info(
+        "metrics_registry.upsert | metric_id=%s artifact_key=%s tenant=%s domain=%s connection=%s db=%s schema=%s metric_name=%s lifecycle_status=%s source_type=%s source_run_id=%s dataset_id=%s source_model=%s version_no=%s",
+        metric_id,
+        artifact_key,
+        payload.get("tenant_id"),
+        payload.get("domain_id"),
+        payload.get("connection_id"),
+        payload.get("database"),
+        payload.get("schema"),
+        metric_name,
+        lifecycle_status,
+        payload.get("source_type", "system"),
+        payload.get("source_run_id"),
+        payload.get("dataset_id"),
+        payload.get("source_model"),
+        version_no,
+    )
     return metric_id
 
 

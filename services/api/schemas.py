@@ -33,6 +33,11 @@ class QueryRequest(BaseModel):
         description="Domain identifier for glossary/context enrichment",
         examples=["manufacturing"],
     )
+    run_id: Optional[str] = Field(
+        None,
+        description="Deployment run identifier to bind semantic intelligence for workspace-scoped queries",
+        examples=["run_1a0f427c86ec"],
+    )
     metric: Optional[str] = Field(
         None,
         description="Metric name to query directly",
@@ -71,6 +76,7 @@ class ChatRequest(BaseModel):
     question: str = Field(..., description="Natural language question")
     tenant_id: str = Field(..., description="Tenant identifier")
     domain_id: Optional[str] = Field(None, description="Domain identifier")
+    run_id: Optional[str] = Field(None, description="Deployment run identifier")
     metrics: Optional[List[str]] = Field(None, description="Metric names to query")
     dimensions: List[str] = Field(default_factory=list, description="Dimensions to group by")
     filters: List[QueryFilter] = Field(default_factory=list, description="Filters to apply")
@@ -135,6 +141,16 @@ class QueryResult(BaseModel):
     lineage: Optional[dict] = Field(
         None,
         examples=[{"models": ["fact_sales"], "tables": ["public.fact_sales"]}],
+    )
+    artifact_lineage: Optional[dict] = Field(
+        None,
+        examples=[
+            {
+                "run_id": "run_1a0f427c86ec",
+                "scope": {"tenant_id": "VC_101", "domain_id": "lpg_production_distribution"},
+                "metrics": [{"metric_name": "production_mt", "artifact_key": "metric_key", "version_no": 2}],
+            }
+        ],
     )
     model_config = {
         "json_schema_extra": {

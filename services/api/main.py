@@ -18,7 +18,7 @@ import urllib.request
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Query
 
-from services.ai.catalog import Dimension, load_catalog_with_registry, resolve_ref
+from services.ai.catalog import Dimension, Metric, MetricCatalog, load_catalog_with_registry, resolve_ref
 from datetime import date as _date, timedelta as _timedelta
 from services.ai.config import load_settings
 from services.ai.db import execute_non_query, run_query
@@ -139,6 +139,12 @@ from services.ai.agentic_store import (
     append_plan_summary,
 )
 from services.ai.agentic_orchestrator import run_agentic_workflow
+from services.ai.agentic_artifacts_registry import (
+    get_schema_graph_artifact,
+    get_table_profile_artifact,
+    list_join_registry,
+    list_model_registry,
+)
 from services.ai.langsmith_forwarder import LangSmithEventForwarder
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
@@ -6286,6 +6292,7 @@ def _workspace_query_response(
     *,
     tenant_id: str,
     domain_id: str,
+    run_id: str | None,
     question: str,
     metrics: list[str] | None = None,
     dimensions: list[str] | None = None,
@@ -6296,6 +6303,7 @@ def _workspace_query_response(
             question=question,
             tenant_id=tenant_id,
             domain_id=domain_id,
+            run_id=run_id,
             metrics=metrics or [],
             dimensions=dimensions or [],
             filters=[],
@@ -6335,6 +6343,8 @@ def _workspace_query_response(
         "data": chart_payload.get("data") if chart_payload else query_result.rows,
         "sql": query_result.sql,
         "rows": query_result.rows,
+        "lineage": query_result.lineage,
+        "artifact_lineage": query_result.artifact_lineage,
     }
     metric_label = ", ".join(query_result.metrics[:2]) if query_result.metrics else "requested metrics"
     assistant_text = f"Returned {len(query_result.rows)} rows for {metric_label}."
@@ -6343,10 +6353,13 @@ def _workspace_query_response(
         "row_count": len(query_result.rows),
         "metrics": query_result.metrics,
         "dimensions": query_result.dimensions,
+        "lineage": query_result.lineage,
+        "artifact_lineage": query_result.artifact_lineage,
     }
     inference_json = {
         "text": "Use filters or follow-up prompts to drill deeper by region, plant, or time period.",
         "confidence": 0.75 if query_result.rows else 0.4,
+        "artifact_lineage": query_result.artifact_lineage,
     }
     return response_payload, assistant_text, summary_json, inference_json
 
@@ -7034,6 +7047,27 @@ def workspace_create_conversation(payload: dict) -> dict:
     deployment = get_current_deployment(settings, tenant_id, domain_id)
     if not deployment or deployment.get("status") != "completed":
         raise HTTPException(status_code=409, detail="No completed deployment available for tenant/domain")
+    connection_id, database_name, schema_name, _ = _resolve_scope_values(tenant_id, domain_id)
+    bundle = _load_run_scoped_intelligence(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=deployment.get("run_id"),
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    missing = _missing_required_intelligence(bundle)
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Deployment intelligence is incomplete for conversation use",
+                "tenant_id": tenant_id,
+                "domain_id": domain_id,
+                "run_id": deployment.get("run_id"),
+                "missing_artifacts": missing,
+            },
+        )
     title = payload.get("title") or generate_conversation_title(_extract_user_query(payload), domain_id)
     conversation = create_workspace_conversation(
         settings,
@@ -7804,6 +7838,17 @@ def workspace_send_message(conversation_id: str, payload: dict):
     effective_question = user_query
     if resume_context and memory and memory.get("summary_text"):
         effective_question = f"{user_query}\n\nConversation context: {memory.get('summary_text')}"
+    logger.info(
+        "workspace.message.start | conversation_id=%s tenant=%s domain=%s run_id=%s stream=%s resume_context=%s memory_present=%s user_query=%s",
+        conversation_id,
+        conversation["tenant_id"],
+        conversation["domain_id"],
+        conversation["run_id"],
+        bool(stream),
+        bool(resume_context),
+        bool(memory),
+        user_query,
+    )
 
     def _persist_assistant(
         *,
@@ -7854,6 +7899,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
         response_payload, assistant_text_base, summary_json, inference_json = _workspace_query_response(
             tenant_id=conversation["tenant_id"],
             domain_id=conversation["domain_id"],
+            run_id=conversation["run_id"],
             question=effective_question,
             metrics=payload.get("metrics") or [],
             dimensions=payload.get("dimensions") or [],
@@ -7902,6 +7948,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
             response_payload, assistant_text_base, summary_json, inference_json = _workspace_query_response(
                 tenant_id=conversation["tenant_id"],
                 domain_id=conversation["domain_id"],
+                run_id=conversation["run_id"],
                 question=effective_question,
                 metrics=payload.get("metrics") or [],
                 dimensions=payload.get("dimensions") or [],
@@ -8470,6 +8517,79 @@ def agentic_debug_glossary(run_id: str) -> dict:
     if not event:
         raise HTTPException(status_code=404, detail="Glossary event not found")
     return {"run_id": run_id, "glossary_terms": event.get("artifacts")}
+
+
+@app.get(
+    "/agentic/debug/intelligence",
+    tags=["agentic"],
+    summary="Debug: run-scoped conversation intelligence bundle",
+)
+def agentic_debug_intelligence(tenant_id: str, domain_id: str | None = None, run_id: str | None = None) -> dict:
+    resolved_domain = _resolve_domain_id(tenant_id, domain_id)
+    if not run_id:
+        deployment = get_current_deployment(settings, tenant_id, resolved_domain)
+        if deployment:
+            run_id = deployment.get("run_id")
+    connection_id, database_name, schema_name, _ = _resolve_scope_values(tenant_id, resolved_domain)
+    bundle = _load_run_scoped_intelligence(
+        tenant_id=tenant_id,
+        domain_id=resolved_domain,
+        run_id=run_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": resolved_domain,
+        "run_id": run_id,
+        "connection_id": connection_id,
+        "database_name": database_name,
+        "schema_name": schema_name,
+        "counts": {
+            "metrics": len(bundle.get("metrics") or []),
+            "facts": len(bundle.get("facts") or []),
+            "dimensions": len(bundle.get("dimensions") or []),
+            "glossary": len(bundle.get("glossary") or []),
+            "hierarchies": len(bundle.get("hierarchies") or []),
+            "joins": len(bundle.get("joins") or []),
+            "models": len(bundle.get("models") or []),
+            "dimension_candidates": len(bundle.get("dimension_candidates") or []),
+        },
+        "artifact_agents": sorted(list((bundle.get("agent_artifacts") or {}).keys())),
+        "metrics_sample": [
+            {
+                "metric_name": row.get("metric_name"),
+                "dataset_id": row.get("dataset_id"),
+                "source_model": row.get("source_model"),
+                "source_run_id": row.get("source_run_id"),
+            }
+            for row in (bundle.get("metrics") or [])[:10]
+        ],
+        "facts_sample": [
+            {
+                "table_name": row.get("table_name"),
+                "grain": row.get("grain"),
+                "time_column": row.get("time_column"),
+                "source_run_id": row.get("source_run_id"),
+            }
+            for row in (bundle.get("facts") or [])[:10]
+        ],
+        "dimensions_sample": [
+            {
+                "name": row.get("name"),
+                "keys": row.get("keys"),
+                "attributes": row.get("attributes"),
+                "source_run_id": row.get("source_run_id"),
+            }
+            for row in (bundle.get("dimensions") or [])[:10]
+        ],
+        "glossary_sample": (bundle.get("glossary") or [])[:20],
+        "hierarchies_sample": (bundle.get("hierarchies") or [])[:20],
+        "joins_sample": (bundle.get("joins") or [])[:20],
+        "models_sample": (bundle.get("models") or [])[:20],
+        "dimension_candidates_sample": (bundle.get("dimension_candidates") or [])[:50],
+    }
 
 
 @app.get(
@@ -13757,7 +13877,9 @@ def _resolve_metrics(
     glossary: list[dict] | None = None,
     allowed_dimensions: list[str] | None = None,
     domain_id: str | None = None,
+    metric_catalog: MetricCatalog | None = None,
 ) -> tuple[list[str], list[str], list[dict]]:
+    catalog_ref = metric_catalog or catalog
     if request.metrics:
         logger.info("request.metrics provided: %s", request.metrics)
         return request.metrics, request.dimensions, [flt.model_dump() for flt in request.filters]
@@ -13768,12 +13890,12 @@ def _resolve_metrics(
 
     if request.question:
         logger.info("resolving question: %s", request.question)
-        deterministic_metrics = _deterministic_metrics_from_question(request.question, catalog)
+        deterministic_metrics = _deterministic_metrics_from_question(request.question, catalog_ref)
         if deterministic_metrics:
             logger.info("resolver.deterministic_metrics | metrics=%s", deterministic_metrics)
             metric_fact_cols: set[str] = set()
             for metric_name in deterministic_metrics:
-                metric = catalog.metrics.get(metric_name)
+                metric = catalog_ref.metrics.get(metric_name)
                 if not metric:
                     continue
                 metric_fact_cols.update(_fact_columns_for_metric(metric.sql, settings.db_schema))
@@ -13799,7 +13921,7 @@ def _resolve_metrics(
             else:
                 resolved = resolve_question(
                     request.question,
-                    catalog,
+                    catalog_ref,
                     settings,
                     allowed_metrics=deterministic_metrics,
                     glossary=glossary,
@@ -13835,7 +13957,7 @@ def _resolve_metrics(
             else:
                 resolved = resolve_question(
                     request.question,
-                    catalog,
+                    catalog_ref,
                     settings,
                     glossary=glossary,
                     allowed_dimensions=allowed_dimensions,
@@ -13845,7 +13967,7 @@ def _resolve_metrics(
                 dimensions = resolved.get("dimensions", [])
                 filters = resolved.get("filters", [])
         if allowed_dimensions:
-            allowed_metrics_set = {m for m in catalog.metric_names()}
+            allowed_metrics_set = {m for m in catalog_ref.metric_names()}
             if allowed_metrics_set:
                 filtered_metrics = []
                 for metric in metrics:
@@ -13902,7 +14024,7 @@ def _resolve_metrics(
             filter_fields.append(payload["field"])
 
         allowed_metrics = []
-        for metric in catalog.metrics.values():
+        for metric in catalog_ref.metrics.values():
             if all(dim in metric.dimensions for dim in dimensions) and all(
                 field in metric.dimensions for field in filter_fields
             ):
@@ -13915,7 +14037,7 @@ def _resolve_metrics(
             logger.info("re-resolving with allowed metrics: %s", allowed_metrics)
             resolved = resolve_question(
                 request.question,
-                catalog,
+                catalog_ref,
                 settings,
                 allowed_metrics=allowed_metrics,
                 glossary=glossary,
@@ -14139,6 +14261,21 @@ def _normalize_filters(filters: list[dict], settings: object) -> list[dict]:
             continue
         normalized.append(flt)
     return normalized
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        key = str(value or "").strip()
+        if not key:
+            continue
+        marker = key.lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(key)
+    return result
 
 
 def _expand_relative_date_filters(filters: list[dict]) -> list[dict]:
@@ -14497,6 +14634,280 @@ def _coerce_time_filter_fields(filters: list[dict], metric_dimension_set: set[st
     return coerced
 
 
+def _join_connected_tables(
+    base_tables: set[str],
+    join_edges: list[dict[str, Any]] | None,
+) -> set[str]:
+    normalized_bases = {_normalize_table_token(table) for table in base_tables if _normalize_table_token(table)}
+    if not normalized_bases:
+        return set()
+    graph: dict[str, set[str]] = {}
+    for edge in join_edges or []:
+        if not isinstance(edge, dict):
+            continue
+        left = _normalize_table_token(edge.get("left_table") or edge.get("left"))
+        right = _normalize_table_token(edge.get("right_table") or edge.get("right"))
+        if not left or not right:
+            continue
+        graph.setdefault(left, set()).add(right)
+        graph.setdefault(right, set()).add(left)
+    visited = set(normalized_bases)
+    pending = list(normalized_bases)
+    while pending:
+        current = pending.pop(0)
+        for neighbor in graph.get(current, set()):
+            if neighbor in visited:
+                continue
+            visited.add(neighbor)
+            pending.append(neighbor)
+    return visited
+
+
+def _build_scoped_dimension_access(
+    *,
+    schema_name: str,
+    metrics: list[Metric],
+    join_edges: list[dict[str, Any]] | None,
+    model_map: dict[str, dict[str, Any]] | None,
+) -> tuple[set[str], dict[str, list[str]], dict[str, str]]:
+    base_tables = {
+        _normalize_table_token(_infer_fact_table_from_metric_sql(metric.sql))
+        for metric in metrics
+        if _infer_fact_table_from_metric_sql(metric.sql)
+    }
+    accessible_tables = _join_connected_tables(base_tables, join_edges) | {table for table in base_tables if table}
+    if not accessible_tables:
+        return set(), {}, {}
+    model_info = model_map or {}
+    ranked_tables = sorted(
+        accessible_tables,
+        key=lambda table: (
+            0 if (model_info.get(table) or {}).get("model_type") == "dimension" else 1,
+            0 if table in base_tables else 1,
+            table,
+        ),
+    )
+    allowed_columns: set[str] = set()
+    column_tables: dict[str, list[str]] = {}
+    preferred_table_for_column: dict[str, str] = {}
+    for table in ranked_tables:
+        cols = [str(col) for col in _list_fact_table_columns(schema_name, table) if str(col or "").strip()]
+        for col in cols:
+            allowed_columns.add(col)
+            column_tables.setdefault(col, [])
+            if table not in column_tables[col]:
+                column_tables[col].append(table)
+            preferred_table_for_column.setdefault(col, table)
+    return allowed_columns, column_tables, preferred_table_for_column
+
+
+def _build_ad_hoc_dimension(
+    *,
+    dim_name: str,
+    preferred_table: str | None,
+    model_map: dict[str, dict[str, Any]] | None,
+) -> Dimension | None:
+    table = str(preferred_table or "").strip()
+    if not table:
+        return None
+    model_type = (model_map or {}).get(_normalize_table_token(table), {}).get("model_type") or "scoped"
+    quoted_dim_name = str(dim_name).replace('"', '""')
+    return Dimension(
+        name=dim_name,
+        description=f"Ad-hoc {model_type} dimension from {table}",
+        data_type="string",
+        sql=f'{{{{ ref(\'{table}\') }}}}."{quoted_dim_name}"',
+    )
+
+
+def _load_persisted_hierarchy_overrides(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database_name: str,
+    schema_name: str,
+) -> list[dict[str, Any]]:
+    active_context_ids = list_active_context_ids(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id,
+        database_name,
+        schema_name,
+    )
+    _, hierarchy_overrides = load_overrides(
+        settings,
+        tenant_id,
+        domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        context_ids=active_context_ids or None,
+    )
+    return hierarchy_overrides or []
+
+
+def _artifact_lineage_snapshot(
+    *,
+    tenant_id: str | None,
+    domain_id: str | None,
+    run_id: str | None,
+    connection_id: str | None,
+    database_name: str | None,
+    schema_name: str | None,
+    bundle: dict[str, Any] | None,
+    metrics: list[Metric],
+) -> dict[str, Any] | None:
+    if not tenant_id or not domain_id or not run_id:
+        return None
+    payload = bundle or {}
+    selected_metric_names = {metric.name for metric in metrics}
+    metric_rows = []
+    for row in payload.get("metrics") or []:
+        metric_name = str(row.get("metric_name") or "").strip()
+        if metric_name and metric_name in selected_metric_names:
+            metric_rows.append(
+                {
+                    "metric_name": metric_name,
+                    "artifact_key": row.get("artifact_key"),
+                    "version_no": row.get("version_no"),
+                    "source_model": row.get("source_model"),
+                    "dataset_id": row.get("dataset_id"),
+                    "source_run_id": row.get("source_run_id"),
+                }
+            )
+    return {
+        "run_id": run_id,
+        "scope": {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "connection_id": connection_id,
+            "database_name": database_name,
+            "schema_name": schema_name,
+        },
+        "metrics": metric_rows,
+        "joins": [
+            {
+                "artifact_key": row.get("artifact_key"),
+                "version_no": row.get("version_no"),
+                "left_table": row.get("left_table"),
+                "right_table": row.get("right_table"),
+            }
+            for row in (payload.get("joins") or [])
+        ],
+        "models": [
+            {
+                "artifact_key": row.get("artifact_key"),
+                "version_no": row.get("version_no"),
+                "table_name": row.get("table_name"),
+                "model_type": row.get("model_type"),
+                "grain": row.get("grain"),
+                "time_column": row.get("time_column"),
+            }
+            for row in (payload.get("models") or [])
+        ],
+        "facts": [
+            {
+                "artifact_key": row.get("artifact_key"),
+                "version_no": row.get("version_no"),
+                "table_name": row.get("table_name"),
+                "source_run_id": row.get("source_run_id"),
+            }
+            for row in (payload.get("facts") or [])
+        ],
+        "dimensions": [
+            {
+                "artifact_key": row.get("artifact_key"),
+                "version_no": row.get("version_no"),
+                "name": row.get("name"),
+                "source_run_id": row.get("source_run_id"),
+            }
+            for row in (payload.get("dimensions") or [])
+        ],
+        "glossary": [
+            {
+                "term": row.get("term"),
+                "normalized_term": row.get("normalized_term"),
+            }
+            for row in (payload.get("glossary") or [])[:50]
+        ],
+        "hierarchies": [
+            {
+                "hierarchy_name": row.get("hierarchy_name"),
+                "artifact_key": row.get("artifact_key"),
+                "version_no": row.get("version_no"),
+            }
+            for row in (payload.get("hierarchies") or [])
+        ],
+        "schema_graph": {
+            "artifact_key": (payload.get("schema_graph_row") or {}).get("artifact_key"),
+            "version_no": (payload.get("schema_graph_row") or {}).get("version_no"),
+        },
+        "table_profiles": {
+            "artifact_key": (payload.get("table_profile_row") or {}).get("artifact_key"),
+            "version_no": (payload.get("table_profile_row") or {}).get("version_no"),
+        },
+    }
+
+
+def _validate_metric_semantics(
+    *,
+    metrics: list[Metric],
+    dimensions: list[str],
+    filters: list[dict[str, Any]],
+    model_map: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    if not metrics:
+        return None
+    model_lookup = model_map or {}
+    signatures: set[tuple[str, str]] = set()
+    time_supported = False
+    metric_details: list[dict[str, Any]] = []
+    for metric in metrics:
+        base_table = _infer_fact_table_from_metric_sql(metric.sql)
+        model_info = model_lookup.get(_normalize_table_token(base_table)) or {}
+        grain = str((model_info.get("grain") or metric.grain or "unknown")).strip().lower()
+        time_column = str(model_info.get("time_column") or "").strip()
+        if time_column:
+            time_supported = True
+        signatures.add((grain, time_column))
+        metric_details.append(
+            {
+                "metric_name": metric.name,
+                "base_table": base_table,
+                "grain": grain,
+                "time_column": time_column or None,
+                "model_type": model_info.get("model_type"),
+            }
+        )
+    temporal_fields = {str(dim).strip().lower() for dim in dimensions if str(dim).strip()}
+    temporal_fields.update(
+        str((flt or {}).get("field") or "").strip().lower()
+        for flt in filters
+        if isinstance(flt, dict)
+    )
+    requests_time = bool(
+        temporal_fields
+        & {"process_month", "process_date", "date_day", "pdate", "date", "week", "month_name", "fiscal_year"}
+    )
+    if len(signatures) > 1:
+        return {
+            "message": "Selected metrics have incompatible semantic grains for one query",
+            "issue": "grain_conflict",
+            "metrics": metric_details,
+        }
+    if requests_time and not time_supported:
+        return {
+            "message": "Selected metrics do not support time-based grouping or filtering",
+            "issue": "missing_time_support",
+            "metrics": metric_details,
+            "dimensions": dimensions,
+            "filters": filters,
+        }
+    return None
+
+
 def _extract_top_n(question: str | None) -> int | None:
     if not question:
         return None
@@ -14528,6 +14939,532 @@ def _infer_fact_table_from_metric_sql(metric_sql: str) -> str | None:
     if match:
         return match.group(1)
     return None
+
+
+def _infer_table_from_dimension_sql(dim_sql: str) -> str | None:
+    match = re.search(r"ref\('([^']+)'\)", dim_sql or "")
+    if match:
+        return match.group(1)
+    match = re.search(r'ref\(\"([^\"]+)\"\)', dim_sql or "")
+    if match:
+        return match.group(1)
+    return None
+
+
+def _normalize_table_token(value: object) -> str:
+    return str(value or "").split(".")[-1].strip().lower()
+
+
+def _build_model_intelligence_map(bundle: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    payload = bundle or {}
+    models = payload.get("models") or []
+    agent_artifacts = payload.get("agent_artifacts") or {}
+    profile_tables: list[dict[str, Any]] = []
+    table_profile_artifact = payload.get("table_profile_artifact")
+    if isinstance(table_profile_artifact, dict):
+        profile_tables.extend(table_profile_artifact.get("tables") or [])
+    profile_tables.extend(agent_artifacts.get("ProfilingAgent", {}).get("profiles") or [])
+    profile_map: dict[str, dict[str, Any]] = {}
+    for table in profile_tables:
+        if not isinstance(table, dict):
+            continue
+        table_name = _normalize_table_token(table.get("name") or table.get("table"))
+        if table_name and table_name not in profile_map:
+            profile_map[table_name] = table
+
+    model_rows = list(models)
+    if not model_rows:
+        model_rows = agent_artifacts.get("SemanticModelAgent", {}).get("model_classifications_detail") or []
+
+    model_map: dict[str, dict[str, Any]] = {}
+    for row in model_rows:
+        if not isinstance(row, dict):
+            continue
+        table_name = _normalize_table_token(row.get("table_name") or row.get("table") or row.get("name"))
+        if not table_name:
+            continue
+        profile = profile_map.get(table_name) or {}
+        time_columns = [
+            str(value).strip()
+            for value in (profile.get("time_columns") or [])
+            if str(value or "").strip()
+        ]
+        time_column = (
+            row.get("time_column")
+            or (row.get("metadata") or {}).get("time_column")
+            or (time_columns[0] if time_columns else None)
+        )
+        grain = row.get("grain") or (row.get("metadata") or {}).get("grain")
+        if not grain and time_column:
+            grain = "day"
+        model_map[table_name] = {
+            "table_name": table_name,
+            "model_type": str(row.get("model_type") or (row.get("metadata") or {}).get("model_type") or "").strip().lower() or None,
+            "grain": str(grain or "").strip().lower() or None,
+            "time_column": str(time_column or "").strip() or None,
+            "confidence": row.get("confidence"),
+            "numeric_columns": row.get("numeric_columns") or profile.get("numeric_columns") or [],
+            "categorical_columns": row.get("categorical_columns") or profile.get("categorical_columns") or [],
+            "time_columns": time_columns,
+        }
+    return model_map
+
+
+def _metric_debug_payload(metric: Metric, model_map: dict[str, dict[str, Any]] | None = None) -> dict[str, object]:
+    base_table = _infer_fact_table_from_metric_sql(metric.sql)
+    model_info = (model_map or {}).get(_normalize_table_token(base_table))
+    return {
+        "name": metric.name,
+        "base_table": base_table,
+        "dimensions": list(metric.dimensions or []),
+        "metric_type": metric.metric_type,
+        "grain": metric.grain,
+        "model_type": (model_info or {}).get("model_type"),
+        "time_column": (model_info or {}).get("time_column"),
+        "sql_preview": (metric.sql or "")[:160],
+    }
+
+
+def _question_supports_multi_metric(question: str | None) -> bool:
+    lowered = str(question or "").lower()
+    if not lowered:
+        return False
+    markers = (
+        " vs ",
+        " versus ",
+        "compare",
+        "difference",
+        "ratio",
+        "split by",
+        "alongside",
+        "required run rate",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _select_metrics_with_model_intelligence(
+    *,
+    metrics: list[Metric],
+    question: str | None,
+    dimensions: list[str],
+    filters: list[dict[str, Any]],
+    model_map: dict[str, dict[str, Any]] | None,
+) -> tuple[list[Metric], dict[str, Any]]:
+    if not metrics or not model_map:
+        return metrics, {"reason": "no_model_intelligence"}
+
+    filter_fields = {
+        str((flt or {}).get("field") or "").strip()
+        for flt in filters
+        if isinstance(flt, dict) and str((flt or {}).get("field") or "").strip()
+    }
+    requested_dimensions = {str(dim).strip() for dim in dimensions if str(dim or "").strip()}
+    candidates: list[dict[str, Any]] = []
+    for metric in metrics:
+        base_table = _infer_fact_table_from_metric_sql(metric.sql)
+        model_info = model_map.get(_normalize_table_token(base_table))
+        metric_dimensions = set(metric.dimensions or [])
+        dimension_support = len(requested_dimensions & metric_dimensions) + len(filter_fields & metric_dimensions)
+        lexical_score = _score_metric_match(question or "", metric.name)
+        fact_bonus = 0.35 if (model_info or {}).get("model_type") == "fact" else 0.0
+        time_bonus = 0.1 if (model_info or {}).get("time_column") and any("month" in dim.lower() or "date" in dim.lower() for dim in requested_dimensions | filter_fields) else 0.0
+        final_score = lexical_score + fact_bonus + time_bonus + (0.05 * dimension_support)
+        candidates.append(
+            {
+                "metric": metric,
+                "metric_name": metric.name,
+                "base_table": base_table,
+                "model_type": (model_info or {}).get("model_type"),
+                "grain": (model_info or {}).get("grain") or metric.grain or None,
+                "time_column": (model_info or {}).get("time_column"),
+                "dimension_support": dimension_support,
+                "lexical_score": lexical_score,
+                "score": final_score,
+            }
+        )
+
+    fact_candidates = [item for item in candidates if item.get("model_type") == "fact"]
+    working = fact_candidates or candidates
+    dropped_non_fact = [item for item in candidates if item not in working]
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in working:
+        signature = (
+            str(item.get("grain") or "unknown"),
+            str(item.get("time_column") or ""),
+        )
+        grouped.setdefault(signature, []).append(item)
+
+    chosen_signature = None
+    if len(grouped) > 1:
+        scored_groups = []
+        for signature, items in grouped.items():
+            group_score = sum(float(entry.get("score") or 0.0) for entry in items)
+            scored_groups.append((group_score, len(items), signature))
+        scored_groups.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        chosen_signature = scored_groups[0][2]
+        working = grouped[chosen_signature]
+
+    if not _question_supports_multi_metric(question) and len(working) > 1:
+        working = sorted(
+            working,
+            key=lambda item: (-float(item.get("score") or 0.0), item.get("metric_name") or ""),
+        )[:1]
+
+    selected = [item["metric"] for item in working]
+    return selected, {
+        "reason": "model_pruned",
+        "candidate_count": len(candidates),
+        "selected_count": len(selected),
+        "chosen_signature": chosen_signature,
+        "dropped_non_fact": [item.get("metric_name") for item in dropped_non_fact],
+        "candidates": [
+            {
+                "metric_name": item.get("metric_name"),
+                "base_table": item.get("base_table"),
+                "model_type": item.get("model_type"),
+                "grain": item.get("grain"),
+                "time_column": item.get("time_column"),
+                "dimension_support": item.get("dimension_support"),
+                "lexical_score": round(float(item.get("lexical_score") or 0.0), 3),
+                "score": round(float(item.get("score") or 0.0), 3),
+                "selected": item["metric"] in selected,
+            }
+            for item in sorted(
+                candidates,
+                key=lambda entry: (-float(entry.get("score") or 0.0), str(entry.get("metric_name") or "")),
+            )
+        ],
+    }
+
+
+def _catalog_from_registry_rows(rows: list[dict[str, object]], dimensions: dict[str, Dimension]) -> MetricCatalog:
+    metrics: dict[str, Metric] = {}
+    for row in rows:
+        sql = str(row.get("sql") or "").strip()
+        if not sql:
+            continue
+        metric_name = str(row.get("metric_name") or row.get("metric_id") or "").strip()
+        if not metric_name:
+            continue
+        dimensions_list = row.get("dimensions") or []
+        if not isinstance(dimensions_list, list):
+            dimensions_list = []
+        metric_obj = Metric(
+            name=metric_name,
+            description=str(row.get("description") or ""),
+            metric_type=str(row.get("type") or ""),
+            sql=sql,
+            grain=str(row.get("grain") or ""),
+            dimensions=[str(item) for item in dimensions_list if str(item or "").strip()],
+            status=str(row.get("lifecycle_status") or "") or None,
+            owner=str(row.get("owner") or "") or None,
+            version=str(row.get("version") or "") or None,
+        )
+        metrics[metric_name] = metric_obj
+        display_name = str(row.get("display_name") or "").strip()
+        if display_name and display_name != metric_name and display_name not in metrics:
+            metrics[display_name] = Metric(
+                name=display_name,
+                description=metric_obj.description,
+                metric_type=metric_obj.metric_type,
+                sql=metric_obj.sql,
+                grain=metric_obj.grain,
+                dimensions=list(metric_obj.dimensions),
+                status=metric_obj.status,
+                owner=metric_obj.owner,
+                version=metric_obj.version,
+            )
+    return MetricCatalog(metrics=metrics, dimensions=dimensions)
+
+
+def _latest_completed_agent_raw_artifacts(run_id: str) -> dict[str, dict[str, Any]]:
+    rows = list_agent_run_events_stage_aware(settings, run_id, limit=5000)
+    completed_events = [
+        row
+        for row in rows
+        if row.get("agent_name")
+        and ((row.get("stage_name") == "completed") or (row.get("status") == "completed"))
+    ]
+    artifact_by_event_id: dict[str, dict[str, Any]] = {}
+    event_ids = [str(row.get("event_id")) for row in completed_events if row.get("event_id")]
+    if event_ids:
+        try:
+            artifact_by_event_id = list_agent_event_artifacts_by_event_ids(settings, run_id, event_ids)
+        except Exception:
+            artifact_by_event_id = {}
+    latest: dict[str, dict[str, Any]] = {}
+    for row in completed_events:
+        agent_name = str(row.get("agent_name") or "").strip()
+        if not agent_name:
+            continue
+        event_id = str(row.get("event_id") or "")
+        artifact_row = artifact_by_event_id.get(event_id) or {}
+        raw_json = artifact_row.get("raw_json")
+        if not isinstance(raw_json, dict):
+            artifacts = row.get("artifacts") or {}
+            if isinstance(artifacts, dict) and isinstance(artifacts.get("raw_json"), dict):
+                raw_json = artifacts.get("raw_json")
+            elif isinstance(artifacts, dict):
+                raw_json = artifacts
+        latest[agent_name] = raw_json if isinstance(raw_json, dict) else {}
+    return latest
+
+
+def _extract_bundle_glossary_terms(agent_artifacts: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+
+    def _add_term(term: str, *, synonyms: list[str] | None = None, abbreviations: list[str] | None = None) -> None:
+        normalized = str(term or "").strip().lower()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        out.append(
+            {
+                "term": str(term).strip(),
+                "normalized_term": normalized,
+                "definition": None,
+                "synonyms": synonyms or [],
+                "abbreviations": abbreviations or [],
+            }
+        )
+
+    for item in agent_artifacts.get("ContextAgent", {}).get("glossary_terms") or []:
+        if isinstance(item, dict):
+            _add_term(
+                str(item.get("term") or "").strip(),
+                synonyms=[str(v) for v in (item.get("synonyms") or []) if str(v).strip()],
+                abbreviations=[str(v) for v in (item.get("abbreviations") or []) if str(v).strip()],
+            )
+    for item in agent_artifacts.get("GlossaryAgent", {}).get("terms_detail") or []:
+        if isinstance(item, dict):
+            _add_term(
+                str(item.get("term") or "").strip(),
+                synonyms=[str(v) for v in (item.get("synonyms") or []) if str(v).strip()],
+                abbreviations=[str(v) for v in (item.get("abbreviations") or []) if str(v).strip()],
+            )
+    for concept in agent_artifacts.get("OntologyAgent", {}).get("concepts_detail") or []:
+        if concept:
+            _add_term(str(concept))
+    return out
+
+
+def _artifact_dimension_candidates(
+    facts_rows: list[dict[str, Any]],
+    dimension_rows: list[dict[str, Any]],
+    agent_artifacts: dict[str, dict[str, Any]],
+) -> list[str]:
+    names: list[str] = []
+    for row in facts_rows:
+        for value in (row.get("dimensions") or []):
+            if value:
+                names.append(str(value))
+        if row.get("time_column"):
+            names.append(str(row.get("time_column")))
+    for row in dimension_rows:
+        if row.get("name"):
+            names.append(str(row.get("name")))
+        for value in (row.get("keys") or []):
+            if value:
+                names.append(str(value))
+        for value in (row.get("attributes") or []):
+            if value:
+                names.append(str(value))
+    for table in agent_artifacts.get("SchemaAgent", {}).get("tables_detail") or []:
+        if isinstance(table, dict):
+            for col in table.get("columns") or []:
+                if isinstance(col, dict) and col.get("name"):
+                    names.append(str(col.get("name")))
+    for table in agent_artifacts.get("ProfilingAgent", {}).get("profiles") or []:
+        if isinstance(table, dict):
+            for key in (
+                "categorical_columns",
+                "time_columns",
+                "eligible_numeric_columns",
+                "numeric_columns",
+            ):
+                for value in table.get(key) or []:
+                    if value:
+                        names.append(str(value))
+    for edge in agent_artifacts.get("JoinAgent", {}).get("join_edges_detail") or []:
+        if isinstance(edge, dict):
+            for key in ("left_key", "right_key"):
+                value = edge.get(key)
+                if value:
+                    names.append(str(value))
+    for model in agent_artifacts.get("SemanticModelAgent", {}).get("model_classifications_detail") or []:
+        if isinstance(model, dict):
+            for key in ("time_column",):
+                value = model.get(key)
+                if value:
+                    names.append(str(value))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        normalized = name.strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(name.strip())
+    return deduped
+
+
+def _load_run_scoped_intelligence(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str | None,
+    connection_id: str,
+    database_name: str,
+    schema_name: str,
+) -> dict[str, Any]:
+    persisted_glossary = fetch_glossary_terms(settings, tenant_id, domain_id)
+    facts_rows = list_facts(settings, tenant_id, domain_id, connection_id, database_name, schema_name)
+    dimension_rows = list_dimensions(settings, tenant_id, domain_id, connection_id, database_name, schema_name)
+    metrics_rows = fetch_registry_metrics(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        source_run_id=run_id,
+        include_all_statuses=True,
+    ) if run_id else fetch_registry_metrics(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        include_all_statuses=True,
+    )
+    if run_id:
+        run_filtered_facts = [row for row in facts_rows if row.get("source_run_id") == run_id]
+        run_filtered_dimensions = [row for row in dimension_rows if row.get("source_run_id") == run_id]
+        if run_filtered_facts:
+            facts_rows = run_filtered_facts
+        if run_filtered_dimensions:
+            dimension_rows = run_filtered_dimensions
+    agent_artifacts = _latest_completed_agent_raw_artifacts(run_id) if run_id else {}
+    schema_graph_artifact = (
+        get_schema_graph_artifact(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
+        if run_id
+        else None
+    )
+    table_profile_artifact = (
+        get_table_profile_artifact(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
+        if run_id
+        else None
+    )
+    joins = (
+        list_join_registry(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
+        if run_id
+        else []
+    )
+    models = (
+        list_model_registry(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
+        if run_id
+        else []
+    )
+    hierarchies = _load_persisted_hierarchy_overrides(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    if schema_graph_artifact and isinstance(schema_graph_artifact.get("graph_json"), dict):
+        agent_artifacts.setdefault("SchemaAgent", {})
+        agent_artifacts["SchemaAgent"].setdefault("tables_detail", (schema_graph_artifact.get("graph_json") or {}).get("tables", []))
+    if table_profile_artifact and isinstance(table_profile_artifact.get("profiling_json"), dict):
+        agent_artifacts.setdefault("ProfilingAgent", {})
+        agent_artifacts["ProfilingAgent"].setdefault("profiles", (table_profile_artifact.get("profiling_json") or {}).get("tables", []))
+    bundle_glossary = _extract_bundle_glossary_terms(agent_artifacts)
+    glossary_map: dict[str, dict[str, Any]] = {}
+    for row in persisted_glossary + bundle_glossary:
+        term = str((row or {}).get("term") or "").strip()
+        normalized = str((row or {}).get("normalized_term") or term.lower()).strip()
+        if not term and not normalized:
+            continue
+        glossary_map[normalized or term.lower()] = {
+            "term": term or normalized,
+            "normalized_term": normalized or term.lower(),
+            "definition": (row or {}).get("definition"),
+            "synonyms": (row or {}).get("synonyms") or [],
+            "abbreviations": (row or {}).get("abbreviations") or [],
+        }
+    dimension_candidates = _artifact_dimension_candidates(facts_rows, dimension_rows, agent_artifacts)
+    return {
+        "run_id": run_id,
+        "facts": facts_rows,
+        "dimensions": dimension_rows,
+        "metrics": metrics_rows,
+        "glossary": list(glossary_map.values()),
+        "hierarchies": hierarchies,
+        "joins": joins,
+        "models": models,
+        "schema_graph_row": schema_graph_artifact,
+        "schema_graph_artifact": schema_graph_artifact.get("graph_json") if schema_graph_artifact else None,
+        "table_profile_row": table_profile_artifact,
+        "table_profile_artifact": table_profile_artifact.get("profiling_json") if table_profile_artifact else None,
+        "agent_artifacts": agent_artifacts,
+        "dimension_candidates": dimension_candidates,
+    }
+
+
+def _missing_required_intelligence(bundle: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    if not (bundle.get("schema_graph_artifact") or (bundle.get("agent_artifacts") or {}).get("SchemaAgent")):
+        missing.append("schema_graph")
+    if not (bundle.get("table_profile_artifact") or (bundle.get("agent_artifacts") or {}).get("ProfilingAgent")):
+        missing.append("table_profiles")
+    if not (bundle.get("glossary") or (bundle.get("agent_artifacts") or {}).get("ContextAgent") or (bundle.get("agent_artifacts") or {}).get("GlossaryAgent") or (bundle.get("agent_artifacts") or {}).get("OntologyAgent")):
+        missing.append("glossary_ontology")
+    if not (bundle.get("joins") or (bundle.get("agent_artifacts") or {}).get("JoinAgent")):
+        missing.append("joins")
+    if not (bundle.get("models") or (bundle.get("agent_artifacts") or {}).get("SemanticModelAgent")):
+        missing.append("semantic_models")
+    if not (bundle.get("metrics") or []):
+        missing.append("metrics")
+    if not (bundle.get("facts") or []):
+        missing.append("facts")
+    if not (bundle.get("dimensions") or []):
+        missing.append("dimensions")
+    return missing
 
 
 def _list_fact_table_columns(schema_name: str, table_name: str) -> list[str]:
@@ -14709,11 +15646,16 @@ def query(request: QueryRequest) -> QueryResult:
     glossary = None
     contract = None
     domain_id = None
+    query_catalog = catalog
+    intelligence_bundle: dict[str, Any] | None = None
+    scoped_join_edges: list[dict[str, Any]] = []
+    model_intelligence_map: dict[str, dict[str, Any]] = {}
     logger.info("query.start | tenant=%s domain=%s question=%s metric=%s metrics=%s dims=%s filters=%s limit=%s",
                 request.tenant_id, request.domain_id, request.question, request.metric, request.metrics,
                 request.dimensions, request.filters, request.limit)
     fact_dims_map: dict[str, set[str]] = {}
     dimension_candidates: list[str] | None = None
+    scoped_metric_names: set[str] | None = None
     cached_payload = None
     if request.question and request.tenant_id:
         logger.info("query.cache_lookup | tenant=%s question=%s", request.tenant_id, request.question)
@@ -14733,14 +15675,73 @@ def query(request: QueryRequest) -> QueryResult:
         else:
             logger.info("query.cache_miss")
 
-    if request.tenant_id and not cached_payload:
+    if request.tenant_id:
         domain_id = _resolve_domain_id(request.tenant_id, request.domain_id)
+        effective_run_id = request.run_id
+        if not effective_run_id:
+            deployment = get_current_deployment(settings, request.tenant_id, domain_id)
+            if deployment:
+                effective_run_id = deployment.get("run_id")
+        if not effective_run_id:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "No completed deployment available for tenant/domain",
+                    "tenant_id": request.tenant_id,
+                    "domain_id": domain_id,
+                },
+            )
         connection_id, database_name, schema_name, tables = _resolve_scope_values(
             request.tenant_id,
             domain_id,
         )
+        intelligence_bundle = _load_run_scoped_intelligence(
+            tenant_id=request.tenant_id,
+            domain_id=domain_id,
+            run_id=effective_run_id,
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
         logger.info("query.scope | domain=%s connection=%s db=%s schema=%s tables=%s",
                     domain_id, connection_id, database_name, schema_name, tables)
+        logger.info(
+            "query.intelligence_bundle | requested_run_id=%s effective_run_id=%s metrics=%s facts=%s dimensions=%s glossary=%s hierarchies=%s artifact_agents=%s dimension_candidates=%s",
+            request.run_id,
+            effective_run_id,
+            len((intelligence_bundle or {}).get("metrics") or []),
+            len((intelligence_bundle or {}).get("facts") or []),
+            len((intelligence_bundle or {}).get("dimensions") or []),
+            len((intelligence_bundle or {}).get("glossary") or []),
+            len((intelligence_bundle or {}).get("hierarchies") or []),
+            sorted(list(((intelligence_bundle or {}).get("agent_artifacts") or {}).keys())),
+            len((intelligence_bundle or {}).get("dimension_candidates") or []),
+        )
+        model_intelligence_map = _build_model_intelligence_map(intelligence_bundle)
+        logger.info(
+            "query.model_scope | count=%s sample=%s",
+            len(model_intelligence_map),
+            list(model_intelligence_map.values())[:10],
+        )
+        scoped_join_edges = [dict(item) for item in ((intelligence_bundle or {}).get("joins") or []) if isinstance(item, dict)]
+        missing_artifacts = _missing_required_intelligence(intelligence_bundle or {})
+        if missing_artifacts:
+            logger.error(
+                "query.fail | reason=incomplete_intelligence requested_run_id=%s effective_run_id=%s missing=%s",
+                request.run_id,
+                effective_run_id,
+                missing_artifacts,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Deployment intelligence is incomplete for this tenant/domain scope",
+                    "tenant_id": request.tenant_id,
+                    "domain_id": domain_id,
+                    "run_id": effective_run_id,
+                    "missing_artifacts": missing_artifacts,
+                },
+            )
         _log_step("scope_resolved")
         _augment_catalog_dimensions_from_facts(
             request.tenant_id,
@@ -14750,22 +15751,45 @@ def query(request: QueryRequest) -> QueryResult:
             schema_name,
         )
         _log_step("catalog_augmented")
-        facts_for_scope = list_facts(
-            settings,
-            tenant_id=request.tenant_id,
-            domain_id=domain_id,
-            connection_id=connection_id,
-            database_name=database_name,
-            schema_name=schema_name,
-        )
+        facts_for_scope = (intelligence_bundle or {}).get("facts") or []
         _log_step("facts_listed")
+        scoped_metric_rows = (intelligence_bundle or {}).get("metrics") or []
+        scoped_metric_names: set[str] = set()
+        for row in scoped_metric_rows:
+            metric_name = str(row.get("metric_name") or "").strip()
+            display_name = str(row.get("display_name") or "").strip()
+            if metric_name:
+                scoped_metric_names.add(metric_name)
+            if display_name:
+                scoped_metric_names.add(display_name)
+        logger.info(
+            "query.scope_metrics | count=%s sample=%s",
+            len(scoped_metric_names),
+            [
+                {
+                    "metric_name": row.get("metric_name"),
+                    "display_name": row.get("display_name"),
+                    "dataset_id": row.get("dataset_id"),
+                    "source_model": row.get("source_model"),
+                    "lifecycle_status": row.get("lifecycle_status"),
+                    "source_run_id": row.get("source_run_id"),
+                }
+                for row in scoped_metric_rows[:10]
+            ],
+        )
+        query_catalog = _catalog_from_registry_rows(scoped_metric_rows, catalog.dimensions)
+        logger.info(
+            "query.scope_catalog | metric_count=%s dimension_count=%s",
+            len(query_catalog.metrics),
+            len(query_catalog.dimensions),
+        )
         for fact in facts_for_scope:
             table_name = fact.get("table_name")
             if table_name:
                 db_dims = _list_fact_table_columns(schema_name, table_name)
                 fact_dims_map[table_name] = set(db_dims)
         _log_step("fact_columns_loaded")
-        dimension_candidates = _dimension_candidates_for_scope(
+        dimension_candidates = (intelligence_bundle or {}).get("dimension_candidates") or _dimension_candidates_for_scope(
             request.tenant_id,
             domain_id,
             connection_id,
@@ -14774,7 +15798,7 @@ def query(request: QueryRequest) -> QueryResult:
         )
         logger.info("query.fact_dim_candidates | count=%s dims=%s", len(dimension_candidates), dimension_candidates)
         _log_step("dimension_candidates")
-        glossary = fetch_glossary_terms(settings, request.tenant_id, domain_id)
+        glossary = (intelligence_bundle or {}).get("glossary") or fetch_glossary_terms(settings, request.tenant_id, domain_id)
         logger.info("query.glossary | loaded=%s", len(glossary or []))
         contract = get_active_semantic_contract(settings, request.tenant_id, domain_id)
         _log_step("glossary_contract")
@@ -14799,14 +15823,15 @@ def query(request: QueryRequest) -> QueryResult:
             glossary=glossary,
             allowed_dimensions=dimension_candidates,
             domain_id=domain_id,
+            metric_catalog=query_catalog,
         )
     _log_step("resolve_metrics")
     logger.info("query.resolve_metrics | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     if metric_names or dimensions or filters:
-        metric_lookup = {name.lower(): name for name in catalog.metrics.keys()}
-        dim_lookup = {name.lower(): name for name in catalog.dimensions.keys()}
+        metric_lookup = {name.lower(): name for name in query_catalog.metrics.keys()}
+        dim_lookup = {name.lower(): name for name in query_catalog.dimensions.keys()}
         metric_names = [metric_lookup.get(name.lower(), name) for name in metric_names]
-        dimensions = [dim_lookup.get(name.lower(), name) for name in dimensions]
+        dimensions = _dedupe_preserve_order([dim_lookup.get(name.lower(), name) for name in dimensions])
         normalized_filters = []
         for flt in filters:
             payload = flt if isinstance(flt, dict) else flt.model_dump()
@@ -14816,9 +15841,18 @@ def query(request: QueryRequest) -> QueryResult:
             normalized_filters.append(payload)
         filters = normalized_filters
         logger.info("query.normalized | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
+    if scoped_metric_names:
+        filtered_metric_names = [m for m in metric_names if m in scoped_metric_names]
+        if filtered_metric_names != metric_names:
+            logger.info(
+                "query.scope_metric_filter | before=%s after=%s",
+                metric_names,
+                filtered_metric_names,
+            )
+            metric_names = filtered_metric_names
     if not metric_names and request.question:
         question = request.question.lower()
-        if "required run rate" in question:
+        if "required run rate" in question and not scoped_metric_names:
             metric_names = ["current_run_rate_mmt", "required_run_rate_mmt"]
             dimensions = ["sales_area_name", "month_name", "fiscal_year"]
     logger.info("metrics: %s", metric_names)
@@ -14830,7 +15864,7 @@ def query(request: QueryRequest) -> QueryResult:
     filters = _normalize_filters(filters, settings)
     filters = _normalize_sales_quarter_filters(filters, metric_names)
     if not (cached_payload and dimension_candidates is None):
-        filters = _filter_dimension_filters(filters, set(catalog.dimensions.keys()))
+        filters = _filter_dimension_filters(filters, set(query_catalog.dimensions.keys()))
     _log_step("normalize_inputs")
     logger.info("query.coerced | metrics=%s dimensions=%s filters=%s", metric_names, dimensions, filters)
     logger.info("dimensions: %s", dimensions)
@@ -14874,20 +15908,35 @@ def query(request: QueryRequest) -> QueryResult:
     metrics = []
     metrics_all = []
     for metric_name in metric_names:
-        if metric_name not in catalog.metrics:
+        if metric_name not in query_catalog.metrics:
             logger.error("query.fail | reason=unknown_metric metric=%s", metric_name)
             raise HTTPException(status_code=400, detail=f"Unknown metric: {metric_name}")
-        metrics.append(catalog.metrics[metric_name])
-        metrics_all.append(catalog.metrics[metric_name])
+        metrics.append(query_catalog.metrics[metric_name])
+        metrics_all.append(query_catalog.metrics[metric_name])
         if request.question:
             score = _score_metric_match(request.question, metric_name)
-            base_table = _infer_fact_table_from_metric_sql(catalog.metrics[metric_name].sql)
+            base_table = _infer_fact_table_from_metric_sql(query_catalog.metrics[metric_name].sql)
             logger.info(
                 "query.metric_score | metric=%s score=%.3f base_table=%s",
                 metric_name,
                 score,
                 base_table,
             )
+    logger.info(
+        "query.metric_candidates | count=%s sample=%s",
+        len(metrics_all),
+        [_metric_debug_payload(metric, model_intelligence_map) for metric in metrics_all[:10]],
+    )
+    metrics, model_selection = _select_metrics_with_model_intelligence(
+        metrics=metrics,
+        question=request.question,
+        dimensions=dimensions,
+        filters=[flt if isinstance(flt, dict) else flt.model_dump() for flt in filters],
+        model_map=model_intelligence_map,
+    )
+    metrics_all = list(metrics)
+    metric_names = [metric.name for metric in metrics]
+    logger.info("query.model_selection | details=%s", model_selection)
     _log_step("metrics_loaded")
 
     filter_fields = []
@@ -14899,21 +15948,34 @@ def query(request: QueryRequest) -> QueryResult:
     for metric in metrics_all:
         fact_cols = _fact_columns_for_metric(metric.sql, settings.db_schema)
         metric_dimension_set.update(fact_cols)
+    scoped_dimension_set, scoped_column_tables, preferred_table_for_column = _build_scoped_dimension_access(
+        schema_name=schema_name or settings.db_schema,
+        metrics=metrics,
+        join_edges=scoped_join_edges,
+        model_map=model_intelligence_map,
+    )
+    if scoped_dimension_set:
+        metric_dimension_set.update(scoped_dimension_set)
     dimensions, filters = _coerce_dimension_aliases(
         dimensions,
         filters,
-        set(catalog.dimensions.keys()),
+        set(query_catalog.dimensions.keys()),
         metric_dimension_set,
     )
     filters = _coerce_time_filter_fields(filters, metric_dimension_set)
     _log_step("alias_coerced")
-    logger.info("query.dim_alias | dimensions=%s filters=%s metric_dims=%s",
-                dimensions, filters, sorted(metric_dimension_set))
+    logger.info(
+        "query.dim_alias | dimensions=%s filters=%s metric_dims=%s scoped_column_tables=%s",
+        dimensions,
+        filters,
+        sorted(metric_dimension_set),
+        {key: value for key, value in list(scoped_column_tables.items())[:25]},
+    )
     if metric_dimension_set:
         filtered_dimensions = [dim for dim in dimensions if dim in metric_dimension_set or dim == "process_month"]
         if filtered_dimensions != dimensions:
             logger.info(
-                "query.dimensions_filtered_to_fact | before=%s after=%s",
+                "query.dimensions_filtered_to_scope | before=%s after=%s",
                 dimensions,
                 filtered_dimensions,
             )
@@ -14933,8 +15995,19 @@ def query(request: QueryRequest) -> QueryResult:
     if dimensions or filter_fields:
         filtered_metrics = []
         for metric in metrics:
-            metric_dims = _fact_columns_for_metric(metric.sql, settings.db_schema)
-            logger.info("query.metric_fact_cols | metric=%s cols=%s", metric.name, sorted(metric_dims))
+            metric_base_table = _infer_fact_table_from_metric_sql(metric.sql)
+            metric_base_tables = {_normalize_table_token(metric_base_table)} if metric_base_table else set()
+            metric_scope_tables = _join_connected_tables(metric_base_tables, scoped_join_edges) | metric_base_tables
+            metric_dims: set[str] = set()
+            for table in metric_scope_tables:
+                metric_dims.update(_list_fact_table_columns(settings.db_schema, table))
+            logger.info(
+                "query.metric_scope_cols | metric=%s base_table=%s tables=%s cols=%s",
+                metric.name,
+                metric_base_table,
+                sorted(metric_scope_tables),
+                sorted(metric_dims),
+            )
             dimensions, filters = _coerce_dimensions_from_glossary(
                 dimensions,
                 filters,
@@ -14952,6 +16025,10 @@ def query(request: QueryRequest) -> QueryResult:
         metrics = filtered_metrics
         logger.info("query.filtered_metrics | count=%s names=%s",
                     len(metrics), [m.name for m in metrics])
+        logger.info(
+            "query.filtered_metric_details | sample=%s",
+            [_metric_debug_payload(metric, model_intelligence_map) for metric in metrics[:10]],
+        )
     _log_step("metric_filtering")
 
     if request.question and metric_names and len(metrics) != len(metric_names):
@@ -14960,7 +16037,7 @@ def query(request: QueryRequest) -> QueryResult:
             logger.info("re-resolving after coercion with allowed metrics: %s", allowed_metrics)
             resolved = resolve_question(
                 request.question,
-                catalog,
+                query_catalog,
                 settings,
                 allowed_metrics=allowed_metrics,
                 glossary=glossary,
@@ -14975,10 +16052,10 @@ def query(request: QueryRequest) -> QueryResult:
 
             metrics = []
             for metric_name in metric_names:
-                if metric_name not in catalog.metrics:
+                if metric_name not in query_catalog.metrics:
                     logger.error("query.fail | reason=unknown_metric_after_reresolve metric=%s", metric_name)
                     raise HTTPException(status_code=400, detail=f"Unknown metric: {metric_name}")
-                metrics.append(catalog.metrics[metric_name])
+                metrics.append(query_catalog.metrics[metric_name])
 
             filter_fields = [flt["field"] for flt in filters]
             if dimensions or filter_fields:
@@ -14991,8 +16068,17 @@ def query(request: QueryRequest) -> QueryResult:
                 metrics = filtered_metrics
             logger.info("query.filtered_metrics_post_reresolve | count=%s names=%s",
                         len(metrics), [m.name for m in metrics])
+            metrics, model_selection = _select_metrics_with_model_intelligence(
+                metrics=metrics,
+                question=request.question,
+                dimensions=dimensions,
+                filters=[flt if isinstance(flt, dict) else flt.model_dump() for flt in filters],
+                model_map=model_intelligence_map,
+            )
+            metric_names = [metric.name for metric in metrics]
+            logger.info("query.model_selection_post_reresolve | details=%s", model_selection)
 
-    if not metrics and metrics_all:
+    if not metrics and metrics_all and not scoped_metric_names:
         logger.info("dropping unsupported dimensions/filters for resolved metrics")
         allowed_dims = set()
         for metric in metrics_all:
@@ -15010,10 +16096,48 @@ def query(request: QueryRequest) -> QueryResult:
             detail="No metrics support the requested dimensions/filters",
         )
 
+    semantic_issue = _validate_metric_semantics(
+        metrics=metrics,
+        dimensions=dimensions,
+        filters=[flt if isinstance(flt, dict) else flt.model_dump() for flt in filters],
+        model_map=model_intelligence_map,
+    )
+    if semantic_issue:
+        logger.error(
+            "query.fail | reason=semantic_validation_failed issue=%s details=%s",
+            semantic_issue.get("issue"),
+            semantic_issue,
+        )
+        raise HTTPException(status_code=400, detail=semantic_issue)
+
     dim_objects = []
     for dim_name in dimensions:
-        if dim_name in catalog.dimensions:
-            dim_objects.append(catalog.dimensions[dim_name])
+        preferred_table = preferred_table_for_column.get(dim_name)
+        if dim_name in query_catalog.dimensions:
+            existing_dimension = query_catalog.dimensions[dim_name]
+            existing_table = _normalize_table_token(_infer_table_from_dimension_sql(existing_dimension.sql))
+            preferred_table_token = _normalize_table_token(preferred_table)
+            if (
+                dim_name in metric_dimension_set
+                and preferred_table_token
+                and existing_table
+                and existing_table != preferred_table_token
+            ):
+                ad_hoc_dimension = _build_ad_hoc_dimension(
+                    dim_name=dim_name,
+                    preferred_table=preferred_table,
+                    model_map=model_intelligence_map,
+                )
+                if ad_hoc_dimension:
+                    dim_objects.append(ad_hoc_dimension)
+                    logger.info(
+                        "query.dimension_scope_override | name=%s catalog_table=%s preferred_table=%s",
+                        dim_name,
+                        existing_table,
+                        preferred_table_token,
+                    )
+                    continue
+            dim_objects.append(existing_dimension)
             continue
         if dim_name == "process_month":
             base_table = _infer_fact_table_from_metric_sql(metrics[0].sql)
@@ -15028,19 +16152,20 @@ def query(request: QueryRequest) -> QueryResult:
                 )
                 logger.info("query.ad_hoc_dimension | name=%s base_table=%s", dim_name, base_table)
                 continue
-        # Ad-hoc dimension: if it matches a metric dimension, build SQL from metric base table.
-        if dim_name in metric_dimension_set:
-            base_table = _infer_fact_table_from_metric_sql(metrics[0].sql)
-            if base_table:
-                dim_objects.append(
-                    Dimension(
-                        name=dim_name,
-                        description="Ad-hoc dimension from metric",
-                        data_type="string",
-                        sql=f"{{{{ ref('{base_table}') }}}}.{dim_name}",
-                    )
+        if dim_name in metric_dimension_set and preferred_table:
+            ad_hoc_dimension = _build_ad_hoc_dimension(
+                dim_name=dim_name,
+                preferred_table=preferred_table,
+                model_map=model_intelligence_map,
+            )
+            if ad_hoc_dimension:
+                dim_objects.append(ad_hoc_dimension)
+                logger.info(
+                    "query.ad_hoc_dimension | name=%s table=%s candidate_tables=%s",
+                    dim_name,
+                    preferred_table,
+                    scoped_column_tables.get(dim_name) or [preferred_table],
                 )
-                logger.info("query.ad_hoc_dimension | name=%s base_table=%s", dim_name, base_table)
                 continue
         raise HTTPException(status_code=400, detail=f"Unknown dimension: {dim_name}")
     _log_step("dimension_objects")
@@ -15048,8 +16173,30 @@ def query(request: QueryRequest) -> QueryResult:
     built_filters: List[Filter] = []
     for flt in filters:
         payload = flt if isinstance(flt, dict) else flt.model_dump()
-        if payload["field"] not in catalog.dimensions:
-            continue
+        preferred_table = preferred_table_for_column.get(payload["field"])
+        if payload["field"] in query_catalog.dimensions and preferred_table:
+            existing_dimension = query_catalog.dimensions[payload["field"]]
+            existing_table = _normalize_table_token(_infer_table_from_dimension_sql(existing_dimension.sql))
+            preferred_table_token = _normalize_table_token(preferred_table)
+            if existing_table and preferred_table_token and existing_table != preferred_table_token:
+                ad_hoc_filter_dimension = _build_ad_hoc_dimension(
+                    dim_name=payload["field"],
+                    preferred_table=preferred_table,
+                    model_map=model_intelligence_map,
+                )
+                if ad_hoc_filter_dimension:
+                    query_catalog.dimensions[payload["field"]] = ad_hoc_filter_dimension
+        if payload["field"] not in query_catalog.dimensions:
+            if preferred_table:
+                ad_hoc_filter_dimension = _build_ad_hoc_dimension(
+                    dim_name=payload["field"],
+                    preferred_table=preferred_table,
+                    model_map=model_intelligence_map,
+                )
+                if ad_hoc_filter_dimension:
+                    query_catalog.dimensions[payload["field"]] = ad_hoc_filter_dimension
+            if payload["field"] not in query_catalog.dimensions:
+                continue
         normalized_value = _normalize_filter_value(payload["field"], payload["value"])
         built_filters.append(
             Filter(field=payload["field"], operator=payload["operator"], value=normalized_value)
@@ -15111,6 +16258,16 @@ def query(request: QueryRequest) -> QueryResult:
     if rollup_used and rollup_rows is not None:
         semantic_validation = _build_semantic_validation(metrics, contract)
         lineage = _build_lineage(metrics)
+        artifact_lineage = _artifact_lineage_snapshot(
+            tenant_id=request.tenant_id,
+            domain_id=domain_id,
+            run_id=effective_run_id if request.tenant_id else None,
+            connection_id=connection_id if request.tenant_id else None,
+            database_name=database_name if request.tenant_id else None,
+            schema_name=schema_name if request.tenant_id else None,
+            bundle=intelligence_bundle,
+            metrics=metrics,
+        )
         chart_id = None
         if request.question and request.tenant_id:
             try:
@@ -15159,21 +16316,38 @@ def query(request: QueryRequest) -> QueryResult:
             by_company_rows=None,
             semantic_validation=semantic_validation,
             lineage=lineage,
+            artifact_lineage=artifact_lineage,
         )
     try:
-        filter_dimensions = dict(catalog.dimensions)
+        filter_dimensions = dict(query_catalog.dimensions)
         base_table = _infer_fact_table_from_metric_sql(metrics[0].sql)
+        metric_base_tables = sorted(
+            {
+                str(_infer_fact_table_from_metric_sql(metric.sql) or "<multi_or_unknown>")
+                for metric in metrics
+            }
+        )
+        logger.info(
+            "query.build_input | metric_count=%s base_tables=%s dimensions=%s filters=%s metrics=%s",
+            len(metrics),
+            metric_base_tables,
+            dimensions,
+            [flt.model_dump() if hasattr(flt, "model_dump") else flt for flt in built_filters],
+            [_metric_debug_payload(metric, model_intelligence_map) for metric in metrics[:10]],
+        )
         if base_table:
             for flt in filters:
                 payload = flt if isinstance(flt, dict) else flt.model_dump()
                 field = payload.get("field")
                 if field and field not in filter_dimensions and field in metric_dimension_set:
-                    filter_dimensions[field] = Dimension(
-                        name=field,
-                        description="Ad-hoc filter dimension from metric",
-                        data_type="string",
-                        sql=f"{{{{ ref('{base_table}') }}}}.{field}",
+                    preferred_table = preferred_table_for_column.get(field) or _normalize_table_token(base_table)
+                    ad_hoc_filter_dimension = _build_ad_hoc_dimension(
+                        dim_name=field,
+                        preferred_table=preferred_table,
+                        model_map=model_intelligence_map,
                     )
+                    if ad_hoc_filter_dimension:
+                        filter_dimensions[field] = ad_hoc_filter_dimension
         built = build_query(
             metrics=metrics,
             dimensions=dim_objects,
@@ -15183,6 +16357,7 @@ def query(request: QueryRequest) -> QueryResult:
             limit=effective_limit,
             order_by_metric=True,
             order_desc=sort_desc,
+            join_edges=scoped_join_edges,
         )
         _log_step("sql_built")
         sql_text = built.sql
@@ -15194,6 +16369,16 @@ def query(request: QueryRequest) -> QueryResult:
         _log_step("sql_executed")
     except Exception as exc:
         error_message = str(exc)
+        logger.error(
+            "query.build_failed | question=%s tenant=%s domain=%s metrics=%s dimensions=%s filters=%s details=%s",
+            request.question,
+            request.tenant_id,
+            domain_id,
+            [_metric_debug_payload(metric, model_intelligence_map) for metric in metrics[:10]],
+            dimensions,
+            [flt.model_dump() if hasattr(flt, "model_dump") else flt for flt in built_filters],
+            error_message,
+        )
         execution_ms = int((time.perf_counter() - start_time) * 1000)
         log_query_audit(
             settings,
@@ -15238,11 +16423,11 @@ def query(request: QueryRequest) -> QueryResult:
     by_company_sql = None
     by_company_rows = None
     if request.explain and "industry_sales_by_company_tmt" in [m.name for m in metrics]:
-        if "industry_sales_by_company_tmt" in catalog.metrics:
-            by_company_metric = catalog.metrics["industry_sales_by_company_tmt"]
+        if "industry_sales_by_company_tmt" in query_catalog.metrics:
+            by_company_metric = query_catalog.metrics["industry_sales_by_company_tmt"]
             by_company_dimensions = list(dim_objects)
             if "company_name" not in [dim.name for dim in by_company_dimensions]:
-                by_company_dimensions.append(catalog.dimensions["company_name"])
+                by_company_dimensions.append(query_catalog.dimensions["company_name"])
             by_company_built = build_query(
                 metrics=[by_company_metric],
                 dimensions=by_company_dimensions,
@@ -15252,6 +16437,7 @@ def query(request: QueryRequest) -> QueryResult:
                 limit=effective_limit,
                 order_by_metric=True,
                 order_desc=sort_desc,
+                join_edges=scoped_join_edges,
             )
             by_company_sql = by_company_built.sql
             logger.info("by_company_sql: %s", by_company_sql)
@@ -15274,6 +16460,16 @@ def query(request: QueryRequest) -> QueryResult:
 
     semantic_validation = _build_semantic_validation(metrics, contract)
     lineage = _build_lineage(metrics)
+    artifact_lineage = _artifact_lineage_snapshot(
+        tenant_id=request.tenant_id,
+        domain_id=domain_id,
+        run_id=effective_run_id if request.tenant_id else None,
+        connection_id=connection_id if request.tenant_id else None,
+        database_name=database_name if request.tenant_id else None,
+        schema_name=schema_name if request.tenant_id else None,
+        bundle=intelligence_bundle,
+        metrics=metrics,
+    )
     if semantic_validation and request.tenant_id:
         for policy_name in semantic_validation.get("policy_applied", []):
             log_policy_audit(
@@ -15335,6 +16531,7 @@ def query(request: QueryRequest) -> QueryResult:
         by_company_rows=by_company_rows,
         semantic_validation=semantic_validation,
         lineage=lineage,
+        artifact_lineage=artifact_lineage,
     )
 
 
@@ -15576,6 +16773,7 @@ def chat_query(request: ChatRequest) -> ChatResponse:
         "question": request.question,
         "tenant_id": request.tenant_id,
         "domain_id": request.domain_id,
+        "run_id": request.run_id,
         "metrics": request.metrics,
         "dimensions": request.dimensions,
         "filters": [flt.model_dump() for flt in request.filters],
@@ -15604,6 +16802,7 @@ def chat_query(request: ChatRequest) -> ChatResponse:
             question=request.question,
             tenant_id=request.tenant_id,
             domain_id=request.domain_id,
+            run_id=request.run_id,
             metrics=request.metrics,
             dimensions=request.dimensions,
             filters=request.filters,

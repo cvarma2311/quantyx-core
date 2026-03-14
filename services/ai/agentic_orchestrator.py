@@ -41,8 +41,18 @@ from services.ai.semantic_graph_store import persist_semantic_graph, persist_das
 from services.ai.views import create_views_from_schema, create_joined_views
 from services.ai.charts_store import create_chart_request, update_chart_request
 from services.ai.charts import build_chart_payload
-from services.ai.db import run_query
+from services.ai.db import run_query, execute_non_query
 from services.ai.quality_gate import evaluate_quality_report
+from services.ai.metrics_registry import upsert_metric
+from services.ai.onboarding.models_registry import upsert_fact, upsert_dimension
+from services.ai.semantic_contracts import store_semantic_contract
+from services.ai.agentic_artifacts_registry import (
+    persist_schema_graph_artifact,
+    persist_table_profile_artifact,
+    replace_join_registry,
+    replace_model_registry,
+)
+from psycopg2.extras import Json
 
 
 def _qident(name: str) -> str:
@@ -647,6 +657,503 @@ def _qualify_formula(formula: str, table_ref: str, table_profile: dict[str, Any]
     return qualified
 
 
+def _normalize_metric_type(metric_type: str | None) -> str:
+    value = str(metric_type or "").strip().lower()
+    if value in {"sum", "average", "avg", "min", "max", "count", "count_distinct", "ratio", "rate", "derived"}:
+        return value
+    if value in {"efficiency", "utilization", "yield"}:
+        return "derived"
+    return "sum"
+
+
+def _normalize_term(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _persist_agentic_semantic_assets(
+    settings,
+    run_id: str,
+    state: dict[str, Any],
+    *,
+    persist_glossary: bool = True,
+    persist_hierarchy: bool = True,
+    persist_contract: bool = True,
+) -> dict[str, Any]:
+    tenant_id = str(state.get("tenant_id") or "").strip()
+    domain_id = str(state.get("domain_id") or "").strip()
+    connection_id = str(state.get("connection_id") or "").strip()
+    database_name = str(state.get("database_name") or "").strip()
+    schema_name = str(state.get("schema_name") or "public").strip() or "public"
+    if not tenant_id or not domain_id:
+        return {"glossary_terms": 0, "hierarchies": 0, "semantic_contract_id": None}
+
+    glossary_terms = state.get("glossary_terms") or []
+    context_entities = state.get("context_entities") or []
+    ontology = state.get("ontology") or {}
+    hierarchy_hints = state.get("hierarchy_hints") or []
+    metric_defs = state.get("metric_defs") or []
+    model_classifications = state.get("model_classifications") or []
+    join_edges = state.get("join_edges") or []
+
+    glossary_count = 0
+    hierarchy_count = 0
+
+    # Persist glossary terms inferred by Context/Glossary/Ontology agents.
+    seen_terms: set[str] = set()
+    glossary_rows: list[dict[str, Any]] = []
+    if persist_glossary:
+        for entry in glossary_terms:
+            if isinstance(entry, dict):
+                term = str(entry.get("term") or "").strip()
+                if not term:
+                    continue
+                normalized = _normalize_term(term)
+                if not normalized or normalized in seen_terms:
+                    continue
+                seen_terms.add(normalized)
+                glossary_rows.append(
+                    {
+                        "term": term,
+                        "normalized_term": normalized,
+                        "definition": entry.get("definition"),
+                        "synonyms": list(entry.get("synonyms") or []),
+                        "abbreviations": list(entry.get("abbreviations") or []),
+                    }
+                )
+        for name in context_entities + (ontology.get("concepts") or []):
+            term = str(name or "").strip()
+            if not term:
+                continue
+            normalized = _normalize_term(term)
+            if not normalized or normalized in seen_terms:
+                continue
+            seen_terms.add(normalized)
+            glossary_rows.append(
+                {
+                    "term": term,
+                    "normalized_term": normalized,
+                    "definition": None,
+                    "synonyms": [],
+                    "abbreviations": [],
+                }
+            )
+        for row in glossary_rows:
+            try:
+                term_id = f"{tenant_id}__{domain_id}__{row['normalized_term']}"
+                execute_non_query(
+                    settings,
+                    """
+                    INSERT INTO public.quantyx_glossary_terms (
+                      term_id,
+                      tenant_id,
+                      domain_id,
+                      term,
+                      normalized_term,
+                      definition,
+                      synonyms,
+                      abbreviations,
+                      lifecycle_status,
+                      source_context_id,
+                      created_at,
+                      updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                    ON CONFLICT (term_id)
+                    DO UPDATE SET
+                      term = EXCLUDED.term,
+                      definition = EXCLUDED.definition,
+                      synonyms = EXCLUDED.synonyms,
+                      abbreviations = EXCLUDED.abbreviations,
+                      lifecycle_status = EXCLUDED.lifecycle_status,
+                      source_context_id = EXCLUDED.source_context_id,
+                      updated_at = now()
+                    """,
+                    [
+                        term_id,
+                        tenant_id,
+                        domain_id,
+                        row["term"],
+                        row["normalized_term"],
+                        row.get("definition"),
+                        Json(row.get("synonyms") or []),
+                        Json(row.get("abbreviations") or []),
+                        "active",
+                        run_id,
+                    ],
+                )
+                glossary_count += 1
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "agentic.registry.glossary_persist_failed | run_id=%s term=%s",
+                    run_id,
+                    row.get("term"),
+                )
+
+    # Persist hierarchy hints/edges inferred by Context/Ontology agents.
+    hierarchy_records: list[tuple[str, list[str], str | None]] = []
+    for hint in hierarchy_hints:
+        parts = [p.strip() for p in str(hint or "").split(">") if p.strip()]
+        if len(parts) >= 2:
+            name = parts[0].lower().replace(" ", "_")
+            hierarchy_records.append((name, parts, str(hint)))
+    if not hierarchy_records:
+        for edge in ontology.get("hierarchy_edges") or []:
+            parent = str(edge.get("parent") or "").strip()
+            child = str(edge.get("child") or "").strip()
+            if not parent or not child:
+                continue
+            name = parent.lower().replace(" ", "_")
+            hierarchy_records.append((name, [parent, child], edge.get("source")))
+    if persist_hierarchy:
+        for idx, (name, levels, description) in enumerate(hierarchy_records, start=1):
+            hierarchy_name = name or f"agentic_hierarchy_{idx}"
+            try:
+                artifact_key = f"{run_id}::{hierarchy_name}"
+                execute_non_query(
+                    settings,
+                    """
+                    INSERT INTO public.quantyx_hierarchy_overrides (
+                      tenant_id,
+                      domain_id,
+                      connection_id,
+                      database_name,
+                      schema_name,
+                      context_id,
+                      hierarchy_name,
+                      hierarchy_group,
+                      levels,
+                      description,
+                      artifact_key,
+                      lifecycle_status,
+                      source_type,
+                      source_run_id,
+                      source_context_id,
+                      is_current,
+                      created_at,
+                      updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+                    ON CONFLICT (tenant_id, domain_id, connection_id, database_name, schema_name, context_id, hierarchy_name)
+                    DO UPDATE SET
+                      levels = EXCLUDED.levels,
+                      description = EXCLUDED.description,
+                      artifact_key = EXCLUDED.artifact_key,
+                      lifecycle_status = EXCLUDED.lifecycle_status,
+                      source_type = EXCLUDED.source_type,
+                      source_run_id = EXCLUDED.source_run_id,
+                      source_context_id = EXCLUDED.source_context_id,
+                      is_current = EXCLUDED.is_current,
+                      updated_at = now()
+                    """,
+                    [
+                        tenant_id,
+                        domain_id,
+                        connection_id,
+                        database_name,
+                        schema_name,
+                        run_id,
+                        hierarchy_name,
+                        "agentic",
+                        Json(levels),
+                        description,
+                        artifact_key,
+                        "active",
+                        "agentic",
+                        run_id,
+                        run_id,
+                        True,
+                    ],
+                )
+                hierarchy_count += 1
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "agentic.registry.hierarchy_persist_failed | run_id=%s hierarchy=%s",
+                    run_id,
+                    hierarchy_name,
+                )
+
+    # Persist full semantic snapshot as contract per run (auditable replay).
+    contract_id = None
+    if persist_contract:
+        try:
+            semantic_payload = {
+                "ontology": ontology,
+                "metric_definitions": metric_defs,
+                "dataset_definitions": model_classifications,
+                "join_candidates": join_edges,
+                "glossary_terms": glossary_rows,
+                "hierarchy_hints": hierarchy_hints,
+                "run_id": run_id,
+            }
+            contract_id = store_semantic_contract(
+                settings,
+                tenant_id=tenant_id,
+                industry=domain_id,
+                version=f"run-{run_id}",
+                payload=semantic_payload,
+                status="active",
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "agentic.registry.semantic_contract_persist_failed | run_id=%s",
+                run_id,
+            )
+
+    return {
+        "glossary_terms": glossary_count,
+        "hierarchies": hierarchy_count,
+        "semantic_contract_id": contract_id,
+    }
+
+
+def _persist_agentic_registry_outputs(
+    settings,
+    run_id: str,
+    state: dict[str, Any],
+    *,
+    persist_facts: bool = True,
+    persist_dimensions: bool = True,
+    persist_metrics: bool = True,
+) -> dict[str, int]:
+    tenant_id = str(state.get("tenant_id") or "").strip()
+    domain_id = str(state.get("domain_id") or "").strip()
+    connection_id = str(state.get("connection_id") or "").strip()
+    database_name = str(state.get("database_name") or "").strip()
+    schema_name = str(state.get("schema_name") or "public").strip() or "public"
+    if not tenant_id or not domain_id or not connection_id or not database_name:
+        return {"facts": 0, "dimensions": 0, "metrics": 0}
+
+    profiling_tables = (state.get("profiling_stats") or {}).get("tables") or []
+    profiling_map = {str(t.get("name") or ""): t for t in profiling_tables if t.get("name")}
+    schema_tables = (state.get("schema_graph") or {}).get("tables") or []
+    metric_defs = state.get("metric_defs") or []
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "agentic.registry.persist.start | run_id=%s tenant=%s domain=%s connection=%s db=%s schema=%s schema_tables=%s profiling_tables=%s metric_defs=%s persist_facts=%s persist_dimensions=%s persist_metrics=%s",
+        run_id,
+        tenant_id,
+        domain_id,
+        connection_id,
+        database_name,
+        schema_name,
+        len(schema_tables),
+        len(profiling_tables),
+        len(metric_defs),
+        persist_facts,
+        persist_dimensions,
+        persist_metrics,
+    )
+
+    persisted_facts = 0
+    persisted_dimensions = 0
+    persisted_metrics = 0
+
+    # Persist facts for all scanned tables.
+    if persist_facts:
+        for table in schema_tables:
+            base_table = str(table.get("name") or "").strip()
+            if not base_table:
+                continue
+            profile = profiling_map.get(base_table) or {}
+            time_cols = profile.get("time_columns") or []
+            cat_cols = profile.get("categorical_columns") or []
+            eligible_measures = profile.get("eligible_numeric_columns") or []
+            numeric_cols = profile.get("numeric_columns") or []
+            measures = list(dict.fromkeys([*eligible_measures, *numeric_cols]))
+            dimensions = list(dict.fromkeys([*time_cols, *cat_cols]))
+            time_column = time_cols[0] if time_cols else None
+            grain = "day" if time_column else "unknown"
+            fact_model = f"fact_{base_table}"
+            try:
+                upsert_fact(
+                    settings,
+                    {
+                        "fact_id": f"{domain_id}__{fact_model}",
+                        "tenant_id": tenant_id,
+                        "domain_id": domain_id,
+                        "connection_id": connection_id,
+                        "database_name": database_name,
+                        "schema_name": schema_name,
+                        "table_name": fact_model,
+                        "grain": grain,
+                        "time_column": time_column,
+                        "measures": measures,
+                        "dimensions": dimensions,
+                        "description": f"Agentic inferred fact for {base_table}",
+                        "artifact_key": f"{domain_id}__{fact_model}",
+                        "lifecycle_status": "active",
+                        "source_type": "agentic",
+                        "source_run_id": run_id,
+                        "is_current": True,
+                    },
+                )
+                persisted_facts += 1
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "agentic.registry.fact_persist_failed | run_id=%s table=%s",
+                    run_id,
+                    base_table,
+                )
+
+    # Persist dimensions by unique dimension name across profiled tables.
+    if persist_dimensions:
+        dim_map: dict[str, dict[str, Any]] = {}
+        for table_name, profile in profiling_map.items():
+            for col in (profile.get("categorical_columns") or []) + (profile.get("time_columns") or []):
+                if not col:
+                    continue
+                entry = dim_map.setdefault(
+                    str(col),
+                    {"keys": [col], "attributes": [], "tables": set()},
+                )
+                entry["tables"].add(table_name)
+        for dim_name, meta in dim_map.items():
+            tables_list = sorted(list(meta["tables"]))[:8]
+            try:
+                upsert_dimension(
+                    settings,
+                    {
+                        "dimension_id": f"{domain_id}__dim__{dim_name}",
+                        "tenant_id": tenant_id,
+                        "domain_id": domain_id,
+                        "connection_id": connection_id,
+                        "database_name": database_name,
+                        "schema_name": schema_name,
+                        "name": dim_name,
+                        "keys": meta["keys"] or [dim_name],
+                        "attributes": meta["attributes"] or [],
+                        "description": f"Agentic inferred dimension used in {', '.join(tables_list)}",
+                        "artifact_key": f"{domain_id}__dim__{dim_name}",
+                        "lifecycle_status": "active",
+                        "source_type": "agentic",
+                        "source_run_id": run_id,
+                        "is_current": True,
+                    },
+                )
+                persisted_dimensions += 1
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "agentic.registry.dimension_persist_failed | run_id=%s dimension=%s",
+                    run_id,
+                    dim_name,
+                )
+
+    # Persist all generated metrics (no selection gate).
+    if persist_metrics:
+        for metric in metric_defs:
+            metric_name = str(metric.get("metric_name") or "").strip()
+            base_table = str(metric.get("base_table") or "").strip()
+            formula = str(metric.get("formula") or "").strip()
+            if not metric_name or not base_table:
+                continue
+            fact_model = f"fact_{base_table}"
+            table_ref = "{{ ref('%s') }}" % fact_model
+            table_profile = profiling_map.get(base_table) or {}
+            sql_expr = _qualify_formula(formula, table_ref, table_profile) if formula else ""
+            if not sql_expr:
+                fallback_col = None
+                for key in ("eligible_numeric_columns", "numeric_columns", "categorical_columns", "time_columns"):
+                    cols = table_profile.get(key) or []
+                    if cols:
+                        fallback_col = cols[0]
+                        break
+                if fallback_col:
+                    sql_expr = f"SUM({table_ref}.{_qident(fallback_col)})"
+                else:
+                    # Last-resort expression to keep metric present; execution may still reject on usage.
+                    sql_expr = "COUNT(1)"
+            metric_dims = list(
+                dict.fromkeys(
+                    (table_profile.get("categorical_columns") or [])
+                    + (table_profile.get("time_columns") or [])
+                )
+            )
+            metric_type = _normalize_metric_type(metric.get("metric_type"))
+            artifact_key = f"{domain_id}__{base_table}__{metric_name}"
+            existing = run_query(
+                settings,
+                """
+                SELECT metric_id
+                  FROM public.quantyx_metrics_registry
+                 WHERE tenant_id = %s
+                   AND domain_id = %s
+                   AND connection_id = %s
+                   AND database_name = %s
+                   AND schema_name = %s
+                   AND artifact_key = %s
+                   AND source_run_id = %s
+                   AND COALESCE(is_current, true) = true
+                 LIMIT 1
+                """,
+                [tenant_id, domain_id, connection_id, database_name, schema_name, artifact_key, run_id],
+            )
+            if existing:
+                continue
+            try:
+                upsert_metric(
+                    settings,
+                    {
+                        "metric_id": artifact_key,
+                        "artifact_key": artifact_key,
+                        "tenant_id": tenant_id,
+                        "domain_id": domain_id,
+                        "connection_id": connection_id,
+                        "database": database_name,
+                        "schema": schema_name,
+                        "metric_name": metric_name,
+                        "display_name": metric_name.replace("_", " ").title(),
+                        "description": f"Agentic inferred metric for {base_table}",
+                        "type": metric_type,
+                        "unit": metric.get("unit"),
+                        "confidence": metric.get("measure_confidence"),
+                        "additive": metric_type in {"sum", "count", "avg", "average", "min", "max"},
+                        "grain": "day" if (table_profile.get("time_columns") or []) else "unknown",
+                        "dimensions": metric_dims,
+                        "dataset_id": fact_model,
+                        "source_model": fact_model,
+                        "source_schema": schema_name,
+                        "sql": sql_expr,
+                        "lifecycle_status": "active",
+                        "source_type": "agentic",
+                        "source_run_id": run_id,
+                        "is_current": True,
+                    },
+                )
+                persisted_metrics += 1
+                logger.info(
+                    "agentic.registry.metric_persisted | run_id=%s metric_name=%s base_table=%s artifact_key=%s dataset_id=%s source_model=%s",
+                    run_id,
+                    metric_name,
+                    base_table,
+                    artifact_key,
+                    fact_model,
+                    fact_model,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "agentic.registry.metric_persist_failed | run_id=%s metric=%s base_table=%s",
+                    run_id,
+                    metric_name,
+                    base_table,
+                )
+
+    result = {
+        "facts": persisted_facts,
+        "dimensions": persisted_dimensions,
+        "metrics": persisted_metrics,
+    }
+    logger.info(
+        "agentic.registry.persist.complete | run_id=%s facts=%s dimensions=%s metrics=%s",
+        run_id,
+        result["facts"],
+        result["dimensions"],
+        result["metrics"],
+    )
+    return result
+
+
 def run_agentic_workflow(
     settings,
     run_id: str,
@@ -694,6 +1201,19 @@ def run_agentic_workflow(
             with_columns,
             max(0, len(tables) - with_columns),
         )
+        try:
+            persist_schema_graph_artifact(
+                settings,
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or ""),
+                run_id=run_id,
+                connection_id=str(state.get("connection_id") or ""),
+                database_name=str(state.get("database_name") or ""),
+                schema_name=str(state.get("schema_name") or "public"),
+                schema_graph=state["schema_graph"],
+            )
+        except Exception:
+            logger.exception("agentic.schema.persist_failed | run_id=%s", run_id)
         _emit(
             settings,
             run_id,
@@ -736,6 +1256,31 @@ def run_agentic_workflow(
             "Profiling completed: detected %s tables."
             % len(state["profiling_stats"].get("tables", [])),
         )
+        try:
+            persist_table_profile_artifact(
+                settings,
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or ""),
+                run_id=run_id,
+                connection_id=str(state.get("connection_id") or ""),
+                database_name=str(state.get("database_name") or ""),
+                schema_name=str(state.get("schema_name") or "public"),
+                profiling_json=state["profiling_stats"],
+            )
+        except Exception:
+            logger.exception("agentic.profiling.persist_failed | run_id=%s", run_id)
+        registry_persisted = {"facts": 0, "dimensions": 0, "metrics": 0}
+        try:
+            registry_persisted = _persist_agentic_registry_outputs(
+                settings,
+                run_id,
+                state,
+                persist_facts=True,
+                persist_dimensions=True,
+                persist_metrics=False,
+            )
+        except Exception:
+            logger.exception("agentic.registry.profile_persist_failed | run_id=%s", run_id)
         _emit(
             settings,
             run_id,
@@ -745,6 +1290,7 @@ def run_agentic_workflow(
             {
                 "tables": len(state["profiling_stats"].get("tables", [])),
                 "profiles": state["profiling_stats"].get("tables", []),
+                "registry_persisted": registry_persisted,
             },
             event_callback=event_callback,
         )
@@ -769,6 +1315,18 @@ def run_agentic_workflow(
             state["context_entities"] = extracted.get("context_entities", [])
             state["hierarchy_hints"] = extracted.get("hierarchy_hints", [])
             state["glossary_terms"] = extracted.get("glossary_terms", [])
+        semantics_persisted = {"glossary_terms": 0, "hierarchies": 0, "semantic_contract_id": None}
+        try:
+            semantics_persisted = _persist_agentic_semantic_assets(
+                settings,
+                run_id,
+                state,
+                persist_glossary=True,
+                persist_hierarchy=True,
+                persist_contract=False,
+            )
+        except Exception:
+            logger.exception("agentic.registry.context_persist_failed | run_id=%s", run_id)
         _emit(
             settings,
             run_id,
@@ -779,6 +1337,7 @@ def run_agentic_workflow(
                 "entities": len(state["context_entities"]),
                 "sample_entities": state["context_entities"][:10],
                 "glossary_terms": state["glossary_terms"],
+                "semantics_persisted": semantics_persisted,
             },
             event_callback=event_callback,
         )
@@ -818,13 +1377,29 @@ def run_agentic_workflow(
             run_id,
             len(state.get("glossary_terms") or []),
         )
+        semantics_persisted = {"glossary_terms": 0, "hierarchies": 0, "semantic_contract_id": None}
+        try:
+            semantics_persisted = _persist_agentic_semantic_assets(
+                settings,
+                run_id,
+                state,
+                persist_glossary=True,
+                persist_hierarchy=False,
+                persist_contract=False,
+            )
+        except Exception:
+            logger.exception("agentic.registry.glossary_persist_failed | run_id=%s", run_id)
         _emit(
             settings,
             run_id,
             "GlossaryAgent",
             "completed",
             "Glossary Agent completed",
-            {"terms": len(state["glossary_terms"]), "terms_detail": state["glossary_terms"]},
+            {
+                "terms": len(state["glossary_terms"]),
+                "terms_detail": state["glossary_terms"],
+                "semantics_persisted": semantics_persisted,
+            },
             event_callback=event_callback,
         )
         return state
@@ -852,6 +1427,18 @@ def run_agentic_workflow(
             len(ontology.get("hierarchy_edges", []) or []),
             len(ontology.get("synonym_edges", []) or []),
         )
+        semantics_persisted = {"glossary_terms": 0, "hierarchies": 0, "semantic_contract_id": None}
+        try:
+            semantics_persisted = _persist_agentic_semantic_assets(
+                settings,
+                run_id,
+                state,
+                persist_glossary=True,
+                persist_hierarchy=True,
+                persist_contract=False,
+            )
+        except Exception:
+            logger.exception("agentic.registry.ontology_persist_failed | run_id=%s", run_id)
         _emit(
             settings,
             run_id,
@@ -865,6 +1452,7 @@ def run_agentic_workflow(
                 "concepts_detail": ontology.get("concepts", []),
                 "hierarchy_edges_detail": ontology.get("hierarchy_edges", []),
                 "synonym_edges_detail": ontology.get("synonym_edges", []),
+                "semantics_persisted": semantics_persisted,
             },
             event_callback=event_callback,
         )
@@ -1087,6 +1675,20 @@ def run_agentic_workflow(
                 for j in (state.get("join_edges") or [])[:5]
             ],
         )
+        try:
+            persisted = replace_join_registry(
+                settings,
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or ""),
+                run_id=run_id,
+                connection_id=str(state.get("connection_id") or ""),
+                database_name=str(state.get("database_name") or ""),
+                schema_name=str(state.get("schema_name") or "public"),
+                joins=state.get("join_edges") or [],
+            )
+            logger.info("agentic.join.persisted | run_id=%s joins=%s", run_id, persisted)
+        except Exception:
+            logger.exception("agentic.join.persist_failed | run_id=%s", run_id)
         return state
 
     def metric_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -1118,13 +1720,29 @@ def run_agentic_workflow(
                 "Metrics generated: %s"
                 % ", ".join([m.get("metric_name") for m in state["metric_defs"][:5]]),
             )
+        registry_persisted = {"facts": 0, "dimensions": 0, "metrics": 0}
+        try:
+            registry_persisted = _persist_agentic_registry_outputs(
+                settings,
+                run_id,
+                state,
+                persist_facts=False,
+                persist_dimensions=False,
+                persist_metrics=True,
+            )
+        except Exception:
+            logger.exception("agentic.registry.metric_persist_failed | run_id=%s", run_id)
         _emit(
             settings,
             run_id,
             "MetricAgent",
             "completed",
             "Metric Agent completed",
-            {"metrics": len(state["metric_defs"]), "metric_defs_detail": state["metric_defs"]},
+            {
+                "metrics": len(state["metric_defs"]),
+                "metric_defs_detail": state["metric_defs"],
+                "registry_persisted": registry_persisted,
+            },
             event_callback=event_callback,
         )
         return state
@@ -1146,6 +1764,20 @@ def run_agentic_workflow(
             (state.get("model_classifications") or [])[:5],
         )
         append_agent_chat_log(settings, run_id, "system", "Semantic model classified.")
+        try:
+            persisted = replace_model_registry(
+                settings,
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or ""),
+                run_id=run_id,
+                connection_id=str(state.get("connection_id") or ""),
+                database_name=str(state.get("database_name") or ""),
+                schema_name=str(state.get("schema_name") or "public"),
+                models=state.get("model_classifications") or [],
+            )
+            logger.info("agentic.model.persisted | run_id=%s models=%s", run_id, persisted)
+        except Exception:
+            logger.exception("agentic.model.persist_failed | run_id=%s", run_id)
         _emit(
             settings,
             run_id,
@@ -1685,6 +2317,8 @@ def run_agentic_workflow(
         counts = {"nodes": 0, "edges": 0}
         created_views: list[str] = []
         joined_views: list[dict[str, Any]] = []
+        registry_persisted = {"facts": 0, "dimensions": 0, "metrics": 0}
+        semantics_persisted: dict[str, Any] = {"glossary_terms": 0, "hierarchies": 0, "semantic_contract_id": None}
         if fast_mode:
             _emit(
                 settings,
@@ -1693,6 +2327,60 @@ def run_agentic_workflow(
                 "running",
                 "Dashboard Agent fast mode enabled: skipping semantic graph and view persistence",
                 {"fast_mode": True},
+                event_callback=event_callback,
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent persisting semantic registry entities",
+                {},
+                event_callback=event_callback,
+            )
+            t3 = time.perf_counter()
+            registry_persisted = _persist_agentic_registry_outputs(
+                settings,
+                run_id,
+                state,
+                persist_facts=True,
+                persist_dimensions=True,
+                persist_metrics=False,
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent semantic registry entities persisted",
+                {"elapsed_ms": round((time.perf_counter() - t3) * 1000, 1), **registry_persisted},
+                event_callback=event_callback,
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent persisting semantic context assets",
+                {},
+                event_callback=event_callback,
+            )
+            t4 = time.perf_counter()
+            semantics_persisted = _persist_agentic_semantic_assets(
+                settings,
+                run_id,
+                state,
+                persist_glossary=True,
+                persist_hierarchy=True,
+                persist_contract=True,
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent semantic context assets persisted",
+                {"elapsed_ms": round((time.perf_counter() - t4) * 1000, 1), **semantics_persisted},
                 event_callback=event_callback,
             )
         else:
@@ -1781,6 +2469,60 @@ def run_agentic_workflow(
                 {"elapsed_ms": round((time.perf_counter() - t2) * 1000, 1), "joined_views": len(joined_views)},
                 event_callback=event_callback,
             )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent persisting semantic registry entities",
+                {},
+                event_callback=event_callback,
+            )
+            t3 = time.perf_counter()
+            registry_persisted = _persist_agentic_registry_outputs(
+                settings,
+                run_id,
+                state,
+                persist_facts=True,
+                persist_dimensions=True,
+                persist_metrics=False,
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent semantic registry entities persisted",
+                {"elapsed_ms": round((time.perf_counter() - t3) * 1000, 1), **registry_persisted},
+                event_callback=event_callback,
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent persisting semantic context assets",
+                {},
+                event_callback=event_callback,
+            )
+            t4 = time.perf_counter()
+            semantics_persisted = _persist_agentic_semantic_assets(
+                settings,
+                run_id,
+                state,
+                persist_glossary=True,
+                persist_hierarchy=True,
+                persist_contract=True,
+            )
+            _emit(
+                settings,
+                run_id,
+                "DashboardAgent",
+                "running",
+                "Dashboard Agent semantic context assets persisted",
+                {"elapsed_ms": round((time.perf_counter() - t4) * 1000, 1), **semantics_persisted},
+                event_callback=event_callback,
+            )
         _emit(
             settings,
             run_id,
@@ -1816,6 +2558,8 @@ def run_agentic_workflow(
                 "chart_details": enriched_charts,
                 "quality_report": state.get("quality_report"),
                 "views_detail": created_views,
+                "registry_persisted": registry_persisted,
+                "semantics_persisted": semantics_persisted,
                 "elapsed_ms": round((time.perf_counter() - dashboard_start) * 1000, 1),
                 "fast_mode": fast_mode,
             },

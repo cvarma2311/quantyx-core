@@ -10,7 +10,7 @@ from typing import Any
 from psycopg2.extras import Json
 
 from services.ai.config import Settings
-from services.ai.db import execute_non_query, run_query
+from services.ai.db import execute_non_query, execute_returning_query, run_query
 
 
 STATUS_ACTIVE = "active"
@@ -369,7 +369,7 @@ def create_workspace_conversation(
     created_by: str | None = None,
 ) -> dict[str, Any]:
     conversation_id = f"conv_{uuid.uuid4().hex[:12]}"
-    rows = run_query(
+    rows = execute_returning_query(
         settings,
         """
         INSERT INTO public.quantyx_workspace_conversations (
@@ -529,7 +529,7 @@ def update_workspace_conversation(
         return get_workspace_conversation(settings, conversation_id)
     updates.append("updated_at = now()")
     params.append(conversation_id)
-    run_query(
+    execute_returning_query(
         settings,
         f"UPDATE public.quantyx_workspace_conversations SET {', '.join(updates)} WHERE conversation_id = %s",
         params,
@@ -566,7 +566,7 @@ def create_workspace_message(
     summary_json: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     message_id = f"wmsg_{uuid.uuid4().hex[:12]}"
-    rows = run_query(
+    rows = execute_returning_query(
         settings,
         """
         INSERT INTO public.quantyx_workspace_messages (
@@ -658,7 +658,7 @@ def upsert_workspace_memory(
     memory_json: dict[str, Any],
 ) -> dict[str, Any]:
     memory_id = f"mem_{uuid.uuid4().hex[:12]}"
-    rows = run_query(
+    rows = execute_returning_query(
         settings,
         """
         INSERT INTO public.quantyx_workspace_conversation_memory (

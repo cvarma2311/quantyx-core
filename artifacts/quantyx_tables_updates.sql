@@ -631,6 +631,109 @@ DELETE FROM public.quantyx_metrics_registry t
 -- DELETE FROM public.quantyx_dimensions_registry;
 -- DELETE FROM public.quantyx_metrics_registry;
 
+
+CREATE TABLE IF NOT EXISTS public.quantyx_schema_graph_artifacts (
+  artifact_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  artifact_key TEXT NOT NULL,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  is_current BOOLEAN NOT NULL DEFAULT true,
+  lifecycle_status TEXT NOT NULL DEFAULT 'active',
+  source_type TEXT NOT NULL DEFAULT 'agentic',
+  graph_json JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, domain_id, run_id, connection_id, database_name, schema_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_schema_graph_artifacts_scope
+  ON public.quantyx_schema_graph_artifacts (tenant_id, domain_id, run_id, connection_id, database_name, schema_name);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_table_profile_artifacts (
+  artifact_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  artifact_key TEXT NOT NULL,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  is_current BOOLEAN NOT NULL DEFAULT true,
+  lifecycle_status TEXT NOT NULL DEFAULT 'active',
+  source_type TEXT NOT NULL DEFAULT 'agentic',
+  profiling_json JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, domain_id, run_id, connection_id, database_name, schema_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_table_profile_artifacts_scope
+  ON public.quantyx_table_profile_artifacts (tenant_id, domain_id, run_id, connection_id, database_name, schema_name);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_join_registry (
+  join_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  left_table TEXT NOT NULL,
+  left_key TEXT NOT NULL,
+  right_table TEXT NOT NULL,
+  right_key TEXT NOT NULL,
+  relationship TEXT NULL,
+  confidence DOUBLE PRECISION NULL,
+  coverage_ratio DOUBLE PRECISION NULL,
+  coverage_total BIGINT NULL,
+  coverage_matched BIGINT NULL,
+  uniqueness_check JSONB NULL,
+  coverage_check JSONB NULL,
+  metadata JSONB NULL,
+  artifact_key TEXT NOT NULL,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  is_current BOOLEAN NOT NULL DEFAULT true,
+  lifecycle_status TEXT NOT NULL DEFAULT 'active',
+  source_type TEXT NOT NULL DEFAULT 'agentic',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_join_registry_scope
+  ON public.quantyx_join_registry (tenant_id, domain_id, run_id, connection_id, database_name, schema_name);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_model_registry (
+  model_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  database_name TEXT NOT NULL,
+  schema_name TEXT NOT NULL,
+  table_name TEXT NOT NULL,
+  model_type TEXT NULL,
+  grain TEXT NULL,
+  time_column TEXT NULL,
+  confidence DOUBLE PRECISION NULL,
+  metadata JSONB NULL,
+  artifact_key TEXT NOT NULL,
+  version_no INTEGER NOT NULL DEFAULT 1,
+  is_current BOOLEAN NOT NULL DEFAULT true,
+  lifecycle_status TEXT NOT NULL DEFAULT 'active',
+  source_type TEXT NOT NULL DEFAULT 'agentic',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_model_registry_scope
+  ON public.quantyx_model_registry (tenant_id, domain_id, run_id, connection_id, database_name, schema_name);
+
 -- Phase AA: Flow node data registry for derived views + NL query routing
 
 DO $$

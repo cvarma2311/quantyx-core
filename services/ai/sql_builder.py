@@ -13,6 +13,7 @@ _REF_PATTERN = re.compile(
 )
 _TABLE_PATTERN = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\b")
 _ALLOWED_OPERATORS = {"=", "!=", ">", ">=", "<", "<=", "IN", "ILIKE"}
+_AGGREGATE_SQL_PATTERN = re.compile(r"^\s*(SUM|AVG|COUNT|MIN|MAX)\s*\(", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,15 @@ def _render_metric_sql(metric: Metric, schema: str) -> str:
     return resolve_ref(metric.sql, schema)
 
 
+def _is_already_aggregated(metric_sql: str) -> bool:
+    return bool(_AGGREGATE_SQL_PATTERN.match(metric_sql or ""))
+
+
+def _required_tables_for_metric(metric: Metric, schema: str) -> set[str]:
+    metric_sql = _render_metric_sql(metric, schema)
+    return _collect_tables(metric_sql)
+
+
 def _build_filters(filters: Iterable[Filter], dimensions: dict[str, Dimension], schema: str) -> tuple[str, list[object]]:
     clauses = []
     params: list[object] = []
@@ -65,35 +75,6 @@ def _build_filters(filters: Iterable[Filter], dimensions: dict[str, Dimension], 
             params.append(flt.value)
 
     return (" AND ".join(clauses), params)
-
-
-def _build_base_sql(metric: Metric, schema: str) -> tuple[str, str | None, str | None, dict[str, str] | None]:
-    if metric.name == "sales_vs_target_achievement_pct":
-        base_table = f"{schema}.fact_hpcl_sales_monthly_actuals"
-        return (
-            f"FROM {schema}.fact_hpcl_sales_monthly_actuals a "
-            f"JOIN {schema}.fact_hpcl_sales_monthly_targets t "
-            "ON a.month_name = t.month_name "
-            "AND a.fiscal_year = t.fiscal_year "
-            "AND a.sbu_name = t.sbu_name "
-            "AND a.zone_name = t.zone_name "
-            "AND a.region_name = t.region_name "
-            "AND a.sales_area_name = t.sales_area_name "
-            "AND a.product_name = t.product_name"
-        ), base_table, "a", {
-            f"{schema}.fact_hpcl_sales_monthly_actuals": "a",
-            f"{schema}.fact_hpcl_sales_monthly_targets": "t",
-            "fact_hpcl_sales_monthly_actuals": "a",
-            "fact_hpcl_sales_monthly_targets": "t",
-        }
-
-    metric_sql = _render_metric_sql(metric, schema)
-    tables = _collect_tables(metric_sql)
-    if len(tables) != 1:
-        from_sql, alias_map = build_join_from(sorted(tables), schema)
-        return from_sql, None, None, alias_map
-    table_name = sorted(tables)[0]
-    return f"FROM {table_name}", table_name, None, None
 
 
 def _rewrite_dimension_sql(
@@ -157,17 +138,34 @@ def build_query(
     limit: int,
     order_by_metric: bool = True,
     order_desc: bool = True,
+    join_edges: list[dict[str, object]] | None = None,
 ) -> BuiltQuery:
     if not metrics:
         raise ValueError("At least one metric is required")
 
-    base_sql, base_table, base_alias, alias_map = _build_base_sql(metrics[0], schema)
     dimensions = _normalize_group_dimensions(metrics, dimensions)
+    required_tables: set[str] = set()
+    for metric in metrics:
+        required_tables.update(_required_tables_for_metric(metric, schema))
+    for dim in dimensions:
+        required_tables.update(_collect_tables(_render_dimension_sql(dim, schema)))
+    for flt in filters:
+        if flt.field in filter_dimensions:
+            required_tables.update(_collect_tables(_render_dimension_sql(filter_dimensions[flt.field], schema)))
 
-    for metric in metrics[1:]:
-        metric_base_sql, _, _, _ = _build_base_sql(metric, schema)
-        if metric_base_sql != base_sql:
-            raise ValueError("All metrics must be from the same base table")
+    if not required_tables:
+        raise ValueError("No tables resolved for query")
+    if len(required_tables) == 1:
+        table_name = sorted(required_tables)[0]
+        base_sql = f"FROM {table_name}"
+        base_table = table_name
+        base_alias = None
+        alias_map = None
+    else:
+        from_sql, alias_map = build_join_from(sorted(required_tables), schema, joins=join_edges)
+        base_sql = from_sql
+        base_table = None
+        base_alias = None
 
     metric_tables = set()
     select_parts = []
@@ -185,9 +183,9 @@ def build_query(
 
     for metric in metrics:
         metric_sql = _render_metric_sql(metric, schema)
-        if metric.metric_type == "sum":
+        if metric.metric_type == "sum" and not _is_already_aggregated(metric_sql):
             metric_sql = f"SUM({metric_sql})"
-        elif metric.metric_type in {"average", "avg"}:
+        elif metric.metric_type in {"average", "avg"} and not _is_already_aggregated(metric_sql):
             metric_sql = f"AVG({metric_sql})"
         metric_sql = _rewrite_metric_sql(metric, metric_sql, schema, alias_map)
         metric_sql = _rewrite_dimension_sql(metric_sql, base_table, base_alias, alias_map)

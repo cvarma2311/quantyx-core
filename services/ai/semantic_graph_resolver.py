@@ -4,6 +4,8 @@ import hashlib
 import re
 from typing import Any
 
+from psycopg2.extras import Json
+
 from services.ai.config import Settings
 from services.ai.db import run_query, execute_non_query
 
@@ -154,8 +156,8 @@ def log_semantic_usage(
             tenant_id,
             domain_id,
             metrics[0] if metrics else "",
-            dimensions,
-            filters,
+            Json(dimensions or []),
+            Json(filters or []),
             intent,
         ],
     )

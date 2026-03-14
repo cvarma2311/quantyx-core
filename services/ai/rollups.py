@@ -5,6 +5,8 @@ import re
 import uuid
 from typing import Any
 
+from psycopg2.extras import Json
+
 from services.ai.catalog import load_catalog_with_registry, resolve_ref
 from services.ai.config import Settings
 from services.ai.db import run_query, execute_non_query
@@ -79,9 +81,9 @@ def create_rollup_registry(
             domain_id,
             base_model,
             metric_name,
-            dimensions,
+            Json(dimensions),
             time_grain,
-            filters or [],
+            Json(filters or []),
             rollup_table,
         ],
     )
@@ -174,7 +176,7 @@ def find_matching_rollup(
            AND status = 'active'
          LIMIT 1
         """,
-        [tenant_id, domain_id, metric_name, time_grain, dims_sorted],
+        [tenant_id, domain_id, metric_name, time_grain, Json(dims_sorted)],
     )
     return rows[0] if rows else None
 

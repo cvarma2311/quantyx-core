@@ -94,6 +94,9 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 30. **Phase 32: Executive KPI Quality Gates and Regression**
    - Enforce dashboard KPI composition, anti-pattern checks, and regression protections.
 
+31. **Phase 34: Agent Artifact Persistence and Conversation Intelligence**
+   - Make every agent persist durable scoped artifacts and make workspace conversations use those persisted artifacts as the semantic intelligence source of truth.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -109,3 +112,4 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 30 depends on Phases 02/10/28/29 and operationalizes template-first KPI metrics.
 - Phase 31 depends on Phases 03/05/28/29/30 and hardens planner + SQL execution safety.
 - Phase 32 depends on Phases 15/23/28/29/30/31 and finalizes quality gate + regression controls.
+- Phase 34 depends on Phases 12/20/22/24/25 and makes persisted deployment artifacts the sole semantic intelligence input for workspace conversations.
