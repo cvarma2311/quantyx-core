@@ -8,3 +8,22 @@ policies:
       column: line_name
       operator: not_in
       values: ["Test", "Pilot"]
+
+dashboard_preferences:
+  kpi_priority_hints:
+    total_output: 125
+    output: 110
+    productivity: 105
+    efficiency: 100
+    downtime: 90
+  time_priority_columns:
+    - process_date
+    - production_date
+    - shift_date
+    - created_at
+  breakdown_priority_tokens:
+    - line
+    - plant
+    - zone
+    - region
+    - shift

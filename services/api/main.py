@@ -10,6 +10,7 @@ import os
 import time
 import re
 import threading
+import traceback
 import uuid
 import zipfile
 import xml.etree.ElementTree as ElementTree
@@ -711,6 +712,33 @@ def _load_context_text(context_id: str) -> tuple[dict, str, list[str]]:
     return context_row, combined_text, file_texts
 
 
+def _merge_context_inputs(
+    tenant_id: str,
+    domain_id: str,
+    context_text: str | None,
+    context_ids: list[str] | None,
+) -> tuple[str | None, list[str]]:
+    merged_parts: list[str] = []
+    resolved_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for raw_id in context_ids or []:
+        context_id = str(raw_id or "").strip()
+        if not context_id or context_id in seen_ids:
+            continue
+        seen_ids.add(context_id)
+        context_row, combined_text, _ = _load_context_text(context_id)
+        if context_row.get("tenant_id") != tenant_id or context_row.get("domain_id") != domain_id:
+            raise HTTPException(status_code=400, detail=f"Context {context_id} tenant/domain mismatch")
+        resolved_ids.append(context_id)
+        if combined_text:
+            merged_parts.append(combined_text)
+    inline_text = str(context_text or "").strip()
+    if inline_text:
+        merged_parts.append(inline_text)
+    merged_text = "\n\n".join([part for part in merged_parts if part]).strip() or None
+    return merged_text, resolved_ids
+
+
 def _execute_chart_job(payload: dict) -> dict:
     chart_id = payload.get("chart_id")
     if not chart_id:
@@ -1255,6 +1283,7 @@ def _execute_job(job: dict) -> dict:
             error_artifacts = {
                 "error_message": str(exc),
                 "error_type": exc.__class__.__name__,
+                "traceback": traceback.format_exc(limit=20),
             }
             try:
                 stage = append_agent_run_stage_event(
@@ -2718,6 +2747,11 @@ def get_tenant_scope_api(tenant_id: str, domain_id: str | None = None) -> Tenant
                                             "status": "certified",
                                             "owner": "analytics@company.com",
                                             "version": "v1",
+                                            "semantic_metadata": {
+                                                "family_name": "total",
+                                                "family_role": "production",
+                                                "derivation_method": "direct_column",
+                                            },
                                         }
                                     ],
                                     "limit": 200,
@@ -2782,6 +2816,7 @@ def metrics(
                 "is_current": row.get("is_current"),
                 "owner": row.get("owner"),
                 "version": row.get("version"),
+                "semantic_metadata": row.get("semantic_metadata"),
                 "definition": contract_metrics.get(row.get("metric_name"), {}).get("definition"),
                 "freshness": contract_metrics.get(row.get("metric_name"), {}).get("freshness"),
             }
@@ -2833,6 +2868,7 @@ def metrics_all(tenant_id: str) -> dict:
                 "artifact_key": row.get("artifact_key"),
                 "version_no": row.get("version_no"),
                 "is_current": row.get("is_current"),
+                "semantic_metadata": row.get("semantic_metadata"),
             }
         )
     return {"connections": list(grouped.values())}
@@ -6139,6 +6175,15 @@ def entities_mappings(tenant_id: str, limit: int = 50) -> dict:
                                 "mode": "full",
                             },
                         },
+                        "start_with_context_ids": {
+                            "summary": "Start run with stored context references",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "context_ids": ["ctx_ops_glossary", "ctx_kpi_formulas"],
+                                "mode": "full",
+                            },
+                        },
                         "start_with_runtime_tuning": {
                             "summary": "Start run with performance tuning (single full run)",
                             "value": {
@@ -6250,7 +6295,23 @@ def start_agentic_run(payload: dict) -> dict:
         payload["schema_name"] = schema
     if not connection_id or not database:
         connection_id, database, schema, _ = _resolve_scope_values(tenant_id, domain_id)
-    logger.info("agentic.start | context_present=%s", bool(payload.get("context_text")))
+    merged_context_text, resolved_context_ids = _merge_context_inputs(
+        tenant_id,
+        domain_id,
+        payload.get("context_text"),
+        payload.get("context_ids") or [],
+    )
+    logger.info(
+        "agentic.start | context_present=%s context_ids=%s",
+        bool(merged_context_text),
+        len(resolved_context_ids),
+    )
+    merged_context_text, resolved_context_ids = _merge_context_inputs(
+        tenant_id,
+        domain_id,
+        payload.get("context_text"),
+        payload.get("context_ids") or [],
+    )
     run_id = create_agent_run(settings, tenant_id, domain_id, status="queued")
     append_agent_run_event(
         settings,
@@ -6269,7 +6330,8 @@ def start_agentic_run(payload: dict) -> dict:
         "tenant_id": tenant_id,
         "domain_id": domain_id,
         "schema_ids": payload.get("schema_ids") or [],
-        "context_text": payload.get("context_text"),
+        "context_text": merged_context_text,
+        "context_ids": resolved_context_ids,
         "schema_payload": payload.get("schema_payload") or {},
         "schema_name": payload.get("schema_name") or "public",
         "connection_id": payload.get("connection_id") or connection_id,
@@ -6837,6 +6899,12 @@ def _start_workspace_deployment(payload: dict) -> dict:
         schema_payload = load_latest_scan_for_scope(settings, tenant_id, domain_id, connection_id, database, schema)
     if not schema_payload:
         raise HTTPException(status_code=400, detail="schema_payload is required")
+    merged_context_text, resolved_context_ids = _merge_context_inputs(
+        tenant_id,
+        domain_id,
+        payload.get("context_text"),
+        payload.get("context_ids") or [],
+    )
     run_id = create_agent_run(settings, tenant_id, domain_id, status="queued")
     version_no = next_run_version(settings, tenant_id, domain_id)
     display_name = payload.get("display_name") or generate_run_display_name(domain_id, version_no)
@@ -6862,7 +6930,8 @@ def _start_workspace_deployment(payload: dict) -> dict:
         "tenant_id": tenant_id,
         "domain_id": domain_id,
         "schema_ids": payload.get("schema_ids") or [],
-        "context_text": payload.get("context_text"),
+        "context_text": merged_context_text,
+        "context_ids": resolved_context_ids,
         "schema_payload": schema_payload or {},
         "schema_name": payload.get("schema_name") or schema,
         "connection_id": payload.get("connection_id") or connection_id,
@@ -6908,6 +6977,41 @@ def _start_workspace_deployment(payload: dict) -> dict:
                             "value": {
                                 "tenant_id": "VC_101",
                                 "domain_id": "lpg_production_distribution",
+                                "mode": "full",
+                            },
+                        },
+                        "create_with_context_text": {
+                            "summary": "Create deployment with inline business context",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "context_text": (
+                                    "Total production is the sum of production_14_2kg and production_19kg. "
+                                    "Use process_date as the canonical operational date. "
+                                    "Zone > Region > Plant is the business hierarchy."
+                                ),
+                                "mode": "full",
+                            },
+                        },
+                        "create_with_context_ids": {
+                            "summary": "Create deployment with stored context references",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "context_ids": ["ctx_ops_glossary", "ctx_kpi_formulas"],
+                                "mode": "full",
+                            },
+                        },
+                        "create_with_text_and_context_ids": {
+                            "summary": "Create deployment with both stored and inline context",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "context_ids": ["ctx_ops_glossary"],
+                                "context_text": (
+                                    "Total production is total_production. "
+                                    "Prefer day and month charts for total productivity and total production."
+                                ),
                                 "mode": "full",
                             },
                         }
@@ -8589,6 +8693,48 @@ def agentic_debug_intelligence(tenant_id: str, domain_id: str | None = None, run
         "joins_sample": (bundle.get("joins") or [])[:20],
         "models_sample": (bundle.get("models") or [])[:20],
         "dimension_candidates_sample": (bundle.get("dimension_candidates") or [])[:50],
+    }
+
+
+@app.get(
+    "/agentic/debug/proposals",
+    tags=["agentic"],
+    summary="Debug: metric/chart/dashboard proposal diagnostics for a run",
+)
+def agentic_debug_proposals(run_id: str) -> dict:
+    agent_artifacts = _latest_agent_completed_artifacts(run_id)
+    metric_artifacts = agent_artifacts.get("MetricAgent") or {}
+    chart_artifacts = agent_artifacts.get("ChartPlannerAgent") or {}
+    dashboard_artifacts = agent_artifacts.get("DashboardAgent") or {}
+    accepted_metrics = ((metric_artifacts.get("context_metric_diagnostics") or {}).get("accepted_metrics") or [])
+    rejected_metrics = ((metric_artifacts.get("context_metric_diagnostics") or {}).get("rejected_metrics") or [])
+    chart_plan = chart_artifacts.get("chart_plan") or []
+    chart_rejections = chart_artifacts.get("chart_rejections") or []
+    return {
+        "run_id": run_id,
+        "metric_proposals": {
+            "context_metric_diagnostics": metric_artifacts.get("context_metric_diagnostics"),
+            "metric_rerank_diagnostics": metric_artifacts.get("metric_rerank_diagnostics"),
+            "accepted_count": len(accepted_metrics),
+            "rejected_count": len(rejected_metrics),
+            "accepted_sample": accepted_metrics[:20],
+            "rejected_sample": rejected_metrics[:20],
+        },
+        "chart_proposals": {
+            "chart_proposal_diagnostics": chart_artifacts.get("chart_proposal_diagnostics"),
+            "chart_rerank_diagnostics": chart_artifacts.get("chart_rerank_diagnostics"),
+            "selected_count": len(chart_plan),
+            "rejected_count": len(chart_rejections),
+            "selected_sample": chart_plan[:30],
+            "rejected_sample": chart_rejections[:30],
+        },
+        "dashboard_composition": {
+            "dashboard_composition_diagnostics": dashboard_artifacts.get("dashboard_composition_diagnostics"),
+            "dashboard_title": dashboard_artifacts.get("dashboard_title"),
+            "chart_ids": dashboard_artifacts.get("chart_ids") or [],
+            "chart_titles": dashboard_artifacts.get("chart_titles") or [],
+            "chart_details": (dashboard_artifacts.get("chart_details") or [])[:30],
+        },
     }
 
 

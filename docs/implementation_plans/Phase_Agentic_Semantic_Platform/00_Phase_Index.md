@@ -97,6 +97,15 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 31. **Phase 34: Agent Artifact Persistence and Conversation Intelligence**
    - Make every agent persist durable scoped artifacts and make workspace conversations use those persisted artifacts as the semantic intelligence source of truth.
 
+32. **Phase 35: KPI-First Record-Aware Auto Dashboard Generation**
+   - Make agents prefer strong business KPI columns and real record evidence so auto dashboards generate the expected day/month trend and operational breakdown charts automatically.
+
+33. **Phase 36: Context-Text-First LLM Metric Interpretation and Validation**
+   - Make `context_text` the primary human-authored business input for metric creation, with LLM proposal, deterministic validation, provenance persistence, and downstream KPI/chart prioritization.
+
+34. **Phase 37: LLM-First KPI Family Proposal and Broad Dashboard Composition**
+   - Make metrics, charts, and dashboards LLM-first over validated semantic artifacts, enforce aligned KPI-family derivation, and allow broader high-confidence dashboard coverage.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -113,3 +122,6 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 31 depends on Phases 03/05/28/29/30 and hardens planner + SQL execution safety.
 - Phase 32 depends on Phases 15/23/28/29/30/31 and finalizes quality gate + regression controls.
 - Phase 34 depends on Phases 12/20/22/24/25 and makes persisted deployment artifacts the sole semantic intelligence input for workspace conversations.
+- Phase 35 depends on Phases 29/30/31/32/34 and makes auto dashboards KPI-first and record-aware instead of first-column heuristic driven.
+- Phase 36 depends on Phases 24/29/30/34/35 and makes deployment context text a first-class LLM input for validated metric creation and KPI prioritization.
+- Phase 37 depends on Phases 35 and 36 and extends the same LLM-first, validation-backed approach to KPI-family derivation, chart proposal, and broad dashboard composition.

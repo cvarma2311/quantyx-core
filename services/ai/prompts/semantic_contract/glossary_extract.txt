@@ -14,5 +14,4 @@ Rules:
 - Only use information present in the input.
 - Do not invent definitions.
 - If unsure, omit the term.
-Input:
-{raw_text}
+The runtime will append the input text below under an `Input` section.

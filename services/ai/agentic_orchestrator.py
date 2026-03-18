@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import traceback
 import urllib.request
 
 try:
@@ -28,6 +29,7 @@ from services.ai.agentic_agents import (
     enrich_schema_graph_columns,
     profile_tables,
     extract_context,
+    validate_metric_candidates,
     propose_ontology,
     propose_joins,
     propose_metrics,
@@ -295,6 +297,589 @@ def _llm_extract_text(
     except Exception:
         logging.getLogger(__name__).warning("agentic.%s_llm_failed", kind, exc_info=True)
     return None
+
+
+def _chart_rerank_enabled(settings) -> bool:
+    mode = os.getenv("AGENTIC_CHART_RERANK_MODE", "auto").lower()
+    if mode in {"off", "false", "0"}:
+        return False
+    if mode in {"on", "true", "1"}:
+        return bool(getattr(settings, "openai_api_key", None))
+    return bool(getattr(settings, "openai_api_key", None))
+
+
+def _chart_proposal_enabled(settings) -> bool:
+    mode = os.getenv("AGENTIC_CHART_PROPOSAL_MODE", "auto").lower()
+    if mode in {"off", "false", "0"}:
+        return False
+    if mode in {"on", "true", "1"}:
+        return bool(getattr(settings, "openai_api_key", None))
+    return bool(getattr(settings, "openai_api_key", None))
+
+
+def _dashboard_composition_enabled(settings) -> bool:
+    mode = os.getenv("AGENTIC_DASHBOARD_COMPOSITION_MODE", "auto").lower()
+    if mode in {"off", "false", "0"}:
+        return False
+    if mode in {"on", "true", "1"}:
+        return bool(getattr(settings, "openai_api_key", None))
+    return bool(getattr(settings, "openai_api_key", None))
+
+
+def _validate_llm_chart_candidates(
+    candidates: list[dict[str, Any]] | None,
+    *,
+    profiling: dict[str, Any],
+    metrics: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    profiling_tables = {str(t.get("name") or ""): t for t in (profiling.get("tables") or []) if t.get("name")}
+    metric_map = {
+        (str(m.get("base_table") or ""), str(m.get("metric_name") or "")): m
+        for m in metrics
+        if m.get("base_table") and m.get("metric_name")
+    }
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for candidate in candidates or []:
+        table = str(candidate.get("table") or "").strip()
+        metric_name = str(candidate.get("metric") or "").strip()
+        chart_type = str(candidate.get("type") or "").strip()
+        if not table or not metric_name or not chart_type:
+            rejected.append({"candidate": candidate, "reason": "missing_required_fields"})
+            continue
+        table_profile = profiling_tables.get(table)
+        metric = metric_map.get((table, metric_name))
+        if not table_profile or not metric:
+            rejected.append({"candidate": candidate, "reason": "unknown_table_or_metric"})
+            continue
+        time_col = str(candidate.get("time_column") or "").strip() or None
+        cat_col = str(candidate.get("category_column") or "").strip() or None
+        valid_cols = set(
+            list(table_profile.get("time_columns") or [])
+            + list(table_profile.get("categorical_columns") or [])
+            + list(table_profile.get("numeric_columns") or [])
+        )
+        if time_col and time_col not in valid_cols:
+            rejected.append({"candidate": candidate, "reason": "unknown_time_column"})
+            continue
+        if cat_col and cat_col not in valid_cols:
+            rejected.append({"candidate": candidate, "reason": "unknown_category_column"})
+            continue
+        normalized = {
+            "type": chart_type,
+            "intent": candidate.get("intent") or ("trend" if time_col else "breakdown"),
+            "title": candidate.get("title") or metric_name.replace("_", " ").title(),
+            "table": table,
+            "metric": metric_name,
+            "metric_intent": metric.get("metric_intent"),
+            "metric_column": None,
+            "metric_expr": metric.get("formula"),
+            "time_column": time_col,
+            "time_grain": candidate.get("time_grain"),
+            "category_column": cat_col,
+            "chart_source": candidate.get("chart_source") or "llm_proposed",
+        }
+        key = (
+            normalized.get("table"),
+            normalized.get("metric"),
+            normalized.get("type"),
+            normalized.get("intent"),
+            normalized.get("time_column"),
+            normalized.get("time_grain"),
+            normalized.get("category_column"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        accepted.append(normalized)
+    return accepted, rejected
+
+
+def _llm_propose_chart_candidates(
+    settings,
+    *,
+    domain_id: str | None,
+    profiling: dict[str, Any],
+    metrics: list[dict[str, Any]],
+    context_text: str | None,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    if not _chart_proposal_enabled(settings):
+        return None, None
+    model = os.getenv("AGENTIC_CHART_PROPOSAL_MODEL", getattr(settings, "openai_model", "gpt-4o-mini"))
+    timeout_sec = int(os.getenv("AGENTIC_CHART_PROPOSAL_TIMEOUT_SEC", "45"))
+    metric_payload = []
+    for metric in (metrics or [])[:24]:
+        metric_payload.append(
+            {
+                "metric_name": metric.get("metric_name"),
+                "table": metric.get("base_table"),
+                "metric_intent": metric.get("metric_intent"),
+                "metric_source": metric.get("metric_source"),
+                "preferred_time_column": metric.get("preferred_time_column"),
+                "preferred_breakdowns": (metric.get("preferred_breakdowns") or [])[:4],
+                "is_executive_kpi": bool(metric.get("is_executive_kpi")),
+            }
+        )
+    table_payload = []
+    for table in (profiling.get("tables") or [])[:10]:
+        table_payload.append(
+            {
+                "table": table.get("name"),
+                "time_columns": (table.get("time_columns") or [])[:6],
+                "categorical_columns": (table.get("categorical_columns") or [])[:12],
+            }
+        )
+    system_prompt = (
+        "You propose dashboard chart candidates from validated metrics. "
+        "Use only the provided metric names, tables, time columns, and category columns. "
+        "Prefer KPI trends by day/month and strong operational breakdowns. "
+        "Return JSON only with keys: charts, rationale. "
+        "Each chart must contain: type, intent, table, metric, time_column, time_grain, category_column, title."
+    )
+    user_payload = {
+        "domain_id": domain_id,
+        "context_text": str(context_text or "")[:8000],
+        "metrics": metric_payload,
+        "tables": table_payload,
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload)},
+                ],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            }
+        ).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    logger = logging.getLogger(__name__)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        parsed = json.loads(body["choices"][0]["message"]["content"])
+        charts = [item for item in (parsed.get("charts") or []) if isinstance(item, dict)]
+        logger.info("agentic.chart_proposal.response | domain=%s candidate_count=%s", domain_id, len(charts))
+        return charts, {"model": model, "candidate_count": len(charts), "rationale": parsed.get("rationale")}
+    except Exception:
+        logger.warning("agentic.chart_proposal_llm_failed", exc_info=True)
+        return None, None
+
+
+def _llm_compose_dashboard(
+    settings,
+    *,
+    domain_id: str | None,
+    chart_candidates: list[dict[str, Any]],
+    min_charts: int,
+    max_charts: int,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    if not _dashboard_composition_enabled(settings) or not chart_candidates:
+        return None, None
+    model = os.getenv("AGENTIC_DASHBOARD_COMPOSITION_MODEL", getattr(settings, "openai_model", "gpt-4o-mini"))
+    timeout_sec = int(os.getenv("AGENTIC_DASHBOARD_COMPOSITION_TIMEOUT_SEC", "45"))
+    candidate_lookup: dict[str, dict[str, Any]] = {}
+    payload_candidates = []
+    for idx, cand in enumerate(chart_candidates[:40], start=1):
+        cid = f"chart_{idx}"
+        candidate_lookup[cid] = cand
+        payload_candidates.append(
+            {
+                "candidate_id": cid,
+                "title": cand.get("title"),
+                "table": cand.get("table"),
+                "metric": cand.get("metric"),
+                "intent": cand.get("intent"),
+                "type": cand.get("type"),
+                "time_grain": cand.get("time_grain"),
+                "category_column": cand.get("category_column"),
+            }
+        )
+    system_prompt = (
+        "You compose a strong operational dashboard. "
+        "Choose only from the provided candidate_ids. "
+        "Prefer broad KPI coverage, day and month trends, and plant/zone/region breakdowns. "
+        "Return JSON only with keys: selected_ids, rationale."
+    )
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "domain_id": domain_id,
+                                "min_charts": min_charts,
+                                "max_charts": max_charts,
+                                "candidates": payload_candidates,
+                            }
+                        ),
+                    },
+                ],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            }
+        ).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    logger = logging.getLogger(__name__)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        parsed = json.loads(body["choices"][0]["message"]["content"])
+        ordered: list[dict[str, Any]] = []
+        for cid in [str(v) for v in (parsed.get("selected_ids") or [])]:
+            if cid in candidate_lookup:
+                ordered.append(candidate_lookup[cid])
+            if len(ordered) >= max_charts:
+                break
+        return ordered or None, {"model": model, "selected_count": len(ordered), "rationale": parsed.get("rationale")}
+    except Exception:
+        logger.warning("agentic.dashboard_composition_llm_failed", exc_info=True)
+        return None, None
+
+
+def _llm_rerank_chart_candidates(
+    settings,
+    *,
+    domain_id: str | None,
+    profiling: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    min_charts: int,
+    max_charts: int,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    if not _chart_rerank_enabled(settings):
+        return None, None
+    valid_candidates = [cand for cand in candidates if not cand.get("skipped")]
+    if not valid_candidates:
+        return None, None
+    model = os.getenv("AGENTIC_CHART_RERANK_MODEL", getattr(settings, "openai_model", "gpt-4o-mini"))
+    timeout_sec = int(os.getenv("AGENTIC_CHART_RERANK_TIMEOUT_SEC", "30"))
+    candidate_payload = []
+    candidate_lookup: dict[str, dict[str, Any]] = {}
+    for idx, cand in enumerate(valid_candidates[:24], start=1):
+        cid = f"cand_{idx}"
+        candidate_lookup[cid] = cand
+        candidate_payload.append(
+            {
+                "candidate_id": cid,
+                "title": cand.get("title"),
+                "table": cand.get("table"),
+                "metric": cand.get("metric"),
+                "metric_intent": cand.get("metric_intent"),
+                "chart_type": cand.get("type"),
+                "intent": cand.get("intent"),
+                "time_column": cand.get("time_column"),
+                "time_grain": cand.get("time_grain"),
+                "category_column": cand.get("category_column"),
+            }
+        )
+    profiling_payload = []
+    for table in (profiling.get("tables") or [])[:8]:
+        profiling_payload.append(
+            {
+                "table": table.get("name"),
+                "time_columns": (table.get("time_columns") or [])[:3],
+                "categorical_columns": (table.get("categorical_columns") or [])[:8],
+                "eligible_numeric_columns": (table.get("eligible_numeric_columns") or [])[:8],
+            }
+        )
+    system_prompt = (
+        "You are a dashboard chart reranker. "
+        "Choose only from the provided candidate_ids. "
+        "Prefer executive KPI coverage, day and month trends, and business breakdowns. "
+        "Do not invent charts. Return JSON only with keys: selected_ids, rationale."
+    )
+    user_payload = {
+        "domain_id": domain_id,
+        "selection_constraints": {
+            "min_charts": min_charts,
+            "max_charts": max_charts,
+            "prefer_trends": 2,
+            "prefer_breakdowns": 2,
+        },
+        "profiling_summary": profiling_payload,
+        "candidates": candidate_payload,
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload)},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        content = body["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        selected_ids = [str(item) for item in (parsed.get("selected_ids") or []) if str(item).strip()]
+        ordered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for cid in selected_ids:
+            if cid in seen or cid not in candidate_lookup:
+                continue
+            seen.add(cid)
+            ordered.append(candidate_lookup[cid])
+            if len(ordered) >= max_charts:
+                break
+        if not ordered:
+            return None, None
+        diagnostics = {
+            "model": model,
+            "selected_ids": selected_ids,
+            "applied_ids": [cid for cid in selected_ids if cid in candidate_lookup][:max_charts],
+            "rationale": parsed.get("rationale"),
+        }
+        return ordered, diagnostics
+    except Exception:
+        logging.getLogger(__name__).warning("agentic.chart_rerank_llm_failed", exc_info=True)
+        return None, None
+
+
+def _metric_rerank_enabled(settings) -> bool:
+    mode = os.getenv("AGENTIC_METRIC_RERANK_MODE", "auto").lower()
+    if mode in {"off", "false", "0"}:
+        return False
+    if mode in {"on", "true", "1"}:
+        return bool(getattr(settings, "openai_api_key", None))
+    return bool(getattr(settings, "openai_api_key", None))
+
+
+def _context_metric_llm_enabled(settings) -> bool:
+    mode = os.getenv("AGENTIC_CONTEXT_METRIC_MODE", "auto").lower()
+    if mode in {"off", "false", "0"}:
+        return False
+    if mode in {"on", "true", "1"}:
+        return bool(getattr(settings, "openai_api_key", None))
+    return bool(getattr(settings, "openai_api_key", None))
+
+
+def _llm_propose_context_metrics(
+    settings,
+    *,
+    domain_id: str | None,
+    context_text: str | None,
+    schema_graph: dict[str, Any],
+    profiling: dict[str, Any],
+    glossary_terms: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    text = str(context_text or "").strip()
+    if not _context_metric_llm_enabled(settings) or not text:
+        return None, None
+    model = os.getenv("AGENTIC_CONTEXT_METRIC_MODEL", getattr(settings, "openai_model", "gpt-4o-mini"))
+    timeout_sec = int(os.getenv("AGENTIC_CONTEXT_METRIC_TIMEOUT_SEC", "45"))
+    profiling_payload = []
+    for table in (profiling.get("tables") or [])[:10]:
+        profiling_payload.append(
+            {
+                "table": table.get("name"),
+                "row_count": table.get("row_count"),
+                "eligible_numeric_columns": (table.get("eligible_numeric_columns") or [])[:12],
+                "numeric_columns": (table.get("numeric_columns") or [])[:12],
+                "time_columns": (table.get("time_columns") or [])[:6],
+                "categorical_columns": (table.get("categorical_columns") or [])[:12],
+            }
+        )
+    glossary_payload = []
+    for item in (glossary_terms or [])[:30]:
+        if not item.get("term"):
+            continue
+        glossary_payload.append(
+            {
+                "term": item.get("term"),
+                "synonyms": (item.get("synonyms") or [])[:3],
+                "abbreviations": (item.get("abbreviations") or [])[:3],
+            }
+        )
+    system_prompt = (
+        "You interpret business deployment context and propose analytical metrics. "
+        "Use only provided tables and columns. "
+        "Do not invent tables or columns. "
+        "If the context implies formulas or KPI names, translate them into candidate metrics. "
+        "Return JSON only with keys: metrics, rationale. "
+        "metrics must be a list of objects with keys: metric_name, display_name, description, base_table, formula, grain, preferred_time_column, preferred_dimensions, metric_type, confidence, rationale. "
+        "If no metric is strongly implied by the context, return an empty metrics array."
+    )
+    user_payload = {
+        "domain_id": domain_id,
+        "context_text": text[:12000],
+        "schema_summary": [
+            {
+                "table": table.get("name"),
+                "columns": [c.get("name") for c in (table.get("columns") or [])[:25] if c.get("name")],
+            }
+            for table in (schema_graph.get("tables") or [])[:10]
+        ],
+        "profiling_summary": profiling_payload,
+        "glossary_terms": glossary_payload,
+    }
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "agentic.context_metric_prompt | domain=%s context_chars=%s tables=%s glossary_terms=%s",
+        domain_id,
+        len(text),
+        len(profiling_payload),
+        len(glossary_payload),
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload)},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        content = body["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        metrics = [item for item in (parsed.get("metrics") or []) if isinstance(item, dict)]
+        diagnostics = {
+            "model": model,
+            "candidate_count": len(metrics),
+            "rationale": parsed.get("rationale"),
+            "used_context_text": True,
+        }
+        logger.info(
+            "agentic.context_metric_response | domain=%s candidate_count=%s rationale=%s",
+            domain_id,
+            len(metrics),
+            parsed.get("rationale"),
+        )
+        return metrics, diagnostics
+    except Exception:
+        logger.warning("agentic.context_metric_llm_failed", exc_info=True)
+        return None, None
+
+
+def _llm_rerank_metric_candidates(
+    settings,
+    *,
+    domain_id: str | None,
+    profiling: dict[str, Any],
+    metrics: list[dict[str, Any]],
+) -> tuple[list[str] | None, dict[str, Any] | None]:
+    if not _metric_rerank_enabled(settings):
+        return None, None
+    if not metrics:
+        return None, None
+    model = os.getenv("AGENTIC_METRIC_RERANK_MODEL", getattr(settings, "openai_model", "gpt-4o-mini"))
+    timeout_sec = int(os.getenv("AGENTIC_METRIC_RERANK_TIMEOUT_SEC", "30"))
+    candidate_payload = []
+    valid_metrics = [metric for metric in metrics if metric.get("metric_name") and metric.get("base_table")]
+    metric_lookup: dict[str, dict[str, Any]] = {}
+    for idx, metric in enumerate(valid_metrics[:30], start=1):
+        mid = f"metric_{idx}"
+        metric_lookup[mid] = metric
+        candidate_payload.append(
+            {
+                "metric_id": mid,
+                "metric_name": metric.get("metric_name"),
+                "base_table": metric.get("base_table"),
+                "metric_type": metric.get("metric_type"),
+                "metric_intent": metric.get("metric_intent"),
+                "is_executive_kpi": bool(metric.get("is_executive_kpi")),
+                "measure_confidence": float(metric.get("measure_confidence") or 0.0),
+                "preferred_time_column": metric.get("preferred_time_column"),
+                "preferred_breakdowns": (metric.get("preferred_breakdowns") or [])[:3],
+            }
+        )
+    profiling_payload = []
+    for table in (profiling.get("tables") or [])[:8]:
+        profiling_payload.append(
+            {
+                "table": table.get("name"),
+                "time_columns": (table.get("time_columns") or [])[:3],
+                "categorical_columns": (table.get("categorical_columns") or [])[:8],
+                "eligible_numeric_columns": (table.get("eligible_numeric_columns") or [])[:8],
+            }
+        )
+    system_prompt = (
+        "You are a KPI metric reranker. "
+        "Choose only from the provided metric_ids. "
+        "Prefer business KPIs, canonical totals, productivity/efficiency measures, and metrics with strong time and breakdown support. "
+        "Do not invent metrics. Return JSON only with keys: ranked_metric_ids, rationale."
+    )
+    user_payload = {
+        "domain_id": domain_id,
+        "profiling_summary": profiling_payload,
+        "metric_candidates": candidate_payload,
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(user_payload)},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        content = body["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+        ranked_ids = [str(item) for item in (parsed.get("ranked_metric_ids") or []) if str(item).strip()]
+        if not ranked_ids:
+            return None, None
+        diagnostics = {
+            "model": model,
+            "ranked_metric_ids": ranked_ids,
+            "rationale": parsed.get("rationale"),
+        }
+        return ranked_ids, diagnostics
+    except Exception:
+        logging.getLogger(__name__).warning("agentic.metric_rerank_llm_failed", exc_info=True)
+        return None, None
 
 
 def _safe_event_callback(event_callback: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]) -> None:
@@ -1092,6 +1677,26 @@ def _persist_agentic_registry_outputs(
             if existing:
                 continue
             try:
+                metric_source = str(metric.get("metric_source") or "agentic").strip().lower()
+                registry_source_type = (
+                    "agentic_context_llm"
+                    if metric_source == "context_llm"
+                    else ("agentic_context_override" if metric_source == "context_override" else "agentic")
+                )
+                semantic_metadata = {
+                    "metric_source": metric_source,
+                    "metric_intent": metric.get("metric_intent"),
+                    "family_name": metric.get("family_name"),
+                    "family_role": metric.get("family_role"),
+                    "derivation_method": metric.get("derivation_method") or metric_source,
+                    "derived_from_metrics": metric.get("derived_from_metrics") or [],
+                    "source_context": "context_text" if metric_source in {"context_llm", "context_override"} else "agentic",
+                    "semantic_confidence": metric.get("measure_confidence"),
+                    "validation_status": "validated",
+                    "llm_rationale": metric.get("llm_rationale"),
+                    "eligibility_reason": metric.get("eligibility_reason"),
+                }
+                semantic_metadata = {k: v for k, v in semantic_metadata.items() if v not in (None, "", [])}
                 upsert_metric(
                     settings,
                     {
@@ -1103,33 +1708,55 @@ def _persist_agentic_registry_outputs(
                         "database": database_name,
                         "schema": schema_name,
                         "metric_name": metric_name,
-                        "display_name": metric_name.replace("_", " ").title(),
-                        "description": f"Agentic inferred metric for {base_table}",
+                        "display_name": metric.get("display_name") or metric_name.replace("_", " ").title(),
+                        "description": metric.get("description") or f"Agentic inferred metric for {base_table}",
                         "type": metric_type,
                         "unit": metric.get("unit"),
                         "confidence": metric.get("measure_confidence"),
                         "additive": metric_type in {"sum", "count", "avg", "average", "min", "max"},
-                        "grain": "day" if (table_profile.get("time_columns") or []) else "unknown",
+                        "grain": metric.get("grain") or ("day" if (table_profile.get("time_columns") or []) else "unknown"),
                         "dimensions": metric_dims,
                         "dataset_id": fact_model,
                         "source_model": fact_model,
                         "source_schema": schema_name,
                         "sql": sql_expr,
                         "lifecycle_status": "active",
-                        "source_type": "agentic",
+                        "source_type": registry_source_type,
                         "source_run_id": run_id,
                         "is_current": True,
+                        "change_reason": (
+                            f"{metric.get('llm_rationale') or metric.get('eligibility_reason') or metric_source}"
+                            + (
+                                f" | family={metric.get('family_name')} role={metric.get('family_role')}"
+                                if metric.get("family_name") or metric.get("family_role")
+                                else ""
+                            )
+                        ),
+                        "created_by": "metric_agent",
+                        "updated_by": "metric_agent",
+                        "owner": metric.get("family_name") or metric_source,
+                        "version": (
+                            f"run-{run_id}"
+                            + (
+                                f"|family:{metric.get('family_name')}|role:{metric.get('family_role')}"
+                                if metric.get("family_name") or metric.get("family_role")
+                                else ""
+                            )
+                        ),
+                        "semantic_metadata": semantic_metadata,
                     },
                 )
                 persisted_metrics += 1
                 logger.info(
-                    "agentic.registry.metric_persisted | run_id=%s metric_name=%s base_table=%s artifact_key=%s dataset_id=%s source_model=%s",
+                    "agentic.registry.metric_persisted | run_id=%s metric_name=%s base_table=%s artifact_key=%s dataset_id=%s source_model=%s metric_source=%s source_type=%s",
                     run_id,
                     metric_name,
                     base_table,
                     artifact_key,
                     fact_model,
                     fact_model,
+                    metric_source,
+                    registry_source_type,
                 )
             except Exception:
                 logging.getLogger(__name__).exception(
@@ -1300,21 +1927,44 @@ def run_agentic_workflow(
         _emit(settings, run_id, "ContextAgent", "running", "Context Agent started", event_callback=event_callback)
         context_text = state.get("context_text")
         logger.info(
-            "agentic.context.input | run_id=%s has_context_text=%s context_len=%s",
+            "agentic.context.input | run_id=%s has_context_text=%s context_len=%s context_ids=%s",
             run_id,
             bool(context_text),
             len(str(context_text or "")),
+            len(state.get("context_ids") or []),
         )
-        extracted = extract_context(settings, context_text, state.get("schema_graph", {}))
+        try:
+            extracted = extract_context(settings, context_text, state.get("schema_graph", {}))
+        except Exception as exc:
+            error_artifacts = {
+                "error_message": str(exc),
+                "error_type": exc.__class__.__name__,
+                "traceback": traceback.format_exc(limit=12),
+                "context_len": len(str(context_text or "")),
+                "context_ids": len(state.get("context_ids") or []),
+            }
+            logger.exception("agentic.context.failed | run_id=%s", run_id)
+            _emit(
+                settings,
+                run_id,
+                "ContextAgent",
+                "failed",
+                "Context Agent failed",
+                error_artifacts,
+                event_callback=event_callback,
+            )
+            raise
         state["context_entities"] = extracted.get("context_entities", [])
         state["hierarchy_hints"] = extracted.get("hierarchy_hints", [])
         state["glossary_terms"] = extracted.get("glossary_terms", [])
+        state["metric_overrides"] = extracted.get("metric_overrides", [])
         if not state["glossary_terms"] and state.get("schema_graph"):
             # fallback if context extraction yielded nothing
             extracted = extract_context(settings, None, state.get("schema_graph", {}))
             state["context_entities"] = extracted.get("context_entities", [])
             state["hierarchy_hints"] = extracted.get("hierarchy_hints", [])
             state["glossary_terms"] = extracted.get("glossary_terms", [])
+            state["metric_overrides"] = extracted.get("metric_overrides", [])
         semantics_persisted = {"glossary_terms": 0, "hierarchies": 0, "semantic_contract_id": None}
         try:
             semantics_persisted = _persist_agentic_semantic_assets(
@@ -1337,6 +1987,7 @@ def run_agentic_workflow(
                 "entities": len(state["context_entities"]),
                 "sample_entities": state["context_entities"][:10],
                 "glossary_terms": state["glossary_terms"],
+                "metric_overrides": state.get("metric_overrides") or [],
                 "semantics_persisted": semantics_persisted,
             },
             event_callback=event_callback,
@@ -1693,14 +2344,84 @@ def run_agentic_workflow(
 
     def metric_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(settings, run_id, "MetricAgent", "running", "Metric Agent started", event_callback=event_callback)
+        llm_metric_candidates, llm_metric_diag = _llm_propose_context_metrics(
+            settings,
+            domain_id=state.get("domain_id"),
+            context_text=state.get("context_text"),
+            schema_graph=state.get("schema_graph", {}) or {},
+            profiling=state.get("profiling_stats", {}) or {},
+            glossary_terms=state.get("glossary_terms") or [],
+        )
+        validated_context_metrics, rejected_context_metrics = validate_metric_candidates(
+            llm_metric_candidates,
+            state.get("profiling_stats", {}) or {},
+            domain_id=state.get("domain_id"),
+        )
+        state["context_metric_diagnostics"] = {
+            "proposal": llm_metric_diag,
+            "accepted_count": len(validated_context_metrics),
+            "rejected_count": len(rejected_context_metrics),
+            "accepted_metrics": [
+                {
+                    "metric_name": m.get("metric_name"),
+                    "base_table": m.get("base_table"),
+                    "grain": m.get("grain"),
+                    "preferred_time_column": m.get("preferred_time_column"),
+                }
+                for m in validated_context_metrics
+            ],
+            "rejected_metrics": rejected_context_metrics[:10],
+        }
+        combined_metric_overrides: list[dict[str, Any]] = []
+        seen_override_keys: set[tuple[str, str]] = set()
+        for metric in validated_context_metrics + (state.get("metric_overrides") or []):
+            key = (str(metric.get("base_table") or ""), str(metric.get("metric_name") or ""))
+            if not key[0] or not key[1] or key in seen_override_keys:
+                continue
+            seen_override_keys.add(key)
+            combined_metric_overrides.append(metric)
         state["metric_defs"] = propose_metrics(
             state.get("profiling_stats", {}),
             domain_id=state.get("domain_id"),
+            metric_overrides=combined_metric_overrides,
         )
+        metric_rerank_ids, metric_rerank_diag = _llm_rerank_metric_candidates(
+            settings,
+            domain_id=state.get("domain_id"),
+            profiling=state.get("profiling_stats", {}) or {},
+            metrics=state.get("metric_defs") or [],
+        )
+        if metric_rerank_ids:
+            metric_id_lookup: dict[str, dict[str, Any]] = {}
+            for idx, metric in enumerate(state.get("metric_defs") or [], start=1):
+                metric_id_lookup[f"metric_{idx}"] = metric
+            reranked_metrics: list[dict[str, Any]] = []
+            seen_metric_names: set[tuple[str, str]] = set()
+            for rank, metric_id in enumerate(metric_rerank_ids):
+                metric = metric_id_lookup.get(metric_id)
+                if not metric:
+                    continue
+                key = (str(metric.get("base_table") or ""), str(metric.get("metric_name") or ""))
+                if key in seen_metric_names:
+                    continue
+                seen_metric_names.add(key)
+                boosted = dict(metric)
+                boosted["llm_priority_boost"] = max(0.0, 60.0 - (rank * 5.0))
+                boosted["llm_rank"] = rank + 1
+                reranked_metrics.append(boosted)
+            for metric in state.get("metric_defs") or []:
+                key = (str(metric.get("base_table") or ""), str(metric.get("metric_name") or ""))
+                if key in seen_metric_names:
+                    continue
+                reranked_metrics.append(metric)
+            state["metric_defs"] = reranked_metrics
+        state["metric_rerank_diagnostics"] = metric_rerank_diag
         logger.info(
-            "agentic.metrics.output | run_id=%s metrics=%s sample=%s",
+            "agentic.metrics.output | run_id=%s metrics=%s metric_context=%s metric_rerank=%s sample=%s",
             run_id,
             len(state.get("metric_defs") or []),
+            state.get("context_metric_diagnostics"),
+            metric_rerank_diag,
             [
                 {
                     "name": m.get("metric_name"),
@@ -1708,6 +2429,7 @@ def run_agentic_workflow(
                     "type": m.get("metric_type"),
                     "eligible_measure": m.get("eligible_measure"),
                     "intent": m.get("metric_intent"),
+                    "source": m.get("metric_source"),
                 }
                 for m in (state.get("metric_defs") or [])[:8]
             ],
@@ -1741,6 +2463,8 @@ def run_agentic_workflow(
             {
                 "metrics": len(state["metric_defs"]),
                 "metric_defs_detail": state["metric_defs"],
+                "context_metric_diagnostics": state.get("context_metric_diagnostics"),
+                "metric_rerank_diagnostics": metric_rerank_diag,
                 "registry_persisted": registry_persisted,
             },
             event_callback=event_callback,
@@ -1850,29 +2574,116 @@ def run_agentic_workflow(
             state,
             "chart_min_charts",
             "AGENTIC_CHART_MIN_CHARTS",
-            4,
+            6,
         )
         max_charts = _resolve_int_setting(
             state,
             "chart_max_charts",
             "AGENTIC_CHART_MAX_CHARTS",
-            8,
+            12,
         )
         if min_charts > max_charts:
             min_charts = max_charts
-        candidates = propose_chart_candidates(
+        deterministic_candidates = propose_chart_candidates(
             state.get("profiling_stats", {}),
             state.get("metric_defs", []),
             state.get("join_edges", []),
+            domain_id=state.get("domain_id"),
         )
+        llm_candidates_raw, llm_chart_diag = _llm_propose_chart_candidates(
+            settings,
+            domain_id=state.get("domain_id"),
+            profiling=state.get("profiling_stats", {}) or {},
+            metrics=state.get("metric_defs", []) or [],
+            context_text=state.get("context_text"),
+        )
+        llm_candidates, llm_candidate_rejections = _validate_llm_chart_candidates(
+            llm_candidates_raw,
+            profiling=state.get("profiling_stats", {}) or {},
+            metrics=state.get("metric_defs", []) or [],
+        )
+        candidates = list(llm_candidates or [])
+        seen_candidate_keys = {
+            (
+                cand.get("table"),
+                cand.get("metric"),
+                cand.get("type"),
+                cand.get("intent"),
+                cand.get("category_column"),
+                cand.get("time_column"),
+                cand.get("time_grain"),
+            )
+            for cand in candidates
+        }
+        for cand in deterministic_candidates:
+            key = (
+                cand.get("table"),
+                cand.get("metric"),
+                cand.get("type"),
+                cand.get("intent"),
+                cand.get("category_column"),
+                cand.get("time_column"),
+                cand.get("time_grain"),
+            )
+            if key in seen_candidate_keys:
+                continue
+            seen_candidate_keys.add(key)
+            candidates.append(cand)
         selected = select_charts(candidates, min_charts=min_charts, max_charts=max_charts)
-        rejected = [cand for cand in candidates if cand.get("skipped")]
+        reranked, rerank_diag = _llm_rerank_chart_candidates(
+            settings,
+            domain_id=state.get("domain_id"),
+            profiling=state.get("profiling_stats", {}) or {},
+            candidates=candidates,
+            min_charts=min_charts,
+            max_charts=max_charts,
+        )
+        if reranked:
+            selected_keys = {
+                (
+                    cand.get("table"),
+                    cand.get("metric"),
+                    cand.get("type"),
+                    cand.get("category_column"),
+                    cand.get("time_column"),
+                    cand.get("time_grain"),
+                )
+                for cand in selected
+            }
+            for cand in selected:
+                key = (
+                    cand.get("table"),
+                    cand.get("metric"),
+                    cand.get("type"),
+                    cand.get("category_column"),
+                    cand.get("time_column"),
+                    cand.get("time_grain"),
+                )
+                if key not in {
+                    (
+                        item.get("table"),
+                        item.get("metric"),
+                        item.get("type"),
+                        item.get("category_column"),
+                        item.get("time_column"),
+                        item.get("time_grain"),
+                    )
+                    for item in reranked
+                }:
+                    reranked.append(cand)
+                if len(reranked) >= max_charts:
+                    break
+            selected = reranked[:max_charts]
+        rejected = [cand for cand in candidates if cand.get("skipped")] + list(llm_candidate_rejections or [])
         logger.info(
-            "agentic.chart_planner.output | run_id=%s candidates=%s selected=%s rejected=%s sample_selected=%s",
+            "agentic.chart_planner.output | run_id=%s candidates=%s llm_candidates=%s selected=%s rejected=%s llm_proposal=%s llm_rerank=%s sample_selected=%s",
             run_id,
             len(candidates),
+            len(llm_candidates or []),
             len(selected),
             len(rejected),
+            llm_chart_diag,
+            rerank_diag,
             [
                 {
                     "title": c.get("title"),
@@ -1888,6 +2699,8 @@ def run_agentic_workflow(
         state["chart_candidates"] = candidates
         state["chart_plan"] = selected
         state["chart_candidate_rejections"] = rejected
+        state["chart_proposal_diagnostics"] = llm_chart_diag
+        state["chart_rerank_diagnostics"] = rerank_diag
         _emit(
             settings,
             run_id,
@@ -1902,6 +2715,8 @@ def run_agentic_workflow(
                 "max_charts": max_charts,
                 "chart_plan": selected,
                 "chart_rejections": rejected,
+                "chart_proposal_diagnostics": llm_chart_diag,
+                "chart_rerank_diagnostics": rerank_diag,
             },
             event_callback=event_callback,
         )
@@ -1937,6 +2752,7 @@ def run_agentic_workflow(
         dashboard_spec = build_dashboard_spec(
             state.get("metric_defs", []),
             state.get("profiling_stats", {}),
+            domain_id=state.get("domain_id"),
         )
         dashboard_title = (dashboard_spec.get("title") or "").strip()
         if not dashboard_title:
@@ -1945,12 +2761,24 @@ def run_agentic_workflow(
         dashboard_spec["title"] = dashboard_title
         dashboard_spec["dashboard_title"] = dashboard_title
         charts_spec = state.get("chart_plan") or dashboard_spec.get("charts", [])
+        composed_charts, dashboard_comp_diag = _llm_compose_dashboard(
+            settings,
+            domain_id=state.get("domain_id"),
+            chart_candidates=charts_spec,
+            min_charts=min(6, len(charts_spec) or 6),
+            max_charts=min(max(12, len(charts_spec)), 12),
+        )
+        if composed_charts:
+            charts_spec = composed_charts
+        dashboard_spec["dashboard_composition_diagnostics"] = dashboard_comp_diag
+        dashboard_spec["charts"] = charts_spec
         logger.info(
-            "agentic.dashboard.input | run_id=%s charts_spec=%s metrics=%s profiling_tables=%s",
+            "agentic.dashboard.input | run_id=%s charts_spec=%s metrics=%s profiling_tables=%s composition=%s",
             run_id,
             len(charts_spec or []),
             len(state.get("metric_defs") or []),
             len((state.get("profiling_stats") or {}).get("tables") or []),
+            dashboard_comp_diag,
         )
         dashboard_spec["chart_plan"] = state.get("chart_plan") or []
         dashboard_spec["chart_candidates"] = state.get("chart_candidates") or []
@@ -1995,15 +2823,16 @@ def run_agentic_workflow(
             table_name = chart.get("table")
             time_col = chart.get("time_column")
             category_col = chart.get("category_column")
+            chart_intent = str(chart.get("intent") or "").strip().lower()
             chart_title = chart.get("title")
             if not chart_title:
-                if chart.get("intent") == "trend":
+                if chart_intent == "trend":
                     chart_title = f"{metric_name} Trend Over {time_col or 'Time'}"
-                elif chart.get("intent") in {"breakdown", "join_breakdown"}:
+                elif chart_intent in {"breakdown", "join_breakdown"}:
                     chart_title = f"{metric_name} by {category_col or 'Category'}"
-                elif chart.get("intent") == "share":
+                elif chart_intent == "share":
                     chart_title = f"{category_col or 'Category'} Share of {metric_name}"
-                elif chart.get("intent") == "multi_series":
+                elif chart_intent == "multi_series":
                     chart_title = f"{metric_name} Trend by {category_col or 'Category'}"
                 else:
                     chart_title = f"{metric_name} {chart.get('type') or 'Overview'}"
@@ -2082,8 +2911,12 @@ def run_agentic_workflow(
                 )
                 continue
 
+            # Plain time-series trends must stay single-series unless explicitly marked multi_series.
+            if chart_type == "line" and chart_intent != "multi_series":
+                category_col = None
+
             # choose a better dimension using join metadata if none provided
-            if not category_col:
+            if not category_col and chart_intent in {"breakdown", "join_breakdown", "share", "multi_series"}:
                 for edge in join_edges:
                     if edge.get("left_table") == table_name and edge.get("relationship") in {
                         "many_to_one",
@@ -2095,7 +2928,11 @@ def run_agentic_workflow(
             if table_ref and metric_expr:
                 if chart_type == "line":
                     if time_col:
-                        dim_expr = f"date_trunc('month', {table_alias}.{_qident(time_col)})"
+                        time_grain = str(chart.get("time_grain") or "month").strip().lower()
+                        if time_grain == "day":
+                            dim_expr = f"date_trunc('day', {table_alias}.{_qident(time_col)})"
+                        else:
+                            dim_expr = f"date_trunc('month', {table_alias}.{_qident(time_col)})"
                         dim_alias = "period"
                         if category_col:
                             cat_alias = "category"

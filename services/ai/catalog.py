@@ -24,6 +24,7 @@ class Metric:
     status: str | None = None
     owner: str | None = None
     version: str | None = None
+    semantic_metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,7 @@ def load_catalog_with_registry(settings: Settings, path: str) -> MetricCatalog:
             status=metric.get("status"),
             owner=metric.get("owner"),
             version=metric.get("version"),
+            semantic_metadata=metric.get("semantic_metadata"),
         )
         metrics[name] = metric_obj
         if display_name and display_name != name:
@@ -115,6 +117,7 @@ def load_catalog_with_registry(settings: Settings, path: str) -> MetricCatalog:
                     status=metric_obj.status,
                     owner=metric_obj.owner,
                     version=metric_obj.version,
+                    semantic_metadata=metric_obj.semantic_metadata,
                 )
     return MetricCatalog(metrics=metrics, dimensions=catalog.dimensions)
 

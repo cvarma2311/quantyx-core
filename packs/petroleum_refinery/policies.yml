@@ -15,3 +15,22 @@ policies:
       column: lorry_id
       operator: min_group_size
       values: [5]
+
+dashboard_preferences:
+  kpi_priority_hints:
+    throughput: 120
+    dispatch: 105
+    utilization: 100
+    turnaround: 95
+    inventory: 90
+  time_priority_columns:
+    - process_date
+    - dispatch_date
+    - execution_date
+    - created_at
+  breakdown_priority_tokens:
+    - location
+    - bay
+    - terminal
+    - region
+    - zone

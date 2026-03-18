@@ -5,11 +5,31 @@ import uuid
 from typing import Any, Iterable
 
 import psycopg2
+from psycopg2.extras import Json
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, run_query
 
 logger = logging.getLogger(__name__)
+_SEMANTIC_METADATA_COLUMN_READY = False
+
+
+def _ensure_semantic_metadata_column(settings: Settings) -> None:
+    global _SEMANTIC_METADATA_COLUMN_READY
+    if _SEMANTIC_METADATA_COLUMN_READY:
+        return
+    try:
+        execute_non_query(
+            settings,
+            """
+            ALTER TABLE IF EXISTS public.quantyx_metrics_registry
+              ADD COLUMN IF NOT EXISTS semantic_metadata JSONB
+            """,
+            [],
+        )
+        _SEMANTIC_METADATA_COLUMN_READY = True
+    except Exception:
+        logger.exception("metrics_registry.semantic_metadata.ensure_failed")
 
 
 def fetch_registry_metrics(
@@ -23,6 +43,7 @@ def fetch_registry_metrics(
     statuses: Iterable[str] | None = None,
     include_all_statuses: bool = False,
 ) -> list[dict[str, Any]]:
+    _ensure_semantic_metadata_column(settings)
     filters = ["deprecated = false", "COALESCE(is_current, true) = true"]
     params: list[object] = []
     if not include_all_statuses:
@@ -52,7 +73,7 @@ def fetch_registry_metrics(
     SELECT metric_id, metric_name, display_name, description, type, sql, grain, dimensions,
            domain_id, tenant_id, connection_id, database_name, schema_name, lifecycle_status,
            source_type, source_run_id, artifact_key, version_no, is_current, owner, version,
-           dataset_id, source_model
+           dataset_id, source_model, semantic_metadata
     FROM public.quantyx_metrics_registry
     WHERE {where_clause}
     """
@@ -76,6 +97,7 @@ def fetch_registry_metrics(
 
 
 def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
+    _ensure_semantic_metadata_column(settings)
     metric_name = payload["metric_name"]
     scope = (
         payload.get("tenant_id"),
@@ -125,9 +147,9 @@ def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
        display_name, description, type, unit, confidence, additive, grain, dimensions, dataset_id,
        source_model, source_schema, sql, lifecycle_status, source_type, source_run_id,
        artifact_key, version_no, is_current, change_reason, approved_by, approved_at,
-       supersedes_version_no, created_by, updated_by, owner, version)
+       supersedes_version_no, created_by, updated_by, owner, version, semantic_metadata)
     VALUES
-      (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+      (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     params = [
         metric_id,
@@ -163,6 +185,7 @@ def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
         payload.get("updated_by"),
         payload.get("owner"),
         payload.get("version"),
+        Json(payload.get("semantic_metadata")) if payload.get("semantic_metadata") is not None else None,
     ]
     execute_non_query(settings, sql, params)
     logger.info(
@@ -223,6 +246,7 @@ def update_metric(settings: Settings, metric_id: str, updates: dict[str, Any]) -
         "updated_by",
         "owner",
         "version",
+        "semantic_metadata",
     }
     filtered = {}
     for key, value in updates.items():
@@ -281,6 +305,7 @@ def update_metric(settings: Settings, metric_id: str, updates: dict[str, Any]) -
             "updated_by": merged.get("updated_by"),
             "owner": merged.get("owner"),
             "version": merged.get("version"),
+            "semantic_metadata": merged.get("semantic_metadata"),
         },
     )
 

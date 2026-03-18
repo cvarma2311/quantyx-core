@@ -413,6 +413,7 @@ CREATE TABLE IF NOT EXISTS public.quantyx_metrics_registry (
   lifecycle_status TEXT NOT NULL DEFAULT 'suggested',
   source_type TEXT NOT NULL DEFAULT 'system',
   source_run_id TEXT NULL,
+  semantic_metadata JSONB NULL,
   change_reason TEXT NULL,
   approved_by TEXT NULL,
   approved_at TIMESTAMPTZ NULL,

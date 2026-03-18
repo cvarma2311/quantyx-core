@@ -1952,6 +1952,10 @@ class MetricUpsertRequest(BaseModel):
     source_schema: str | None = Field(None, examples=["public"])
     owner: str | None = Field(None, examples=["analytics@company.com"])
     version: str | None = Field(None, examples=["v1"])
+    semantic_metadata: dict | None = Field(
+        None,
+        examples=[{"family_name": "total", "family_role": "productivity", "derivation_method": "family_aligned_formula"}],
+    )
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -1984,6 +1988,10 @@ class MetricPatchRequest(BaseModel):
     source_schema: str | None = Field(None, examples=["public"])
     owner: str | None = Field(None, examples=["analytics@company.com"])
     version: str | None = Field(None, examples=["v1"])
+    semantic_metadata: dict | None = Field(
+        None,
+        examples=[{"family_name": "total", "family_role": "productivity", "validation_status": "validated"}],
+    )
     model_config = {
         "json_schema_extra": {
             "example": {"display_name": "Total Sales Volume (TMT)", "status": "certified"}

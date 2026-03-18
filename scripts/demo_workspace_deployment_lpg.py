@@ -22,10 +22,18 @@ Usage examples:
     --schema public
 
   python3 scripts/demo_workspace_deployment_lpg.py --mode poll
+
+  python3 scripts/demo_workspace_deployment_lpg.py \
+    --context-file docs/examples/lpg_business_context.txt
+
+  python3 scripts/demo_workspace_deployment_lpg.py \
+    --context-id ctx_ops_glossary \
+    --context-ids ctx_kpi_formulas ctx_chart_guidance
 """
 
 import argparse
 import json
+from pathlib import Path
 import sys
 import time
 import urllib.error
@@ -35,15 +43,8 @@ import uuid
 from typing import Any
 
 DEFAULT_TABLES = [
-    "event_log",
-    "production_log",
-    "lpg_todays_cdcms_sales_summary",
-    "lpg_cdcms_last_three_months_summary",
-    "lpg_cdcms_subsidy_failure_statistics",
-    "lpg_monthly_cdcms_sales_summary",
-    "lpg_plant_operations_masters",
+    "lpg_plants",
     "lpg_plant_operations",
-    "lpg_distributor_mapping",
 ]
 
 
@@ -69,7 +70,11 @@ def _request(api_base: str, method: str, path: str, payload: dict[str, Any] | No
         return exc.code, parsed
 
 
-def _print_event(event: dict[str, Any]) -> None:
+def _json_dump(value: Any) -> str:
+    return json.dumps(value, indent=2, ensure_ascii=True, default=str, sort_keys=True)
+
+
+def _print_event(event: dict[str, Any], *, print_full_payload: bool = True) -> None:
     created_at = event.get("created_at") or "-"
     agent = event.get("agent_name") or "-"
     status = event.get("status") or "-"
@@ -77,17 +82,27 @@ def _print_event(event: dict[str, Any]) -> None:
     message = event.get("message") or ""
     print(f"[{created_at}] {agent} | {status} | stage={stage} | {message}")
 
+    meta = {
+        "event_id": event.get("event_id"),
+        "logical_event_id": event.get("logical_event_id"),
+        "payload_compacted": event.get("payload_compacted"),
+    }
+    print("  meta:")
+    print(_json_dump(meta))
+
     artifacts = event.get("artifacts") or {}
-    if isinstance(artifacts, dict):
+    if print_full_payload and artifacts:
+        print("  artifacts:")
+        print(_json_dump(artifacts))
+    elif isinstance(artifacts, dict):
         if artifacts.get("dashboard_id") or artifacts.get("dashboard_title"):
             print(
                 "  dashboard:",
-                json.dumps(
+                _json_dump(
                     {
                         "dashboard_id": artifacts.get("dashboard_id"),
                         "dashboard_title": artifacts.get("dashboard_title"),
-                    },
-                    ensure_ascii=True,
+                    }
                 ),
             )
         if artifacts.get("chart_ids"):
@@ -95,21 +110,28 @@ def _print_event(event: dict[str, Any]) -> None:
         if artifacts.get("error_type") or artifacts.get("error_message"):
             print(
                 "  error:",
-                json.dumps(
+                _json_dump(
                     {
                         "error_type": artifacts.get("error_type"),
                         "error_message": artifacts.get("error_message"),
-                    },
-                    ensure_ascii=True,
+                    }
                 ),
             )
+    print("")
 
 
 def _terminal_status(status: str | None) -> bool:
     return str(status or "").lower() in {"completed", "failed", "cancelled"}
 
 
-def _stream_run(api_base: str, run_id: str, status_check_seconds: float = 3.0, tail_seconds: float = 3.0) -> None:
+def _stream_run(
+    api_base: str,
+    run_id: str,
+    *,
+    print_full_payload: bool = True,
+    status_check_seconds: float = 3.0,
+    tail_seconds: float = 3.0,
+) -> None:
     url = f"{api_base.rstrip('/')}/agentic/runs/{urllib.parse.quote(run_id)}/stream"
     req = urllib.request.Request(url, method="GET")
 
@@ -131,7 +153,7 @@ def _stream_run(api_base: str, run_id: str, status_check_seconds: float = 3.0, t
                     try:
                         event = json.loads(payload)
                         if isinstance(event, dict):
-                            _print_event(event)
+                            _print_event(event, print_full_payload=print_full_payload)
                     except json.JSONDecodeError:
                         print(f"SSE raw: {payload}")
 
@@ -151,7 +173,13 @@ def _stream_run(api_base: str, run_id: str, status_check_seconds: float = 3.0, t
                 break
 
 
-def _poll_run_logs(api_base: str, run_id: str, interval_seconds: float = 2.0) -> None:
+def _poll_run_logs(
+    api_base: str,
+    run_id: str,
+    *,
+    print_full_payload: bool = True,
+    interval_seconds: float = 2.0,
+) -> None:
     seen_event_ids: set[str] = set()
 
     while True:
@@ -171,7 +199,7 @@ def _poll_run_logs(api_base: str, run_id: str, interval_seconds: float = 2.0) ->
             if not event_id or event_id in seen_event_ids:
                 continue
             seen_event_ids.add(event_id)
-            _print_event(event)
+            _print_event(event, print_full_payload=print_full_payload)
 
         run_code, run = _request(api_base, "GET", f"/agentic/runs/{urllib.parse.quote(run_id)}")
         if run_code == 200 and _terminal_status((run or {}).get("status")):
@@ -206,9 +234,47 @@ def main() -> int:
         default="stream",
         help="Use SSE stream or event polling logs",
     )
+    parser.add_argument(
+        "--context-text",
+        default=None,
+        help="Optional inline business context passed as context_text to /workspace/deployments",
+    )
+    parser.add_argument(
+        "--context-file",
+        default=None,
+        help="Optional path to a text file whose contents are passed as context_text to /workspace/deployments",
+    )
+    parser.add_argument(
+        "--context-id",
+        action="append",
+        default=[],
+        help="Optional stored context_id to pass to /workspace/deployments. Can be repeated.",
+    )
+    parser.add_argument(
+        "--context-ids",
+        nargs="*",
+        default=[],
+        help="Optional list of stored context_ids to pass to /workspace/deployments",
+    )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Print compact event summaries instead of full artifacts and metadata.",
+    )
     args = parser.parse_args()
 
     tenant_id = args.tenant_id or str(uuid.uuid4())
+    context_text = args.context_text
+    if args.context_file:
+        context_text = Path(args.context_file).read_text(encoding="utf-8")
+    context_ids: list[str] = []
+    seen_context_ids: set[str] = set()
+    for value in list(args.context_id or []) + list(args.context_ids or []):
+        context_id = str(value or "").strip()
+        if not context_id or context_id in seen_context_ids:
+            continue
+        seen_context_ids.add(context_id)
+        context_ids.append(context_id)
     schema_payload = {
         "connection_id": str(args.connection_id),
         "database": args.database,
@@ -227,6 +293,10 @@ def main() -> int:
         "schema_name": args.schema,
         "schema_payload": schema_payload,
     }
+    if context_text:
+        payload["context_text"] = context_text
+    if context_ids:
+        payload["context_ids"] = context_ids
 
     # Bootstrap tenant metadata required by /workspace/deployments.
     domain_payload = {"tenant_id": tenant_id, "domain_id": args.domain_id}
@@ -239,7 +309,7 @@ def main() -> int:
         "tables": list(args.tables),
     }
     print("Configuring tenant domain and scope:")
-    print(json.dumps({"domain": domain_payload, "scope": scope_payload}, indent=2))
+    print(_json_dump({"domain": domain_payload, "scope": scope_payload}))
     domain_code, domain_resp = _request(args.api_base, "POST", "/tenant/domain", domain_payload)
     if domain_code not in {200, 201}:
         print(f"Failed to set tenant domain: status={domain_code} body={domain_resp}")
@@ -257,7 +327,10 @@ def main() -> int:
         return 1
 
     print("Starting workspace deployment with payload:")
-    print(json.dumps(payload, indent=2))
+    safe_payload = dict(payload)
+    if safe_payload.get("context_text"):
+        safe_payload["context_text"] = f"<{len(str(safe_payload['context_text']))} chars>"
+    print(_json_dump(safe_payload))
 
     code, created = _request(args.api_base, "POST", "/workspace/deployments", payload)
     if code == 409:
@@ -280,16 +353,16 @@ def main() -> int:
     print(f"\nStreaming logs for run_id={run_id} using mode={args.mode} ...\n")
     try:
         if args.mode == "stream":
-            _stream_run(args.api_base, run_id)
+            _stream_run(args.api_base, run_id, print_full_payload=not args.summary_only)
         else:
-            _poll_run_logs(args.api_base, run_id)
+            _poll_run_logs(args.api_base, run_id, print_full_payload=not args.summary_only)
     except KeyboardInterrupt:
         print("Interrupted by user.")
 
     code, final_run = _request(args.api_base, "GET", f"/agentic/runs/{urllib.parse.quote(run_id)}")
     print("\nFinal run status:")
     if code == 200:
-        print(json.dumps(final_run, indent=2))
+        print(_json_dump(final_run))
     else:
         print(f"status={code} body={final_run}")
 

@@ -556,6 +556,7 @@ ALTER TABLE public.quantyx_metrics_registry
   ADD COLUMN IF NOT EXISTS lifecycle_status TEXT NOT NULL DEFAULT 'suggested',
   ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'system',
   ADD COLUMN IF NOT EXISTS source_run_id TEXT NULL,
+  ADD COLUMN IF NOT EXISTS semantic_metadata JSONB NULL,
   ADD COLUMN IF NOT EXISTS change_reason TEXT NULL,
   ADD COLUMN IF NOT EXISTS approved_by TEXT NULL,
   ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ NULL,

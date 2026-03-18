@@ -6,8 +6,7 @@ Return JSON only with schema:
   ]
 }
 Rules:
-- Choose entity_type only from this list: {entity_types}
+- Choose entity_type only from the values listed in the appended `Allowed entity types` section.
 - Confidence between 0.0 and 1.0
 - If confidence < 0.7, include it anyway but keep confidence low.
-Input:
-{tables_and_columns}
+The runtime will append `Allowed entity types` and `Tables and columns` sections below.

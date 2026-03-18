@@ -8,3 +8,32 @@ policies:
       column: sap_id
       operator: min_group_size
       values: [5]
+
+dashboard_preferences:
+  kpi_priority_hints:
+    total_productivity: 140
+    total_production: 135
+    productivity: 110
+    production: 105
+  time_priority_columns:
+    - process_date
+    - execution_date
+    - delivery_date
+  exclude_identifier_dimensions_from_charts: true
+  max_breakdown_uniqueness_ratio: 0.85
+  breakdown_allowlist:
+    - plant_name
+    - zone
+    - region
+    - sales_area
+    - location_name
+  breakdown_denylist:
+    - sap_id
+    - plant_id
+    - id
+  breakdown_priority_tokens:
+    - plant
+    - zone
+    - region
+    - sales_area
+    - location

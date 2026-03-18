@@ -9,5 +9,4 @@ Return JSON only:
 Rules:
 - Use only provided context.
 - Do not change metric_name.
-Input:
-{metric_candidate_and_columns}
+The runtime will append the metric candidate payload below under a `Metric candidate and columns` section.
