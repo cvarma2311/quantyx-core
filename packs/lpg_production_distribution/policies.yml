@@ -15,6 +15,12 @@ dashboard_preferences:
     total_production: 135
     productivity: 110
     production: 105
+  required_trend_metrics:
+    - total_production
+    - productivity
+  required_time_grains:
+    - day
+    - month
   time_priority_columns:
     - process_date
     - execution_date

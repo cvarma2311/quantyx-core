@@ -124,6 +124,22 @@ def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
         """,
         [scope[0], scope[1], scope[2], scope[3], scope[4], artifact_key],
     )
+    existing_rows = run_query(
+        settings,
+        """
+        SELECT metric_id, version_no, COALESCE(is_current, true) AS is_current
+          FROM public.quantyx_metrics_registry
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id = %s
+           AND database_name = %s
+           AND schema_name = %s
+           AND artifact_key = %s
+         ORDER BY COALESCE(version_no, 1) DESC, updated_at DESC
+         LIMIT 50
+        """,
+        [scope[0], scope[1], scope[2], scope[3], scope[4], artifact_key],
+    )
     if current_rows:
         previous = current_rows[0]
         prev_version = int(previous.get("version_no") or 1)
@@ -136,9 +152,33 @@ def upsert_metric(settings: Settings, payload: dict[str, Any]) -> str:
         )
         supersedes_version_no = payload.get("supersedes_version_no", prev_version)
     else:
-        version_no = int(payload.get("version_no") or 1)
-        metric_id = payload.get("metric_id") or artifact_key
-        supersedes_version_no = payload.get("supersedes_version_no")
+        if existing_rows:
+            prev_version = max(int(row.get("version_no") or 1) for row in existing_rows)
+            version_no = prev_version + 1
+            metric_id = f"{artifact_key}__v{version_no}_{uuid.uuid4().hex[:6]}"
+            supersedes_version_no = payload.get("supersedes_version_no", prev_version)
+        else:
+            version_no = int(payload.get("version_no") or 1)
+            metric_id = payload.get("metric_id") or artifact_key
+            supersedes_version_no = payload.get("supersedes_version_no")
+    metric_id_exists = run_query(
+        settings,
+        """
+        SELECT metric_id
+          FROM public.quantyx_metrics_registry
+         WHERE metric_id = %s
+         LIMIT 1
+        """,
+        [metric_id],
+    )
+    if metric_id_exists:
+        version_seed = max(
+            [version_no]
+            + [int(row.get("version_no") or 1) for row in existing_rows]
+            + [int(row.get("version_no") or 1) for row in current_rows]
+        )
+        version_no = max(version_seed + 1, 2)
+        metric_id = f"{artifact_key}__v{version_no}_{uuid.uuid4().hex[:6]}"
     display_name = payload.get("display_name") or metric_name
     lifecycle_status = payload.get("lifecycle_status") or "suggested"
     sql = """

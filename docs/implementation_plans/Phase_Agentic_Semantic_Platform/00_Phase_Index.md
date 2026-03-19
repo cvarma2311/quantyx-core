@@ -106,6 +106,9 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 34. **Phase 37: LLM-First KPI Family Proposal and Broad Dashboard Composition**
    - Make metrics, charts, and dashboards LLM-first over validated semantic artifacts, enforce aligned KPI-family derivation, and allow broader high-confidence dashboard coverage.
 
+35. **Phase 38: Anomaly Investigation and Action Intelligence**
+   - Add an LLM-assisted anomaly investigation agent that detects meaningful business anomalies, identifies high-signal investigative areas, generates multiple evidence-backed why-hypotheses, and persists descriptive plus prescriptive action insights for workspace reuse.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -125,3 +128,4 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 35 depends on Phases 29/30/31/32/34 and makes auto dashboards KPI-first and record-aware instead of first-column heuristic driven.
 - Phase 36 depends on Phases 24/29/30/34/35 and makes deployment context text a first-class LLM input for validated metric creation and KPI prioritization.
 - Phase 37 depends on Phases 35 and 36 and extends the same LLM-first, validation-backed approach to KPI-family derivation, chart proposal, and broad dashboard composition.
+- Phase 38 depends on Phases 24/34/35/36/37 and adds anomaly investigation, multi-hypothesis why-analysis, and action intelligence over persisted semantic and raw-evidence artifacts.

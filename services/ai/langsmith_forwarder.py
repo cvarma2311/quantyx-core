@@ -22,9 +22,13 @@ class LangSmithEventForwarder:
     - all errors are swallowed after debug logging
     """
 
-    def __init__(self, run_id: str) -> None:
+    def __init__(self, run_id: str, tenant_id: str | None = None) -> None:
         self.run_id = run_id
+        tenant = str(tenant_id or "").strip()
+        project_prefix = str(os.getenv("LANGCHAIN_PROJECT_PREFIX") or os.getenv("LANGSMITH_PROJECT_PREFIX") or "").strip()
         self.project = (
+            f"{project_prefix}{tenant}" if tenant and project_prefix else tenant
+        ) or (
             os.getenv("LANGSMITH_PROJECT")
             or os.getenv("LANGCHAIN_PROJECT")
             or "default"
@@ -53,9 +57,9 @@ class LangSmithEventForwarder:
                 run_type="chain",
                 id=parent_id,
                 project_name=self.project,
-                inputs={"run_id": run_id},
+                inputs={"run_id": run_id, "tenant_id": tenant_id},
                 start_time=_utc_now(),
-                tags=["agentic", "progress-forwarded"],
+                tags=["agentic", "progress-forwarded", *(["tenant:" + tenant] if tenant else [])],
             )
         except Exception:  # noqa: BLE001
             logger.exception("langsmith parent run creation failed")
@@ -100,4 +104,3 @@ class LangSmithEventForwarder:
             self._client.update_run(**kwargs)
         except Exception:  # noqa: BLE001
             logger.exception("langsmith parent run update failed")
-

@@ -2629,7 +2629,12 @@ def run_agentic_workflow(
                 continue
             seen_candidate_keys.add(key)
             candidates.append(cand)
-        selected = select_charts(candidates, min_charts=min_charts, max_charts=max_charts)
+        selected = select_charts(
+            candidates,
+            min_charts=min_charts,
+            max_charts=max_charts,
+            domain_id=state.get("domain_id"),
+        )
         reranked, rerank_diag = _llm_rerank_chart_candidates(
             settings,
             domain_id=state.get("domain_id"),
@@ -2942,7 +2947,7 @@ def run_agentic_workflow(
                                 f"{metric_expr} AS \"{metric_name}\" "
                                 f"FROM {sql_from} "
                                 f"GROUP BY {dim_alias}, {cat_alias} "
-                                f"ORDER BY {dim_alias} ASC "
+                                f"ORDER BY {dim_alias} DESC "
                                 f"LIMIT {line_multi_limit}"
                             )
                             dimensions = [dim_alias, cat_alias]
@@ -2952,7 +2957,7 @@ def run_agentic_workflow(
                                 f"{metric_expr} AS \"{metric_name}\" "
                                 f"FROM {sql_from} "
                                 f"GROUP BY {dim_alias} "
-                                f"ORDER BY {dim_alias} ASC "
+                                f"ORDER BY {dim_alias} DESC "
                                 f"LIMIT {line_single_limit}"
                             )
                             dimensions = [dim_alias]

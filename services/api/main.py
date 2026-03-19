@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable, Iterator, List, TypeVar
 
 import base64
+import contextlib
 import io
 import json
 import logging
@@ -444,6 +445,50 @@ JOB_TYPES = {
     "rollup_refresh",
     "chat_build",
 }
+
+
+@contextlib.contextmanager
+def _langsmith_project_env(tenant_id: str | None):
+    tenant = str(tenant_id or "").strip()
+    prefix = str(os.getenv("LANGCHAIN_PROJECT_PREFIX") or os.getenv("LANGSMITH_PROJECT_PREFIX") or "").strip()
+    project = (f"{prefix}{tenant}" if tenant and prefix else tenant) or None
+    old_langchain_project = os.environ.get("LANGCHAIN_PROJECT")
+    old_langsmith_project = os.environ.get("LANGSMITH_PROJECT")
+    try:
+        if project:
+            os.environ["LANGCHAIN_PROJECT"] = project
+            os.environ["LANGSMITH_PROJECT"] = project
+            logger.info("langsmith.project.selected | tenant=%s project=%s", tenant, project)
+        yield project
+    finally:
+        if old_langchain_project is None:
+            os.environ.pop("LANGCHAIN_PROJECT", None)
+        else:
+            os.environ["LANGCHAIN_PROJECT"] = old_langchain_project
+        if old_langsmith_project is None:
+            os.environ.pop("LANGSMITH_PROJECT", None)
+        else:
+            os.environ["LANGSMITH_PROJECT"] = old_langsmith_project
+
+
+@contextlib.contextmanager
+def _langsmith_project_context(tenant_id: str | None):
+    with _langsmith_project_env(tenant_id) as project:
+        if not project:
+            yield project
+            return
+        tracing_cm = None
+        try:
+            from langsmith.run_helpers import tracing_context  # type: ignore
+
+            tracing_cm = tracing_context(project_name=project)
+        except Exception:
+            tracing_cm = None
+        if tracing_cm is None:
+            yield project
+            return
+        with tracing_cm:
+            yield project
 _job_worker_stop = threading.Event()
 _job_worker_thread: threading.Thread | None = None
 _REF_PATTERN = re.compile(r"\{\{\s*ref\('(?P<name>[^']+)'\)\s*\}\}")
@@ -1269,57 +1314,59 @@ def _execute_job(job: dict) -> dict:
             raise HTTPException(status_code=404, detail="Run not found")
         mark_run_status(settings, run_id, "running")
         initial_state = payload.get("initial_state") or {}
+        tenant_id = str(initial_state.get("tenant_id") or run.get("tenant_id") or "").strip() or None
         canonicalize_on_success = bool(payload.get("canonicalize_on_success"))
-        forwarder = LangSmithEventForwarder(run_id)
-        try:
-            run_agentic_workflow(settings, run_id, initial_state, event_callback=forwarder.on_event)
-            mark_run_status(settings, run_id, "completed")
-            if canonicalize_on_success:
-                finalize_canonical_deployment(settings, run_id)
-            forwarder.close(status="completed")
-            return {"run_id": run_id, "status": "completed"}
-        except Exception as exc:  # noqa: BLE001
-            mark_run_status(settings, run_id, "failed")
-            error_artifacts = {
-                "error_message": str(exc),
-                "error_type": exc.__class__.__name__,
-                "traceback": traceback.format_exc(limit=20),
-            }
+        with _langsmith_project_context(tenant_id):
+            forwarder = LangSmithEventForwarder(run_id, tenant_id=tenant_id)
             try:
-                stage = append_agent_run_stage_event(
-                    settings,
-                    run_id,
-                    "WorkflowAgent",
-                    "failed",
-                    "Agentic workflow failed",
-                    artifacts=error_artifacts,
-                )
-                append_agent_chat_log(
-                    settings,
-                    run_id,
-                    sender="system",
-                    message=f"Run failed: {exc}",
-                    artifacts=error_artifacts,
-                )
-                logger.error(
-                    "agentic.run.failed | run_id=%s event_id=%s error_type=%s error=%s",
-                    run_id,
-                    stage.get("event_id"),
-                    exc.__class__.__name__,
-                    str(exc),
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception("agentic.run.failed_event_emit_failed | run_id=%s", run_id)
-                append_agent_run_event(
-                    settings,
-                    run_id,
-                    "WorkflowAgent",
-                    "failed",
-                    "Agentic workflow failed",
-                    error_artifacts,
-                )
-            forwarder.close(status="failed", error=str(exc))
-            raise
+                run_agentic_workflow(settings, run_id, initial_state, event_callback=forwarder.on_event)
+                mark_run_status(settings, run_id, "completed")
+                if canonicalize_on_success:
+                    finalize_canonical_deployment(settings, run_id)
+                forwarder.close(status="completed")
+                return {"run_id": run_id, "status": "completed"}
+            except Exception as exc:  # noqa: BLE001
+                mark_run_status(settings, run_id, "failed")
+                error_artifacts = {
+                    "error_message": str(exc),
+                    "error_type": exc.__class__.__name__,
+                    "traceback": traceback.format_exc(limit=20),
+                }
+                try:
+                    stage = append_agent_run_stage_event(
+                        settings,
+                        run_id,
+                        "WorkflowAgent",
+                        "failed",
+                        "Agentic workflow failed",
+                        artifacts=error_artifacts,
+                    )
+                    append_agent_chat_log(
+                        settings,
+                        run_id,
+                        sender="system",
+                        message=f"Run failed: {exc}",
+                        artifacts=error_artifacts,
+                    )
+                    logger.error(
+                        "agentic.run.failed | run_id=%s event_id=%s error_type=%s error=%s",
+                        run_id,
+                        stage.get("event_id"),
+                        exc.__class__.__name__,
+                        str(exc),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("agentic.run.failed_event_emit_failed | run_id=%s", run_id)
+                    append_agent_run_event(
+                        settings,
+                        run_id,
+                        "WorkflowAgent",
+                        "failed",
+                        "Agentic workflow failed",
+                        error_artifacts,
+                    )
+                forwarder.close(status="failed", error=str(exc))
+                raise
     raise ValueError(f"Unsupported job_type: {job_type}")
 
 

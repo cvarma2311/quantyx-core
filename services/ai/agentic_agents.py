@@ -270,6 +270,26 @@ def _extract_table_from_sql(sql_text: str) -> str | None:
     return match.group(2)
 
 
+def _normalize_formula_text(formula: str | None) -> str:
+    text = str(formula or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"(?i)\bMEASURE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)", r"SUM(\1)", text)
+
+
+def _is_hierarchy_hint_line(line: str | None) -> bool:
+    text = str(line or "").strip()
+    if ">" not in text:
+        return False
+    # Accept only business-style hierarchy expressions like "Zone > Region > Plant".
+    if any(token in text.upper() for token in ("CASE WHEN", "THEN", "ELSE", "END", "SELECT", "SUM(", "AVG(", "COUNT(", "ROUND(", "MEASURE(")):
+        return False
+    parts = [part.strip() for part in text.split(">") if part.strip()]
+    if len(parts) < 2:
+        return False
+    return all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_ /()-]*", part) for part in parts)
+
+
 def _extract_metric_overrides(context_text: str | None, schema_graph: dict[str, Any]) -> list[dict[str, Any]]:
     if not context_text:
         return []
@@ -279,9 +299,10 @@ def _extract_metric_overrides(context_text: str | None, schema_graph: dict[str, 
     section: str | None = None
     sql_lines: list[str] = []
     formula_lines: list[str] = []
+    prose_metric_name: str | None = None
 
     def _flush_current() -> None:
-        nonlocal current, sql_lines, formula_lines
+        nonlocal current, sql_lines, formula_lines, prose_metric_name
         if not current and not sql_lines and not formula_lines:
             return
         candidate = dict(current)
@@ -289,11 +310,11 @@ def _extract_metric_overrides(context_text: str | None, schema_graph: dict[str, 
         if sql_text:
             candidate["reference_sql"] = sql_text
         if formula_lines and not candidate.get("formula"):
-            candidate["formula"] = " ".join(formula_lines).strip()
+            candidate["formula"] = _normalize_formula_text(" ".join(formula_lines).strip())
         metric_name = _sanitize_metric_identifier(candidate.get("metric_name") or candidate.get("display_name"))
         expr, sql_alias = _extract_metric_expr_from_sql(sql_text, metric_name)
         if expr and not candidate.get("formula"):
-            candidate["formula"] = expr
+            candidate["formula"] = _normalize_formula_text(expr)
         if not metric_name:
             metric_name = _sanitize_metric_identifier(sql_alias)
         if not metric_name:
@@ -313,7 +334,7 @@ def _extract_metric_overrides(context_text: str | None, schema_graph: dict[str, 
             "metric_name": metric_name,
             "display_name": candidate.get("display_name") or metric_name.replace("_", " ").title(),
             "description": candidate.get("description"),
-            "formula": str(candidate.get("formula") or "").strip(),
+            "formula": _normalize_formula_text(candidate.get("formula")),
             "base_table": base_table or None,
             "grain": grain,
             "preferred_time_column": time_column,
@@ -329,6 +350,7 @@ def _extract_metric_overrides(context_text: str | None, schema_graph: dict[str, 
         current = {}
         sql_lines = []
         formula_lines = []
+        prose_metric_name = None
 
     for raw_line in context_text.splitlines():
         line = raw_line.rstrip()
@@ -343,6 +365,15 @@ def _extract_metric_overrides(context_text: str | None, schema_graph: dict[str, 
             if section in {"reference sql", "business formula"}:
                 continue
             continue
+        if prose_metric_name and section is None:
+            formula_lines.append(stripped.lstrip("- ").strip())
+            if stripped.endswith("."):
+                current.setdefault("metric_name", prose_metric_name)
+                current["formula"] = _normalize_formula_text(" ".join(formula_lines).strip().rstrip("."))
+                current["base_table"] = current.get("base_table") or "lpg_plant_operations"
+                current["time_column"] = current.get("time_column") or "process_date"
+                _flush_current()
+            continue
         if section == "metric definition":
             meta_match = re.match(r"^-\s*([a-zA-Z_][\w]*)\s*:\s*(.+?)\s*$", stripped)
             if meta_match:
@@ -351,11 +382,25 @@ def _extract_metric_overrides(context_text: str | None, schema_graph: dict[str, 
             formula_match = re.match(r"^-?\s*([a-zA-Z_][\w]*)\s*=\s*(.+?)\s*$", stripped)
             if formula_match:
                 current.setdefault("metric_name", formula_match.group(1))
-                current["formula"] = formula_match.group(2).strip()
+                current["formula"] = _normalize_formula_text(formula_match.group(2).strip())
             else:
                 formula_lines.append(stripped.lstrip("- ").strip())
         elif section == "reference sql":
             sql_lines.append(line)
+        else:
+            prose_match = re.search(r"(?i)\b([a-zA-Z_][\w]*)\s+is\s+calculated\s+as\s+(.+?)(?:\.\s*|$)", stripped)
+            if prose_match:
+                _flush_current()
+                current["metric_name"] = prose_match.group(1)
+                current["formula"] = _normalize_formula_text(prose_match.group(2).strip())
+                current["base_table"] = current.get("base_table") or "lpg_plant_operations"
+                current["time_column"] = current.get("time_column") or "process_date"
+            else:
+                prose_start = re.search(r"(?i)\b([a-zA-Z_][\w]*)\s+is\s+calculated\s+as\s*$", stripped)
+                if prose_start:
+                    _flush_current()
+                    prose_metric_name = prose_start.group(1)
+                    formula_lines = []
 
     _flush_current()
     deduped: list[dict[str, Any]] = []
@@ -567,8 +612,10 @@ def _mandatory_metric_rank(metric_name: str | None) -> int:
     key = str(metric_name or "").strip().lower()
     if key == "total_production":
         return 0
-    if key == "total_productivity":
+    if key == "productivity":
         return 1
+    if key == "total_productivity":
+        return 2
     return 99
 
 
@@ -858,6 +905,20 @@ def _exclude_identifier_breakdowns(domain_id: str | None) -> bool:
     if isinstance(raw, bool):
         return raw
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _required_trend_metrics(domain_id: str | None) -> list[str]:
+    prefs = _dashboard_preferences(domain_id)
+    raw = prefs.get("required_trend_metrics") or []
+    configured = [str(item).strip().lower() for item in raw if str(item or "").strip()]
+    return configured or ["total_production", "productivity", "total_productivity"]
+
+
+def _required_time_grains(domain_id: str | None) -> list[str]:
+    prefs = _dashboard_preferences(domain_id)
+    raw = prefs.get("required_time_grains") or []
+    configured = [str(item).strip().lower() for item in raw if str(item or "").strip()]
+    return configured or ["day", "month"]
 
 
 def _propose_template_metrics(profiling: dict[str, Any], domain_id: str | None) -> list[dict[str, Any]]:
@@ -1269,7 +1330,7 @@ def extract_context(settings: Settings, context_text: str | None, schema_graph: 
     context_entities = [term.get("term") for term in glossary_terms if term.get("term")]
     hierarchy_hints = []
     for line in context_text.splitlines():
-        if ">" in line:
+        if _is_hierarchy_hint_line(line):
             hierarchy_hints.append(line.strip())
     if not glossary_terms:
         logger.warning("extract_context: context_text provided but no glossary_terms returned")
@@ -1317,7 +1378,7 @@ def validate_metric_candidates(
     for candidate in candidates or []:
         metric_name = _sanitize_metric_identifier(candidate.get("metric_name") or candidate.get("display_name"))
         base_table = str(candidate.get("base_table") or "").strip()
-        formula = str(candidate.get("formula") or candidate.get("sql_expression") or "").strip()
+        formula = _normalize_formula_text(candidate.get("formula") or candidate.get("sql_expression"))
         if not metric_name or not base_table or not formula:
             rejected.append(
                 {
@@ -2286,6 +2347,7 @@ def select_charts(
     candidates: list[dict[str, Any]],
     min_charts: int = 4,
     max_charts: int = 8,
+    domain_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if not candidates:
         return []
@@ -2353,12 +2415,20 @@ def select_charts(
     breakdown_count = 0
     share_count = 0
 
-    for required_metric in ("total_production", "total_productivity"):
+    required_trends = [
+        (metric_name, time_grain)
+        for metric_name in _required_trend_metrics(domain_id)
+        for time_grain in _required_time_grains(domain_id)
+    ]
+
+    for required_metric, required_grain in required_trends:
         for score, cand in scored:
             intent = cand.get("intent")
             if str(cand.get("metric") or "").strip().lower() != required_metric:
                 continue
             if intent not in {"trend", "multi_series"}:
+                continue
+            if str(cand.get("time_grain") or "").strip().lower() != required_grain:
                 continue
             if _try_add(cand):
                 trend_count += 1
@@ -2366,7 +2436,7 @@ def select_charts(
 
     for score, cand in scored:
         intent = cand.get("intent")
-        if trend_count < 2 and intent in {"trend", "multi_series"}:
+        if trend_count < 4 and intent in {"trend", "multi_series"}:
             if _try_add(cand):
                 trend_count += 1
         elif intent == "share" and share_count < 1:
