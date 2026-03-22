@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Query
 
 from services.ai.catalog import Dimension, Metric, MetricCatalog, load_catalog_with_registry, resolve_ref
-from datetime import date as _date, timedelta as _timedelta
+from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
 from services.ai.config import load_settings
 from services.ai.db import execute_non_query, run_query
 from services.ai.metrics_registry import (
@@ -41,6 +41,14 @@ from services.ai.onboarding.scan_store import load_latest_scan_result, load_late
 from services.ai.resolver import resolve_question
 from services.ai.semantic_graph_resolver import resolve_question_semantic, log_semantic_usage
 from services.ai.charts import build_chart_payload, infer_chart_type, infer_chart_type_with_llm
+from services.ai.workspace_query_planner import (
+    build_workspace_chart,
+    compile_workspace_query_plan,
+    conversation_plan_diagnostics,
+    interpret_workspace_query,
+    validate_workspace_query_plan,
+    workspace_chart_title,
+)
 from services.ai.rollups import (
     create_rollup,
     list_rollups,
@@ -236,6 +244,15 @@ from services.ai.dashboard_insights import (
     llm_rewrite_text,
     render_summary_html,
     render_inference_html,
+)
+from services.ai.anomaly_store import (
+    get_anomaly_dashboard_link,
+    get_anomaly_investigation,
+    list_anomaly_actions,
+    list_anomaly_dashboard_links,
+    list_anomaly_hypotheses,
+    list_anomaly_investigations,
+    list_anomaly_records,
 )
 from services.ai.workspace_store import (
     STATUS_ACTIVE as WORKSPACE_STATUS_ACTIVE,
@@ -1316,6 +1333,14 @@ def _execute_job(job: dict) -> dict:
         initial_state = payload.get("initial_state") or {}
         tenant_id = str(initial_state.get("tenant_id") or run.get("tenant_id") or "").strip() or None
         canonicalize_on_success = bool(payload.get("canonicalize_on_success"))
+        logger.info(
+            "agentic.job.start | run_id=%s tenant=%s domain=%s initial_state_keys=%s workflow=%s",
+            run_id,
+            tenant_id,
+            initial_state.get("domain_id") or run.get("domain_id"),
+            sorted(initial_state.keys()) if isinstance(initial_state, dict) else [],
+            "services.ai.agentic_orchestrator.run_agentic_workflow",
+        )
         with _langsmith_project_context(tenant_id):
             forwarder = LangSmithEventForwarder(run_id, tenant_id=tenant_id)
             try:
@@ -6407,39 +6432,80 @@ def _workspace_query_response(
     dimensions: list[str] | None = None,
     limit: int = 200,
 ) -> tuple[dict, str, dict, dict]:
-    query_result = query(
-        QueryRequest(
-            question=question,
-            tenant_id=tenant_id,
-            domain_id=domain_id,
-            run_id=run_id,
-            metrics=metrics or [],
-            dimensions=dimensions or [],
-            filters=[],
-            limit=limit,
-            explain=False,
-        )
+    connection_id, database_name, schema_name, _ = _resolve_scope_values(tenant_id, domain_id)
+    intelligence_bundle = _load_run_scoped_intelligence(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
     )
-    chart_payload = None
-    chart_type = None
-    if query_result.rows and query_result.metrics:
-        chart_type = infer_chart_type(query_result.dimensions, query_result.rows, query_result.metrics)
-        if chart_type:
-            chart_payload = build_chart_payload(
-                chart_type,
-                query_result.rows,
-                query_result.metrics[0],
-                query_result.dimensions,
-            )
+    scoped_metric_rows = (intelligence_bundle or {}).get("metrics") or []
+    metric_catalog = _catalog_from_registry_rows(scoped_metric_rows, catalog.dimensions)
+    allowed_dimensions = (intelligence_bundle or {}).get("dimension_candidates") or _dimension_candidates_for_scope(
+        tenant_id,
+        domain_id,
+        connection_id,
+        database_name,
+        schema_name,
+    )
+    glossary = (intelligence_bundle or {}).get("glossary") or fetch_glossary_terms(settings, tenant_id, domain_id)
+    raw_llm_plan = interpret_workspace_query(
+        question=question,
+        metric_catalog=metric_catalog,
+        allowed_dimensions=allowed_dimensions,
+        glossary=glossary,
+        settings=settings,
+    )
+    validated_plan = validate_workspace_query_plan(
+        question=question,
+        raw_plan=raw_llm_plan,
+        metric_catalog=metric_catalog,
+        allowed_dimensions=allowed_dimensions,
+        explicit_metrics=metrics,
+        explicit_dimensions=dimensions,
+    )
+    if not validated_plan.get("metric_name"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "No metrics resolved for workspace conversation",
+                "question": question,
+                "conversation_plan": conversation_plan_diagnostics(
+                    raw_llm_plan=raw_llm_plan,
+                    validated_plan=validated_plan,
+                ),
+            },
+        )
+    compiled_request = compile_workspace_query_plan(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        validated_plan=validated_plan,
+        limit=limit,
+    )
+    query_result = query(
+        QueryRequest(**compiled_request)
+    )
     metric_name = (query_result.metrics or [None])[0]
-    dimension_name = (query_result.dimensions or [None])[0]
-    if metric_name and dimension_name:
-        chart_title = f"{str(metric_name).replace('_', ' ').title()} by {str(dimension_name).replace('_', ' ').title()}"
-    elif metric_name:
-        chart_title = f"{str(metric_name).replace('_', ' ').title()} Trend"
-    else:
-        chart_title = "Data Trend"
+    chart_type, chart_payload, chart_warnings = build_workspace_chart(
+        rows=query_result.rows,
+        metric_name=metric_name,
+        dimensions=query_result.dimensions,
+        response_mode=validated_plan.get("response_mode"),
+    )
+    if chart_warnings:
+        validated_plan["validation_warnings"] = list(dict.fromkeys((validated_plan.get("validation_warnings") or []) + chart_warnings))
+        if chart_type == "table":
+            validated_plan["chart_type"] = "table"
+    chart_title = workspace_chart_title(metric_name, query_result.dimensions)
     dashboard_title = f"{str(domain_id).replace('_', ' ').replace('-', ' ').title()} Dashboard"
+    conversation_plan = conversation_plan_diagnostics(
+        raw_llm_plan=raw_llm_plan,
+        validated_plan=validated_plan,
+        compiled_sql_preview=query_result.sql,
+    )
 
     response_payload = {
         "metrics": query_result.metrics,
@@ -6454,6 +6520,7 @@ def _workspace_query_response(
         "rows": query_result.rows,
         "lineage": query_result.lineage,
         "artifact_lineage": query_result.artifact_lineage,
+        "conversation_plan": conversation_plan,
     }
     metric_label = ", ".join(query_result.metrics[:2]) if query_result.metrics else "requested metrics"
     assistant_text = f"Returned {len(query_result.rows)} rows for {metric_label}."
@@ -6464,11 +6531,13 @@ def _workspace_query_response(
         "dimensions": query_result.dimensions,
         "lineage": query_result.lineage,
         "artifact_lineage": query_result.artifact_lineage,
+        "conversation_plan": conversation_plan,
     }
     inference_json = {
         "text": "Use filters or follow-up prompts to drill deeper by region, plant, or time period.",
         "confidence": 0.75 if query_result.rows else 0.4,
         "artifact_lineage": query_result.artifact_lineage,
+        "conversation_plan": conversation_plan,
     }
     return response_payload, assistant_text, summary_json, inference_json
 
@@ -6554,6 +6623,54 @@ def _workspace_scan_table_count(result_payload: dict | None) -> int:
                 if isinstance(tables, list):
                     count += len(tables)
     return count
+
+
+def _configured_table_count(scope: dict | None) -> int:
+    tables = (scope or {}).get("tables")
+    if isinstance(tables, list):
+        return len(tables)
+    return 0
+
+
+def _workspace_schema_scan_payload(
+    connection_id: str | None,
+    database_name: str | None,
+    schema_payload: dict | None,
+) -> dict | None:
+    if not isinstance(schema_payload, dict):
+        return None
+    schemas = schema_payload.get("schemas")
+    if not isinstance(schemas, list) or not schemas:
+        return None
+    resolved_connection_id = str(schema_payload.get("connection_id") or connection_id or "")
+    resolved_database = str(schema_payload.get("database") or database_name or "")
+    if not resolved_connection_id or not resolved_database:
+        return None
+    normalized_schemas: list[dict[str, object]] = []
+    for schema in schemas:
+        if not isinstance(schema, dict):
+            continue
+        schema_name = str(schema.get("name") or "").strip()
+        if not schema_name:
+            continue
+        tables = schema.get("tables")
+        normalized_tables = [str(table).strip() for table in (tables or []) if str(table).strip()]
+        normalized_schemas.append({"name": schema_name, "tables": normalized_tables})
+    if not normalized_schemas:
+        return None
+    return {
+        "connections": [
+            {
+                "connection_id": resolved_connection_id,
+                "databases": [
+                    {
+                        "name": resolved_database,
+                        "schemas": normalized_schemas,
+                    }
+                ],
+            }
+        ]
+    }
 
 
 def _extract_user_query(payload: dict | None, *, required: bool = False) -> str | None:
@@ -6693,6 +6810,7 @@ def workspace_list_domains_for_tenant(tenant_id: str) -> dict:
 
     domain_items: list[dict] = []
     for domain_id in sorted(domains):
+        scope = get_tenant_scope(settings, tenant_id, domain_id)
         scan_rows = run_query(
             settings,
             """
@@ -6707,17 +6825,19 @@ def workspace_list_domains_for_tenant(tenant_id: str) -> dict:
         )
         scan = scan_rows[0] if scan_rows else None
         deployment = get_current_deployment(settings, tenant_id, domain_id)
+        scan_status = (scan or {}).get("status") or ("configured" if scope else "not_started")
+        deployment_status = (deployment or {}).get("status") or ("configured" if scope else "not_started")
         domain_items.append(
             {
                 "domain_id": domain_id,
                 "display_name": domain_id.replace("_", " ").replace("-", " ").title(),
-                "scan_status": (scan or {}).get("status") or "not_started",
-                "deployment_status": (deployment or {}).get("status") or "not_started",
+                "scan_status": scan_status,
+                "deployment_status": deployment_status,
                 "current_run_id": (deployment or {}).get("run_id"),
                 "current_run_display_name": (deployment or {}).get("display_name"),
                 "last_scan_id": (scan or {}).get("scan_id"),
                 "last_scanned_at": (scan or {}).get("created_at"),
-                "tables_detected": _workspace_scan_table_count((scan or {}).get("result_payload")),
+                "tables_detected": _workspace_scan_table_count((scan or {}).get("result_payload")) or _configured_table_count(scope),
             }
         )
     return {"tenant_id": tenant_id, "domains": domain_items}
@@ -6765,13 +6885,14 @@ def workspace_scan_status(tenant_id: str, domain_id: str) -> dict:
         [tenant_id, domain_id],
     )
     if not rows:
+        scope = get_tenant_scope(settings, tenant_id, domain_id)
         return {
             "tenant_id": tenant_id,
             "domain_id": domain_id,
-            "scan_status": "not_started",
+            "scan_status": "configured" if scope else "not_started",
             "last_scan_id": None,
             "last_scanned_at": None,
-            "tables_detected": 0,
+            "tables_detected": _configured_table_count(scope),
         }
     row = rows[0]
     return {
@@ -6837,10 +6958,11 @@ def workspace_deployment_status(tenant_id: str, domain_id: str) -> dict:
             "version_no": row.get("version_no"),
             "completed_at": row.get("completed_at"),
         }
+    scope = get_tenant_scope(settings, tenant_id, domain_id)
     return {
         "tenant_id": tenant_id,
         "domain_id": domain_id,
-        "status": "not_started",
+        "status": "configured" if scope else "not_started",
         "run_id": None,
         "display_name": None,
         "version_no": None,
@@ -6946,6 +7068,32 @@ def _start_workspace_deployment(payload: dict) -> dict:
         schema_payload = load_latest_scan_for_scope(settings, tenant_id, domain_id, connection_id, database, schema)
     if not schema_payload:
         raise HTTPException(status_code=400, detail="schema_payload is required")
+    scan_payload = _workspace_schema_scan_payload(
+        payload.get("connection_id") or connection_id,
+        payload.get("database") or database,
+        schema_payload,
+    )
+    if scan_payload:
+        try:
+            persist_schema_scan(
+                settings,
+                request_payload={
+                    "source": "workspace_deployments",
+                    "tenant_id": tenant_id,
+                    "domain_id": domain_id,
+                    "schema_payload": schema_payload,
+                },
+                result_payload=scan_payload,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                requested_by="workspace_deployments",
+            )
+        except Exception:
+            logger.exception(
+                "workspace.deployment.scan_snapshot_failed | tenant_id=%s domain_id=%s",
+                tenant_id,
+                domain_id,
+            )
     merged_context_text, resolved_context_ids = _merge_context_inputs(
         tenant_id,
         domain_id,
@@ -7164,6 +7312,77 @@ def workspace_update_deployment(run_id: str, payload: dict) -> dict:
     if not updated:
         raise HTTPException(status_code=404, detail="Deployment run not found")
     return updated
+
+
+@app.get(
+    "/workspace/anomalies",
+    tags=["workspace"],
+    summary="List anomaly investigations",
+)
+def workspace_list_anomaly_investigations(
+    tenant_id: str,
+    domain_id: str | None = None,
+    run_id: str | None = None,
+    limit: int = 50,
+) -> dict:
+    resolved_domain = _resolve_domain_id(tenant_id, domain_id)
+    rows = list_anomaly_investigations(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=resolved_domain,
+        run_id=run_id,
+        limit=limit,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": resolved_domain,
+        "run_id": run_id,
+        "investigations": rows,
+    }
+
+
+@app.get(
+    "/workspace/anomalies/{investigation_id}",
+    tags=["workspace"],
+    summary="Get anomaly investigation",
+)
+def workspace_get_anomaly_investigation(investigation_id: str) -> dict:
+    investigation = get_anomaly_investigation(settings, investigation_id)
+    if not investigation:
+        raise HTTPException(status_code=404, detail="Anomaly investigation not found")
+    anomalies = list_anomaly_records(settings, investigation_id=investigation_id)
+    hypotheses = list_anomaly_hypotheses(settings, investigation_id=investigation_id)
+    actions = list_anomaly_actions(settings, investigation_id=investigation_id)
+    dashboard_links = list_anomaly_dashboard_links(settings, investigation_id=investigation_id)
+    return {
+        "investigation": investigation,
+        "anomalies": anomalies,
+        "hypotheses": hypotheses,
+        "actions": actions,
+        "dashboard_links": dashboard_links,
+    }
+
+
+@app.get(
+    "/workspace/anomalies/{investigation_id}/dashboard",
+    tags=["workspace"],
+    summary="Get linked anomaly dashboard",
+)
+def workspace_get_anomaly_dashboard(investigation_id: str) -> dict:
+    investigation = get_anomaly_investigation(settings, investigation_id)
+    if not investigation:
+        raise HTTPException(status_code=404, detail="Anomaly investigation not found")
+    link = get_anomaly_dashboard_link(settings, investigation_id=investigation_id, role="anomaly_dashboard")
+    if not link:
+        raise HTTPException(status_code=404, detail="Anomaly dashboard not found")
+    dashboard = get_dashboard_spec(settings, link.get("dashboard_id"))
+    if not dashboard:
+        raise HTTPException(status_code=404, detail="Linked dashboard spec not found")
+    return {
+        "investigation_id": investigation_id,
+        "dashboard_link": link,
+        "dashboard": dashboard,
+    }
 
 
 @app.post(
@@ -7735,6 +7954,35 @@ def workspace_get_conversation_message(conversation_id: str, message_id: str) ->
 
 
 @app.get(
+    "/workspace/conversations/{conversation_id}/messages/{message_id}/plan",
+    tags=["workspace"],
+    summary="Get interpreted and validated conversation plan for a message",
+)
+def workspace_get_conversation_message_plan(conversation_id: str, message_id: str) -> dict:
+    conversation = get_workspace_conversation(settings, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    row = get_workspace_message(settings, conversation_id, message_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Message not found")
+    conversation_plan = (
+        (row.get("chart_json") or {}).get("conversation_plan")
+        or (row.get("summary_json") or {}).get("conversation_plan")
+        or (row.get("inference_json") or {}).get("conversation_plan")
+        or {}
+    )
+    return {
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "raw_llm_plan": conversation_plan.get("raw_llm_plan") or {},
+        "validated_plan": conversation_plan.get("validated_plan") or {},
+        "validation_warnings": conversation_plan.get("validation_warnings") or [],
+        "rejected_candidates": conversation_plan.get("rejected_candidates") or {},
+        "compiled_sql_preview": conversation_plan.get("compiled_sql_preview") or row.get("sql_text"),
+    }
+
+
+@app.get(
     "/workspace/conversations/{conversation_id}/memory",
     tags=["workspace"],
     summary="Get conversation memory",
@@ -8025,6 +8273,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 "dashboard_title": response_payload.get("dashboard_title"),
                 "chart_payload": response_payload.get("chart_payload"),
                 "data": response_payload.get("data"),
+                "conversation_plan": response_payload.get("conversation_plan"),
             },
             summary_json=summary_json,
             inference_json=inference_json,
@@ -8042,6 +8291,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 "metrics": response_payload.get("metrics") or [],
                 "dimensions": response_payload.get("dimensions") or [],
                 "sql_present": bool(response_payload.get("sql")),
+                "conversation_plan": response_payload.get("conversation_plan"),
             },
         )
         return {"assistant_message": assistant_msg, "memory": new_memory}
@@ -8144,6 +8394,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 "context_used": context_used,
             }
             yield f"data: {json.dumps({'event': 'artifact', 'name': 'response', 'payload': result.get('response')})}\n\n"
+            yield f"data: {json.dumps({'event': 'artifact', 'name': 'conversation_plan', 'payload': (result.get('response') or {}).get('conversation_plan')})}\n\n"
             yield f"data: {json.dumps({'event': 'artifact', 'name': 'summary', 'payload': result.get('summary_json')})}\n\n"
             yield f"data: {json.dumps({'event': 'artifact', 'name': 'inference', 'payload': result.get('inference_json')})}\n\n"
             yield f"data: {json.dumps({'event': 'artifact', 'name': 'context_used', 'payload': result.get('context_used')})}\n\n"
@@ -15059,7 +15310,7 @@ def _validate_metric_semantics(
     metric_details: list[dict[str, Any]] = []
     for metric in metrics:
         base_table = _infer_fact_table_from_metric_sql(metric.sql)
-        model_info = model_lookup.get(_normalize_table_token(base_table)) or {}
+        model_info = _model_info_for_base_table(model_lookup, base_table)
         grain = str((model_info.get("grain") or metric.grain or "unknown")).strip().lower()
         time_column = str(model_info.get("time_column") or "").strip()
         if time_column:
@@ -15146,6 +15397,28 @@ def _infer_table_from_dimension_sql(dim_sql: str) -> str | None:
 
 def _normalize_table_token(value: object) -> str:
     return str(value or "").split(".")[-1].strip().lower()
+
+
+def _model_info_for_base_table(
+    model_map: dict[str, dict[str, Any]] | None,
+    base_table: str | None,
+) -> dict[str, Any]:
+    normalized = _normalize_table_token(base_table)
+    if not normalized:
+        return {}
+    lookup = model_map or {}
+    direct = lookup.get(normalized)
+    if direct:
+        return direct
+    candidates = [normalized]
+    if normalized.startswith("fact_"):
+        candidates.append(normalized.removeprefix("fact_"))
+    else:
+        candidates.append(f"fact_{normalized}")
+    for candidate in candidates:
+        if candidate in lookup:
+            return lookup[candidate]
+    return {}
 
 
 def _build_model_intelligence_map(bundle: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -15255,7 +15528,7 @@ def _select_metrics_with_model_intelligence(
     candidates: list[dict[str, Any]] = []
     for metric in metrics:
         base_table = _infer_fact_table_from_metric_sql(metric.sql)
-        model_info = model_map.get(_normalize_table_token(base_table))
+        model_info = _model_info_for_base_table(model_map, base_table)
         metric_dimensions = set(metric.dimensions or [])
         dimension_support = len(requested_dimensions & metric_dimensions) + len(filter_fields & metric_dimensions)
         lexical_score = _score_metric_match(question or "", metric.name)

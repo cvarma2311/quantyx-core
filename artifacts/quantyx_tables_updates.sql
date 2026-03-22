@@ -990,6 +990,100 @@ CREATE TABLE IF NOT EXISTS public.quantyx_workspace_conversation_memory (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_memory_conversation
   ON public.quantyx_workspace_conversation_memory (conversation_id);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_anomaly_investigations (
+  investigation_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  conversation_id TEXT NULL,
+  dashboard_id TEXT NULL,
+  source_dashboard_id TEXT NULL,
+  trigger_source TEXT NOT NULL,
+  status TEXT NOT NULL,
+  title TEXT NULL,
+  summary_text TEXT NULL,
+  severity_score NUMERIC NULL,
+  confidence_score NUMERIC NULL,
+  anomaly_summary_json JSONB NULL,
+  quality_json JSONB NULL,
+  error_message TEXT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_anomaly_investigations_scope
+  ON public.quantyx_anomaly_investigations (tenant_id, domain_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_anomaly_investigations_run
+  ON public.quantyx_anomaly_investigations (run_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_anomaly_records (
+  anomaly_id TEXT PRIMARY KEY,
+  investigation_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  metric_id TEXT NULL,
+  raw_signal_name TEXT NULL,
+  anomaly_type TEXT NOT NULL,
+  entity_scope_json JSONB NULL,
+  baseline_window_json JSONB NULL,
+  comparison_window_json JSONB NULL,
+  severity_score NUMERIC NULL,
+  confidence_score NUMERIC NULL,
+  evidence_json JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_anomaly_records_investigation
+  ON public.quantyx_anomaly_records (investigation_id, severity_score DESC, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_anomaly_hypotheses (
+  hypothesis_id TEXT PRIMARY KEY,
+  investigation_id TEXT NOT NULL,
+  anomaly_id TEXT NULL,
+  rank_no INT NOT NULL DEFAULT 1,
+  title TEXT NOT NULL,
+  explanation_text TEXT NOT NULL,
+  confidence_score NUMERIC NULL,
+  likely_drivers_json JSONB NULL,
+  supporting_evidence_json JSONB NULL,
+  validation_step_text TEXT NULL,
+  provenance_json JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_anomaly_hypotheses_investigation
+  ON public.quantyx_anomaly_hypotheses (investigation_id, rank_no ASC, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_anomaly_actions (
+  action_id TEXT PRIMARY KEY,
+  investigation_id TEXT NOT NULL,
+  anomaly_id TEXT NULL,
+  hypothesis_id TEXT NULL,
+  action_type TEXT NOT NULL,
+  priority TEXT NULL,
+  confidence_score NUMERIC NULL,
+  recommended_owner TEXT NULL,
+  action_text TEXT NOT NULL,
+  metadata_json JSONB NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_anomaly_actions_investigation
+  ON public.quantyx_anomaly_actions (investigation_id, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_anomaly_dashboard_links (
+  link_id TEXT PRIMARY KEY,
+  investigation_id TEXT NOT NULL,
+  dashboard_id TEXT NOT NULL,
+  source_dashboard_id TEXT NULL,
+  role TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_anomaly_dashboard_links_role
+  ON public.quantyx_anomaly_dashboard_links (investigation_id, dashboard_id, role);
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.is_current IS 'True for the active version row.';
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.storage_engine IS 'Physical storage engine enum (default parquet).';
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.query_engine IS 'Execution engine enum (default pyiceberg).';

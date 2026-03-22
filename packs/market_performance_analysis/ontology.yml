@@ -1,0 +1,34 @@
+industry: market_performance_analysis
+version: 1
+
+title: Market Performance Analysis Ontology
+
+entity_types:
+  organizational_unit:
+    examples: [zone, region, area, territory, market, cluster]
+    description: Business rollup used for market and target analysis
+    join_key: zone
+  strategic_business_unit:
+    examples: [sbu, sbu_name]
+    description: Strategic business grouping used for performance tracking
+    join_key: sbu_name
+  product:
+    examples: [product, sku, grade, category]
+    description: Product or category used in sales and target analysis
+    join_key: product_name
+  channel:
+    examples: [channel, sales_channel, segment]
+    description: Sales or distribution channel for market analysis
+    join_key: channel_name
+  benchmark:
+    examples: [industry, competitor, benchmark]
+    description: External market or industry comparison entity
+    join_key: benchmark_name
+  time:
+    examples: [day, date, month, year_monthname, fiscal_month]
+    description: Time grains used for daily and monthly market analysis
+
+hierarchies:
+  - name: market_org_hierarchy
+    levels: [region, zone, sbu_name]
+    description: Organizational rollup for market performance analysis

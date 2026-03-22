@@ -34,6 +34,7 @@ Usage examples:
 import argparse
 import json
 from pathlib import Path
+import socket
 import sys
 import time
 import urllib.error
@@ -68,6 +69,10 @@ def _request(api_base: str, method: str, path: str, payload: dict[str, Any] | No
         except Exception:
             parsed = {"detail": body}
         return exc.code, parsed
+    except TimeoutError:
+        return 599, {"detail": "request_timeout"}
+    except socket.timeout:
+        return 599, {"detail": "request_timeout"}
 
 
 def _json_dump(value: Any) -> str:
@@ -124,6 +129,10 @@ def _terminal_status(status: str | None) -> bool:
     return str(status or "").lower() in {"completed", "failed", "cancelled"}
 
 
+def _terminal_agent_status(status: str | None) -> bool:
+    return str(status or "").lower() in {"completed", "failed", "cancelled", "skipped"}
+
+
 def _stream_run(
     api_base: str,
     run_id: str,
@@ -138,6 +147,8 @@ def _stream_run(
     terminal_seen_at: float | None = None
     last_status_check = 0.0
     current_status: str | None = None
+    anomaly_dashboard_started = False
+    anomaly_dashboard_terminal = False
 
     with urllib.request.urlopen(req, timeout=120) as resp:
         while True:
@@ -153,12 +164,16 @@ def _stream_run(
                     try:
                         event = json.loads(payload)
                         if isinstance(event, dict):
+                            if str(event.get("agent_name") or "") == "AnomalyDashboardAgent":
+                                anomaly_dashboard_started = True
+                                if _terminal_agent_status(event.get("status")):
+                                    anomaly_dashboard_terminal = True
                             _print_event(event, print_full_payload=print_full_payload)
                     except json.JSONDecodeError:
                         print(f"SSE raw: {payload}")
 
             if now - last_status_check >= status_check_seconds:
-                code, run = _request(api_base, "GET", f"/agentic/runs/{urllib.parse.quote(run_id)}")
+                code, run = _request(api_base, "GET", f"/agentic/runs/{urllib.parse.quote(run_id)}", timeout=15)
                 if code == 200 and isinstance(run, dict):
                     current_status = str(run.get("status") or "")
                     print(f"[run_status] {current_status}")
@@ -169,7 +184,8 @@ def _stream_run(
                         terminal_seen_at = None
                 last_status_check = now
 
-            if terminal_seen_at is not None and (now - terminal_seen_at) >= tail_seconds:
+            anomaly_safe_to_exit = (not anomaly_dashboard_started) or anomaly_dashboard_terminal
+            if terminal_seen_at is not None and anomaly_safe_to_exit and (now - terminal_seen_at) >= tail_seconds:
                 break
 
 
@@ -181,6 +197,8 @@ def _poll_run_logs(
     interval_seconds: float = 2.0,
 ) -> None:
     seen_event_ids: set[str] = set()
+    anomaly_dashboard_started = False
+    anomaly_dashboard_terminal = False
 
     while True:
         code, resp = _request(
@@ -199,14 +217,256 @@ def _poll_run_logs(
             if not event_id or event_id in seen_event_ids:
                 continue
             seen_event_ids.add(event_id)
+            if str(event.get("agent_name") or "") == "AnomalyDashboardAgent":
+                anomaly_dashboard_started = True
+                if _terminal_agent_status(event.get("status")):
+                    anomaly_dashboard_terminal = True
             _print_event(event, print_full_payload=print_full_payload)
 
         run_code, run = _request(api_base, "GET", f"/agentic/runs/{urllib.parse.quote(run_id)}")
-        if run_code == 200 and _terminal_status((run or {}).get("status")):
+        anomaly_safe_to_exit = (not anomaly_dashboard_started) or anomaly_dashboard_terminal
+        if run_code == 200 and _terminal_status((run or {}).get("status")) and anomaly_safe_to_exit:
             print(f"[run_status] {(run or {}).get('status')}")
             break
 
         time.sleep(interval_seconds)
+
+
+def _wait_for_terminal_run(api_base: str, run_id: str, *, timeout_seconds: float = 180.0, poll_seconds: float = 2.0) -> tuple[int, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_code = 0
+    last_payload: Any = {}
+    while time.monotonic() < deadline:
+        code, payload = _request(api_base, "GET", f"/agentic/runs/{urllib.parse.quote(run_id)}")
+        last_code = code
+        last_payload = payload
+        if code == 200 and _terminal_status((payload or {}).get("status")):
+            return code, payload
+        time.sleep(poll_seconds)
+    return last_code, last_payload
+
+
+def _anomaly_stage_summary(api_base: str, run_id: str) -> dict[str, Any]:
+    code, resp = _request(
+        api_base,
+        "GET",
+        f"/agentic/runs/{urllib.parse.quote(run_id)}/events?limit=2000",
+        timeout=30,
+    )
+    if code != 200:
+        return {
+            "events_lookup_status": code,
+            "events_lookup_error": resp,
+            "anomaly_detection_seen": False,
+            "anomaly_dashboard_seen": False,
+        }
+
+    events = (resp or {}).get("events") or []
+    summary: dict[str, Any] = {
+        "events_lookup_status": 200,
+        "anomaly_detection_seen": False,
+        "anomaly_dashboard_seen": False,
+        "anomaly_detection_status": None,
+        "anomaly_dashboard_status": None,
+        "anomaly_detection_message": None,
+        "anomaly_dashboard_message": None,
+        "investigation_id": None,
+        "anomaly_dashboard_id": None,
+        "anomaly_ids": [],
+        "hypothesis_ids": [],
+        "action_ids": [],
+        "executed_query_count": 0,
+        "rejected_query_count": 0,
+        "skip_reason": None,
+        "failure": None,
+    }
+
+    for event in events:
+        agent_name = str(event.get("agent_name") or "")
+        artifacts = event.get("artifacts") or {}
+        status = str(event.get("status") or "")
+        message = str(event.get("message") or "")
+        if agent_name == "AnomalyDetectionAgent":
+            summary["anomaly_detection_seen"] = True
+            summary["anomaly_detection_status"] = status
+            summary["anomaly_detection_message"] = message
+            if artifacts.get("investigation_id"):
+                summary["investigation_id"] = artifacts.get("investigation_id")
+            if artifacts.get("anomaly_ids"):
+                summary["anomaly_ids"] = artifacts.get("anomaly_ids")
+            if artifacts.get("hypothesis_ids"):
+                summary["hypothesis_ids"] = artifacts.get("hypothesis_ids")
+            if artifacts.get("action_ids"):
+                summary["action_ids"] = artifacts.get("action_ids")
+            if isinstance(artifacts.get("executed_queries"), list):
+                summary["executed_query_count"] = len(artifacts.get("executed_queries") or [])
+            if isinstance(artifacts.get("rejected_queries"), list):
+                summary["rejected_query_count"] = len(artifacts.get("rejected_queries") or [])
+            if artifacts.get("reason"):
+                summary["skip_reason"] = artifacts.get("reason")
+            if artifacts.get("error_type") or artifacts.get("error_message"):
+                summary["failure"] = {
+                    "agent": agent_name,
+                    "error_type": artifacts.get("error_type"),
+                    "error_message": artifacts.get("error_message"),
+                }
+        elif agent_name == "AnomalyDashboardAgent":
+            summary["anomaly_dashboard_seen"] = True
+            summary["anomaly_dashboard_status"] = status
+            summary["anomaly_dashboard_message"] = message
+            if artifacts.get("dashboard_id"):
+                summary["anomaly_dashboard_id"] = artifacts.get("dashboard_id")
+            if artifacts.get("reason") and not summary.get("skip_reason"):
+                summary["skip_reason"] = artifacts.get("reason")
+            if artifacts.get("error_type") or artifacts.get("error_message"):
+                summary["failure"] = {
+                    "agent": agent_name,
+                    "error_type": artifacts.get("error_type"),
+                    "error_message": artifacts.get("error_message"),
+                }
+    return summary
+
+
+def _wait_for_anomaly_artifacts(
+    api_base: str,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    timeout_seconds: float = 45.0,
+    poll_seconds: float = 2.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_summary: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        summary = _anomaly_stage_summary(api_base, run_id)
+        last_summary = summary
+        if summary.get("failure"):
+            return summary
+        dashboard_seen = bool(summary.get("anomaly_dashboard_seen"))
+        dashboard_done = _terminal_agent_status(summary.get("anomaly_dashboard_status"))
+        detection_seen = bool(summary.get("anomaly_detection_seen"))
+        detection_done = _terminal_agent_status(summary.get("anomaly_detection_status"))
+        if dashboard_seen and dashboard_done:
+            return summary
+        if detection_seen and detection_done and not dashboard_seen:
+            return summary
+        code, resp = _request(
+            api_base,
+            "GET",
+            "/workspace/anomalies?"
+            + urllib.parse.urlencode(
+                {
+                    "tenant_id": tenant_id,
+                    "domain_id": domain_id,
+                    "run_id": run_id,
+                    "limit": 1,
+                }
+            ),
+            timeout=20,
+        )
+        if code == 200 and ((resp or {}).get("investigations") or []):
+            summary = dict(summary)
+            latest = ((resp or {}).get("investigations") or [])[0]
+            if latest.get("investigation_id") and not summary.get("investigation_id"):
+                summary["investigation_id"] = latest.get("investigation_id")
+            return summary
+        time.sleep(poll_seconds)
+    return last_summary
+
+
+def _print_anomaly_debug(api_base: str, *, tenant_id: str, domain_id: str, run_id: str) -> None:
+    summary = _wait_for_anomaly_artifacts(
+        api_base,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+    )
+    print("\nAnomaly readiness:")
+    print(
+        _json_dump(
+            {
+                "tenant_id": tenant_id,
+                "domain_id": domain_id,
+                "run_id": run_id,
+                "anomaly_detection_seen": summary.get("anomaly_detection_seen"),
+                "anomaly_detection_status": summary.get("anomaly_detection_status"),
+                "anomaly_detection_message": summary.get("anomaly_detection_message"),
+                "anomaly_dashboard_seen": summary.get("anomaly_dashboard_seen"),
+                "anomaly_dashboard_status": summary.get("anomaly_dashboard_status"),
+                "anomaly_dashboard_message": summary.get("anomaly_dashboard_message"),
+                "investigation_id": summary.get("investigation_id"),
+                "anomaly_dashboard_id": summary.get("anomaly_dashboard_id"),
+                "anomaly_count": len(summary.get("anomaly_ids") or []),
+                "hypothesis_count": len(summary.get("hypothesis_ids") or []),
+                "action_count": len(summary.get("action_ids") or []),
+                "executed_query_count": summary.get("executed_query_count"),
+                "rejected_query_count": summary.get("rejected_query_count"),
+                "skip_reason": summary.get("skip_reason"),
+                "failure": summary.get("failure"),
+            }
+        )
+    )
+    if summary.get("failure"):
+        print("Anomaly failure detected in run events.")
+    elif summary.get("skip_reason"):
+        print(f"Anomaly flow skipped or partially skipped: {summary.get('skip_reason')}")
+    elif not summary.get("anomaly_detection_seen"):
+        if summary.get("investigation_id"):
+            print("Anomaly artifacts were found, but detailed stage events were not yet visible in the event stream.")
+        else:
+            print("Anomaly stages were not observed in run events.")
+    elif not summary.get("investigation_id"):
+        print("Anomaly stages ran, but no investigation artifact was persisted.")
+
+
+def _print_anomaly_followups(api_base: str, *, tenant_id: str, domain_id: str, run_id: str) -> None:
+    query = urllib.parse.urlencode(
+        {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "run_id": run_id,
+            "limit": 10,
+        }
+    )
+    code, resp = _request(api_base, "GET", f"/workspace/anomalies?{query}")
+    if code != 200:
+        print("\nAnomaly artifacts lookup failed:")
+        print(f"status={code} body={resp}")
+        return
+
+    investigations = (resp or {}).get("investigations") or []
+    print("\nAnomaly artifacts:")
+    if not investigations:
+        print("No anomaly investigations found for this run.")
+        return
+
+    latest = investigations[0]
+    investigation_id = str(latest.get("investigation_id") or "").strip()
+    print(_json_dump({"latest_investigation": latest}))
+    if not investigation_id:
+        return
+
+    details_path = f"/workspace/anomalies/{urllib.parse.quote(investigation_id)}"
+    dashboard_path = f"/workspace/anomalies/{urllib.parse.quote(investigation_id)}/dashboard"
+    print("Useful endpoints:")
+    print(f"- Investigation details: {api_base.rstrip('/')}{details_path}")
+    print(f"- Investigation dashboard: {api_base.rstrip('/')}{dashboard_path}")
+
+    details_code, details_resp = _request(api_base, "GET", details_path)
+    if details_code == 200:
+        summary = {
+            "investigation_id": investigation_id,
+            "anomaly_count": len((details_resp or {}).get("anomalies") or []),
+            "hypothesis_count": len((details_resp or {}).get("hypotheses") or []),
+            "action_count": len((details_resp or {}).get("actions") or []),
+            "dashboard_links": (details_resp or {}).get("dashboard_links") or [],
+        }
+        print("Investigation summary:")
+        print(_json_dump(summary))
+    else:
+        print("Investigation details lookup failed:")
+        print(f"status={details_code} body={details_resp}")
 
 
 def main() -> int:
@@ -299,6 +559,18 @@ def main() -> int:
         payload["context_ids"] = context_ids
 
     # Bootstrap tenant metadata required by /workspace/deployments.
+    tenant_payload = {
+        "tenant_id": tenant_id,
+        "display_name": tenant_id,
+        "status": "active",
+        "domain_id": args.domain_id,
+        "metadata": {
+            "created_by": "demo_workspace_deployment_lpg.py",
+            "connection_id": str(args.connection_id),
+            "database": args.database,
+            "schema": args.schema,
+        },
+    }
     domain_payload = {"tenant_id": tenant_id, "domain_id": args.domain_id}
     scope_payload = {
         "tenant_id": tenant_id,
@@ -308,8 +580,12 @@ def main() -> int:
         "schema": args.schema,
         "tables": list(args.tables),
     }
-    print("Configuring tenant domain and scope:")
-    print(_json_dump({"domain": domain_payload, "scope": scope_payload}))
+    print("Configuring tenant, domain and scope:")
+    print(_json_dump({"tenant": tenant_payload, "domain": domain_payload, "scope": scope_payload}))
+    tenant_code, tenant_resp = _request(args.api_base, "POST", "/tenants", tenant_payload)
+    if tenant_code not in {200, 201}:
+        print(f"Failed to upsert tenant: status={tenant_code} body={tenant_resp}")
+        return 1
     domain_code, domain_resp = _request(args.api_base, "POST", "/tenant/domain", domain_payload)
     if domain_code not in {200, 201}:
         print(f"Failed to set tenant domain: status={domain_code} body={domain_resp}")
@@ -359,12 +635,26 @@ def main() -> int:
     except KeyboardInterrupt:
         print("Interrupted by user.")
 
-    code, final_run = _request(args.api_base, "GET", f"/agentic/runs/{urllib.parse.quote(run_id)}")
+    code, final_run = _wait_for_terminal_run(args.api_base, run_id)
     print("\nFinal run status:")
     if code == 200:
         print(_json_dump(final_run))
     else:
         print(f"status={code} body={final_run}")
+
+    _print_anomaly_debug(
+        args.api_base,
+        tenant_id=tenant_id,
+        domain_id=args.domain_id,
+        run_id=run_id,
+    )
+
+    _print_anomaly_followups(
+        args.api_base,
+        tenant_id=tenant_id,
+        domain_id=args.domain_id,
+        run_id=run_id,
+    )
 
     return 0
 

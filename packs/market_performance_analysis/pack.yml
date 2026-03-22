@@ -1,0 +1,5 @@
+industry: market_performance_analysis
+version: 1.0.0
+release_date: 2026-03-21
+breaking_changes: null
+notes: Initial generic market performance analysis pack for daily sales, monthly targets, pace, and benchmark comparison.

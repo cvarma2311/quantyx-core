@@ -109,6 +109,9 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 35. **Phase 38: Anomaly Investigation and Action Intelligence**
    - Add an LLM-assisted anomaly investigation agent that detects meaningful business anomalies, identifies high-signal investigative areas, generates multiple evidence-backed why-hypotheses, and persists descriptive plus prescriptive action insights for workspace reuse.
 
+36. **Phase 39: LLM-First Workspace Conversation Query Interpretation and Safe Compilation**
+   - Make workspace conversation query understanding LLM-first, then validate and compile deterministically so filters, dimensions, chart intent, and SQL stay aligned with the user question.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -129,3 +132,4 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 36 depends on Phases 24/29/30/34/35 and makes deployment context text a first-class LLM input for validated metric creation and KPI prioritization.
 - Phase 37 depends on Phases 35 and 36 and extends the same LLM-first, validation-backed approach to KPI-family derivation, chart proposal, and broad dashboard composition.
 - Phase 38 depends on Phases 24/34/35/36/37 and adds anomaly investigation, multi-hypothesis why-analysis, and action intelligence over persisted semantic and raw-evidence artifacts.
+- Phase 39 depends on Phases 24/31/34/36/37 and hardens workspace conversation query interpretation with LLM-first plan extraction, deterministic validation, and safe SQL/chart compilation.
