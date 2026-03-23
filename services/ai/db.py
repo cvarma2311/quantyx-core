@@ -18,6 +18,7 @@ def run_query(settings: Settings, sql: str, params: list[object]) -> list[dict]:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
+        conn.commit()
         return [dict(row) for row in rows]
     finally:
         conn.close()

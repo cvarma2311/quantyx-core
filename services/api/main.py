@@ -1108,6 +1108,7 @@ def _execute_job(job: dict) -> dict:
         charts = spec.get("charts") or []
         chart_results: list[dict] = []
         failed_charts: list[dict] = []
+        charts_spec_out: list[dict] = []
         for idx, chart in enumerate(charts):
             chart_obj = chart if isinstance(chart, dict) else {}
             chart_id = chart_obj.get("chart_id") or f"dash_chart_{idx+1}"
@@ -1202,17 +1203,29 @@ def _execute_job(job: dict) -> dict:
                     {"chart_id": chart_id, "error_message": error_message or "unknown_error"}
                 )
 
+            merged = dict(chart_obj)
+            if status == "ok":
+                merged["chart_data"] = payload_obj.get("data")
+                merged["rows"] = rows
+                cp = payload_obj.get("chart_payload")
+                if cp is not None:
+                    merged["chart_payload"] = cp
+                merged["chart_type"] = chart_type
+                if sql is not None:
+                    merged["sql"] = sql
+                merged["params"] = params if isinstance(params, list) else []
+            charts_spec_out.append(merged)
+
         regenerated_count = 0
         if regenerate_titles:
-            regenerated_dashboard_title = _regenerated_dashboard_title(dashboard_row.get("domain_id"), charts)
-            updated_charts: list[dict] = []
-            for chart in charts:
-                chart_obj = dict(chart) if isinstance(chart, dict) else {}
+            regenerated_dashboard_title = _regenerated_dashboard_title(
+                dashboard_row.get("domain_id"), charts_spec_out
+            )
+            for chart_obj in charts_spec_out:
                 chart_obj["title"] = _regenerated_chart_title(chart_obj)
                 chart_obj["chart_title"] = chart_obj["title"]
                 chart_obj["dashboard_title"] = regenerated_dashboard_title
-                updated_charts.append(chart_obj)
-            spec["charts"] = updated_charts
+            spec["charts"] = charts_spec_out
             spec["title"] = regenerated_dashboard_title
             spec["dashboard_title"] = regenerated_dashboard_title
             update_dashboard_spec(
@@ -1221,7 +1234,7 @@ def _execute_job(job: dict) -> dict:
                 spec=spec,
                 title=regenerated_dashboard_title,
             )
-            regenerated_count = len(updated_charts)
+            regenerated_count = len(charts_spec_out)
             append_dashboard_refresh_event(
                 settings,
                 refresh_id=refresh_id,
@@ -1231,9 +1244,12 @@ def _execute_job(job: dict) -> dict:
                 artifacts={
                     "regenerate_titles": True,
                     "dashboard_title": regenerated_dashboard_title,
-                    "chart_titles": [c.get("title") for c in updated_charts if isinstance(c, dict)],
+                    "chart_titles": [c.get("title") for c in charts_spec_out if isinstance(c, dict)],
                 },
             )
+        else:
+            spec["charts"] = charts_spec_out
+            update_dashboard_spec(settings, dashboard_id, spec=spec)
 
         append_dashboard_refresh_event(
             settings,
