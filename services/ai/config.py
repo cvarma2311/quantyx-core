@@ -22,7 +22,18 @@ class Settings:
     dbt_project_template: str | None
     default_tenant_id: str
     default_domain_id: str
-
+    minio_endpoint: str
+    minio_host: str
+    minio_access_key_id: str
+    minio_secret_access_key: str
+    minio_base_path: str
+    minio_port: str
+    catalog_db: str
+    catalog_user: str
+    catalog_password: str
+    catalog_db_uri: str
+    catalog_name: str
+    minio_bucket_name: str
 
 def load_settings() -> Settings:
     return Settings(
@@ -42,4 +53,16 @@ def load_settings() -> Settings:
         dbt_project_template=os.getenv("DBT_PROJECT_TEMPLATE"),
         default_tenant_id=os.getenv("DEFAULT_TENANT_ID", "tenant_default"),
         default_domain_id=os.getenv("DEFAULT_DOMAIN_ID", "default_domain"),
+        minio_endpoint=os.getenv("MINIO_ENDPOINT"),
+        minio_host=os.getenv("MINIO_HOST",""),
+        minio_access_key_id=os.getenv("MINIO_ACCESS_KEY_ID"),
+        minio_secret_access_key=os.getenv("MINIO_SECRET_ACCESS_KEY"),
+        minio_base_path=os.getenv("MINIO_BASE_PATH"),
+        minio_port=os.getenv("MINIO_PORT"),
+        catalog_db=os.getenv("CATALOG_DB", "catalog_db"),
+        catalog_user=os.getenv("CATALOG_USER", "catalog_user"),
+        catalog_password=os.getenv("CATALOG_PASSWORD", ""),
+        catalog_db_uri=os.getenv("CATALOG_DB_URI",""),
+        catalog_name=os.getenv("CATALOG_NAME", ""),
+        minio_bucket_name=os.getenv("MINIO_BUCKET_NAME", "")
     )
