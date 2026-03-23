@@ -39,6 +39,9 @@ from services.ai.agentic_agents import (
     classify_models,
     propose_rollups,
     build_dashboard_spec,
+    build_story_sections,
+    build_dashboard_theme_from_charts,
+    deterministic_dashboard_title,
 )
 from services.ai.semantic_graph_store import persist_semantic_graph, persist_dashboard_spec
 from services.ai.anomaly_detection import detect_agentic_anomalies
@@ -337,6 +340,52 @@ def _llm_json_response(
         return None
 
 
+def _llm_generate_dashboard_title(
+    settings,
+    *,
+    domain_id: str | None,
+    context_text: str | None,
+    successful_charts: list[dict[str, Any]],
+    dashboard_theme: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not _dashboard_composition_enabled(settings) or not successful_charts:
+        return None
+    model = os.getenv("AGENTIC_DASHBOARD_TITLE_MODEL", getattr(settings, "openai_model", "gpt-4o-mini"))
+    timeout_sec = int(os.getenv("AGENTIC_DASHBOARD_TITLE_TIMEOUT_SEC", "30"))
+    chart_payload = []
+    for chart in successful_charts[:16]:
+        chart_payload.append(
+            {
+                "title": chart.get("title"),
+                "table": chart.get("table"),
+                "metric": chart.get("metric") or chart.get("metric_name"),
+                "primary_role": chart.get("primary_role"),
+                "related_roles": chart.get("related_roles") or [],
+                "kpi_family": chart.get("kpi_family"),
+                "time_grain": chart.get("time_grain"),
+                "intent": chart.get("intent"),
+            }
+        )
+    system_prompt = (
+        "You generate a concise business dashboard title from successful charts only. "
+        "Prefer business themes and KPI families over raw table names. "
+        "Avoid source-table wording unless no stronger business wording exists. "
+        "Return JSON only with keys: dashboard_title, dashboard_title_reason, dashboard_title_sources."
+    )
+    return _llm_json_response(
+        settings,
+        system_prompt=system_prompt,
+        user_payload={
+            "domain_id": domain_id,
+            "context_text": str(context_text or "")[:5000],
+            "successful_charts": chart_payload,
+            "dashboard_theme": dashboard_theme,
+        },
+        model_env_key="AGENTIC_DASHBOARD_TITLE_MODEL",
+        timeout_env_key="AGENTIC_DASHBOARD_TITLE_TIMEOUT_SEC",
+    )
+
+
 def _llm_plan_anomaly_investigation(
     settings,
     *,
@@ -366,6 +415,9 @@ def _llm_plan_anomaly_investigation(
                 ],
                 "story": dashboard_spec.get("story") or {},
                 "insights": (dashboard_spec.get("insights") or [])[:10],
+                "dashboard_theme": dashboard_spec.get("dashboard_theme") or {},
+                "table_contributions": dashboard_spec.get("table_contributions") or [],
+                "kpi_family_contributions": dashboard_spec.get("kpi_family_contributions") or [],
             },
             "investigation_summary": investigation_summary,
             "anomalies": anomalies_payload,
@@ -618,6 +670,9 @@ def _llm_summarize_anomaly_investigation(
                 "title": dashboard_spec.get("dashboard_title") or dashboard_spec.get("title"),
                 "story": dashboard_spec.get("story") or {},
                 "insights": (dashboard_spec.get("insights") or [])[:10],
+                "dashboard_theme": dashboard_spec.get("dashboard_theme") or {},
+                "table_contributions": dashboard_spec.get("table_contributions") or [],
+                "kpi_family_contributions": dashboard_spec.get("kpi_family_contributions") or [],
             },
             "investigation_summary": investigation_summary,
             "anomalies": anomalies_payload,
@@ -3276,13 +3331,13 @@ def run_agentic_workflow(
             state,
             "chart_min_charts",
             "AGENTIC_CHART_MIN_CHARTS",
-            6,
+            8,
         )
         max_charts = _resolve_int_setting(
             state,
             "chart_max_charts",
             "AGENTIC_CHART_MAX_CHARTS",
-            12,
+            16,
         )
         if min_charts > max_charts:
             min_charts = max_charts
@@ -3331,7 +3386,7 @@ def run_agentic_workflow(
                 continue
             seen_candidate_keys.add(key)
             candidates.append(cand)
-        selected = select_charts(
+        selected, selection_diag = select_charts(
             candidates,
             min_charts=min_charts,
             max_charts=max_charts,
@@ -3380,7 +3435,12 @@ def run_agentic_workflow(
                     reranked.append(cand)
                 if len(reranked) >= max_charts:
                     break
-            selected = reranked[:max_charts]
+            selected, selection_diag = select_charts(
+                reranked[: max(max_charts * 2, len(reranked))],
+                min_charts=min_charts,
+                max_charts=max_charts,
+                domain_id=state.get("domain_id"),
+            )
         rejected = [cand for cand in candidates if cand.get("skipped")] + list(llm_candidate_rejections or [])
         logger.info(
             "agentic.chart_planner.output | run_id=%s candidates=%s llm_candidates=%s selected=%s rejected=%s llm_proposal=%s llm_rerank=%s sample_selected=%s",
@@ -3408,6 +3468,7 @@ def run_agentic_workflow(
         state["chart_candidate_rejections"] = rejected
         state["chart_proposal_diagnostics"] = llm_chart_diag
         state["chart_rerank_diagnostics"] = rerank_diag
+        state["chart_selection_diagnostics"] = selection_diag
         _emit(
             settings,
             run_id,
@@ -3424,6 +3485,7 @@ def run_agentic_workflow(
                 "chart_rejections": rejected,
                 "chart_proposal_diagnostics": llm_chart_diag,
                 "chart_rerank_diagnostics": rerank_diag,
+                "chart_selection_diagnostics": selection_diag,
             },
             event_callback=event_callback,
         )
@@ -3460,6 +3522,8 @@ def run_agentic_workflow(
             state.get("metric_defs", []),
             state.get("profiling_stats", {}),
             domain_id=state.get("domain_id"),
+            chart_plan=state.get("chart_plan") or [],
+            context_text=state.get("context_text"),
         )
         dashboard_title = (dashboard_spec.get("title") or "").strip()
         if not dashboard_title:
@@ -3472,8 +3536,8 @@ def run_agentic_workflow(
             settings,
             domain_id=state.get("domain_id"),
             chart_candidates=charts_spec,
-            min_charts=min(6, len(charts_spec) or 6),
-            max_charts=min(max(12, len(charts_spec)), 12),
+            min_charts=min(min_charts, len(charts_spec) or min_charts),
+            max_charts=min(max_charts, max(len(charts_spec), min_charts)),
         )
         if composed_charts:
             charts_spec = composed_charts
@@ -3870,9 +3934,123 @@ def run_agentic_workflow(
             quality_report["warnings"] = warnings
             quality_report["gate_passed"] = False
             state["quality_report"] = quality_report
+        successful_charts = [item for item in enriched_charts if isinstance(item, dict) and not item.get("skipped") and item.get("chart_id")]
+        successful_chart_ids = {str(item.get("chart_id")) for item in successful_charts if str(item.get("chart_id") or "").strip()}
+        successful_chart_plan = [
+            item
+            for item in (state.get("chart_plan") or [])
+            if str(item.get("chart_id") or "") in successful_chart_ids or (
+                not str(item.get("chart_id") or "").strip()
+                and any(
+                    item.get("table") == chart.get("table")
+                    and item.get("metric") == chart.get("metric")
+                    and item.get("intent") == chart.get("intent")
+                    and item.get("category_column") == chart.get("category_column")
+                    and item.get("time_grain") == chart.get("time_grain")
+                    for chart in successful_charts
+                )
+            )
+        ]
+        story_sections = build_story_sections(successful_charts)
+        dashboard_theme = build_dashboard_theme_from_charts(
+            successful_charts,
+            metrics=state.get("metric_defs", []),
+            profiling=state.get("profiling_stats", {}),
+            domain_id=state.get("domain_id"),
+            context_text=state.get("context_text"),
+        )
+        table_contributions = dashboard_theme.get("table_contributions") or []
+        kpi_family_contributions = dashboard_theme.get("kpi_family_contributions") or []
+        selected_successful_chart_ids = [str(item.get("chart_id")) for item in successful_charts if str(item.get("chart_id") or "").strip()]
+        rejected_chart_ids = [
+            str(item.get("chart_id"))
+            for item in enriched_charts
+            if isinstance(item, dict) and item.get("skipped") and str(item.get("chart_id") or "").strip()
+        ]
+        title_generation_source = "deterministic_theme"
+        title_warning = None
+        final_dashboard_title = ""
+        title_sources = {
+            "tables": dashboard_theme.get("selected_tables") or dashboard_theme.get("eligible_tables") or [],
+            "kpi_families": [item.get("family") for item in kpi_family_contributions if item.get("family")],
+            "successful_chart_ids": selected_successful_chart_ids,
+        }
+        title_reason = "Derived from persisted successful charts, KPI families, and cross-table contribution."
+        llm_title_payload = _llm_generate_dashboard_title(
+            settings,
+            domain_id=state.get("domain_id"),
+            context_text=state.get("context_text"),
+            successful_charts=successful_charts,
+            dashboard_theme=dashboard_theme,
+        )
+        llm_title = str((llm_title_payload or {}).get("dashboard_title") or "").strip()
+        if llm_title:
+            final_dashboard_title = llm_title
+            title_generation_source = "llm_successful_charts"
+            title_reason = str((llm_title_payload or {}).get("dashboard_title_reason") or title_reason)
+            if isinstance((llm_title_payload or {}).get("dashboard_title_sources"), dict):
+                title_sources = dict((llm_title_payload or {}).get("dashboard_title_sources") or {})
+                title_sources.setdefault("successful_chart_ids", selected_successful_chart_ids)
+        if not final_dashboard_title:
+            deterministic_title = deterministic_dashboard_title(dashboard_theme, state.get("domain_id"))
+            if deterministic_title:
+                final_dashboard_title = deterministic_title
+                title_generation_source = "deterministic_theme"
+        if not final_dashboard_title:
+            domain_label = str(state.get("domain_id") or "").replace("_", " ").replace("-", " ").strip()
+            if domain_label:
+                final_dashboard_title = f"{domain_label.title()} Overview"
+                title_generation_source = "domain_fallback"
+                title_reason = "Derived from the domain because no stronger chart-backed title was available."
+        if not final_dashboard_title:
+            fallback_table = str((table_contributions[:1] or [{}])[0].get("table") or "").strip()
+            final_dashboard_title = f"{fallback_table.replace('_', ' ').title()} Overview" if fallback_table else "Performance Overview"
+            title_generation_source = "table_fallback"
+            title_reason = "Fell back to a table-derived title because no stronger domain or chart-backed title was available."
+            title_warning = "table_derived_dashboard_title"
+
+        warnings = [str(v) for v in (quality_report.get("warnings") or []) if str(v).strip()]
+        eligible_tables = list(dict.fromkeys(dashboard_theme.get("eligible_tables") or []))
+        contributing_tables = [item.get("table") for item in table_contributions if item.get("table")]
+        if len(eligible_tables) >= 2 and len(contributing_tables) < 2 and successful_charts:
+            if "insufficient_cross_table_coverage" not in warnings:
+                warnings.append("insufficient_cross_table_coverage")
+        selection_diag = state.get("chart_selection_diagnostics") or {}
+        if title_warning and title_warning not in warnings:
+            warnings.append(title_warning)
+        successful_count = len(successful_charts)
+        low_value_chart_count = int(selection_diag.get("low_value_chart_count") or 0)
+        if successful_count > 12 and (low_value_chart_count >= 2 or len(kpi_family_contributions) < max(2, successful_count // 6)):
+            if "overexpanded_low_value_dashboard" not in warnings:
+                warnings.append("overexpanded_low_value_dashboard")
+        quality_report["warnings"] = warnings
+        quality_report["cross_table_coverage"] = {
+            "eligible_tables": eligible_tables,
+            "contributing_tables": contributing_tables,
+            "successful_chart_count": successful_count,
+        }
+        quality_report["dashboard_title_generation"] = {
+            "source": title_generation_source,
+            "reason": title_reason,
+            "sources": title_sources,
+        }
+        quality_report["chart_selection_diagnostics"] = selection_diag
+        state["quality_report"] = quality_report
+        dashboard_spec["title"] = final_dashboard_title
+        dashboard_spec["dashboard_title"] = final_dashboard_title
+        dashboard_spec["dashboard_theme"] = dashboard_theme
+        dashboard_spec["dashboard_title_reason"] = title_reason
+        dashboard_spec["dashboard_title_sources"] = title_sources
+        dashboard_spec["story_sections"] = story_sections
+        dashboard_spec["table_contributions"] = table_contributions
+        dashboard_spec["kpi_family_contributions"] = kpi_family_contributions
         dashboard_spec["charts"] = enriched_charts
+        dashboard_spec["selected_successful_chart_ids"] = selected_successful_chart_ids
+        dashboard_spec["rejected_chart_ids"] = rejected_chart_ids
+        dashboard_spec["role_selection"] = selection_diag
+        dashboard_spec["chart_plan"] = successful_chart_plan
         dashboard_spec["story"] = {
-            "title": dashboard_title,
+            "title": final_dashboard_title,
             "cards": [
                 {
                     "title": "Trend",
@@ -3892,6 +4070,7 @@ def run_agentic_workflow(
         if state.get("quality_report"):
             dashboard_spec["quality"] = state.get("quality_report")
         state["dashboard_spec"] = dashboard_spec
+        dashboard_title = final_dashboard_title
         null_sql_count = sum(1 for c in enriched_charts if c.get("sql") is None and not c.get("skipped"))
         logger.info(
             "agentic.dashboard.output | run_id=%s charts=%s null_sql_non_skipped=%s chart_ids=%s",
@@ -4169,6 +4348,15 @@ def run_agentic_workflow(
                 "chart_ids": chart_ids,
                 "chart_titles": [c.get("title") for c in enriched_charts if c.get("title")],
                 "chart_details": enriched_charts,
+                "dashboard_theme": dashboard_theme,
+                "dashboard_title_reason": dashboard_spec.get("dashboard_title_reason"),
+                "dashboard_title_sources": dashboard_spec.get("dashboard_title_sources"),
+                "table_contributions": table_contributions,
+                "kpi_family_contributions": kpi_family_contributions,
+                "story_sections": story_sections,
+                "role_selection": selection_diag,
+                "selected_successful_chart_ids": selected_successful_chart_ids,
+                "rejected_chart_ids": rejected_chart_ids,
                 "quality_report": state.get("quality_report"),
                 "views_detail": created_views,
                 "fact_view_results": fact_view_results,

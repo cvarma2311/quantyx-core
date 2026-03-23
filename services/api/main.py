@@ -6428,6 +6428,7 @@ def _workspace_query_response(
     domain_id: str,
     run_id: str | None,
     question: str,
+    chart_context: dict | None = None,
     metrics: list[str] | None = None,
     dimensions: list[str] | None = None,
     limit: int = 200,
@@ -6451,6 +6452,20 @@ def _workspace_query_response(
         schema_name,
     )
     glossary = (intelligence_bundle or {}).get("glossary") or fetch_glossary_terms(settings, tenant_id, domain_id)
+    effective_metrics = list(metrics or [])
+    effective_dimensions = list(dimensions or [])
+    chart_followup_meta: dict[str, Any] | None = None
+    chart_followup_plan_patch: dict[str, Any] | None = None
+    if chart_context:
+        effective_metrics, effective_dimensions, chart_followup_plan_patch, chart_followup_meta = _chart_context_explicit_overrides(
+            question=question,
+            chart_context=chart_context,
+            glossary=glossary,
+            hierarchies=(intelligence_bundle or {}).get("hierarchies") or [],
+            allowed_dimensions=allowed_dimensions,
+            explicit_metrics=metrics,
+            explicit_dimensions=dimensions,
+        )
     raw_llm_plan = interpret_workspace_query(
         question=question,
         metric_catalog=metric_catalog,
@@ -6458,14 +6473,36 @@ def _workspace_query_response(
         glossary=glossary,
         settings=settings,
     )
+    if chart_followup_plan_patch:
+        raw_llm_plan.update(chart_followup_plan_patch)
     validated_plan = validate_workspace_query_plan(
         question=question,
         raw_plan=raw_llm_plan,
         metric_catalog=metric_catalog,
         allowed_dimensions=allowed_dimensions,
-        explicit_metrics=metrics,
-        explicit_dimensions=dimensions,
+        explicit_metrics=effective_metrics,
+        explicit_dimensions=effective_dimensions,
     )
+    if chart_followup_meta:
+        merged_filters = list(validated_plan.get("filters") or [])
+        for flt in chart_followup_meta.get("filter_hints") or []:
+            if not any(
+                str(existing.get("field")) == str(flt.get("field"))
+                and str(existing.get("operator")) == str(flt.get("operator"))
+                and str(existing.get("value")) == str(flt.get("value"))
+                for existing in merged_filters
+                if isinstance(existing, dict)
+            ):
+                merged_filters.append(flt)
+        validated_plan["filters"] = merged_filters
+        validation_warnings = list(validated_plan.get("validation_warnings") or [])
+        validation_warnings.extend(chart_followup_meta.get("warnings") or [])
+        validated_plan["validation_warnings"] = list(dict.fromkeys(validation_warnings))
+        validated_plan["chart_followup"] = {
+            "follow_up_intent": chart_followup_meta.get("follow_up_intent"),
+            "accepted_transformations": chart_followup_meta.get("accepted_transformations") or [],
+            "rejected_transformations": chart_followup_meta.get("rejected_transformations") or [],
+        }
     if not validated_plan.get("metric_name"):
         raise HTTPException(
             status_code=400,
@@ -6494,6 +6531,7 @@ def _workspace_query_response(
         metric_name=metric_name,
         dimensions=query_result.dimensions,
         response_mode=validated_plan.get("response_mode"),
+        preferred_chart_type=(chart_followup_meta or {}).get("requested_chart_type") or validated_plan.get("chart_type"),
     )
     if chart_warnings:
         validated_plan["validation_warnings"] = list(dict.fromkeys((validated_plan.get("validation_warnings") or []) + chart_warnings))
@@ -6506,6 +6544,30 @@ def _workspace_query_response(
         validated_plan=validated_plan,
         compiled_sql_preview=query_result.sql,
     )
+    if chart_followup_meta:
+        conversation_plan["chart_followup"] = {
+            "source_chart_id": chart_followup_meta.get("source_chart_id"),
+            "follow_up_intent": chart_followup_meta.get("follow_up_intent"),
+            "selected_context": chart_followup_meta.get("selected_context") or {},
+            "filter_hints": chart_followup_meta.get("filter_hints") or [],
+            "accepted_transformations": chart_followup_meta.get("accepted_transformations") or [],
+            "rejected_transformations": chart_followup_meta.get("rejected_transformations") or [],
+            "warnings": chart_followup_meta.get("warnings") or [],
+        }
+    transformation_summary = _build_chart_followup_transformation_summary(
+        validated_plan=validated_plan,
+        chart_followup_meta=chart_followup_meta,
+    )
+    if chart_followup_meta:
+        conversation_plan["chart_followup"]["transformation_summary"] = transformation_summary
+
+    merged_chart_followup = {
+        **(chart_context or {}),
+        **(chart_followup_meta or {}),
+    } if chart_context or chart_followup_meta else None
+    if merged_chart_followup is not None:
+        merged_chart_followup["transformation_summary"] = transformation_summary
+        merged_chart_followup["derived_chart_id"] = query_result.chart_id
 
     response_payload = {
         "metrics": query_result.metrics,
@@ -6521,6 +6583,7 @@ def _workspace_query_response(
         "lineage": query_result.lineage,
         "artifact_lineage": query_result.artifact_lineage,
         "conversation_plan": conversation_plan,
+        "chart_followup": merged_chart_followup,
     }
     metric_label = ", ".join(query_result.metrics[:2]) if query_result.metrics else "requested metrics"
     assistant_text = f"Returned {len(query_result.rows)} rows for {metric_label}."
@@ -6532,12 +6595,14 @@ def _workspace_query_response(
         "lineage": query_result.lineage,
         "artifact_lineage": query_result.artifact_lineage,
         "conversation_plan": conversation_plan,
+        "chart_followup": merged_chart_followup,
     }
     inference_json = {
         "text": "Use filters or follow-up prompts to drill deeper by region, plant, or time period.",
         "confidence": 0.75 if query_result.rows else 0.4,
         "artifact_lineage": query_result.artifact_lineage,
         "conversation_plan": conversation_plan,
+        "chart_followup": merged_chart_followup,
     }
     return response_payload, assistant_text, summary_json, inference_json
 
@@ -6555,6 +6620,7 @@ def _workspace_narration_prompt(question: str, response_payload: dict, summary_j
         "row_count": len(response_payload.get("rows") or []),
         "sample_rows": safe_rows,
         "base_summary": summary_json.get("text"),
+        "chart_followup": response_payload.get("chart_followup"),
     }
     system_prompt = (
         "You are an analytics assistant. "
@@ -6566,6 +6632,434 @@ def _workspace_narration_prompt(question: str, response_payload: dict, summary_j
         f"{json.dumps(payload, default=str)}"
     )
     return system_prompt, user_prompt
+
+
+def _extract_chart_followup_context(payload: dict | None) -> dict[str, Any]:
+    data = payload or {}
+    chart_id = str(data.get("chart_id") or "").strip()
+    context: dict[str, Any] = {}
+    if chart_id:
+        context["chart_id"] = chart_id
+    for key in ("selected_point", "selected_series", "selected_category", "selected_time_value"):
+        value = data.get(key)
+        if value not in (None, "", []):
+            context[key] = value
+    return context
+
+
+def _resolve_chart_conversation_context(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    chart_id: str | None,
+) -> dict[str, Any] | None:
+    resolved_chart_id = str(chart_id or "").strip()
+    if not resolved_chart_id:
+        return None
+    chart_row = get_chart_request(settings, resolved_chart_id)
+    if not chart_row:
+        raise HTTPException(status_code=404, detail=f"Chart not found: {resolved_chart_id}")
+    if str(chart_row.get("tenant_id") or "").strip() != str(tenant_id or "").strip():
+        raise HTTPException(status_code=400, detail="chart_id does not belong to the current tenant")
+    row_domain = str(chart_row.get("domain_id") or "").strip()
+    if row_domain and row_domain != str(domain_id or "").strip():
+        raise HTTPException(status_code=400, detail="chart_id does not belong to the current domain")
+    query_payload = dict(chart_row.get("query_payload") or {})
+    dimensions = query_payload.get("dimensions") if isinstance(query_payload.get("dimensions"), list) else []
+    metrics = query_payload.get("metrics") if isinstance(query_payload.get("metrics"), list) else []
+    return {
+        "mode": "chart_scoped",
+        "source_chart_id": resolved_chart_id,
+        "chart_title": query_payload.get("chart_title") or chart_row.get("question"),
+        "dashboard_title": query_payload.get("dashboard_title"),
+        "chart_type": chart_row.get("chart_type"),
+        "metrics": metrics,
+        "dimensions": dimensions,
+        "sql": chart_row.get("sql"),
+        "query_payload": query_payload,
+        "status": chart_row.get("status"),
+    }
+
+
+def _chart_context_question_suffix(
+    question: str,
+    chart_context: dict[str, Any] | None,
+    selected_context: dict[str, Any] | None,
+) -> str:
+    if not chart_context:
+        return question
+    suffix_payload = {
+        "mode": "chart_followup",
+        "source_chart_id": chart_context.get("source_chart_id"),
+        "chart_title": chart_context.get("chart_title"),
+        "dashboard_title": chart_context.get("dashboard_title"),
+        "chart_type": chart_context.get("chart_type"),
+        "metrics": chart_context.get("metrics") or [],
+        "dimensions": chart_context.get("dimensions") or [],
+        "selected_context": selected_context or {},
+    }
+    return f"{question}\n\nChart context: {json.dumps(suffix_payload, default=str)}"
+
+
+def _classify_chart_followup_intent(question: str, chart_context: dict[str, Any] | None) -> str:
+    del chart_context
+    lowered = str(question or "").lower()
+    if any(token in lowered for token in ("why ", "why is", "why did", "explain", "driver", "spike", "drop")):
+        return "explain_point_or_segment"
+    if "roll up" in lowered or "summary by" in lowered:
+        return "roll_up"
+    if "drill" in lowered or "break this by" in lowered or re.search(r"\bby\s+[a-z]", lowered):
+        return "drill_down"
+    if any(token in lowered for token in ("exclude ", "without ", "remove ", "except ")):
+        return "remove_filter"
+    if any(token in lowered for token in ("only ", "for ", "where ", "filter ", "include ")):
+        return "add_filter"
+    if any(token in lowered for token in ("top ", "bottom ", "rank ", "highest ", "lowest ")):
+        return "rank_or_top_n"
+    if any(token in lowered for token in ("daily", "by day", "monthly", "by month", "weekly", "by week")):
+        return "change_grain"
+    if any(token in lowered for token in ("bar chart", "line chart", "pie chart", "split by", "share instead")):
+        return "change_chart_type"
+    return "regenerate_with_adjustment"
+
+
+def _requested_time_grain_from_question(question: str) -> str | None:
+    lowered = str(question or "").lower()
+    if "by day" in lowered or "daily" in lowered:
+        return "day"
+    if "by week" in lowered or "weekly" in lowered:
+        return "week"
+    if "by month" in lowered or "monthly" in lowered:
+        return "month"
+    return None
+
+
+def _requested_chart_type_from_question(question: str) -> tuple[str | None, str | None]:
+    lowered = str(question or "").lower()
+    if "stacked area" in lowered:
+        return "stacked_area", "show as stacked area chart"
+    if "area chart" in lowered or "area instead" in lowered:
+        return "area", "show as area chart"
+    if "donut chart" in lowered or "doughnut chart" in lowered or "donut instead" in lowered:
+        return "donut", "convert to donut chart"
+    if "horizontal bar" in lowered or "horizontal chart" in lowered:
+        return "horizontal_bar", "show as horizontal bar chart"
+    if "share instead" in lowered or "share chart" in lowered or "pie chart" in lowered or "pie instead" in lowered:
+        return "pie", "convert to share view"
+    if "stacked" in lowered:
+        return "stacked_bar", "show as stacked comparison"
+    if "grouped bar" in lowered or "clustered bar" in lowered or "clustered column" in lowered:
+        return "grouped_bar", "show as grouped comparison"
+    if "bar chart" in lowered or "bar instead" in lowered or "column chart" in lowered:
+        return "bar", "show as bar chart"
+    if "line chart" in lowered or "line instead" in lowered or "trend line" in lowered:
+        return "line", "show as line chart"
+    return None, None
+
+
+def _norm_followup_name(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _is_time_dimension_name(value: str | None) -> bool:
+    normalized = _norm_followup_name(value)
+    if not normalized:
+        return False
+    if normalized in {"date", "day", "week", "month", "quarter", "year", "period"}:
+        return True
+    return any(token in normalized for token in ("date", "day", "week", "month", "quarter", "year", "period"))
+
+
+def _hierarchy_level_sequences(hierarchies: list[dict[str, Any]] | None) -> list[list[str]]:
+    sequences: list[list[str]] = []
+    for item in hierarchies or []:
+        if not isinstance(item, dict):
+            continue
+        levels = [str(level).strip() for level in (item.get("levels") or []) if str(level).strip()]
+        if levels:
+            sequences.append(levels)
+    return sequences
+
+
+def _resolve_hierarchy_transition(
+    *,
+    current_dimensions: list[str],
+    requested_dimensions: list[str],
+    hierarchies: list[dict[str, Any]] | None,
+    allowed_dimensions: list[str],
+    direction: str,
+) -> tuple[list[str] | None, str | None]:
+    allowed_lookup = {_norm_followup_name(name): str(name) for name in (allowed_dimensions or []) if str(name).strip()}
+    time_dimensions = [str(name) for name in current_dimensions if _is_time_dimension_name(name)]
+    business_dimensions = [str(name) for name in current_dimensions if not _is_time_dimension_name(name)]
+    normalized_current = [_norm_followup_name(name) for name in business_dimensions if _norm_followup_name(name)]
+    normalized_requested = [_norm_followup_name(name) for name in requested_dimensions if _norm_followup_name(name)]
+    hierarchy_sequences = _hierarchy_level_sequences(hierarchies)
+    if not normalized_current:
+        return None, "invalid_chart_followup_dimension"
+
+    # First honor an explicitly requested valid hierarchy level.
+    for sequence in hierarchy_sequences:
+        norm_sequence = [_norm_followup_name(level) for level in sequence]
+        current_idx = next((idx for idx, name in enumerate(norm_sequence) if name in normalized_current), None)
+        if current_idx is None:
+            continue
+        for requested_name in normalized_requested:
+            if requested_name not in norm_sequence:
+                continue
+            requested_idx = norm_sequence.index(requested_name)
+            if direction == "down" and requested_idx > current_idx:
+                resolved = allowed_lookup.get(requested_name)
+                return (time_dimensions + [resolved] if resolved else None), None if resolved else "invalid_chart_followup_dimension"
+            if direction == "up" and requested_idx < current_idx:
+                resolved = allowed_lookup.get(requested_name)
+                return (time_dimensions + [resolved] if resolved else None), None if resolved else "invalid_chart_followup_dimension"
+            return None, "invalid_chart_followup_dimension"
+
+    # Otherwise move one level along a known hierarchy.
+    for sequence in hierarchy_sequences:
+        norm_sequence = [_norm_followup_name(level) for level in sequence]
+        current_idx = next((idx for idx, name in enumerate(norm_sequence) if name in normalized_current), None)
+        if current_idx is None:
+            continue
+        target_idx = current_idx + 1 if direction == "down" else current_idx - 1
+        if 0 <= target_idx < len(norm_sequence):
+            resolved = allowed_lookup.get(norm_sequence[target_idx])
+            if resolved:
+                return time_dimensions + [resolved], None
+        return None, "invalid_chart_followup_dimension"
+    return None, "invalid_chart_followup_dimension"
+
+
+def _chart_context_explicit_overrides(
+    *,
+    question: str,
+    chart_context: dict[str, Any] | None,
+    glossary: list[dict] | None,
+    hierarchies: list[dict[str, Any]] | None,
+    allowed_dimensions: list[str],
+    explicit_metrics: list[str] | None,
+    explicit_dimensions: list[str] | None,
+) -> tuple[list[str], list[str], dict[str, Any], dict[str, Any]]:
+    chart_context = chart_context or {}
+    selected_context = chart_context.get("selected_context") or {}
+    source_metrics = [str(item).strip() for item in (chart_context.get("metrics") or []) if str(item).strip()]
+    source_dimensions = [str(item).strip() for item in (chart_context.get("dimensions") or []) if str(item).strip()]
+    allowed_lookup = {_norm_followup_name(name): str(name) for name in (allowed_dimensions or []) if str(name).strip()}
+    metrics_out = [str(item).strip() for item in (explicit_metrics or []) if str(item).strip()] or source_metrics[:1]
+    dimensions_out = [str(item).strip() for item in (explicit_dimensions or []) if str(item).strip()] or list(source_dimensions)
+    intent = _classify_chart_followup_intent(question, chart_context)
+    warnings: list[str] = []
+    accepted: list[str] = []
+    rejected: list[str] = []
+    raw_plan_patch: dict[str, Any] = {}
+    requested_dims = _deterministic_dimensions_from_question(question, glossary, allowed_dimensions)
+    requested_grain = _requested_time_grain_from_question(question)
+    requested_chart_type, requested_chart_reason = _requested_chart_type_from_question(question)
+
+    if intent in {"drill_down", "roll_up"}:
+        transition_dims, transition_error = _resolve_hierarchy_transition(
+            current_dimensions=source_dimensions or dimensions_out,
+            requested_dimensions=requested_dims,
+            hierarchies=hierarchies,
+            allowed_dimensions=allowed_dimensions,
+            direction="down" if intent == "drill_down" else "up",
+        )
+        if transition_dims:
+            dimensions_out = transition_dims
+            if source_dimensions and transition_dims != source_dimensions:
+                action = "drilled down" if intent == "drill_down" else "rolled up"
+                accepted.append(f"{action} to {', '.join(transition_dims[:2])}")
+            else:
+                accepted.append(f"carried forward dimensions {', '.join(transition_dims[:2])}")
+        else:
+            rejected.append(transition_error or "invalid_chart_followup_dimension")
+    elif intent == "regenerate_with_adjustment":
+        resolved_requested_dims = [allowed_lookup.get(_norm_followup_name(name)) for name in requested_dims]
+        resolved_requested_dims = [name for name in resolved_requested_dims if name]
+        if resolved_requested_dims:
+            dimensions_out = resolved_requested_dims
+            if source_dimensions and resolved_requested_dims != source_dimensions:
+                accepted.append(f"replaced dimensions with {', '.join(resolved_requested_dims[:2])}")
+            else:
+                accepted.append(f"carried forward dimensions {', '.join(resolved_requested_dims[:2])}")
+        elif not dimensions_out and source_dimensions:
+            dimensions_out = source_dimensions[:1]
+            accepted.append(f"carried forward dimension {source_dimensions[0]}")
+    elif requested_dims and intent not in {"change_grain", "explain_point_or_segment", "change_chart_type"}:
+        resolved_requested_dims = [allowed_lookup.get(_norm_followup_name(name)) for name in requested_dims]
+        resolved_requested_dims = [name for name in resolved_requested_dims if name]
+        if resolved_requested_dims:
+            time_dimensions = [str(name) for name in source_dimensions if _is_time_dimension_name(name)]
+            business_dimensions = [str(name) for name in resolved_requested_dims if not _is_time_dimension_name(name)]
+            dimensions_out = list(dict.fromkeys(time_dimensions + business_dimensions)) or dimensions_out
+            if source_dimensions and dimensions_out != source_dimensions:
+                accepted.append(f"replaced dimensions with {', '.join(dimensions_out[:2])}")
+            else:
+                accepted.append(f"carried forward dimensions {', '.join(dimensions_out[:2])}")
+        else:
+            rejected.append("invalid_chart_followup_dimension")
+    elif not dimensions_out and source_dimensions:
+        dimensions_out = list(source_dimensions)
+        accepted.append(f"carried forward dimensions {', '.join(source_dimensions[:2])}")
+
+    if intent == "change_grain":
+        if requested_grain:
+            raw_plan_patch["time_grain"] = requested_grain
+            accepted.append(f"changed time grain to {requested_grain}")
+        else:
+            rejected.append("invalid_chart_followup_grain")
+
+    if intent == "change_chart_type":
+        if requested_chart_type:
+            raw_plan_patch["chart_intent"] = requested_chart_type
+            accepted.append(requested_chart_reason or f"requested chart type {requested_chart_type}")
+        else:
+            rejected.append("invalid_chart_followup_chart_type")
+
+    filter_hints: list[dict[str, Any]] = []
+    selected_category = selected_context.get("selected_category")
+    if selected_category and source_dimensions:
+        filter_hints.append(
+            {
+                "field": source_dimensions[-1],
+                "operator": "=",
+                "value": selected_category,
+                "value_type": "text",
+            }
+        )
+        accepted.append(f"added filter hint {source_dimensions[-1]} = {selected_category}")
+
+    selected_series = selected_context.get("selected_series")
+    if selected_series and len(source_dimensions) >= 2:
+        filter_hints.append(
+            {
+                "field": source_dimensions[-2],
+                "operator": "=",
+                "value": selected_series,
+                "value_type": "text",
+            }
+        )
+        accepted.append(f"added series filter hint {source_dimensions[-2]} = {selected_series}")
+
+    if selected_context.get("selected_time_value"):
+        time_field = next((dim for dim in source_dimensions if str(dim).lower() in {"process_date", "date", "period", "month", "process_month"}), None)
+        if time_field:
+            filter_hints.append(
+                {
+                    "field": time_field,
+                    "operator": "=",
+                    "value": selected_context.get("selected_time_value"),
+                    "value_type": "text",
+                }
+            )
+            accepted.append(f"added time filter hint {time_field} = {selected_context.get('selected_time_value')}")
+
+    if not source_metrics:
+        warnings.append("chart_followup_missing_source_metric")
+    if chart_context and not source_dimensions:
+        warnings.append("chart_followup_missing_source_dimensions")
+    if metrics_out and source_metrics and metrics_out[0] == source_metrics[0]:
+        accepted.insert(0, f"carried forward metric {source_metrics[0]}")
+    elif metrics_out:
+        accepted.insert(0, f"resolved metric {metrics_out[0]}")
+
+    if intent in {"explain_point_or_segment", "change_chart_type", "regenerate_with_adjustment"} or (not accepted and rejected):
+        warnings.append("chart_followup_replanned_from_scratch")
+    if rejected:
+        warnings.extend(rejected)
+
+    return metrics_out, dimensions_out, raw_plan_patch, {
+        "follow_up_intent": intent,
+        "source_chart_id": chart_context.get("source_chart_id"),
+        "selected_context": selected_context,
+        "filter_hints": filter_hints,
+        "source_metrics": source_metrics,
+        "source_dimensions": source_dimensions,
+        "requested_dimensions": dimensions_out,
+        "requested_chart_type": requested_chart_type,
+        "accepted_transformations": accepted,
+        "rejected_transformations": rejected,
+        "warnings": warnings,
+    }
+
+
+def _build_chart_followup_transformation_summary(
+    *,
+    validated_plan: dict[str, Any],
+    chart_followup_meta: dict[str, Any] | None,
+) -> list[str]:
+    meta = chart_followup_meta or {}
+    accepted = [str(item) for item in (meta.get("accepted_transformations") or []) if str(item).strip()]
+    if accepted:
+        return accepted
+    summary: list[str] = []
+    source_metrics = [str(item) for item in (meta.get("source_metrics") or []) if str(item).strip()]
+    source_dimensions = [str(item) for item in (meta.get("source_dimensions") or []) if str(item).strip()]
+    metric_name = str(validated_plan.get("metric_name") or "").strip()
+    dimensions = [str(item) for item in (validated_plan.get("dimensions") or []) if str(item).strip()]
+    if metric_name:
+        if source_metrics and metric_name == source_metrics[0]:
+            summary.append(f"carried forward metric {metric_name}")
+        elif source_metrics:
+            summary.append(f"replaced metric {source_metrics[0]} with {metric_name}")
+        else:
+            summary.append(f"resolved metric {metric_name}")
+    if source_dimensions and dimensions:
+        if dimensions == source_dimensions:
+            summary.append(f"carried forward dimensions {', '.join(dimensions[:2])}")
+        elif len(dimensions) == 1 and len(source_dimensions) == 1 and dimensions[0] != source_dimensions[0]:
+            summary.append(f"replaced dimension {source_dimensions[0]} with {dimensions[0]}")
+        else:
+            summary.append(f"resolved dimensions {', '.join(dimensions[:2])}")
+    elif dimensions:
+        summary.append(f"resolved dimensions {', '.join(dimensions[:2])}")
+    for flt in meta.get("filter_hints") or []:
+        if isinstance(flt, dict) and flt.get("field") and flt.get("value") not in (None, ""):
+            summary.append(f"added filter hint {flt.get('field')} {flt.get('operator') or '='} {flt.get('value')}")
+    return summary
+
+
+def _persist_chart_followup_lineage(
+    *,
+    chart_id: str | None,
+    response_payload: dict[str, Any],
+) -> None:
+    resolved_chart_id = str(chart_id or "").strip()
+    if not resolved_chart_id:
+        return
+    chart_followup = response_payload.get("chart_followup") or {}
+    source_chart_id = str(chart_followup.get("source_chart_id") or "").strip()
+    if not source_chart_id:
+        return
+    existing = get_chart_request(settings, resolved_chart_id) or {}
+    existing_query_payload = dict(existing.get("query_payload") or {})
+    followup_payload = {
+        "source_chart_id": source_chart_id,
+        "parent_chart_id": source_chart_id,
+        "derived_chart_id": resolved_chart_id,
+        "follow_up_intent": chart_followup.get("follow_up_intent"),
+        "selected_context": chart_followup.get("selected_context") or {},
+        "accepted_transformations": chart_followup.get("accepted_transformations") or [],
+        "rejected_transformations": chart_followup.get("rejected_transformations") or [],
+        "transformation_summary": chart_followup.get("transformation_summary") or [],
+        "warnings": chart_followup.get("warnings") or [],
+    }
+    merged_query_payload = {
+        **existing_query_payload,
+        "chart_followup": followup_payload,
+    }
+    update_chart_request(
+        settings,
+        resolved_chart_id,
+        query_payload=merged_query_payload,
+    )
+    create_chart_event(
+        settings,
+        resolved_chart_id,
+        "chart_followup_linked",
+        details=followup_payload,
+    )
 
 
 def _stream_openai_tokens(system_prompt: str, user_prompt: str) -> Iterator[str]:
@@ -7979,6 +8473,7 @@ def workspace_get_conversation_message_plan(conversation_id: str, message_id: st
         "validation_warnings": conversation_plan.get("validation_warnings") or [],
         "rejected_candidates": conversation_plan.get("rejected_candidates") or {},
         "compiled_sql_preview": conversation_plan.get("compiled_sql_preview") or row.get("sql_text"),
+        "chart_followup": conversation_plan.get("chart_followup") or ((row.get("chart_json") or {}).get("chart_followup") or {}),
     }
 
 
@@ -8145,7 +8640,7 @@ def workspace_override_memory(conversation_id: str, payload: dict) -> dict:
     "/workspace/conversations/{conversation_id}/messages",
     tags=["workspace"],
     summary="Send conversation message",
-    description="Canonical request field is `user_query`. Backward-compatible aliases accepted: `query`, `message_text`, `first_question`.",
+    description="Canonical request field is `user_query`. Backward-compatible aliases accepted: `query`, `message_text`, `first_question`. Optional chart-scoped follow-up fields such as `chart_id`, `selected_category`, and `selected_time_value` can be supplied to continue the same conversation in chart-followup mode.",
     openapi_extra={
         "requestBody": {
             "content": {
@@ -8163,6 +8658,64 @@ def workspace_override_memory(conversation_id: str, payload: dict) -> dict:
                             "summary": "Synchronous response",
                             "value": {
                                 "user_query": "Show production trend by plant for last 30 days",
+                                "resume_context": True,
+                                "stream": False,
+                            },
+                        },
+                        "chart_followup_carry_metric": {
+                            "summary": "Carry forward source metric from chart",
+                            "value": {
+                                "user_query": "Drill this into region",
+                                "chart_id": "chart_daily_sales_zone_01",
+                                "resume_context": True,
+                                "stream": False,
+                            },
+                        },
+                        "chart_followup_carry_dimension": {
+                            "summary": "Carry forward existing dimension context",
+                            "value": {
+                                "user_query": "Show the latest 6 months for this",
+                                "chart_id": "chart_monthly_target_sbu_01",
+                                "resume_context": True,
+                                "stream": False,
+                            },
+                        },
+                        "chart_followup_replace_dimension": {
+                            "summary": "Replace source dimension with requested one",
+                            "value": {
+                                "user_query": "Show this by region instead",
+                                "chart_id": "chart_monthly_target_sbu_01",
+                                "resume_context": True,
+                                "stream": False,
+                            },
+                        },
+                        "chart_followup_selected_category": {
+                            "summary": "Add selected-category filter before drill-down",
+                            "value": {
+                                "user_query": "Break this by plant",
+                                "chart_id": "chart_daily_sales_zone_01",
+                                "selected_category": "West Zone",
+                                "resume_context": True,
+                                "stream": False,
+                            },
+                        },
+                        "chart_followup_selected_time": {
+                            "summary": "Add selected-time filter before refinement",
+                            "value": {
+                                "user_query": "Break this by region",
+                                "chart_id": "chart_daily_sales_trend_01",
+                                "selected_time_value": "2026-02-01",
+                                "resume_context": True,
+                                "stream": False,
+                            },
+                        },
+                        "chart_followup_combined": {
+                            "summary": "Use both selected category and selected time",
+                            "value": {
+                                "user_query": "Drill this into plant and exclude Common",
+                                "chart_id": "chart_sales_region_month_01",
+                                "selected_category": "West Zone",
+                                "selected_time_value": "2026-02-01",
                                 "resume_context": True,
                                 "stream": False,
                             },
@@ -8200,7 +8753,55 @@ def workspace_override_memory(conversation_id: str, payload: dict) -> dict:
                                     },
                                     "context_used": {"resume_context": True, "run_id": "run_1a0f427c86ec"},
                                 },
-                            }
+                            },
+                            "sync_chart_followup_response": {
+                                "summary": "Chart-scoped follow-up response",
+                                "value": {
+                                    "conversation_id": "conv_6f0f0f",
+                                    "response": {
+                                        "chart_type": "bar",
+                                        "chart_title": "Daily Sales by Region",
+                                        "dashboard_title": "Market Performance Dashboard",
+                                        "sql": "SELECT ...",
+                                        "chart_followup": {
+                                            "mode": "chart_scoped",
+                                            "source_chart_id": "chart_daily_sales_zone_01",
+                                            "derived_chart_id": "chart_derived_region_01",
+                                            "follow_up_intent": "drill_down",
+                                            "selected_context": {
+                                                "selected_category": "West Zone"
+                                            },
+                                            "filter_hints": [
+                                                {
+                                                    "field": "Zone_Name",
+                                                    "operator": "=",
+                                                    "value": "West Zone",
+                                                    "value_type": "text"
+                                                }
+                                            ],
+                                            "accepted_transformations": [
+                                                "carried forward metric daily_sales",
+                                                "replaced dimensions with Region_Name",
+                                                "added filter hint Zone_Name = West Zone"
+                                            ],
+                                            "rejected_transformations": [],
+                                            "transformation_summary": [
+                                                "carried forward metric daily_sales",
+                                                "replaced dimensions with Region_Name",
+                                                "added filter hint Zone_Name = West Zone"
+                                            ]
+                                        }
+                                    },
+                                    "context_used": {
+                                        "resume_context": True,
+                                        "run_id": "run_1a0f427c86ec",
+                                        "chart_followup": {
+                                            "mode": "chart_scoped",
+                                            "source_chart_id": "chart_daily_sales_zone_01"
+                                        }
+                                    }
+                                },
+                            },
                         }
                     },
                 }
@@ -8223,6 +8824,19 @@ def workspace_send_message(conversation_id: str, payload: dict):
     resume_context = payload.get("resume_context")
     if resume_context is None:
         resume_context = True
+    chart_followup_context = _extract_chart_followup_context(payload)
+    chart_context = _resolve_chart_conversation_context(
+        tenant_id=conversation["tenant_id"],
+        domain_id=conversation["domain_id"],
+        chart_id=chart_followup_context.get("chart_id"),
+    )
+    if chart_context and chart_followup_context:
+        chart_context = {
+            **chart_context,
+            "selected_context": {
+                key: value for key, value in chart_followup_context.items() if key != "chart_id"
+            },
+        }
 
     user_msg = create_workspace_message(
         settings,
@@ -8232,13 +8846,15 @@ def workspace_send_message(conversation_id: str, payload: dict):
         run_id=conversation["run_id"],
         sender="user",
         message_text=user_query,
+        chart_json=chart_followup_context or None,
     )
     memory = get_workspace_memory(settings, conversation_id)
-    effective_question = user_query
+    effective_question = _chart_context_question_suffix(user_query, chart_context, chart_followup_context)
     if resume_context and memory and memory.get("summary_text"):
         effective_question = f"{user_query}\n\nConversation context: {memory.get('summary_text')}"
+        effective_question = _chart_context_question_suffix(effective_question, chart_context, chart_followup_context)
     logger.info(
-        "workspace.message.start | conversation_id=%s tenant=%s domain=%s run_id=%s stream=%s resume_context=%s memory_present=%s user_query=%s",
+        "workspace.message.start | conversation_id=%s tenant=%s domain=%s run_id=%s stream=%s resume_context=%s memory_present=%s chart_id=%s user_query=%s",
         conversation_id,
         conversation["tenant_id"],
         conversation["domain_id"],
@@ -8246,6 +8862,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
         bool(stream),
         bool(resume_context),
         bool(memory),
+        (chart_context or {}).get("source_chart_id"),
         user_query,
     )
 
@@ -8274,6 +8891,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 "chart_payload": response_payload.get("chart_payload"),
                 "data": response_payload.get("data"),
                 "conversation_plan": response_payload.get("conversation_plan"),
+                "chart_followup": response_payload.get("chart_followup"),
             },
             summary_json=summary_json,
             inference_json=inference_json,
@@ -8292,6 +8910,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 "dimensions": response_payload.get("dimensions") or [],
                 "sql_present": bool(response_payload.get("sql")),
                 "conversation_plan": response_payload.get("conversation_plan"),
+                "last_chart_followup": response_payload.get("chart_followup"),
             },
         )
         return {"assistant_message": assistant_msg, "memory": new_memory}
@@ -8302,6 +8921,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
             domain_id=conversation["domain_id"],
             run_id=conversation["run_id"],
             question=effective_question,
+            chart_context=chart_context,
             metrics=payload.get("metrics") or [],
             dimensions=payload.get("dimensions") or [],
             limit=int(payload.get("limit") or 200),
@@ -8315,6 +8935,10 @@ def workspace_send_message(conversation_id: str, payload: dict):
                     assistant_text = collected
             except Exception:
                 logger.exception("workspace.message.llm_stream_failed")
+        _persist_chart_followup_lineage(
+            chart_id=response_payload.get("chart_id"),
+            response_payload=response_payload,
+        )
         persisted = _persist_assistant(
             response_payload=response_payload,
             assistant_text=assistant_text,
@@ -8327,6 +8951,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
             "run_id": conversation["run_id"],
             "streamed_tokens": False,
             "llm_stream_used": bool(_workspace_llm_stream_enabled()),
+            "chart_followup": chart_context,
         }
         return {
             "conversation_id": conversation_id,
@@ -8351,6 +8976,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 domain_id=conversation["domain_id"],
                 run_id=conversation["run_id"],
                 question=effective_question,
+                chart_context=chart_context,
                 metrics=payload.get("metrics") or [],
                 dimensions=payload.get("dimensions") or [],
                 limit=int(payload.get("limit") or 200),
@@ -8374,6 +9000,10 @@ def workspace_send_message(conversation_id: str, payload: dict):
                     if not token:
                         continue
                     yield f"data: {json.dumps({'event': 'token', 'text': token + ' '})}\n\n"
+            _persist_chart_followup_lineage(
+                chart_id=response_payload.get("chart_id"),
+                response_payload=response_payload,
+            )
             persisted = _persist_assistant(
                 response_payload=response_payload,
                 assistant_text=assistant_text.strip(),
@@ -8386,6 +9016,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 "run_id": conversation["run_id"],
                 "streamed_tokens": streamed,
                 "llm_stream_used": bool(_workspace_llm_stream_enabled()),
+                "chart_followup": chart_context,
             }
             result = {
                 "response": response_payload,

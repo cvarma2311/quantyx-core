@@ -135,6 +135,7 @@ def update_chart_request(
     chart_id: str,
     *,
     status: str | None = None,
+    query_payload: dict | None = None,
     sql: str | None = None,
     params: list | None = None,
     rows_json: list | dict | None = None,
@@ -149,6 +150,9 @@ def update_chart_request(
     if status is not None:
         updates.append("status = %s")
         values.append(status)
+    if query_payload is not None:
+        updates.append("query_payload = %s::jsonb")
+        values.append(_serialize_payload(query_payload))
     if sql is not None:
         updates.append("sql = %s")
         values.append(sql)

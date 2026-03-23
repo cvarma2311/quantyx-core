@@ -91,6 +91,14 @@ DEFAULT_BREAKDOWN_PRIORITY_TOKENS = [
 BREAKDOWN_FALLBACK_LIMIT = 3
 _CONTEXT_SECTION_HEADERS = {"metric definition", "business formula", "reference sql", "semantic rules"}
 _KPI_FAMILY_PREFIXES = ("total", "normal", "break", "overtime")
+_ROLE_TARGETS: dict[str, tuple[int, int]] = {
+    "executive_trends": (2, 4),
+    "breakdowns": (2, 4),
+    "target_pace": (1, 3),
+    "benchmark_comparison": (1, 3),
+    "quality_rate": (1, 3),
+    "supporting_diagnostics": (1, 4),
+}
 _SQL_IDENTIFIER_IGNORE = {
     "sum",
     "avg",
@@ -1950,6 +1958,202 @@ def _contextual_dashboard_title(metric_name: str | None, table_name: str | None)
     return f"{metric_label} Performance Dashboard"
 
 
+def _metric_family(metric_name: str | None, metric_intent: str | None = None) -> str:
+    name = str(metric_name or "").strip().lower()
+    intent = str(metric_intent or "").strip().lower()
+    if "benchmark" in name or "industry" in name or "comparison" in name:
+        return "benchmark"
+    if "target" in name:
+        return "target"
+    if "pace" in name:
+        return "pace"
+    if "sales" in name or "revenue" in name:
+        return "sales"
+    if "production" in name:
+        return "production"
+    if "productivity" in name:
+        return "productivity"
+    if intent in {"quality", "rate"}:
+        return "quality"
+    if intent in {"utilization", "productivity"}:
+        return intent
+    if intent in {"volume", "backlog"}:
+        return intent
+    return "performance"
+
+
+def _build_dashboard_theme(
+    *,
+    metrics: list[dict[str, Any]],
+    profiling: dict[str, Any],
+    chart_plan: list[dict[str, Any]] | None = None,
+    domain_id: str | None = None,
+    context_text: str | None = None,
+) -> dict[str, Any]:
+    chart_plan = [item for item in (chart_plan or []) if isinstance(item, dict)]
+    metric_items = [item for item in (metrics or []) if isinstance(item, dict)]
+    prof_tables = [item for item in (profiling.get("tables") or []) if isinstance(item, dict)]
+    eligible_tables = [
+        str(table.get("name") or "").strip()
+        for table in prof_tables
+        if str(table.get("name") or "").strip() and (table.get("eligible_numeric_columns") or table.get("time_columns"))
+    ]
+    selected_tables = [str(item.get("table") or "").strip() for item in chart_plan if str(item.get("table") or "").strip()]
+    table_counts: dict[str, int] = {}
+    for table_name in selected_tables:
+        table_counts[table_name] = table_counts.get(table_name, 0) + 1
+    family_counts: dict[str, int] = {}
+    for item in chart_plan or metric_items:
+        family = _metric_family(item.get("metric") or item.get("metric_name"), item.get("metric_intent"))
+        family_counts[family] = family_counts.get(family, 0) + 1
+    ordered_families = [name for name, _count in sorted(family_counts.items(), key=lambda item: (-item[1], item[0]))]
+    primary_theme = ordered_families[0] if ordered_families else (str(domain_id or "performance").strip().lower() or "performance")
+    table_contributions = [
+        {"table": table_name, "chart_count": count}
+        for table_name, count in sorted(table_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return {
+        "primary_theme": primary_theme,
+        "subthemes": ordered_families[:6],
+        "eligible_tables": eligible_tables,
+        "selected_tables": list(dict.fromkeys(selected_tables)),
+        "table_contributions": table_contributions,
+        "kpi_family_contributions": [
+            {"family": family, "count": count}
+            for family, count in sorted(family_counts.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "chart_count": len(chart_plan),
+        "context_excerpt": str(context_text or "")[:300],
+    }
+
+
+def _theme_dashboard_title(theme: dict[str, Any], domain_id: str | None = None) -> str:
+    primary = str(theme.get("primary_theme") or "").strip().lower()
+    families = [str(item).strip().lower() for item in (theme.get("subthemes") or []) if str(item).strip()]
+    family_set = set(families)
+    if {"sales", "target", "pace"} & family_set:
+        if {"sales", "target", "pace"} <= family_set:
+            return "Sales, Targets, and Pace Overview"
+        if {"sales", "target"} <= family_set:
+            return "Sales and Target Performance Overview"
+        if {"sales", "benchmark"} <= family_set:
+            return "Sales and Benchmark Performance Overview"
+    if {"production", "productivity"} <= family_set:
+        return "Production and Productivity Overview"
+    if "benchmark" in family_set:
+        return "Benchmark and Performance Overview"
+    if primary:
+        return f"{_pretty_name(primary)} Overview"
+    domain_label = _pretty_name(domain_id)
+    return f"{domain_label or 'Performance'} Overview"
+
+
+def build_dashboard_theme_from_charts(
+    charts: list[dict[str, Any]],
+    *,
+    metrics: list[dict[str, Any]],
+    profiling: dict[str, Any],
+    domain_id: str | None = None,
+    context_text: str | None = None,
+) -> dict[str, Any]:
+    return _build_dashboard_theme(
+        metrics=metrics,
+        profiling=profiling,
+        chart_plan=[item for item in (charts or []) if isinstance(item, dict) and not item.get("skipped")],
+        domain_id=domain_id,
+        context_text=context_text,
+    )
+
+
+def deterministic_dashboard_title(theme: dict[str, Any], domain_id: str | None = None) -> str:
+    return _theme_dashboard_title(theme, domain_id)
+
+
+def _chart_roles(chart: dict[str, Any]) -> tuple[str, list[str]]:
+    metric_name = str(chart.get("metric") or chart.get("metric_name") or "").strip()
+    metric_intent = str(chart.get("metric_intent") or "").strip().lower()
+    intent = str(chart.get("intent") or "").strip().lower()
+    family = _metric_family(metric_name, metric_intent)
+    related: list[str] = []
+    if family in {"target", "pace"} or any(token in metric_name.lower() for token in ("target", "pace")):
+        primary = "target_pace"
+        related.append("executive_trends")
+    elif family == "benchmark" or intent in {"comparison", "benchmark_comparison"}:
+        primary = "benchmark_comparison"
+        related.append("executive_trends")
+    elif family in {"quality", "productivity", "utilization"} or metric_intent in {"quality", "rate", "productivity", "utilization"}:
+        primary = "quality_rate"
+        related.append("supporting_diagnostics")
+    elif intent == "trend":
+        primary = "executive_trends"
+    elif intent in {"breakdown", "share"}:
+        primary = "breakdowns"
+    else:
+        primary = "supporting_diagnostics"
+    if intent in {"multi_series", "join_breakdown"} and "supporting_diagnostics" not in related and primary != "supporting_diagnostics":
+        related.append("supporting_diagnostics")
+    if intent in {"breakdown", "share"} and "breakdowns" not in related and primary != "breakdowns":
+        related.append("breakdowns")
+    if intent == "trend" and "executive_trends" not in related and primary != "executive_trends":
+        related.append("executive_trends")
+    return primary, related
+
+
+def _selection_reason(chart: dict[str, Any]) -> str:
+    intent = str(chart.get("intent") or "").strip().lower()
+    metric = str(chart.get("metric") or chart.get("metric_name") or "metric").strip()
+    table = str(chart.get("table") or "").strip()
+    if intent == "trend":
+        grain = str(chart.get("time_grain") or "").strip().lower()
+        return f"Selected as a {grain or 'time'} trend for {metric} from {table or 'the scoped dataset'}."
+    if intent in {"breakdown", "share"}:
+        category = str(chart.get("category_column") or "category").strip()
+        return f"Selected to show category contribution for {metric} by {category}."
+    if intent in {"multi_series", "join_breakdown"}:
+        return f"Selected as supporting diagnostic context for {metric}."
+    return f"Selected to broaden dashboard coverage for {metric}."
+
+
+def build_story_sections(charts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    role_to_section = {
+        "executive_trends": "Executive overview",
+        "breakdowns": "Key business breakdowns",
+        "target_pace": "Target and pace tracking",
+        "benchmark_comparison": "Benchmark or industry comparison",
+        "quality_rate": "Quality and rate signals",
+        "supporting_diagnostics": "Supporting diagnostic context",
+    }
+    section_order = [
+        "Executive overview",
+        "Key business breakdowns",
+        "Target and pace tracking",
+        "Benchmark or industry comparison",
+        "Quality and rate signals",
+        "Supporting diagnostic context",
+    ]
+    grouped: dict[str, list[str]] = {}
+    for chart in [item for item in charts if isinstance(item, dict) and not item.get("skipped")]:
+        chart_id = str(chart.get("chart_id") or "").strip()
+        if not chart_id:
+            continue
+        primary_role = str(chart.get("primary_role") or "").strip() or "supporting_diagnostics"
+        section_name = role_to_section.get(primary_role, "Supporting diagnostic context")
+        grouped.setdefault(section_name, []).append(chart_id)
+    sections: list[dict[str, Any]] = []
+    for section_name in section_order:
+        chart_ids = grouped.get(section_name) or []
+        if not chart_ids:
+            continue
+        sections.append(
+            {
+                "section": section_name,
+                "chart_ids": chart_ids,
+                "summary": f"{section_name} contains {len(chart_ids)} chart{'s' if len(chart_ids) != 1 else ''}.",
+            }
+        )
+    return sections
+
+
 def _contextual_chart_title(
     *,
     intent: str | None,
@@ -1991,6 +2195,8 @@ def build_dashboard_spec(
     metrics: list[dict[str, Any]],
     profiling: dict[str, Any],
     domain_id: str | None = None,
+    chart_plan: list[dict[str, Any]] | None = None,
+    context_text: str | None = None,
 ) -> dict[str, Any]:
     charts = []
     view_suggestions = []
@@ -2138,9 +2344,22 @@ def build_dashboard_spec(
                 "category_column": category_col,
             }
         )
-    dashboard_title = _contextual_dashboard_title(metric_name, table_name)
+    dashboard_theme = _build_dashboard_theme(
+        metrics=metrics,
+        profiling=profiling,
+        chart_plan=chart_plan,
+        domain_id=domain_id,
+        context_text=context_text,
+    )
+    dashboard_title = _theme_dashboard_title(dashboard_theme, domain_id)
     return {
         "title": dashboard_title,
+        "dashboard_theme": dashboard_theme,
+        "dashboard_title_reason": "Derived from dashboard KPI families, selected chart coverage, and cross-table contribution rather than a single table name.",
+        "dashboard_title_sources": {
+            "tables": dashboard_theme.get("selected_tables") or dashboard_theme.get("eligible_tables") or [],
+            "kpi_families": [item.get("family") for item in (dashboard_theme.get("kpi_family_contributions") or []) if item.get("family")],
+        },
         "charts": charts,
         "view_suggestions": view_suggestions,
         "story": {
@@ -2348,37 +2567,9 @@ def select_charts(
     min_charts: int = 4,
     max_charts: int = 8,
     domain_id: str | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not candidates:
-        return []
-    # score candidates
-    scored = []
-    for cand in candidates:
-        if cand.get("skipped"):
-            continue
-        score = 0
-        if cand.get("intent") == "trend":
-            score += 3
-            if cand.get("time_grain") == "day":
-                score += 2
-            elif cand.get("time_grain") == "month":
-                score += 2
-        if cand.get("intent") == "share":
-            score += 2
-        if cand.get("intent") == "breakdown":
-            score += 2
-        if cand.get("intent") == "multi_series":
-            score += 3
-        if cand.get("metric_expr"):
-            score += 1
-        if cand.get("category_column"):
-            score += 1
-        if cand.get("chart_source") == "llm_proposed":
-            score += 1
-        scored.append((score, cand))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    selected: list[dict[str, Any]] = []
-    seen = set()
+        return [], {"role_targets": _ROLE_TARGETS, "missing_roles": list(_ROLE_TARGETS), "low_value_chart_count": 0}
 
     def _chart_key(cand: dict[str, Any]) -> tuple[Any, ...]:
         return (
@@ -2390,30 +2581,94 @@ def select_charts(
             cand.get("time_grain"),
         )
 
+    def _group_key(cand: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            cand.get("table"),
+            cand.get("metric"),
+            cand.get("intent"),
+            cand.get("time_grain"),
+            cand.get("category_column"),
+        )
+
+    def _base_score(cand: dict[str, Any]) -> float:
+        score = 0.0
+        intent = str(cand.get("intent") or "").strip().lower()
+        primary_role, related_roles = _chart_roles(cand)
+        if intent == "trend":
+            score += 3.5
+            if cand.get("time_grain") == "day":
+                score += 1.5
+            elif cand.get("time_grain") == "month":
+                score += 1.5
+        elif intent == "multi_series":
+            score += 2.75
+        elif intent in {"breakdown", "join_breakdown"}:
+            score += 2.25
+        elif intent == "share":
+            score += 1.75
+        if cand.get("metric_expr"):
+            score += 1.0
+        if cand.get("category_column"):
+            score += 0.75
+        if cand.get("chart_source") == "llm_proposed":
+            score += 0.5
+        if primary_role in {"executive_trends", "target_pace", "benchmark_comparison"}:
+            score += 0.5
+        score += 0.15 * len(related_roles)
+        return score
+
+    def _redundancy_penalty(cand: dict[str, Any], selected_items: list[dict[str, Any]]) -> float:
+        penalty = 0.0
+        primary_role, _related_roles = _chart_roles(cand)
+        family = _metric_family(cand.get("metric"), cand.get("metric_intent"))
+        for existing in selected_items:
+            existing_role = str(existing.get("primary_role") or "")
+            existing_family = str(existing.get("kpi_family") or _metric_family(existing.get("metric"), existing.get("metric_intent")))
+            if _group_key(existing) == _group_key(cand):
+                penalty += 4.0
+            if existing.get("table") == cand.get("table") and existing.get("metric") == cand.get("metric") and existing_role == primary_role:
+                penalty += 1.5
+            if existing.get("table") == cand.get("table") and existing.get("category_column") == cand.get("category_column") and existing.get("time_grain") == cand.get("time_grain"):
+                penalty += 0.9
+            if existing_family == family and existing_role == primary_role:
+                penalty += 0.45
+        return penalty
+
+    pool: list[dict[str, Any]] = []
+    for cand in candidates:
+        if cand.get("skipped"):
+            continue
+        item = dict(cand)
+        primary_role, related_roles = _chart_roles(item)
+        item["primary_role"] = primary_role
+        item["related_roles"] = related_roles
+        item["kpi_family"] = _metric_family(item.get("metric"), item.get("metric_intent"))
+        item["_base_score"] = _base_score(item)
+        pool.append(item)
+    pool.sort(key=lambda item: (float(item.get("_base_score") or 0.0), str(item.get("title") or "")), reverse=True)
+
+    selected: list[dict[str, Any]] = []
+    seen = set()
+    role_counts = {role: 0 for role in _ROLE_TARGETS}
+    low_value_chart_count = 0
+
     def _try_add(cand: dict[str, Any]) -> bool:
         key = _chart_key(cand)
         if key in seen:
             return False
-        if cand.get("intent") in {"breakdown", "join_breakdown"}:
-            for existing in selected:
-                if (
-                    existing.get("intent") in {"breakdown", "join_breakdown"}
-                    and existing.get("table") == cand.get("table")
-                    and existing.get("metric") == cand.get("metric")
-                    and existing.get("category_column") == cand.get("category_column")
-                ):
-                    return False
-        if cand.get("intent") == "share":
-            for existing in selected:
-                if existing.get("intent") == "share" and existing.get("table") == cand.get("table") and existing.get("metric") == cand.get("metric"):
-                    return False
+        penalty = _redundancy_penalty(cand, selected)
+        effective_score = float(cand.get("_base_score") or 0.0) - penalty
+        if penalty >= 4.0:
+            return False
+        if len(selected) >= min_charts and effective_score < 1.0:
+            return False
+        cand["_effective_score"] = round(effective_score, 3)
         seen.add(key)
         selected.append(cand)
+        role_counts[str(cand.get("primary_role") or "supporting_diagnostics")] = role_counts.get(
+            str(cand.get("primary_role") or "supporting_diagnostics"), 0
+        ) + 1
         return True
-
-    trend_count = 0
-    breakdown_count = 0
-    share_count = 0
 
     required_trends = [
         (metric_name, time_grain)
@@ -2422,7 +2677,7 @@ def select_charts(
     ]
 
     for required_metric, required_grain in required_trends:
-        for score, cand in scored:
+        for cand in pool:
             intent = cand.get("intent")
             if str(cand.get("metric") or "").strip().lower() != required_metric:
                 continue
@@ -2431,33 +2686,81 @@ def select_charts(
             if str(cand.get("time_grain") or "").strip().lower() != required_grain:
                 continue
             if _try_add(cand):
-                trend_count += 1
                 break
 
-    for score, cand in scored:
-        intent = cand.get("intent")
-        if trend_count < 4 and intent in {"trend", "multi_series"}:
-            if _try_add(cand):
-                trend_count += 1
-        elif intent == "share" and share_count < 1:
-            if _try_add(cand):
-                share_count += 1
-        elif breakdown_count < 4 and intent in {"breakdown", "join_breakdown"}:
-            if _try_add(cand):
-                breakdown_count += 1
-        if len(selected) >= max_charts:
-            break
-
-    for score, cand in scored:
+    # Ensure broader table coverage before filling with additional charts from the same table.
+    table_best: dict[str, dict[str, Any]] = {}
+    for cand in pool:
+        table_name = str(cand.get("table") or "").strip()
+        if not table_name or table_name in table_best:
+            continue
+        table_best[table_name] = cand
+    for table_name, cand in table_best.items():
         if len(selected) >= max_charts:
             break
         _try_add(cand)
+
+    # Role-target selection. Missing roles fall back to remaining roles without failing selection.
+    for role, (target_min, _target_max) in _ROLE_TARGETS.items():
+        if len(selected) >= max_charts:
+            break
+        if role_counts.get(role, 0) >= target_min:
+            continue
+        role_candidates = [cand for cand in pool if str(cand.get("primary_role") or "") == role]
+        for cand in role_candidates:
+            if len(selected) >= max_charts or role_counts.get(role, 0) >= target_min:
+                break
+            _try_add(cand)
+
+    for cand in pool:
+        role = str(cand.get("primary_role") or "supporting_diagnostics")
+        target_max = _ROLE_TARGETS.get(role, (0, max_charts))[1]
+        if len(selected) >= max_charts:
+            break
+        if role_counts.get(role, 0) >= target_max:
+            continue
+        _try_add(cand)
+
+    for cand in pool:
+        if len(selected) >= max_charts:
+            break
+        _try_add(cand)
+
     if len(selected) < min_charts:
-        # pad with remaining candidates
-        for score, cand in scored:
+        for cand in pool:
             if cand in selected:
                 continue
             selected.append(cand)
             if len(selected) >= min_charts:
                 break
-    return selected
+
+    table_counts: dict[str, int] = {}
+    for cand in selected:
+        table_name = str(cand.get("table") or "").strip()
+        if table_name:
+            table_counts[table_name] = table_counts.get(table_name, 0) + 1
+    ranked_tables = {
+        table_name: idx + 1
+        for idx, (table_name, _count) in enumerate(sorted(table_counts.items(), key=lambda item: (-item[1], item[0])))
+    }
+    enriched: list[dict[str, Any]] = []
+    for cand in selected:
+        item = dict(cand)
+        item["selection_reason"] = _selection_reason(item)
+        item["table_contribution_rank"] = ranked_tables.get(str(item.get("table") or "").strip())
+        if float(item.get("_effective_score") or item.get("_base_score") or 0.0) < 1.0:
+            low_value_chart_count += 1
+        enriched.append(item)
+    role_candidates_available = {
+        role: sum(1 for cand in pool if str(cand.get("primary_role") or "") == role)
+        for role in _ROLE_TARGETS
+    }
+    diagnostics = {
+        "role_targets": {role: {"min": cfg[0], "max": cfg[1]} for role, cfg in _ROLE_TARGETS.items()},
+        "role_counts": role_counts,
+        "role_candidates_available": role_candidates_available,
+        "missing_roles": [role for role, count in role_candidates_available.items() if count == 0],
+        "low_value_chart_count": low_value_chart_count,
+        "selected_count": len(enriched),
+    }
+    return enriched, diagnostics

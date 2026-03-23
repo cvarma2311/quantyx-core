@@ -112,6 +112,12 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 36. **Phase 39: LLM-First Workspace Conversation Query Interpretation and Safe Compilation**
    - Make workspace conversation query understanding LLM-first, then validate and compile deterministically so filters, dimensions, chart intent, and SQL stay aligned with the user question.
 
+37. **Phase 40: Context-Driven Cross-Table Dashboard Composition and Titling**
+   - Make dashboard title generation and dashboard composition derive from the full KPI/chart context across all scoped tables, not from a single picked table, and allow broader high-value chart coverage beyond the current small-chart cap.
+
+38. **Phase 41: Chart Conversation, Drill-Down, and Follow-Up Visual Analytics**
+   - Make every chart conversational so users can ask follow-up questions, apply filters, drill into dimensions, and get new SQL-backed charts derived from the selected chart context.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -133,3 +139,5 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 37 depends on Phases 35 and 36 and extends the same LLM-first, validation-backed approach to KPI-family derivation, chart proposal, and broad dashboard composition.
 - Phase 38 depends on Phases 24/34/35/36/37 and adds anomaly investigation, multi-hypothesis why-analysis, and action intelligence over persisted semantic and raw-evidence artifacts.
 - Phase 39 depends on Phases 24/31/34/36/37 and hardens workspace conversation query interpretation with LLM-first plan extraction, deterministic validation, and safe SQL/chart compilation.
+- Phase 40 depends on Phases 27/31/35/36/37/39 and broadens dashboard composition from single-table heuristics to context-driven, cross-table dashboard intelligence with improved title synthesis and larger, value-ranked chart sets.
+- Phase 41 depends on Phases 24/31/33/34/39/40 and extends workspace conversation into chart-scoped follow-up analysis, safe SQL refinement, drill-down charts, and chart-aware artifact persistence.

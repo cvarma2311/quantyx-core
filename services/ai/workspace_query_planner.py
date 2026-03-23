@@ -571,7 +571,7 @@ def validate_workspace_query_plan(
         for item in rejected_dimensions:
             logger.info("workspace.query_plan.rejected_dimension | dimension=%s detail_intent=%s", item, detail_intent)
     chart_type = raw_plan.get("chart_intent") or ("grouped_bar" if len(bound_dimensions) >= 2 else "bar")
-    if len(bound_dimensions) >= 2 and chart_type not in {"grouped_bar", "table", "bar"}:
+    if len(bound_dimensions) >= 2 and chart_type not in {"grouped_bar", "stacked_bar", "line", "area", "stacked_area", "table", "bar"}:
         warnings.append(f"chart_intent_fallback:{chart_type}->grouped_bar")
         chart_type = "grouped_bar"
     if detail_intent:
@@ -698,8 +698,10 @@ def build_workspace_chart(
     metric_name: str | None,
     dimensions: list[str],
     response_mode: str | None = None,
+    preferred_chart_type: str | None = None,
 ) -> tuple[str | None, dict[str, Any] | None, list[str]]:
     warnings: list[str] = []
+    requested = str(preferred_chart_type or "").strip().lower()
     if response_mode == "table_only":
         warnings.append("chart_intent_fallback:table_only->table")
         return "table", None, warnings
@@ -707,6 +709,18 @@ def build_workspace_chart(
         warnings.append("chart_intent_fallback:insufficient_chart_inputs->table")
         return "table", None, warnings
     if len(dimensions) == 1:
+        first_values = [row.get(dimensions[0]) for row in rows[:10]]
+        is_time_series = any(_is_date_like(value) for value in first_values if value is not None)
+        if requested in {"line", "area", "stacked_area", "bar", "horizontal_bar"}:
+            if requested in {"line", "area", "stacked_area"} and not is_time_series:
+                warnings.append("chart_type_transform_rejected:line_requires_time_dimension")
+            else:
+                return requested, build_chart_payload(requested, rows, metric_name, dimensions), warnings
+        if requested in {"pie", "donut"}:
+            if is_time_series:
+                warnings.append("chart_type_transform_rejected:pie_requires_categorical_dimension")
+            else:
+                return requested, build_chart_payload(requested, rows, metric_name, dimensions), warnings
         chart_type = infer_chart_type(dimensions, rows, [metric_name])
         if not chart_type:
             warnings.append("chart_intent_fallback:unknown_single_dimension_shape->table")
@@ -719,6 +733,12 @@ def build_workspace_chart(
     first_values = [row.get(first_dim) for row in rows[:10]]
     if any(_is_date_like(value) for value in first_values if value is not None):
         chart_type = "line"
+        if requested in {"bar", "grouped_bar", "stacked_bar"}:
+            chart_type = requested
+        elif requested in {"area", "stacked_area"}:
+            chart_type = requested
+        elif requested in {"pie", "donut", "horizontal_bar"}:
+            warnings.append("chart_type_transform_rejected:pie_requires_single_categorical_dimension")
         return chart_type, build_chart_payload(chart_type, rows, metric_name, dimensions), warnings
     series_names = [str(value) for value in dict.fromkeys(row.get(second_dim) for row in rows if row.get(second_dim) is not None)]
     if not series_names:
@@ -731,23 +751,9 @@ def build_workspace_chart(
         if category not in grouped_rows:
             grouped_rows[category] = {"category": category}
         grouped_rows[category][series_name] = row.get(metric_name)
-    return "bar", {
-        "chart_type": "bar",
-        "chart_payload": {
-            "root": {"useTheme": "Animated"},
-            "chart": {"type": "XYChart", "panX": False, "panY": False},
-            "xAxis": {"type": "CategoryAxis", "categoryField": "category"},
-            "yAxis": {"type": "ValueAxis"},
-            "series": [
-                {
-                    "type": "ColumnSeries",
-                    "name": series_name,
-                    "valueYField": series_name,
-                    "categoryXField": "category",
-                }
-                for series_name in series_names
-            ],
-            "legend": {"type": "Legend"},
-        },
-        "data": list(grouped_rows.values()),
-    }, warnings
+    if requested in {"grouped_bar", "stacked_bar", "bar"}:
+        chosen = "grouped_bar" if requested in {"grouped_bar", "bar"} else "stacked_bar"
+        return chosen, build_chart_payload(chosen, rows, metric_name, dimensions), warnings
+    if requested in {"pie", "donut", "horizontal_bar", "line", "area", "stacked_area"}:
+        warnings.append("chart_type_transform_rejected:requested_shape_incompatible_with_multi_series_breakdown")
+    return "grouped_bar", build_chart_payload("grouped_bar", rows, metric_name, dimensions), warnings
