@@ -63,9 +63,18 @@ def purge_tenant_data(
                 "quantyx_table_profile_artifacts",
                 "quantyx_join_registry",
                 "quantyx_model_registry",
+                "quantyx_anomaly_records",
+                "quantyx_anomaly_hypotheses",
+                "quantyx_anomaly_actions",
+                "quantyx_anomaly_dashboard_links",
             ]
             # Delete children before parents to avoid FK violations.
             deletion_order = [
+                "quantyx_anomaly_actions",
+                "quantyx_anomaly_hypotheses",
+                "quantyx_anomaly_dashboard_links",
+                "quantyx_anomaly_records",
+                "quantyx_anomaly_investigations",
                 "quantyx_workspace_conversation_memory",
                 "quantyx_workspace_messages",
                 "quantyx_workspace_conversations",

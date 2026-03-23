@@ -5,6 +5,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from html import escape
 import json
 import os
+from pathlib import Path
 import re
 import time
 import traceback
@@ -40,14 +41,28 @@ from services.ai.agentic_agents import (
     build_dashboard_spec,
 )
 from services.ai.semantic_graph_store import persist_semantic_graph, persist_dashboard_spec
-from services.ai.views import create_views_from_schema, create_joined_views
+from services.ai.anomaly_detection import detect_agentic_anomalies
+from services.ai.anomaly_detection import rank_high_signal_investigative_areas
+from services.ai.anomaly_store import (
+    create_anomaly_action,
+    create_anomaly_dashboard_link,
+    create_anomaly_hypothesis,
+    create_anomaly_investigation,
+    create_anomaly_record,
+    update_anomaly_record,
+    update_anomaly_investigation,
+)
+from services.ai.anomaly_dashboard import build_anomaly_dashboard_spec
+from services.ai.views import create_views_from_schema, create_joined_views, extract_schema_table_names
 from services.ai.charts_store import create_chart_request, update_chart_request
-from services.ai.charts import build_chart_payload
+from services.ai.charts import build_chart_payload, infer_chart_type
 from services.ai.db import run_query, execute_non_query
 from services.ai.quality_gate import evaluate_quality_report
 from services.ai.metrics_registry import upsert_metric
 from services.ai.onboarding.models_registry import upsert_fact, upsert_dimension
 from services.ai.semantic_contracts import store_semantic_contract
+from services.ai.workspace_store import create_workspace_message, get_workspace_memory, upsert_workspace_memory
+from services.ai.semantic_layer.pack_loader import load_pack
 from services.ai.agentic_artifacts_registry import (
     persist_schema_graph_artifact,
     persist_table_profile_artifact,
@@ -109,6 +124,7 @@ from services.ai.rollups import create_rollup, build_rollup_table, update_rollup
 
 _POSTPROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=max(2, int(os.getenv("AGENTIC_POSTPROCESS_MAX_WORKERS", "4"))))
 _RUN_POSTPROCESS_FUTURES: dict[str, list[Future]] = {}
+_ANOMALY_PROMPTS_DIR = Path(__file__).parent / "prompts" / "anomaly_investigation"
 
 
 def _stream_sample_limit() -> int:
@@ -240,6 +256,379 @@ def _llm_enabled(settings) -> bool:
     return bool(getattr(settings, "openai_api_key", None))
 
 
+def _load_anomaly_prompt(name: str) -> str:
+    return (_ANOMALY_PROMPTS_DIR / name).read_text(encoding="utf-8")
+
+
+def _anomaly_llm_enabled(settings) -> bool:
+    mode = os.getenv("AGENTIC_ANOMALY_LLM_MODE", "auto").lower()
+    if mode in {"off", "false", "0"}:
+        return False
+    if mode in {"on", "true", "1"}:
+        return bool(getattr(settings, "openai_api_key", None))
+    return bool(getattr(settings, "openai_api_key", None))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    try:
+        value = int(str(os.getenv(name, default)).strip())
+    except Exception:
+        value = int(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
+    try:
+        value = float(str(os.getenv(name, default)).strip())
+    except Exception:
+        value = float(default)
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+def _llm_json_response(
+    settings,
+    *,
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    model_env_key: str,
+    timeout_env_key: str,
+) -> dict[str, Any] | None:
+    if not _anomaly_llm_enabled(settings):
+        return None
+    model = os.getenv(model_env_key, getattr(settings, "openai_model", "gpt-4o-mini"))
+    timeout_sec = int(os.getenv(timeout_env_key, "45"))
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload, default=str)},
+                ],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            },
+            default=str,
+        ).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        return json.loads(body["choices"][0]["message"]["content"])
+    except Exception:
+        logging.getLogger(__name__).warning("agentic.anomaly_llm_failed", exc_info=True)
+        return None
+
+
+def _llm_plan_anomaly_investigation(
+    settings,
+    *,
+    domain_id: str | None,
+    context_text: str | None,
+    dashboard_spec: dict[str, Any],
+    investigation_summary: dict[str, Any],
+    anomalies_payload: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    system_prompt = _load_anomaly_prompt("plan.md")
+    return _llm_json_response(
+        settings,
+        system_prompt=system_prompt,
+        user_payload={
+            "domain_id": domain_id,
+            "context_text": str(context_text or "")[:8000],
+            "dashboard": {
+                "title": dashboard_spec.get("dashboard_title") or dashboard_spec.get("title"),
+                "charts": [
+                    {
+                        "title": chart.get("title"),
+                        "metric": chart.get("metric"),
+                        "intent": chart.get("intent"),
+                        "type": chart.get("type"),
+                    }
+                    for chart in (dashboard_spec.get("charts") or [])[:10]
+                ],
+                "story": dashboard_spec.get("story") or {},
+                "insights": (dashboard_spec.get("insights") or [])[:10],
+            },
+            "investigation_summary": investigation_summary,
+            "anomalies": anomalies_payload,
+        },
+        model_env_key="AGENTIC_ANOMALY_PLAN_MODEL",
+        timeout_env_key="AGENTIC_ANOMALY_PLAN_TIMEOUT_SEC",
+    )
+
+
+def _validate_llm_prioritized_areas(
+    anomalies_payload: list[dict[str, Any]],
+    llm_plan: dict[str, Any] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    if not llm_plan:
+        return {}
+    anomaly_lookup = {str(item.get("anomaly_id") or ""): item for item in anomalies_payload if str(item.get("anomaly_id") or "").strip()}
+    validated: dict[str, list[dict[str, Any]]] = {}
+    for area in [item for item in (llm_plan.get("prioritized_investigative_areas") or []) if isinstance(item, dict)]:
+        anomaly_id = str(area.get("anomaly_id") or "").strip()
+        dimension = str(area.get("dimension") or "").strip()
+        value = area.get("value")
+        if not anomaly_id or anomaly_id not in anomaly_lookup or not dimension or value in {None, ""}:
+            continue
+        candidate = anomaly_lookup[anomaly_id]
+        table_name = str(candidate.get("table_name") or "").strip()
+        allowed_dimensions = {
+            str(item.get("dimension") or "").strip()
+            for item in (candidate.get("high_signal_investigative_areas") or [])
+            if str(item.get("dimension") or "").strip()
+        }
+        fallback_rows = []
+        for item in (candidate.get("high_signal_investigative_areas") or []):
+            if str(item.get("dimension") or "").strip() == dimension:
+                fallback_rows = [row for row in (item.get("rows") or []) if isinstance(row, dict)]
+                break
+        allowed_values = {str(row.get("value")) for row in fallback_rows if row.get("value") is not None}
+        if allowed_dimensions and dimension not in allowed_dimensions:
+            continue
+        if allowed_values and str(value) not in allowed_values:
+            continue
+        validated.setdefault(anomaly_id, []).append(
+            {
+                "dimension": dimension,
+                "value": value,
+                "table_name": table_name,
+                "rationale": area.get("rationale"),
+                "confidence": area.get("confidence"),
+                "selection_source": "llm",
+            }
+        )
+    return validated
+
+
+def _allowed_fact_tables(profiling_stats: dict[str, Any]) -> set[str]:
+    allowed: set[str] = set()
+    for table in (profiling_stats.get("tables") or []):
+        table_name = str(table.get("name") or "").strip()
+        if not table_name:
+            continue
+        if table.get("eligible_numeric_columns") and table.get("time_columns"):
+            allowed.add(table_name)
+            allowed.add(f"fact_{table_name}")
+    return allowed
+
+
+def _profiling_table_map(profiling_stats: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(table.get("name") or "").strip().lower(): table
+        for table in (profiling_stats.get("tables") or [])
+        if str(table.get("name") or "").strip()
+    }
+
+
+def _approved_join_keys(table_profile: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for item in table_profile.get("candidate_keys") or []:
+        column = str(item.get("column") or "").strip().lower()
+        uniqueness = float(item.get("uniqueness_ratio") or 0.0)
+        if column and uniqueness >= 0.5:
+            keys.add(column)
+    for column in (table_profile.get("categorical_columns") or []):
+        col = str(column or "").strip().lower()
+        if col.endswith("_id") or col.endswith("_code") or col in {"sap_id", "plant_id", "location_id"}:
+            keys.add(col)
+    for column in (table_profile.get("time_columns") or []):
+        col = str(column or "").strip().lower()
+        if col in {"process_date", "business_date", "event_date", "date"}:
+            keys.add(col)
+    return keys
+
+
+def _extract_table_aliases(sql: str) -> dict[str, str]:
+    alias_map: dict[str, str] = {}
+    pattern = re.compile(
+        r"\b(?:from|join)\s+(?:[a-zA-Z_][\w]*\.)?(?P<table>[a-zA-Z_][\w]*)"
+        r"(?:\s+(?:as\s+)?(?P<alias>[a-zA-Z_][\w]*))?",
+        re.IGNORECASE,
+    )
+    reserved = {"on", "where", "group", "order", "limit", "left", "right", "inner", "outer", "full", "cross"}
+    for match in pattern.finditer(sql):
+        table = str(match.group("table") or "").strip().lower()
+        alias = str(match.group("alias") or "").strip().lower()
+        alias_map[table] = table
+        if alias and alias not in reserved:
+            alias_map[alias] = table
+    return alias_map
+
+
+def _validate_join_safety(sql: str, profiling_stats: dict[str, Any], referenced_tables: set[str]) -> tuple[bool, str]:
+    lower = sql.lower()
+    if " cross join " in f" {lower} ":
+        return False, "cross_join_not_allowed"
+    from_match = re.search(r"\bfrom\b(?P<body>.+?)(?:\bwhere\b|\bgroup\b|\border\b|\blimit\b|$)", lower, re.IGNORECASE | re.DOTALL)
+    if from_match and "," in from_match.group("body"):
+        return False, "comma_join_not_allowed"
+    if len(referenced_tables) <= 1:
+        return True, ""
+    if len(referenced_tables) > 2:
+        return False, "too_many_joined_tables"
+
+    alias_map = _extract_table_aliases(sql)
+    profiling_map = _profiling_table_map(profiling_stats)
+    join_patterns = re.findall(
+        r"\bjoin\s+(?:[a-zA-Z_][\w]*\.)?(?P<table>[a-zA-Z_][\w]*)"
+        r"(?:\s+(?:as\s+)?(?P<alias>[a-zA-Z_][\w]*))?\s+on\s+(?P<condition>.+?)(?=\b(?:join|where|group|order|limit)\b|$)",
+        sql,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not join_patterns:
+        return False, "missing_explicit_join_condition"
+    for table_name, alias, condition in join_patterns:
+        table = str(table_name or "").strip().lower()
+        alias_key = str(alias or table).strip().lower() or table
+        if table not in profiling_map:
+            return False, "join_references_non_profiled_table"
+        conditions = re.findall(
+            r"([a-zA-Z_][\w]*)\.([a-zA-Z_][\w]*)\s*=\s*([a-zA-Z_][\w]*)\.([a-zA-Z_][\w]*)",
+            str(condition or ""),
+            re.IGNORECASE,
+        )
+        if not conditions:
+            return False, "only_equality_joins_allowed"
+        approved = False
+        for left_alias, left_col, right_alias, right_col in conditions:
+            left_table = alias_map.get(str(left_alias).lower())
+            right_table = alias_map.get(str(right_alias).lower())
+            if not left_table or not right_table:
+                continue
+            left_keys = _approved_join_keys(profiling_map.get(left_table, {}))
+            right_keys = _approved_join_keys(profiling_map.get(right_table, {}))
+            left_name = str(left_col).strip().lower()
+            right_name = str(right_col).strip().lower()
+            if left_name == right_name and left_name in (left_keys & right_keys):
+                approved = True
+                break
+        if not approved:
+            return False, f"join_keys_not_approved:{table}:{alias_key}"
+    return True, ""
+
+
+def _validate_select_query(sql: str, allowed_tables: set[str], profiling_stats: dict[str, Any]) -> tuple[bool, str]:
+    text = str(sql or "").strip().rstrip(";")
+    lower = text.lower()
+    if not text:
+        return False, "empty_query"
+    if ";" in text:
+        return False, "multiple_statements_not_allowed"
+    if not (lower.startswith("select") or lower.startswith("with")):
+        return False, "only_select_queries_allowed"
+    blocked = [" insert ", " update ", " delete ", " drop ", " alter ", " create ", " truncate ", " grant ", " revoke "]
+    padded = f" {lower} "
+    if any(token in padded for token in blocked):
+        return False, "mutation_sql_not_allowed"
+    referenced = set(re.findall(r"(?:from|join)\s+(?:[a-zA-Z_][\w]*\.)?([a-zA-Z_][\w]*)", lower))
+    if not referenced:
+        return False, "no_fact_table_references_found"
+    if any(table not in {t.lower() for t in allowed_tables} for table in referenced):
+        return False, "query_references_non_allowed_table"
+    joins_ok, join_reason = _validate_join_safety(text, profiling_stats, referenced)
+    if not joins_ok:
+        return False, join_reason
+    return True, text
+
+
+def _execute_llm_evidence_queries(
+    settings,
+    *,
+    schema_name: str,
+    profiling_stats: dict[str, Any],
+    evidence_queries: list[dict[str, Any]],
+    max_queries: int = 5,
+    row_limit: int = 200,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    allowed_tables = _allowed_fact_tables(profiling_stats)
+    executed: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    max_queries = max(int(max_queries), 0)
+    row_limit = max(int(row_limit), 1)
+    for index, item in enumerate(evidence_queries):
+        if not isinstance(item, dict):
+            continue
+        query_id = str(item.get("query_id") or f"query_{len(executed) + len(rejected) + 1}")
+        if index >= max_queries:
+            rejected.append({"query_id": query_id, "title": item.get("title"), "reason": "max_query_limit_exceeded"})
+            continue
+        sql = str(item.get("sql") or "").strip()
+        valid, reason_or_sql = _validate_select_query(sql, allowed_tables, profiling_stats)
+        if not valid:
+            rejected.append({"query_id": query_id, "title": item.get("title"), "reason": reason_or_sql})
+            continue
+        safe_sql = reason_or_sql.rstrip(";")
+        if " limit " not in safe_sql.lower():
+            safe_sql = f"{safe_sql} LIMIT {int(row_limit)}"
+        try:
+            rows = run_query(settings, safe_sql, [])
+            executed.append(
+                {
+                    "query_id": query_id,
+                    "title": item.get("title"),
+                    "reason": item.get("reason"),
+                    "sql": safe_sql,
+                    "row_count": len(rows),
+                    "rows": rows[: min(len(rows), min(row_limit, 50))],
+                }
+            )
+        except Exception as exc:
+            rejected.append({"query_id": query_id, "title": item.get("title"), "reason": str(exc)})
+    return executed, rejected
+
+
+def _llm_summarize_anomaly_investigation(
+    settings,
+    *,
+    domain_id: str | None,
+    context_text: str | None,
+    dashboard_spec: dict[str, Any],
+    investigation_summary: dict[str, Any],
+    anomalies_payload: list[dict[str, Any]],
+    executed_queries: list[dict[str, Any]],
+    rejected_queries: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    system_prompt = _load_anomaly_prompt("synthesize.md")
+    return _llm_json_response(
+        settings,
+        system_prompt=system_prompt,
+        user_payload={
+            "domain_id": domain_id,
+            "context_text": str(context_text or "")[:8000],
+            "dashboard": {
+                "title": dashboard_spec.get("dashboard_title") or dashboard_spec.get("title"),
+                "story": dashboard_spec.get("story") or {},
+                "insights": (dashboard_spec.get("insights") or [])[:10],
+            },
+            "investigation_summary": investigation_summary,
+            "anomalies": anomalies_payload,
+            "evidence_query_results": executed_queries,
+            "rejected_queries": rejected_queries,
+        },
+        model_env_key="AGENTIC_ANOMALY_SYNTHESIS_MODEL",
+        timeout_env_key="AGENTIC_ANOMALY_SYNTHESIS_TIMEOUT_SEC",
+    )
+
+
 def _llm_extract_text(
     settings,
     *,
@@ -297,6 +686,316 @@ def _llm_extract_text(
     except Exception:
         logging.getLogger(__name__).warning("agentic.%s_llm_failed", kind, exc_info=True)
     return None
+
+
+def _persist_anomaly_workspace_context(
+    settings,
+    *,
+    state: dict[str, Any],
+    investigation_id: str,
+    summary_text: str | None,
+    anomaly_ids: list[str],
+    hypothesis_ids: list[str],
+    action_ids: list[str],
+    dashboard_id: str | None,
+) -> None:
+    conversation_id = str(state.get("conversation_id") or "").strip()
+    tenant_id = str(state.get("tenant_id") or "").strip()
+    domain_id = str(state.get("domain_id") or "").strip()
+    run_id = str(state.get("run_id") or state.get("deployment_run_id") or "").strip()
+    if not conversation_id or not tenant_id or not domain_id or not run_id:
+        return
+    summary = str(summary_text or "Anomaly investigation artifacts are available.").strip()
+    payload = {
+        "artifact_kind": "anomaly_investigation",
+        "investigation_id": investigation_id,
+        "anomaly_ids": anomaly_ids,
+        "hypothesis_ids": hypothesis_ids,
+        "action_ids": action_ids,
+        "dashboard_id": dashboard_id,
+    }
+    create_workspace_message(
+        settings,
+        conversation_id=conversation_id,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        sender="system",
+        message_text=summary,
+        summary_json=payload,
+        inference_json={"summary": summary, **payload},
+    )
+    existing_memory = get_workspace_memory(settings, conversation_id) or {}
+    memory_json = dict(existing_memory.get("memory_json") or {})
+    investigations = [item for item in (memory_json.get("anomaly_investigations") or []) if isinstance(item, dict)]
+    investigations = [item for item in investigations if str(item.get("investigation_id") or "") != investigation_id]
+    investigations.insert(
+        0,
+        {
+            "investigation_id": investigation_id,
+            "summary_text": summary,
+            "anomaly_ids": anomaly_ids[:10],
+            "hypothesis_ids": hypothesis_ids[:10],
+            "action_ids": action_ids[:10],
+            "dashboard_id": dashboard_id,
+        },
+    )
+    memory_json["anomaly_investigations"] = investigations[:10]
+    upsert_workspace_memory(
+        settings,
+        conversation_id=conversation_id,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        summary_text=summary,
+        memory_json=memory_json,
+    )
+
+
+def _normalize_confidence_score(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    mapping = {
+        "high": 0.85,
+        "medium": 0.6,
+        "med": 0.6,
+        "low": 0.35,
+        "strong": 0.8,
+        "moderate": 0.6,
+        "weak": 0.3,
+    }
+    if text in mapping:
+        return mapping[text]
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_evidence_coverage_summary(
+    expected_tables: list[str],
+    fact_view_results: list[dict[str, Any]],
+    joined_views: list[dict[str, Any]],
+) -> dict[str, Any]:
+    expected = [str(v) for v in expected_tables if str(v).strip()]
+    fact_results = [item for item in fact_view_results if isinstance(item, dict)]
+    fact_created = [item for item in fact_results if item.get("status") == "created"]
+    fact_failed = [item for item in fact_results if item.get("status") != "created"]
+    join_created = [item for item in joined_views if isinstance(item, dict) and item.get("status") == "created"]
+    join_failed = [item for item in joined_views if isinstance(item, dict) and item.get("status") != "created"]
+    coverage_ok = not fact_failed and not join_failed and len(fact_created) == len(expected)
+    return {
+        "status": "passed" if coverage_ok else "failed",
+        "expected_fact_tables": expected,
+        "expected_fact_count": len(expected),
+        "fact_view_created_count": len(fact_created),
+        "fact_view_failure_count": len(fact_failed),
+        "join_view_created_count": len(join_created),
+        "join_view_failure_count": len(join_failed),
+        "fact_views": fact_results,
+        "joined_views": joined_views,
+        "failure_reasons": [
+            item
+            for item in [
+                "fact_view_creation_failed" if fact_failed else None,
+                "joined_view_creation_failed" if join_failed else None,
+                "missing_expected_fact_views" if len(fact_created) < len(expected) else None,
+            ]
+            if item
+        ],
+    }
+
+
+def _load_domain_policies(domain_id: str | None) -> list[dict[str, Any]]:
+    if not domain_id:
+        return []
+    try:
+        pack = load_pack(f"packs/{domain_id}")
+    except Exception:
+        return []
+    policies = (pack.get("policies") or {}).get("policies") or []
+    return [item for item in policies if isinstance(item, dict)]
+
+
+def _table_column_case_map(table_profile: dict[str, Any]) -> dict[str, str]:
+    names: list[str] = []
+    for key in ("columns", "time_columns", "categorical_columns", "numeric_columns", "eligible_numeric_columns"):
+        for item in (table_profile.get(key) or []):
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("column_name")
+            else:
+                name = item
+            if name:
+                names.append(str(name))
+    mapping: dict[str, str] = {}
+    for name in names:
+        mapping.setdefault(name.lower(), name)
+    return mapping
+
+
+def _rewrite_policy_sql(fragment: str, table_alias: str, table_profile: dict[str, Any]) -> str:
+    text = str(fragment or "").strip()
+    if not text:
+        return ""
+    case_map = _table_column_case_map(table_profile)
+    for lower_name, actual_name in sorted(case_map.items(), key=lambda item: len(item[0]), reverse=True):
+        pattern = re.compile(rf"\b{re.escape(lower_name)}\b", re.IGNORECASE)
+        text = pattern.sub(f"{table_alias}.{_qident(actual_name)}", text)
+    return text
+
+
+def _dashboard_policy_filters(domain_id: str | None, table_alias: str, table_profile: dict[str, Any]) -> list[str]:
+    filters: list[str] = []
+    case_map = _table_column_case_map(table_profile)
+    for policy in _load_domain_policies(domain_id):
+        applies_to = str(policy.get("applies_to") or "").strip().lower()
+        if applies_to not in {"", "all", "chart"}:
+            continue
+        filter_def = policy.get("filter") or {}
+        if str(filter_def.get("operator") or "").strip().lower() != "custom_sql":
+            continue
+        column_name = str(filter_def.get("column") or "").strip().lower()
+        if column_name and column_name not in case_map:
+            continue
+        for item in filter_def.get("values") or []:
+            rendered = _rewrite_policy_sql(str(item or ""), table_alias, table_profile)
+            if rendered:
+                filters.append(rendered)
+    return filters
+
+
+def _chart_output_validation(
+    *,
+    chart_title: str,
+    chart_intent: str,
+    chart_type: str,
+    category_col: str | None,
+    dimensions: list[str],
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    title_lower = str(chart_title or "").strip().lower()
+    has_category_dimension = "category" in {str(v).strip().lower() for v in dimensions}
+    if not rows:
+        return {"status": "rejected", "reason": "no_rows_returned"}
+    if chart_intent in {"breakdown", "share", "join_breakdown", "multi_series"} and category_col and not has_category_dimension:
+        return {"status": "rejected", "reason": "missing_category_dimension"}
+    if chart_intent == "trend" and not has_category_dimension and " by " in title_lower:
+        return {"status": "rejected", "reason": "misleading_title_category"}
+    if chart_type == "line" and chart_intent != "multi_series" and has_category_dimension:
+        return {"status": "rejected", "reason": "unexpected_category_dimension_for_line_trend"}
+    return {"status": "passed", "reason": "eligible_metric"}
+
+
+def _fallback_anomaly_investigation_payload(
+    *,
+    anomalies_payload: list[dict[str, Any]],
+    high_signal_areas_by_anomaly: dict[str, list[dict[str, Any]]],
+    executed_queries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    prioritized = [item for item in anomalies_payload if isinstance(item, dict)][:3]
+    if not prioritized:
+        return {
+            "summary_text": "No strong anomaly investigation narrative could be generated.",
+            "hypotheses": [],
+            "actions": [],
+            "insights": [],
+            "dashboard_suggestions": [],
+        }
+
+    first = prioritized[0]
+    first_anomaly_id = str(first.get("anomaly_id") or "").strip()
+    first_metric = str(first.get("metric_name") or first.get("raw_signal_name") or "signal")
+    first_evidence = first.get("evidence") or {}
+    summary_text = (
+        f"{first_metric} shows the strongest recent anomaly at {first_evidence.get('period')}, "
+        f"with actual {first_evidence.get('actual')} versus baseline {first_evidence.get('baseline')}."
+    )
+    hypotheses: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    insights: list[str] = []
+    dashboard_suggestions: list[dict[str, Any]] = []
+
+    for idx, item in enumerate(prioritized, start=1):
+        anomaly_id = str(item.get("anomaly_id") or "").strip()
+        metric_name = str(item.get("metric_name") or item.get("raw_signal_name") or f"signal_{idx}")
+        evidence = item.get("evidence") or {}
+        period = evidence.get("period")
+        actual = evidence.get("actual")
+        baseline = evidence.get("baseline")
+        deviation = evidence.get("deviation")
+        confidence = _normalize_confidence_score(evidence.get("confidence_score"), 0.45)
+        areas = high_signal_areas_by_anomaly.get(anomaly_id) or []
+        top_area = areas[0] if areas else None
+        driver_summary = None
+        if top_area:
+            driver_summary = (
+                f"{top_area.get('dimension')}={top_area.get('value') if top_area.get('value') is not None else top_area.get('top_value')}"
+            )
+        explanation = (
+            f"{metric_name} deviated materially during {period}. "
+            f"Actual was {actual} against a baseline of {baseline}, creating deviation {deviation}."
+        )
+        if driver_summary:
+            explanation += f" The most concentrated explanatory slice is {driver_summary}."
+        hypotheses.append(
+            {
+                "title": f"{metric_name} anomaly requires operational review",
+                "explanation": explanation,
+                "confidence": round(max(confidence, 0.4), 4),
+                "anomaly_ids": [anomaly_id] if anomaly_id else [],
+                "likely_drivers": [driver_summary] if driver_summary else [],
+                "supporting_evidence": {
+                    "period": period,
+                    "actual": actual,
+                    "baseline": baseline,
+                    "deviation": deviation,
+                    "high_signal_area": top_area,
+                },
+                "validation_step": (
+                    f"Compare {metric_name} against plant, zone, and operational hour slices for {period}."
+                ),
+            }
+        )
+        actions.append(
+            {
+                "action_type": "prescriptive",
+                "action_text": (
+                    f"Inspect the leading drivers behind {metric_name} for {period}"
+                    + (f", starting with {driver_summary}." if driver_summary else ".")
+                ),
+                "confidence": round(max(confidence, 0.35), 4),
+                "priority": "high" if idx == 1 else "medium",
+                "linked_hypothesis_titles": [f"{metric_name} anomaly requires operational review"],
+                "recommended_owner": "operations_analyst",
+            }
+        )
+        insights.append(
+            f"{metric_name} moved from baseline {baseline} to actual {actual} during {period}."
+            + (f" Top concentration is in {driver_summary}." if driver_summary else "")
+        )
+        dashboard_suggestions.append(
+            {
+                "suggestion_id": f"fallback_chart_{idx}",
+                "title": f"{metric_name} anomaly evidence",
+                "section": "chart",
+                "priority": idx,
+                "summary": f"Show evidence for {metric_name} deviation around {period}.",
+                "query_id": str(executed_queries[idx - 1].get("query_id") or "") if idx - 1 < len(executed_queries) else None,
+                "include": True,
+            }
+        )
+    return {
+        "summary_text": summary_text,
+        "hypotheses": hypotheses,
+        "actions": actions,
+        "insights": insights,
+        "dashboard_suggestions": dashboard_suggestions,
+    }
 
 
 def _chart_rerank_enabled(settings) -> bool:
@@ -1792,13 +2491,16 @@ def run_agentic_workflow(
 
     logger = logging.getLogger(__name__)
     logger.info(
-        "agentic.workflow.start | run_id=%s tenant=%s domain=%s schema=%s connection_id=%s database=%s",
+        "agentic.workflow.start | run_id=%s tenant=%s domain=%s schema=%s connection_id=%s database=%s anomaly_enabled=%s anomaly_dashboard_enabled=%s anomaly_llm_mode=%s",
         run_id,
         initial_state.get("tenant_id"),
         initial_state.get("domain_id"),
         initial_state.get("schema_name"),
         initial_state.get("connection_id"),
         initial_state.get("database_name"),
+        _env_bool("AGENTIC_ANOMALY_DETECTION_ENABLED", True),
+        _env_bool("AGENTIC_ANOMALY_DASHBOARD_ENABLED", True),
+        os.getenv("AGENTIC_ANOMALY_LLM_MODE", "auto"),
     )
 
     graph = StateGraph(dict)
@@ -2820,6 +3522,7 @@ def run_agentic_workflow(
             10,
         )
         enriched_charts = []
+        runtime_chart_rejections: list[dict[str, Any]] = []
         profiling_map = {t.get("name"): t for t in (state.get("profiling_stats", {}).get("tables") or [])}
         join_edges = state.get("join_edges") or []
         for chart in charts_spec:
@@ -2829,6 +3532,17 @@ def run_agentic_workflow(
             time_col = chart.get("time_column")
             category_col = chart.get("category_column")
             chart_intent = str(chart.get("intent") or "").strip().lower()
+            if (chart.get("type") or "bar") == "line" and chart_intent != "multi_series":
+                category_col = None
+            if not category_col and chart_intent in {"breakdown", "join_breakdown", "share", "multi_series"}:
+                for edge in join_edges:
+                    if edge.get("left_table") == table_name and edge.get("relationship") in {
+                        "many_to_one",
+                        "one_to_many",
+                    }:
+                        category_col = edge.get("left_key")
+                        break
+            chart["category_column"] = category_col
             chart_title = chart.get("title")
             if not chart_title:
                 if chart_intent == "trend":
@@ -2920,17 +3634,10 @@ def run_agentic_workflow(
             if chart_type == "line" and chart_intent != "multi_series":
                 category_col = None
 
-            # choose a better dimension using join metadata if none provided
-            if not category_col and chart_intent in {"breakdown", "join_breakdown", "share", "multi_series"}:
-                for edge in join_edges:
-                    if edge.get("left_table") == table_name and edge.get("relationship") in {
-                        "many_to_one",
-                        "one_to_many",
-                    }:
-                        category_col = edge.get("left_key")
-                        break
-
             if table_ref and metric_expr:
+                table_profile = profiling_map.get(table_name) or {}
+                policy_filters = _dashboard_policy_filters(state.get("domain_id"), table_alias, table_profile)
+                where_clause = f" WHERE {' AND '.join(policy_filters)} " if policy_filters else " "
                 if chart_type == "line":
                     if time_col:
                         time_grain = str(chart.get("time_grain") or "month").strip().lower()
@@ -2945,7 +3652,8 @@ def run_agentic_workflow(
                                 f"SELECT {dim_expr} AS {dim_alias}, "
                                 f"{table_alias}.{_qident(category_col)} AS {cat_alias}, "
                                 f"{metric_expr} AS \"{metric_name}\" "
-                                f"FROM {sql_from} "
+                                f"FROM {sql_from}"
+                                f"{where_clause}"
                                 f"GROUP BY {dim_alias}, {cat_alias} "
                                 f"ORDER BY {dim_alias} DESC "
                                 f"LIMIT {line_multi_limit}"
@@ -2955,7 +3663,8 @@ def run_agentic_workflow(
                             sql = (
                                 f"SELECT {dim_expr} AS {dim_alias}, "
                                 f"{metric_expr} AS \"{metric_name}\" "
-                                f"FROM {sql_from} "
+                                f"FROM {sql_from}"
+                                f"{where_clause}"
                                 f"GROUP BY {dim_alias} "
                                 f"ORDER BY {dim_alias} DESC "
                                 f"LIMIT {line_single_limit}"
@@ -2966,7 +3675,8 @@ def run_agentic_workflow(
                         sql = (
                             f"SELECT {table_alias}.{_qident(category_col)} AS {dim_alias}, "
                             f"{metric_expr} AS \"{metric_name}\" "
-                            f"FROM {sql_from} "
+                            f"FROM {sql_from}"
+                            f"{where_clause}"
                             f"GROUP BY {dim_alias} "
                             f"ORDER BY \"{metric_name}\" DESC "
                             f"LIMIT {category_limit}"
@@ -2980,7 +3690,8 @@ def run_agentic_workflow(
                         sql = (
                             f"SELECT {table_alias}.{_qident(dim_col)} AS {dim_alias}, "
                             f"{metric_expr} AS \"{metric_name}\" "
-                            f"FROM {sql_from} "
+                            f"FROM {sql_from}"
+                            f"{where_clause}"
                             f"GROUP BY {dim_alias} "
                             f"ORDER BY \"{metric_name}\" DESC "
                             f"LIMIT {limit}"
@@ -2991,6 +3702,7 @@ def run_agentic_workflow(
                     sql = (
                         f"SELECT {metric_expr} AS \"{metric_name}\" "
                         f"FROM {sql_from}"
+                        f"{where_clause}"
                     )
                     dimensions = []
                     logger.info(
@@ -3036,6 +3748,38 @@ def run_agentic_workflow(
                 sql,
                 len(rows),
             )
+            semantic_validation = _chart_output_validation(
+                chart_title=chart_title,
+                chart_intent=chart_intent,
+                chart_type=chart_type,
+                category_col=category_col,
+                dimensions=dimensions,
+                rows=rows,
+            )
+            if semantic_validation.get("status") != "passed":
+                runtime_chart_rejections.append(
+                    {
+                        "title": chart_title,
+                        "reason": semantic_validation.get("reason"),
+                        "table": table_name,
+                        "metric": metric_name,
+                    }
+                )
+                enriched_charts.append(
+                    {
+                        **chart,
+                        "chart_type": chart_type,
+                        "dimensions": dimensions,
+                        "metric_name": metric_name,
+                        "sql": sql,
+                        "rows_count": len(rows),
+                        "dashboard_title": dashboard_title,
+                        "semantic_validation": semantic_validation,
+                        "skipped": True,
+                        "reason": semantic_validation.get("reason"),
+                    }
+                )
+                continue
 
             chart_id = create_chart_request(
                 settings,
@@ -3104,10 +3848,7 @@ def run_agentic_workflow(
                         "chart_payload": payload.get("chart_payload"),
                         "chart_data": payload.get("data"),
                         "dashboard_title": dashboard_title,
-                        "semantic_validation": {
-                            "status": "passed",
-                            "reason": "eligible_metric",
-                        },
+                        "semantic_validation": semantic_validation,
                     }
                 )
             else:
@@ -3119,6 +3860,16 @@ def run_agentic_workflow(
                 )
                 enriched_charts.append({**chart, "dashboard_title": dashboard_title})
 
+        quality_report = dict(state.get("quality_report") or {})
+        existing_chart_rejections = [item for item in (quality_report.get("chart_rejections") or []) if isinstance(item, dict)]
+        if runtime_chart_rejections:
+            quality_report["chart_rejections"] = [*existing_chart_rejections, *runtime_chart_rejections]
+            warnings = [str(v) for v in (quality_report.get("warnings") or []) if str(v).strip()]
+            if "chart_rejections_present" not in warnings:
+                warnings.append("chart_rejections_present")
+            quality_report["warnings"] = warnings
+            quality_report["gate_passed"] = False
+            state["quality_report"] = quality_report
         dashboard_spec["charts"] = enriched_charts
         dashboard_spec["story"] = {
             "title": dashboard_title,
@@ -3267,7 +4018,7 @@ def run_agentic_workflow(
                 event_callback=event_callback,
             )
             t1 = time.perf_counter()
-            created_views = create_views_from_schema(
+            fact_view_results = create_views_from_schema(
                 settings,
                 state.get("tenant_id") or "",
                 state.get("domain_id") or "",
@@ -3276,13 +4027,22 @@ def run_agentic_workflow(
                 state.get("schema_name") or "public",
                 state.get("schema_payload") or {},
             )
+            created_views = [
+                str(item.get("view_name"))
+                for item in fact_view_results
+                if isinstance(item, dict) and item.get("status") == "created" and item.get("view_name")
+            ]
             _emit(
                 settings,
                 run_id,
                 "DashboardAgent",
                 "running",
                 "Dashboard Agent registered views created",
-                {"elapsed_ms": round((time.perf_counter() - t1) * 1000, 1), "views": len(created_views)},
+                {
+                    "elapsed_ms": round((time.perf_counter() - t1) * 1000, 1),
+                    "views": len(created_views),
+                    "fact_view_results": fact_view_results,
+                },
                 event_callback=event_callback,
             )
             _emit(
@@ -3302,13 +4062,23 @@ def run_agentic_workflow(
                 state.get("schema_name") or "public",
                 state.get("join_edges") or [],
             )
+            evidence_coverage = _build_evidence_coverage_summary(
+                extract_schema_table_names(state.get("schema_payload") or {}),
+                fact_view_results,
+                joined_views,
+            )
+            state["evidence_coverage"] = evidence_coverage
             _emit(
                 settings,
                 run_id,
                 "DashboardAgent",
                 "running",
                 "Dashboard Agent joined views created",
-                {"elapsed_ms": round((time.perf_counter() - t2) * 1000, 1), "joined_views": len(joined_views)},
+                {
+                    "elapsed_ms": round((time.perf_counter() - t2) * 1000, 1),
+                    "joined_views": len(joined_views),
+                    "evidence_coverage": evidence_coverage,
+                },
                 event_callback=event_callback,
             )
             _emit(
@@ -3381,6 +4151,7 @@ def run_agentic_workflow(
             dashboard_spec,
             title=dashboard_title,
         )
+        state["dashboard_id"] = dash_id
         _emit(
             settings,
             run_id,
@@ -3400,10 +4171,729 @@ def run_agentic_workflow(
                 "chart_details": enriched_charts,
                 "quality_report": state.get("quality_report"),
                 "views_detail": created_views,
+                "fact_view_results": fact_view_results,
                 "registry_persisted": registry_persisted,
                 "semantics_persisted": semantics_persisted,
+                "evidence_coverage": evidence_coverage,
                 "elapsed_ms": round((time.perf_counter() - dashboard_start) * 1000, 1),
                 "fast_mode": fast_mode,
+            },
+            event_callback=event_callback,
+        )
+        logger.info(
+            "agentic.dashboard.handoff | run_id=%s dashboard_id=%s charts=%s next=anomaly_detection",
+            run_id,
+            dash_id,
+            len(state["dashboard_spec"].get("charts", [])),
+        )
+        return state
+
+    def anomaly_detection_node(state: dict[str, Any]) -> dict[str, Any]:
+        logger.info(
+            "agentic.anomaly_detection.enter | run_id=%s dashboard_id=%s has_dashboard_spec=%s metric_defs=%s profiling_tables=%s",
+            run_id,
+            state.get("dashboard_id"),
+            bool(state.get("dashboard_spec")),
+            len(state.get("metric_defs") or []),
+            len(((state.get("profiling_stats") or {}).get("tables") or [])),
+        )
+        _emit(
+            settings,
+            run_id,
+            "AnomalyDetectionAgent",
+            "running",
+            "Anomaly Detection Agent started",
+            event_callback=event_callback,
+        )
+        evidence_coverage = state.get("evidence_coverage") or {}
+        if isinstance(evidence_coverage, dict) and evidence_coverage.get("status") == "failed":
+            investigation_id = create_anomaly_investigation(
+                settings,
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or ""),
+                run_id=run_id,
+                trigger_source="deployment",
+                title=f"{str(state.get('domain_id') or 'Domain').replace('_', ' ').title()} Anomaly Investigation",
+                dashboard_id=state.get("dashboard_id"),
+                source_dashboard_id=state.get("dashboard_id"),
+                summary_text="Evidence coverage failed; anomaly investigation skipped.",
+                anomaly_summary_json={
+                    "reason": "evidence_coverage_failed",
+                    "evidence_coverage": evidence_coverage,
+                },
+                quality_json={
+                    "status": "evidence_coverage_failed",
+                    "evidence_coverage": evidence_coverage,
+                },
+            )
+            update_anomaly_investigation(
+                settings,
+                investigation_id,
+                status="failed",
+                error_message="Evidence coverage failed; anomaly investigation skipped.",
+            )
+            state["anomaly_investigation_id"] = investigation_id
+            state["anomaly_ids"] = []
+            state["anomaly_hypothesis_ids"] = []
+            state["anomaly_action_ids"] = []
+            logger.info(
+                "agentic.anomaly_detection.skip | run_id=%s reason=evidence_coverage_failed investigation_id=%s",
+                run_id,
+                investigation_id,
+            )
+            _emit(
+                settings,
+                run_id,
+                "AnomalyDetectionAgent",
+                "failed",
+                "Anomaly Detection Agent skipped due to evidence coverage failure",
+                {
+                    "investigation_id": investigation_id,
+                    "reason": "evidence_coverage_failed",
+                    "evidence_coverage": evidence_coverage,
+                },
+                event_callback=event_callback,
+            )
+            return state
+        quality_report = state.get("quality_report") or {}
+        if isinstance(quality_report, dict) and quality_report and not bool(quality_report.get("gate_passed")):
+            investigation_id = create_anomaly_investigation(
+                settings,
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or ""),
+                run_id=run_id,
+                trigger_source="deployment",
+                title=f"{str(state.get('domain_id') or 'Domain').replace('_', ' ').title()} Anomaly Investigation",
+                dashboard_id=state.get("dashboard_id"),
+                source_dashboard_id=state.get("dashboard_id"),
+                summary_text="Dashboard quality gate failed; anomaly investigation skipped.",
+                anomaly_summary_json={
+                    "reason": "dashboard_quality_failed",
+                    "quality_report": quality_report,
+                },
+                quality_json={
+                    "status": "dashboard_quality_failed",
+                    "quality_report": quality_report,
+                },
+            )
+            update_anomaly_investigation(
+                settings,
+                investigation_id,
+                status="failed",
+                error_message="Dashboard quality gate failed; anomaly investigation skipped.",
+            )
+            state["anomaly_investigation_id"] = investigation_id
+            state["anomaly_ids"] = []
+            state["anomaly_hypothesis_ids"] = []
+            state["anomaly_action_ids"] = []
+            logger.info(
+                "agentic.anomaly_detection.skip | run_id=%s reason=dashboard_quality_failed investigation_id=%s",
+                run_id,
+                investigation_id,
+            )
+            _emit(
+                settings,
+                run_id,
+                "AnomalyDetectionAgent",
+                "failed",
+                "Anomaly Detection Agent skipped due to dashboard quality failure",
+                {
+                    "investigation_id": investigation_id,
+                    "reason": "dashboard_quality_failed",
+                    "quality_report": quality_report,
+                },
+                event_callback=event_callback,
+            )
+            return state
+        enabled = _env_bool("AGENTIC_ANOMALY_DETECTION_ENABLED", True)
+        min_severity_score = _env_float("AGENTIC_ANOMALY_MIN_SEVERITY", 0.15, minimum=0.0)
+        max_evidence_queries = _env_int("AGENTIC_ANOMALY_MAX_EVIDENCE_QUERIES", 5, minimum=0)
+        evidence_query_row_limit = _env_int("AGENTIC_ANOMALY_EVIDENCE_QUERY_ROW_LIMIT", 200, minimum=1)
+        min_hypothesis_confidence = _env_float("AGENTIC_ANOMALY_MIN_HYPOTHESIS_CONFIDENCE", 0.35, minimum=0.0)
+        runtime_config = {
+            "enabled": enabled,
+            "min_severity_score": min_severity_score,
+            "max_evidence_queries": max_evidence_queries,
+            "evidence_query_row_limit": evidence_query_row_limit,
+            "min_hypothesis_confidence": min_hypothesis_confidence,
+            "llm_enabled": _anomaly_llm_enabled(settings),
+        }
+        state["anomaly_runtime_config"] = runtime_config
+        if not enabled:
+            logger.info("agentic.anomaly_detection.skip | run_id=%s reason=disabled", run_id)
+            _emit(
+                settings,
+                run_id,
+                "AnomalyDetectionAgent",
+                "completed",
+                "Anomaly Detection Agent skipped",
+                {"reason": "disabled", "runtime_config": runtime_config},
+                event_callback=event_callback,
+            )
+            return state
+        try:
+            detection = detect_agentic_anomalies(
+                settings,
+                schema_name=str(state.get("schema_name") or "public"),
+                profiling_stats=state.get("profiling_stats", {}) or {},
+                metric_defs=state.get("metric_defs", []) or [],
+                dashboard_spec=state.get("dashboard_spec") or {},
+                min_severity_score=min_severity_score,
+            )
+        except Exception as exc:
+            error_artifacts = {
+                "error_message": str(exc),
+                "error_type": exc.__class__.__name__,
+                "traceback": traceback.format_exc(limit=12),
+            }
+            _emit(
+                settings,
+                run_id,
+                "AnomalyDetectionAgent",
+                "failed",
+                "Anomaly Detection Agent failed",
+                error_artifacts,
+                event_callback=event_callback,
+            )
+            raise
+
+        state["anomaly_detection"] = detection
+        candidates = detection.get("candidates") or []
+        logger.info(
+            "agentic.anomaly_detection.detected | run_id=%s candidates=%s metric_candidates=%s raw_signal_candidates=%s",
+            run_id,
+            len(candidates),
+            (detection.get("summary") or {}).get("metric_candidate_count"),
+            (detection.get("summary") or {}).get("raw_signal_candidate_count"),
+        )
+        if not candidates:
+            logger.info("agentic.anomaly_detection.skip | run_id=%s reason=no_candidates_above_threshold", run_id)
+            _emit(
+                settings,
+                run_id,
+                "AnomalyDetectionAgent",
+                "completed",
+                "Anomaly Detection Agent completed",
+                {
+                    "candidate_count": 0,
+                    "summary": detection.get("summary") or {},
+                    "runtime_config": runtime_config,
+                    "reason": "no_candidates_above_threshold",
+                },
+                event_callback=event_callback,
+            )
+            return state
+
+        investigation_id = create_anomaly_investigation(
+            settings,
+            tenant_id=str(state.get("tenant_id") or ""),
+            domain_id=str(state.get("domain_id") or ""),
+            run_id=run_id,
+            trigger_source="deployment",
+            title=f"{str(state.get('domain_id') or 'Domain').replace('_', ' ').title()} Anomaly Investigation",
+            dashboard_id=state.get("dashboard_id"),
+            source_dashboard_id=state.get("dashboard_id"),
+            summary_text=str(((detection.get("summary") or {}).get("top_anomalies") or [{}])[0].get("metric_name") or "Anomalies detected"),
+            severity_score=float(((candidates[0].get("evidence") or {}).get("severity_score") or 0.0)),
+            confidence_score=float(((candidates[0].get("evidence") or {}).get("confidence_score") or 0.0)),
+            anomaly_summary_json=detection.get("summary") or {},
+            quality_json={
+                "status": "phase_38_2_detection_only",
+                "runtime_config": runtime_config,
+            },
+        )
+        created_anomaly_ids: list[str] = []
+        fallback_high_signal_areas_by_anomaly: dict[str, list[dict[str, Any]]] = {}
+        profiling_map = {
+            str(table.get("name") or "").strip(): table
+            for table in ((state.get("profiling_stats") or {}).get("tables") or [])
+            if str(table.get("name") or "").strip()
+        }
+        for candidate in candidates:
+            evidence = candidate.get("evidence") or {}
+            anomaly_id = create_anomaly_record(
+                settings,
+                investigation_id=investigation_id,
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or ""),
+                metric_id=str(candidate.get("metric_id") or "") or None,
+                raw_signal_name=str(candidate.get("raw_signal_name") or "") or None,
+                anomaly_type=str(candidate.get("anomaly_type") or "deviation"),
+                entity_scope_json={
+                    "table_name": candidate.get("table_name"),
+                    "time_column": candidate.get("time_column"),
+                    "grain": candidate.get("grain"),
+                    "dashboard_id": state.get("dashboard_id"),
+                },
+                baseline_window_json={
+                    "window_points": 7,
+                    "period": evidence.get("period"),
+                    "baseline": evidence.get("baseline"),
+                },
+                comparison_window_json={
+                    "actual": evidence.get("actual"),
+                    "deviation": evidence.get("deviation"),
+                    "z_score": evidence.get("z_score"),
+                },
+                severity_score=float(evidence.get("severity_score") or 0.0),
+                confidence_score=float(evidence.get("confidence_score") or 0.0),
+                evidence_json=evidence,
+            )
+            table_profile = profiling_map.get(str(candidate.get("table_name") or "").strip()) or {}
+            areas = rank_high_signal_investigative_areas(
+                settings,
+                schema_name=str(state.get("schema_name") or "public"),
+                candidate=candidate,
+                table_profile=table_profile,
+            )
+            if areas:
+                fallback_high_signal_areas_by_anomaly[anomaly_id] = areas
+                update_anomaly_record(
+                    settings,
+                    anomaly_id,
+                    evidence_json={
+                        **evidence,
+                        "fallback_high_signal_investigative_areas": areas,
+                    },
+                )
+            created_anomaly_ids.append(anomaly_id)
+        state["anomaly_investigation_id"] = investigation_id
+        state["anomaly_ids"] = created_anomaly_ids
+        anomalies_payload = []
+        for idx, candidate in enumerate(candidates):
+            anomaly_id = created_anomaly_ids[idx] if idx < len(created_anomaly_ids) else None
+            anomalies_payload.append(
+                {
+                    "anomaly_id": anomaly_id,
+                    "candidate_type": candidate.get("candidate_type"),
+                    "metric_name": candidate.get("metric_name"),
+                    "raw_signal_name": candidate.get("raw_signal_name"),
+                    "table_name": candidate.get("table_name"),
+                    "time_column": candidate.get("time_column"),
+                    "grain": candidate.get("grain"),
+                    "evidence": candidate.get("evidence") or {},
+                    "high_signal_investigative_areas": fallback_high_signal_areas_by_anomaly.get(str(anomaly_id or ""), []),
+                }
+            )
+        llm_plan = _llm_plan_anomaly_investigation(
+            settings,
+            domain_id=state.get("domain_id"),
+            context_text=state.get("context_text"),
+            dashboard_spec=state.get("dashboard_spec") or {},
+            investigation_summary=detection.get("summary") or {},
+            anomalies_payload=anomalies_payload,
+        )
+        logger.info(
+            "agentic.anomaly_detection.plan | run_id=%s plan_present=%s prioritized_ids=%s",
+            run_id,
+            bool(llm_plan),
+            [str(v) for v in ((llm_plan or {}).get("prioritized_anomaly_ids") or [])[:5]],
+        )
+        llm_prioritized_anomaly_ids = [str(v) for v in ((llm_plan or {}).get("prioritized_anomaly_ids") or []) if str(v).strip()]
+        llm_high_signal_areas_by_anomaly = _validate_llm_prioritized_areas(anomalies_payload, llm_plan)
+        effective_high_signal_areas_by_anomaly = llm_high_signal_areas_by_anomaly or fallback_high_signal_areas_by_anomaly
+        executed_queries: list[dict[str, Any]] = []
+        rejected_queries: list[dict[str, Any]] = []
+        llm_synthesis: dict[str, Any] | None = None
+        planning_failed = False
+        if llm_plan:
+            executed_queries, rejected_queries = _execute_llm_evidence_queries(
+                settings,
+                schema_name=str(state.get("schema_name") or "public"),
+                profiling_stats=state.get("profiling_stats", {}) or {},
+                evidence_queries=[item for item in (llm_plan.get("evidence_queries") or []) if isinstance(item, dict)],
+                max_queries=max_evidence_queries,
+                row_limit=evidence_query_row_limit,
+            )
+            logger.info(
+                "agentic.anomaly_detection.queries | run_id=%s executed=%s rejected=%s",
+                run_id,
+                len(executed_queries),
+                len(rejected_queries),
+            )
+            llm_synthesis = _llm_summarize_anomaly_investigation(
+                settings,
+                domain_id=state.get("domain_id"),
+                context_text=state.get("context_text"),
+                dashboard_spec=state.get("dashboard_spec") or {},
+                investigation_summary={
+                    **(detection.get("summary") or {}),
+                    "planning_summary": llm_plan.get("planning_summary"),
+                    "evidence_focus": llm_plan.get("evidence_focus"),
+                    "prioritized_anomaly_ids": llm_prioritized_anomaly_ids,
+                    "prioritized_investigative_areas": llm_high_signal_areas_by_anomaly,
+                },
+                anomalies_payload=anomalies_payload,
+                executed_queries=executed_queries,
+                rejected_queries=rejected_queries,
+            )
+        elif runtime_config["llm_enabled"]:
+            planning_failed = True
+        if not llm_synthesis:
+            logger.info("agentic.anomaly_detection.fallback | run_id=%s reason=no_llm_synthesis", run_id)
+            llm_synthesis = _fallback_anomaly_investigation_payload(
+                anomalies_payload=anomalies_payload,
+                high_signal_areas_by_anomaly=effective_high_signal_areas_by_anomaly,
+                executed_queries=executed_queries,
+            )
+        for anomaly_id in created_anomaly_ids:
+            candidate = next((item for item in anomalies_payload if str(item.get("anomaly_id") or "") == anomaly_id), None)
+            if not candidate:
+                continue
+            evidence = dict(candidate.get("evidence") or {})
+            update_anomaly_record(
+                settings,
+                anomaly_id,
+                evidence_json={
+                    **evidence,
+                    "high_signal_investigative_areas": effective_high_signal_areas_by_anomaly.get(anomaly_id, []),
+                    "fallback_high_signal_investigative_areas": fallback_high_signal_areas_by_anomaly.get(anomaly_id, []),
+                },
+            )
+        if llm_synthesis:
+            created_hypothesis_ids: list[str] = []
+            for idx, item in enumerate([h for h in (llm_synthesis.get("hypotheses") or []) if isinstance(h, dict)], start=1):
+                item_confidence = _normalize_confidence_score(item.get("confidence"), 0.0)
+                if item_confidence < min_hypothesis_confidence:
+                    continue
+                linked_anomaly_ids = [str(v) for v in (item.get("anomaly_ids") or []) if str(v).strip()]
+                hypothesis_id = create_anomaly_hypothesis(
+                    settings,
+                    investigation_id=investigation_id,
+                    anomaly_id=linked_anomaly_ids[0] if linked_anomaly_ids else None,
+                    rank_no=idx,
+                    title=str(item.get("title") or f"Hypothesis {idx}"),
+                    explanation_text=str(item.get("explanation") or ""),
+                    confidence_score=item_confidence if item.get("confidence") is not None else None,
+                    likely_drivers_json=item.get("likely_drivers") or [],
+                    supporting_evidence_json=item.get("supporting_evidence") or {"query_results": executed_queries},
+                    validation_step_text=item.get("validation_step"),
+                    provenance_json={"source": "llm_anomaly_investigation"},
+                )
+                created_hypothesis_ids.append(hypothesis_id)
+            hypothesis_title_map = {
+                str((item.get("title") or f"Hypothesis {idx}")).strip(): created_hypothesis_ids[idx - 1]
+                for idx, item in enumerate([h for h in (llm_synthesis.get("hypotheses") or []) if isinstance(h, dict)], start=1)
+                if idx - 1 < len(created_hypothesis_ids)
+            }
+            created_action_ids: list[str] = []
+            for item in [a for a in (llm_synthesis.get("actions") or []) if isinstance(a, dict)]:
+                linked_titles = [str(v) for v in (item.get("linked_hypothesis_titles") or []) if str(v).strip()]
+                linked_hypothesis_id = next((hypothesis_title_map.get(title) for title in linked_titles if hypothesis_title_map.get(title)), None)
+                action_id = create_anomaly_action(
+                    settings,
+                    investigation_id=investigation_id,
+                    hypothesis_id=linked_hypothesis_id,
+                    action_type=str(item.get("action_type") or "prescriptive"),
+                    priority=str(item.get("priority") or "") or None,
+                    confidence_score=_normalize_confidence_score(item.get("confidence"), 0.0)
+                    if item.get("confidence") is not None
+                    else None,
+                    recommended_owner=str(item.get("recommended_owner") or "") or None,
+                    action_text=str(item.get("action_text") or ""),
+                    metadata_json={"linked_hypothesis_titles": linked_titles},
+                )
+                created_action_ids.append(action_id)
+            update_anomaly_investigation(
+                settings,
+                investigation_id,
+                status="completed",
+                summary_text=str(llm_synthesis.get("summary_text") or ""),
+                anomaly_summary_json={
+                    **(detection.get("summary") or {}),
+                    "investigation_id": investigation_id,
+                    "anomaly_ids": created_anomaly_ids,
+                    "prioritized_anomaly_ids": llm_prioritized_anomaly_ids,
+                    "high_signal_investigative_areas": effective_high_signal_areas_by_anomaly,
+                    "fallback_high_signal_investigative_areas": fallback_high_signal_areas_by_anomaly,
+                    "planning_summary": (llm_plan or {}).get("planning_summary"),
+                    "evidence_focus": (llm_plan or {}).get("evidence_focus"),
+                    "executed_queries": executed_queries,
+                    "rejected_queries": rejected_queries,
+                    "hypothesis_ids": created_hypothesis_ids,
+                    "action_ids": created_action_ids,
+                    "insights": llm_synthesis.get("insights") or [],
+                    "dashboard_suggestions": llm_synthesis.get("dashboard_suggestions") or [],
+                },
+                quality_json={
+                    "status": "llm_anomaly_investigation_completed" if llm_plan else "deterministic_fallback_completed",
+                    "anomaly_prioritization_source": "llm" if llm_prioritized_anomaly_ids else "deterministic_fallback",
+                    "investigative_area_source": "llm" if llm_high_signal_areas_by_anomaly else "deterministic_fallback",
+                    "executed_query_count": len(executed_queries),
+                    "rejected_query_count": len(rejected_queries),
+                    "hypothesis_count": len(created_hypothesis_ids),
+                    "action_count": len(created_action_ids),
+                    "planning_failed": planning_failed,
+                    "runtime_config": runtime_config,
+                    "warnings": [
+                        item
+                        for item in [
+                            "llm_planning_unavailable" if planning_failed else None,
+                            "no_hypotheses_above_confidence_threshold" if not created_hypothesis_ids else None,
+                            "evidence_queries_rejected" if rejected_queries else None,
+                            "using_deterministic_investigation_fallback" if not llm_plan else None,
+                        ]
+                        if item
+                    ],
+                },
+            )
+            logger.info(
+                "agentic.anomaly_detection.persisted | run_id=%s investigation_id=%s hypotheses=%s actions=%s status=completed",
+                run_id,
+                investigation_id,
+                len(created_hypothesis_ids),
+                len(created_action_ids),
+            )
+            state["anomaly_hypothesis_ids"] = created_hypothesis_ids
+            state["anomaly_action_ids"] = created_action_ids
+            state["anomaly_insights"] = llm_synthesis.get("insights") or []
+            state["anomaly_llm_synthesis"] = llm_synthesis
+            state["anomaly_llm_plan"] = llm_plan or {}
+            state["anomaly_executed_queries"] = executed_queries
+            state["anomaly_rejected_queries"] = rejected_queries
+        else:
+            state["anomaly_llm_synthesis"] = {}
+            state["anomaly_llm_plan"] = llm_plan or {}
+            state["anomaly_executed_queries"] = executed_queries
+            state["anomaly_rejected_queries"] = rejected_queries
+        state["high_signal_investigative_areas"] = effective_high_signal_areas_by_anomaly
+        _emit(
+            settings,
+            run_id,
+            "AnomalyDetectionAgent",
+            "completed",
+            "Anomaly Detection Agent completed",
+            {
+                "investigation_id": investigation_id,
+                "candidate_count": len(candidates),
+                "anomaly_ids": created_anomaly_ids,
+                "prioritized_anomaly_ids": llm_prioritized_anomaly_ids,
+                "high_signal_investigative_areas": effective_high_signal_areas_by_anomaly,
+                "fallback_high_signal_investigative_areas": fallback_high_signal_areas_by_anomaly,
+                "executed_queries": executed_queries,
+                "rejected_queries": rejected_queries,
+                "hypothesis_ids": state.get("anomaly_hypothesis_ids") or [],
+                "action_ids": state.get("anomaly_action_ids") or [],
+                "anomaly_insights": state.get("anomaly_insights") or [],
+                "summary": detection.get("summary") or {},
+                "runtime_config": runtime_config,
+            },
+            event_callback=event_callback,
+        )
+        return state
+
+    def anomaly_dashboard_node(state: dict[str, Any]) -> dict[str, Any]:
+        logger.info(
+            "agentic.anomaly_dashboard.enter | run_id=%s investigation_id=%s executed_queries=%s hypotheses=%s actions=%s",
+            run_id,
+            state.get("anomaly_investigation_id"),
+            len(state.get("anomaly_executed_queries") or []),
+            len(state.get("anomaly_hypothesis_ids") or []),
+            len(state.get("anomaly_action_ids") or []),
+        )
+        _emit(
+            settings,
+            run_id,
+            "AnomalyDashboardAgent",
+            "running",
+            "Anomaly Dashboard Agent started",
+            event_callback=event_callback,
+        )
+        if not _env_bool("AGENTIC_ANOMALY_DASHBOARD_ENABLED", True):
+            logger.info("agentic.anomaly_dashboard.skip | run_id=%s reason=disabled", run_id)
+            if investigation_id := str(state.get("anomaly_investigation_id") or "").strip():
+                _persist_anomaly_workspace_context(
+                    settings,
+                    state=state,
+                    investigation_id=investigation_id,
+                    summary_text=(state.get("anomaly_llm_synthesis") or {}).get("summary_text"),
+                    anomaly_ids=[str(v) for v in (state.get("anomaly_ids") or []) if str(v).strip()],
+                    hypothesis_ids=[str(v) for v in (state.get("anomaly_hypothesis_ids") or []) if str(v).strip()],
+                    action_ids=[str(v) for v in (state.get("anomaly_action_ids") or []) if str(v).strip()],
+                    dashboard_id=None,
+                )
+            _emit(
+                settings,
+                run_id,
+                "AnomalyDashboardAgent",
+                "completed",
+                "Anomaly Dashboard Agent skipped",
+                {"reason": "disabled"},
+                event_callback=event_callback,
+            )
+            return state
+        investigation_id = str(state.get("anomaly_investigation_id") or "").strip()
+        llm_synthesis = state.get("anomaly_llm_synthesis") or {}
+        executed_queries = state.get("anomaly_executed_queries") or []
+        if not investigation_id or not llm_synthesis or not executed_queries:
+            logger.info(
+                "agentic.anomaly_dashboard.skip | run_id=%s reason=insufficient_artifacts investigation_id=%s has_synthesis=%s executed_queries=%s",
+                run_id,
+                investigation_id,
+                bool(llm_synthesis),
+                len(executed_queries),
+            )
+            if investigation_id:
+                _persist_anomaly_workspace_context(
+                    settings,
+                    state=state,
+                    investigation_id=investigation_id,
+                    summary_text=llm_synthesis.get("summary_text") if isinstance(llm_synthesis, dict) else None,
+                    anomaly_ids=[str(v) for v in (state.get("anomaly_ids") or []) if str(v).strip()],
+                    hypothesis_ids=[str(v) for v in (state.get("anomaly_hypothesis_ids") or []) if str(v).strip()],
+                    action_ids=[str(v) for v in (state.get("anomaly_action_ids") or []) if str(v).strip()],
+                    dashboard_id=None,
+                )
+            _emit(
+                settings,
+                run_id,
+                "AnomalyDashboardAgent",
+                "completed",
+                "Anomaly Dashboard Agent skipped",
+                {"reason": "insufficient_artifacts"},
+                event_callback=event_callback,
+            )
+            return state
+        quality_warnings = [
+            item
+            for item in (
+                (((state.get("anomaly_detection") or {}).get("summary") or {}).get("candidate_count_after_threshold") or 0) == 0 and "no_candidates_above_threshold" or None,
+                (state.get("anomaly_rejected_queries") or []) and "evidence_queries_rejected" or None,
+                not (state.get("anomaly_hypothesis_ids") or []) and "no_persisted_hypotheses" or None,
+            )
+            if item
+        ]
+
+        anomaly_dashboard_spec = build_anomaly_dashboard_spec(
+            domain_id=state.get("domain_id"),
+            investigation_id=investigation_id,
+            anomaly_ids=[str(v) for v in (state.get("anomaly_ids") or []) if str(v).strip()],
+            hypothesis_ids=[str(v) for v in (state.get("anomaly_hypothesis_ids") or []) if str(v).strip()],
+            action_ids=[str(v) for v in (state.get("anomaly_action_ids") or []) if str(v).strip()],
+            summary_text=llm_synthesis.get("summary_text"),
+            insights=[str(v) for v in (llm_synthesis.get("insights") or []) if str(v).strip()],
+            hypotheses=[item for item in (llm_synthesis.get("hypotheses") or []) if isinstance(item, dict)],
+            actions=[item for item in (llm_synthesis.get("actions") or []) if isinstance(item, dict)],
+            high_signal_areas=state.get("high_signal_investigative_areas") or {},
+            executed_queries=[item for item in executed_queries if isinstance(item, dict)],
+            dashboard_suggestions=llm_synthesis.get("dashboard_suggestions") or [],
+            quality={
+                "confidence": None,
+                "warnings": quality_warnings,
+                "runtime_config": state.get("anomaly_runtime_config") or {},
+            },
+        )
+        dashboard_title = str(anomaly_dashboard_spec.get("dashboard_title") or anomaly_dashboard_spec.get("title") or "Anomaly Investigation Dashboard")
+        enriched_charts: list[dict[str, Any]] = []
+        chart_ids: list[str] = []
+        for chart in [item for item in (anomaly_dashboard_spec.get("charts") or []) if isinstance(item, dict)]:
+            rows = [row for row in (chart.get("chart_data") or []) if isinstance(row, dict)]
+            metric_name = str(chart.get("metric") or "value")
+            dimensions = [str(v) for v in (chart.get("dimensions") or []) if str(v).strip()]
+            chart_type = chart.get("type") or infer_chart_type(dimensions, rows, [metric_name]) or "bar"
+            chart_sql = chart.get("sql")
+            chart_params = chart.get("params") or []
+            chart_id = create_chart_request(
+                settings,
+                state.get("tenant_id") or "",
+                state.get("domain_id"),
+                question=chart.get("title"),
+                query_payload={
+                    "metrics": [metric_name],
+                    "dimensions": dimensions,
+                    "chart": chart_type,
+                    "chart_title": chart.get("title"),
+                    "dashboard_title": dashboard_title,
+                    "investigation_id": investigation_id,
+                },
+                sql=chart_sql,
+                params=chart_params,
+                rows_json=rows,
+            ).get("chart_id")
+            payload = build_chart_payload(chart_type, rows, metric_name, dimensions or ["category"])
+            if chart_id:
+                update_chart_request(
+                    settings,
+                    chart_id,
+                    status="ready",
+                    sql=chart_sql,
+                    params=chart_params,
+                    rows_json=rows,
+                    chart_type=chart_type,
+                    chart_payload=payload.get("chart_payload"),
+                    chart_data=payload.get("data"),
+                )
+                chart_ids.append(chart_id)
+            enriched_charts.append(
+                {
+                    **chart,
+                    "chart_id": chart_id,
+                    "chart_type": chart_type,
+                    "chart_payload": payload.get("chart_payload"),
+                    "chart_data": payload.get("data"),
+                    "dashboard_title": dashboard_title,
+                }
+            )
+        anomaly_dashboard_spec["charts"] = enriched_charts
+        anomaly_dashboard_id = persist_dashboard_spec(
+            settings,
+            state.get("tenant_id") or "",
+            state.get("domain_id") or "",
+            anomaly_dashboard_spec,
+            title=dashboard_title,
+        )
+        create_anomaly_dashboard_link(
+            settings,
+            investigation_id=investigation_id,
+            dashboard_id=anomaly_dashboard_id,
+            role="anomaly_dashboard",
+            source_dashboard_id=state.get("dashboard_id"),
+        )
+        if state.get("dashboard_id"):
+            create_anomaly_dashboard_link(
+                settings,
+                investigation_id=investigation_id,
+                dashboard_id=state.get("dashboard_id"),
+                role="source_dashboard",
+                source_dashboard_id=state.get("dashboard_id"),
+            )
+        update_anomaly_investigation(
+            settings,
+            investigation_id,
+            dashboard_id=anomaly_dashboard_id,
+            source_dashboard_id=state.get("dashboard_id"),
+        )
+        logger.info(
+            "agentic.anomaly_dashboard.persisted | run_id=%s investigation_id=%s dashboard_id=%s chart_count=%s",
+            run_id,
+            investigation_id,
+            anomaly_dashboard_id,
+            len(enriched_charts),
+        )
+        _persist_anomaly_workspace_context(
+            settings,
+            state=state,
+            investigation_id=investigation_id,
+            summary_text=llm_synthesis.get("summary_text"),
+            anomaly_ids=[str(v) for v in (state.get("anomaly_ids") or []) if str(v).strip()],
+            hypothesis_ids=[str(v) for v in (state.get("anomaly_hypothesis_ids") or []) if str(v).strip()],
+            action_ids=[str(v) for v in (state.get("anomaly_action_ids") or []) if str(v).strip()],
+            dashboard_id=anomaly_dashboard_id,
+        )
+        state["anomaly_dashboard_id"] = anomaly_dashboard_id
+        state["anomaly_dashboard_spec"] = anomaly_dashboard_spec
+        _emit(
+            settings,
+            run_id,
+            "AnomalyDashboardAgent",
+            "completed",
+            "Anomaly Dashboard Agent completed",
+            {
+                "dashboard_id": anomaly_dashboard_id,
+                "dashboard_title": dashboard_title,
+                "chart_ids": chart_ids,
+                "chart_count": len(enriched_charts),
+                "investigation_id": investigation_id,
             },
             event_callback=event_callback,
         )
@@ -3421,6 +4911,8 @@ def run_agentic_workflow(
     graph.add_node("chart_planner", chart_planner_node)
     graph.add_node("quality", quality_node)
     graph.add_node("dashboard", dashboard_node)
+    graph.add_node("anomaly_detection", anomaly_detection_node)
+    graph.add_node("anomaly_dashboard", anomaly_dashboard_node)
 
     graph.set_entry_point("schema")
     # NOTE:
@@ -3438,9 +4930,33 @@ def run_agentic_workflow(
     graph.add_edge("rollup", "chart_planner")
     graph.add_edge("chart_planner", "quality")
     graph.add_edge("quality", "dashboard")
-    graph.add_edge("dashboard", END)
+    graph.add_edge("dashboard", "anomaly_detection")
+    graph.add_edge("anomaly_detection", "anomaly_dashboard")
+    graph.add_edge("anomaly_dashboard", END)
+    logger.info(
+        "agentic.workflow.graph | run_id=%s nodes=%s anomaly_edges=%s",
+        run_id,
+        [
+            "schema",
+            "profiling",
+            "context",
+            "ontology",
+            "glossary",
+            "join",
+            "metric",
+            "model",
+            "rollup",
+            "chart_planner",
+            "quality",
+            "dashboard",
+            "anomaly_detection",
+            "anomaly_dashboard",
+        ],
+        [("dashboard", "anomaly_detection"), ("anomaly_detection", "anomaly_dashboard")],
+    )
 
     app = graph.compile()
+    logger.info("agentic.workflow.compiled | run_id=%s", run_id)
     result = app.invoke(initial_state)
     pending = _RUN_POSTPROCESS_FUTURES.pop(run_id, [])
     if pending:

@@ -1,0 +1,33 @@
+industry: market_performance_analysis
+version: 1
+
+templates:
+  - name: daily_sales
+    type: sum
+    description: Total daily sales or market activity volume
+    measure_hint: sales
+
+  - name: monthly_target_quantity
+    type: sum
+    description: Monthly target quantity at reporting grain
+    measure_hint: target
+
+  - name: monthly_pace
+    type: sum
+    description: Monthly pace or run-rate measure
+    measure_hint: pace
+
+  - name: target_achievement_pct
+    type: ratio
+    description: Actual quantity divided by target quantity
+    measure_hint: achievement
+
+  - name: benchmark_gap
+    type: ratio
+    description: Relative performance gap versus benchmark or industry
+    measure_hint: benchmark
+
+  - name: market_share_proxy
+    type: ratio
+    description: Relative contribution against broader market or industry total
+    measure_hint: share

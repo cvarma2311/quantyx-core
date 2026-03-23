@@ -1,0 +1,13 @@
+industry: market_performance_analysis
+version: 1
+
+datasets:
+  - name: daily_market_activity
+    source_model: fact_MOM_DAY_LEVEL_DATA
+    description: Daily sales or market activity data at business reporting grain
+  - name: monthly_target_metadata
+    source_model: fact_M60_LEVEL_METADATA
+    description: Monthly targets, pace, and planning metadata
+  - name: industry_benchmark_performance
+    source_model: fact_industry_performance
+    description: Industry or benchmark comparison data for market analysis

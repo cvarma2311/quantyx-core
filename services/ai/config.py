@@ -22,6 +22,9 @@ class Settings:
     dbt_project_template: str | None
     default_tenant_id: str
     default_domain_id: str
+    workspace_query_plan_mode: str
+    workspace_query_plan_model: str | None
+    workspace_query_plan_timeout_sec: int
 
 
 def load_settings() -> Settings:
@@ -42,4 +45,7 @@ def load_settings() -> Settings:
         dbt_project_template=os.getenv("DBT_PROJECT_TEMPLATE"),
         default_tenant_id=os.getenv("DEFAULT_TENANT_ID", "tenant_default"),
         default_domain_id=os.getenv("DEFAULT_DOMAIN_ID", "default_domain"),
+        workspace_query_plan_mode=os.getenv("WORKSPACE_QUERY_PLAN_MODE", "auto"),
+        workspace_query_plan_model=os.getenv("WORKSPACE_QUERY_PLAN_MODEL"),
+        workspace_query_plan_timeout_sec=int(os.getenv("WORKSPACE_QUERY_PLAN_TIMEOUT_SEC", "30")),
     )

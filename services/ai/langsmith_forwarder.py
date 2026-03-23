@@ -14,6 +14,14 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _env_enabled(*names: str) -> bool:
+    for name in names:
+        value = str(os.getenv(name) or "").strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
 class LangSmithEventForwarder:
     """Best-effort forwarder for agent events to LangSmith.
 
@@ -33,7 +41,12 @@ class LangSmithEventForwarder:
             or os.getenv("LANGCHAIN_PROJECT")
             or "default"
         )
-        self.enabled = os.getenv("LANGSMITH_TRACING", "").lower() in {"1", "true", "yes"}
+        self.enabled = _env_enabled(
+            "LANGSMITH_TRACING",
+            "LANGSMITH_TRACING_V2",
+            "LANGCHAIN_TRACING",
+            "LANGCHAIN_TRACING_V2",
+        )
         self._client = None
         self._parent_run_id = None
 

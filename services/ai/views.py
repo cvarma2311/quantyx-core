@@ -12,6 +12,14 @@ from services.ai.db import execute_non_query, run_query
 logger = logging.getLogger(__name__)
 
 
+def _qident(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _error_message(exc: Exception) -> str:
+    return str(exc).strip() or exc.__class__.__name__
+
+
 def _registry_columns(settings: Settings) -> set[str]:
     rows = run_query(
         settings,
@@ -24,6 +32,21 @@ def _registry_columns(settings: Settings) -> set[str]:
         [],
     )
     return {str(r.get("column_name")) for r in rows if r.get("column_name")}
+
+
+def _relation_columns(settings: Settings, schema_name: str, relation_name: str) -> list[str]:
+    rows = run_query(
+        settings,
+        """
+        SELECT column_name
+          FROM information_schema.columns
+         WHERE table_schema = %s
+           AND table_name = %s
+         ORDER BY ordinal_position
+        """,
+        [schema_name, relation_name],
+    )
+    return [str(r.get("column_name")) for r in rows if r.get("column_name")]
 
 
 def _insert_registry_row(settings: Settings, values: dict[str, Any]) -> None:
@@ -51,9 +74,12 @@ def ensure_fact_view(
     source_table: str,
 ) -> str:
     fact_table = source_table if source_table.startswith("fact_") else f"fact_{source_table}"
+    q_schema = _qident(schema_name)
+    q_fact_table = _qident(fact_table)
+    q_source_table = _qident(source_table)
     sql = f"""
-        CREATE OR REPLACE VIEW {schema_name}.{fact_table} AS
-        SELECT * FROM {schema_name}.{source_table}
+        CREATE OR REPLACE VIEW {q_schema}.{q_fact_table} AS
+        SELECT * FROM {q_schema}.{q_source_table}
     """
     conn = psycopg2.connect(
         host=settings.db_host,
@@ -138,13 +164,7 @@ def get_view_schema(settings: Settings, schema_name: str, view_name: str) -> lis
     )
 
 
-def create_views_from_schema(
-    settings: Settings,
-    tenant_id: str,
-    domain_id: str,
-    connection_id: str,
-    database_name: str,
-    schema_name: str,
+def extract_schema_table_names(
     schema_payload: dict[str, Any],
 ) -> list[str]:
     def _table_names(payload: dict[str, Any]) -> list[str]:
@@ -183,25 +203,49 @@ def create_views_from_schema(
                             name = item.get("table") or item.get("name") or item.get("table_name")
                             if name:
                                 names.append(str(name))
-        # preserve order while deduping
         return list(dict.fromkeys([n for n in names if n]))
 
-    created: list[str] = []
-    for name in _table_names(schema_payload):
+    return _table_names(schema_payload)
+
+
+def create_views_from_schema(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str,
+    connection_id: str,
+    database_name: str,
+    schema_name: str,
+    schema_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    created: list[dict[str, Any]] = []
+    for name in extract_schema_table_names(schema_payload):
         try:
-            created.append(
-                ensure_fact_view(
-                    settings,
-                    tenant_id,
-                    domain_id,
-                    connection_id,
-                    database_name,
-                    schema_name,
-                    name,
-                )
+            view_name = ensure_fact_view(
+                settings,
+                tenant_id,
+                domain_id,
+                connection_id,
+                database_name,
+                schema_name,
+                name,
             )
-        except Exception:
+            created.append(
+                {
+                    "source_table": name,
+                    "view_name": view_name,
+                    "status": "created",
+                }
+            )
+        except Exception as exc:
             logger.warning("views.create_fact_view_failed | schema=%s table=%s", schema_name, name, exc_info=True)
+            created.append(
+                {
+                    "source_table": name,
+                    "view_name": f"fact_{name}" if not str(name).startswith("fact_") else str(name),
+                    "status": "failed",
+                    "error_message": _error_message(exc),
+                }
+            )
     return created
 
 
@@ -221,12 +265,30 @@ def create_joined_views(
         if not (left and right and left_key and right_key):
             continue
         view_name = f"view_{left}_{right}"
+        q_schema = _qident(schema_name)
+        q_view_name = _qident(view_name)
+        q_left = _qident(left)
+        q_right = _qident(right)
+        q_left_key = _qident(left_key)
+        q_right_key = _qident(right_key)
+        left_columns = _relation_columns(settings, schema_name, left)
+        right_columns = _relation_columns(settings, schema_name, right)
+        left_aliases = {
+            col: col for col in left_columns
+        }
+        select_parts = [
+            f"l.{_qident(col)} AS {_qident(alias)}"
+            for col, alias in left_aliases.items()
+        ]
+        for col in right_columns:
+            alias = col if col not in left_aliases else f"{right}__{col}"
+            select_parts.append(f"r.{_qident(col)} AS {_qident(alias)}")
         sql = (
-            f"CREATE OR REPLACE VIEW {schema_name}.{view_name} AS "
-            f"SELECT l.*, r.* "
-            f"FROM {schema_name}.{left} l "
-            f"LEFT JOIN {schema_name}.{right} r "
-            f"ON l.{left_key} = r.{right_key}"
+            f"CREATE OR REPLACE VIEW {q_schema}.{q_view_name} AS "
+            f"SELECT {', '.join(select_parts)} "
+            f"FROM {q_schema}.{q_left} l "
+            f"LEFT JOIN {q_schema}.{q_right} r "
+            f"ON l.{q_left_key} = r.{q_right_key}"
         )
         try:
             execute_non_query(settings, sql, [])
@@ -257,7 +319,7 @@ def create_joined_views(
                     "status": "created",
                 }
             )
-        except Exception:
+        except Exception as exc:
             created.append(
                 {
                     "view_name": view_name,
@@ -266,6 +328,7 @@ def create_joined_views(
                     "left_key": left_key,
                     "right_key": right_key,
                     "status": "failed",
+                    "error_message": _error_message(exc),
                 }
             )
     return created
