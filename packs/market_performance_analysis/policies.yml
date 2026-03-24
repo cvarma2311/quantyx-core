@@ -1,0 +1,46 @@
+industry: market_performance_analysis
+version: 1
+
+policies:
+  - name: exclude_invalid_sbu_name
+    applies_to: all
+    filter:
+      column: sbu_name
+      operator: custom_sql
+      values:
+        - "sbu_name IS NOT NULL"
+        - "sbu_name != '0'"
+        - "sbu_name NOT IN ('Common','Mumbai Ref','Renewable Energy','Visakh Ref')"
+
+  - name: avoid_identifier_breakdowns
+    applies_to: chart
+    filter:
+      column: breakdown_dimension
+      operator: not_in
+      values: ["sap_id", "plant_id", "id", "code", "identifier"]
+
+dashboard_preferences:
+  kpi_priority_hints:
+    sales: 120
+    target: 115
+    pace: 110
+    benchmark: 100
+    achievement: 95
+  time_priority_columns:
+    - process_date
+    - sales_date
+    - business_date
+    - date
+    - year_monthname
+    - month
+  breakdown_priority_tokens:
+    - zone
+    - region
+    - sbu
+    - market
+    - area
+    - territory
+  chart_preferences:
+    prefer_time_series_ascending: true
+    prefer_rankings_descending: true
+    avoid_identifier_category_charts: true

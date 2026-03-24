@@ -128,6 +128,7 @@ from services.ai.rollups import create_rollup, build_rollup_table, update_rollup
 _POSTPROCESS_EXECUTOR = ThreadPoolExecutor(max_workers=max(2, int(os.getenv("AGENTIC_POSTPROCESS_MAX_WORKERS", "4"))))
 _RUN_POSTPROCESS_FUTURES: dict[str, list[Future]] = {}
 _ANOMALY_PROMPTS_DIR = Path(__file__).parent / "prompts" / "anomaly_investigation"
+_DASHBOARD_PROMPTS_DIR = Path(__file__).parent / "prompts" / "dashboard_composition"
 
 
 def _stream_sample_limit() -> int:
@@ -263,6 +264,10 @@ def _load_anomaly_prompt(name: str) -> str:
     return (_ANOMALY_PROMPTS_DIR / name).read_text(encoding="utf-8")
 
 
+def _load_dashboard_prompt(name: str) -> str:
+    return (_DASHBOARD_PROMPTS_DIR / name).read_text(encoding="utf-8")
+
+
 def _anomaly_llm_enabled(settings) -> bool:
     mode = os.getenv("AGENTIC_ANOMALY_LLM_MODE", "auto").lower()
     if mode in {"off", "false", "0"}:
@@ -350,8 +355,6 @@ def _llm_generate_dashboard_title(
 ) -> dict[str, Any] | None:
     if not _dashboard_composition_enabled(settings) or not successful_charts:
         return None
-    model = os.getenv("AGENTIC_DASHBOARD_TITLE_MODEL", getattr(settings, "openai_model", "gpt-4o-mini"))
-    timeout_sec = int(os.getenv("AGENTIC_DASHBOARD_TITLE_TIMEOUT_SEC", "30"))
     chart_payload = []
     for chart in successful_charts[:16]:
         chart_payload.append(
@@ -366,15 +369,9 @@ def _llm_generate_dashboard_title(
                 "intent": chart.get("intent"),
             }
         )
-    system_prompt = (
-        "You generate a concise business dashboard title from successful charts only. "
-        "Prefer business themes and KPI families over raw table names. "
-        "Avoid source-table wording unless no stronger business wording exists. "
-        "Return JSON only with keys: dashboard_title, dashboard_title_reason, dashboard_title_sources."
-    )
     return _llm_json_response(
         settings,
-        system_prompt=system_prompt,
+        system_prompt=_load_dashboard_prompt("title.md"),
         user_payload={
             "domain_id": domain_id,
             "context_text": str(context_text or "")[:5000],
@@ -383,6 +380,123 @@ def _llm_generate_dashboard_title(
         },
         model_env_key="AGENTIC_DASHBOARD_TITLE_MODEL",
         timeout_env_key="AGENTIC_DASHBOARD_TITLE_TIMEOUT_SEC",
+    )
+
+
+def _llm_review_dashboard_quality(
+    settings,
+    *,
+    domain_id: str | None,
+    context_text: str | None,
+    dashboard_title: str | None,
+    successful_charts: list[dict[str, Any]],
+    rejected_charts: list[dict[str, Any]],
+    dashboard_theme: dict[str, Any],
+    quality_report: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not _dashboard_composition_enabled(settings) or not successful_charts:
+        return None
+    return _llm_json_response(
+        settings,
+        system_prompt=_load_dashboard_prompt("quality_review.md"),
+        user_payload={
+            "domain_id": domain_id,
+            "context_text": str(context_text or "")[:5000],
+            "dashboard_title": dashboard_title,
+            "successful_charts": [
+                {
+                    "chart_id": chart.get("chart_id"),
+                    "title": chart.get("title"),
+                    "table": chart.get("table"),
+                    "metric": chart.get("metric") or chart.get("metric_name"),
+                    "primary_role": chart.get("primary_role"),
+                    "related_roles": chart.get("related_roles") or [],
+                    "kpi_family": chart.get("kpi_family"),
+                    "intent": chart.get("intent"),
+                }
+                for chart in successful_charts[:16]
+            ],
+            "rejected_charts": [
+                {
+                    "title": chart.get("title"),
+                    "table": chart.get("table"),
+                    "metric": chart.get("metric") or chart.get("metric_name"),
+                    "reason": chart.get("reason") or ((chart.get("semantic_validation") or {}).get("reason")),
+                }
+                for chart in rejected_charts[:12]
+            ],
+            "dashboard_theme": dashboard_theme,
+            "quality_report": quality_report or {},
+        },
+        model_env_key="AGENTIC_DASHBOARD_TITLE_MODEL",
+        timeout_env_key="AGENTIC_DASHBOARD_TITLE_TIMEOUT_SEC",
+    )
+
+
+def _title_mentions_raw_tables(title: str | None, table_names: list[str] | None) -> bool:
+    normalized_title = re.sub(r"[^a-z0-9]+", " ", str(title or "").lower()).strip()
+    if not normalized_title:
+        return False
+    for table_name in table_names or []:
+        table_label = str(table_name or "").strip().lower()
+        if not table_label:
+            continue
+        for candidate in {
+            table_label,
+            table_label.replace("_", " "),
+            table_label.replace("fact_", "").replace("_", " "),
+        }:
+            cleaned = re.sub(r"[^a-z0-9]+", " ", candidate).strip()
+            if cleaned and cleaned in normalized_title:
+                return True
+    return False
+
+
+def _should_skip_anomaly_for_dashboard_quality(quality_report: dict[str, Any] | None) -> bool:
+    report = quality_report or {}
+    if not isinstance(report, dict) or not report:
+        return False
+    blocked_patterns = [item for item in (report.get("blocked_patterns") or []) if str(item).strip()]
+    if blocked_patterns:
+        return True
+    score = float(report.get("quality_score") or 0.0)
+    if score < 0.65:
+        return True
+    chart_rejections = [item for item in (report.get("chart_rejections") or []) if isinstance(item, dict)]
+    edges_checked = int(report.get("edges_checked") or 0)
+    if edges_checked > 0 and len(chart_rejections) >= max(2, edges_checked):
+        return True
+    return False
+
+
+def _llm_review_anomaly_readiness(
+    settings,
+    *,
+    domain_id: str | None,
+    context_text: str | None,
+    dashboard_spec: dict[str, Any] | None,
+    quality_report: dict[str, Any] | None,
+    evidence_coverage: dict[str, Any] | None,
+    anomaly_candidate_summary: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    return _llm_json_response(
+        settings,
+        system_prompt=_load_anomaly_prompt("readiness_review.md"),
+        user_payload={
+            "domain_id": domain_id,
+            "context_text": str(context_text or "")[:5000],
+            "dashboard": {
+                "title": (dashboard_spec or {}).get("dashboard_title") or (dashboard_spec or {}).get("title"),
+                "dashboard_theme": (dashboard_spec or {}).get("dashboard_theme") or {},
+                "table_contributions": (dashboard_spec or {}).get("table_contributions") or [],
+                "kpi_family_contributions": (dashboard_spec or {}).get("kpi_family_contributions") or [],
+            },
+            "quality_report": quality_report or {},
+            "evidence_coverage": evidence_coverage or {},
+            "anomaly_candidate_summary": anomaly_candidate_summary or {},
+        },
+        model_env_key="AGENTIC_ANOMALY_READINESS_MODEL",
+        timeout_env_key="AGENTIC_ANOMALY_READINESS_TIMEOUT_SEC",
     )
 
 
@@ -933,14 +1047,13 @@ def _chart_output_validation(
     dimensions: list[str],
     rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    title_lower = str(chart_title or "").strip().lower()
-    has_category_dimension = "category" in {str(v).strip().lower() for v in dimensions}
+    normalized_dimensions = {str(v).strip().lower() for v in dimensions}
+    has_category_dimension = "category" in normalized_dimensions
+    del chart_title
     if not rows:
         return {"status": "rejected", "reason": "no_rows_returned"}
     if chart_intent in {"breakdown", "share", "join_breakdown", "multi_series"} and category_col and not has_category_dimension:
         return {"status": "rejected", "reason": "missing_category_dimension"}
-    if chart_intent == "trend" and not has_category_dimension and " by " in title_lower:
-        return {"status": "rejected", "reason": "misleading_title_category"}
     if chart_type == "line" and chart_intent != "multi_series" and has_category_dimension:
         return {"status": "rejected", "reason": "unexpected_category_dimension_for_line_trend"}
     return {"status": "passed", "reason": "eligible_metric"}
@@ -3518,6 +3631,20 @@ def run_agentic_workflow(
         logger = logging.getLogger(__name__)
         _emit(settings, run_id, "DashboardAgent", "running", "Dashboard Agent started", event_callback=event_callback)
         dashboard_start = time.perf_counter()
+        min_charts = _resolve_int_setting(
+            state,
+            "chart_min_charts",
+            "AGENTIC_CHART_MIN_CHARTS",
+            8,
+        )
+        max_charts = _resolve_int_setting(
+            state,
+            "chart_max_charts",
+            "AGENTIC_CHART_MAX_CHARTS",
+            16,
+        )
+        if min_charts > max_charts:
+            min_charts = max_charts
         dashboard_spec = build_dashboard_spec(
             state.get("metric_defs", []),
             state.get("profiling_stats", {}),
@@ -3984,13 +4111,17 @@ def run_agentic_workflow(
             dashboard_theme=dashboard_theme,
         )
         llm_title = str((llm_title_payload or {}).get("dashboard_title") or "").strip()
-        if llm_title:
+        all_title_tables = list(dict.fromkeys((dashboard_theme.get("selected_tables") or []) + (dashboard_theme.get("eligible_tables") or [])))
+        if llm_title and not _title_mentions_raw_tables(llm_title, all_title_tables):
             final_dashboard_title = llm_title
             title_generation_source = "llm_successful_charts"
             title_reason = str((llm_title_payload or {}).get("dashboard_title_reason") or title_reason)
             if isinstance((llm_title_payload or {}).get("dashboard_title_sources"), dict):
                 title_sources = dict((llm_title_payload or {}).get("dashboard_title_sources") or {})
                 title_sources.setdefault("successful_chart_ids", selected_successful_chart_ids)
+        elif llm_title and _title_mentions_raw_tables(llm_title, all_title_tables):
+            if "table_derived_dashboard_title" not in (quality_report.get("warnings") or []):
+                quality_report["warnings"] = [*list(quality_report.get("warnings") or []), "table_derived_dashboard_title"]
         if not final_dashboard_title:
             deterministic_title = deterministic_dashboard_title(dashboard_theme, state.get("domain_id"))
             if deterministic_title:
@@ -4035,6 +4166,18 @@ def run_agentic_workflow(
             "sources": title_sources,
         }
         quality_report["chart_selection_diagnostics"] = selection_diag
+        llm_quality_review = _llm_review_dashboard_quality(
+            settings,
+            domain_id=state.get("domain_id"),
+            context_text=state.get("context_text"),
+            dashboard_title=final_dashboard_title,
+            successful_charts=successful_charts,
+            rejected_charts=[item for item in enriched_charts if isinstance(item, dict) and item.get("skipped")],
+            dashboard_theme=dashboard_theme,
+            quality_report=quality_report,
+        )
+        if isinstance(llm_quality_review, dict) and llm_quality_review:
+            quality_report["llm_advisory"] = llm_quality_review
         state["quality_report"] = quality_report
         dashboard_spec["title"] = final_dashboard_title
         dashboard_spec["dashboard_title"] = final_dashboard_title
@@ -4048,6 +4191,8 @@ def run_agentic_workflow(
         dashboard_spec["selected_successful_chart_ids"] = selected_successful_chart_ids
         dashboard_spec["rejected_chart_ids"] = rejected_chart_ids
         dashboard_spec["role_selection"] = selection_diag
+        if isinstance(quality_report.get("llm_advisory"), dict):
+            dashboard_spec["llm_advisory"] = quality_report.get("llm_advisory")
         dashboard_spec["chart_plan"] = successful_chart_plan
         dashboard_spec["story"] = {
             "title": final_dashboard_title,
@@ -4394,6 +4539,19 @@ def run_agentic_workflow(
             event_callback=event_callback,
         )
         evidence_coverage = state.get("evidence_coverage") or {}
+        quality_report = state.get("quality_report") or {}
+        readiness_advisory = _llm_review_anomaly_readiness(
+            settings,
+            domain_id=state.get("domain_id"),
+            context_text=state.get("context_text"),
+            dashboard_spec=state.get("dashboard_spec") or {},
+            quality_report=quality_report,
+            evidence_coverage=evidence_coverage,
+            anomaly_candidate_summary=(state.get("anomaly_detection") or {}).get("summary") or {},
+        )
+        if isinstance(quality_report, dict) and isinstance(readiness_advisory, dict) and readiness_advisory:
+            quality_report["anomaly_readiness_advisory"] = readiness_advisory
+            state["quality_report"] = quality_report
         if isinstance(evidence_coverage, dict) and evidence_coverage.get("status") == "failed":
             investigation_id = create_anomaly_investigation(
                 settings,
@@ -4408,10 +4566,12 @@ def run_agentic_workflow(
                 anomaly_summary_json={
                     "reason": "evidence_coverage_failed",
                     "evidence_coverage": evidence_coverage,
+                    "readiness_advisory": readiness_advisory,
                 },
                 quality_json={
                     "status": "evidence_coverage_failed",
                     "evidence_coverage": evidence_coverage,
+                    "readiness_advisory": readiness_advisory,
                 },
             )
             update_anomaly_investigation(
@@ -4439,12 +4599,12 @@ def run_agentic_workflow(
                     "investigation_id": investigation_id,
                     "reason": "evidence_coverage_failed",
                     "evidence_coverage": evidence_coverage,
+                    "readiness_advisory": readiness_advisory,
                 },
                 event_callback=event_callback,
             )
             return state
-        quality_report = state.get("quality_report") or {}
-        if isinstance(quality_report, dict) and quality_report and not bool(quality_report.get("gate_passed")):
+        if _should_skip_anomaly_for_dashboard_quality(quality_report):
             investigation_id = create_anomaly_investigation(
                 settings,
                 tenant_id=str(state.get("tenant_id") or ""),
@@ -4458,10 +4618,12 @@ def run_agentic_workflow(
                 anomaly_summary_json={
                     "reason": "dashboard_quality_failed",
                     "quality_report": quality_report,
+                    "readiness_advisory": readiness_advisory,
                 },
                 quality_json={
                     "status": "dashboard_quality_failed",
                     "quality_report": quality_report,
+                    "readiness_advisory": readiness_advisory,
                 },
             )
             update_anomaly_investigation(
@@ -4489,6 +4651,7 @@ def run_agentic_workflow(
                     "investigation_id": investigation_id,
                     "reason": "dashboard_quality_failed",
                     "quality_report": quality_report,
+                    "readiness_advisory": readiness_advisory,
                 },
                 event_callback=event_callback,
             )
@@ -4546,6 +4709,9 @@ def run_agentic_workflow(
             raise
 
         state["anomaly_detection"] = detection
+        if isinstance(quality_report, dict) and isinstance(readiness_advisory, dict) and readiness_advisory:
+            detection.setdefault("summary", {})
+            detection["summary"]["readiness_advisory"] = readiness_advisory
         candidates = detection.get("candidates") or []
         logger.info(
             "agentic.anomaly_detection.detected | run_id=%s candidates=%s metric_candidates=%s raw_signal_candidates=%s",

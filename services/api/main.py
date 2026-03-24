@@ -16,6 +16,7 @@ import uuid
 import zipfile
 import xml.etree.ElementTree as ElementTree
 import urllib.request
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Query
@@ -449,6 +450,7 @@ app = FastAPI(
 
 settings = load_settings()
 catalog = load_catalog_with_registry(settings, settings.metrics_catalog_path)
+_CHART_FOLLOWUP_PROMPTS_DIR = Path(__file__).resolve().parent / "ai" / "prompts" / "chart_followup"
 LOW_CONFIDENCE_THRESHOLD = 0.7
 JOB_TYPES = {
     "scan_connection",
@@ -6576,6 +6578,15 @@ def _workspace_query_response(
     )
     if chart_followup_meta:
         conversation_plan["chart_followup"]["transformation_summary"] = transformation_summary
+    llm_followup_advisory = _llm_review_chart_followup(
+        question=question,
+        chart_context=chart_context,
+        chart_followup_meta=chart_followup_meta,
+        validated_plan=validated_plan,
+        query_result=query_result,
+    )
+    if chart_followup_meta and isinstance(llm_followup_advisory, dict) and llm_followup_advisory:
+        conversation_plan["chart_followup"]["llm_advisory"] = llm_followup_advisory
 
     merged_chart_followup = {
         **(chart_context or {}),
@@ -6584,6 +6595,8 @@ def _workspace_query_response(
     if merged_chart_followup is not None:
         merged_chart_followup["transformation_summary"] = transformation_summary
         merged_chart_followup["derived_chart_id"] = query_result.chart_id
+        if isinstance(llm_followup_advisory, dict) and llm_followup_advisory:
+            merged_chart_followup["llm_advisory"] = llm_followup_advisory
 
     response_payload = {
         "metrics": query_result.metrics,
@@ -6601,6 +6614,19 @@ def _workspace_query_response(
         "conversation_plan": conversation_plan,
         "chart_followup": merged_chart_followup,
     }
+    persisted_chart_id = _persist_workspace_chart_artifact(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        question=question,
+        compiled_request=compiled_request,
+        response_payload=response_payload,
+    )
+    if persisted_chart_id:
+        response_payload["chart_id"] = persisted_chart_id
+        if isinstance(response_payload.get("conversation_plan"), dict):
+            response_payload["conversation_plan"]["chart_id"] = persisted_chart_id
+        if isinstance(response_payload.get("chart_followup"), dict):
+            response_payload["chart_followup"]["derived_chart_id"] = persisted_chart_id
     metric_label = ", ".join(query_result.metrics[:2]) if query_result.metrics else "requested metrics"
     assistant_text = f"Returned {len(query_result.rows)} rows for {metric_label}."
     summary_json = {
@@ -6611,20 +6637,111 @@ def _workspace_query_response(
         "lineage": query_result.lineage,
         "artifact_lineage": query_result.artifact_lineage,
         "conversation_plan": conversation_plan,
-        "chart_followup": merged_chart_followup,
+        "chart_followup": response_payload.get("chart_followup"),
     }
     inference_json = {
         "text": "Use filters or follow-up prompts to drill deeper by region, plant, or time period.",
         "confidence": 0.75 if query_result.rows else 0.4,
         "artifact_lineage": query_result.artifact_lineage,
         "conversation_plan": conversation_plan,
-        "chart_followup": merged_chart_followup,
+        "chart_followup": response_payload.get("chart_followup"),
     }
     return response_payload, assistant_text, summary_json, inference_json
 
 
 def _workspace_llm_stream_enabled() -> bool:
     return bool(getattr(settings, "openai_api_key", None))
+
+
+def _load_chart_followup_prompt(name: str) -> str:
+    return (_CHART_FOLLOWUP_PROMPTS_DIR / name).read_text(encoding="utf-8")
+
+
+def _workspace_llm_json_response(
+    *,
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    model_env_key: str,
+    timeout_env_key: str,
+) -> dict[str, Any] | None:
+    if not getattr(settings, "openai_api_key", None):
+        return None
+    model = os.getenv(model_env_key, getattr(settings, "openai_model", "gpt-4o-mini"))
+    timeout_sec = int(os.getenv(timeout_env_key, "30"))
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload, default=str)},
+                ],
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"},
+            },
+            default=str,
+        ).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        return json.loads(body["choices"][0]["message"]["content"])
+    except Exception:
+        logger.warning("workspace.chart_followup_llm_failed", exc_info=True)
+        return None
+
+
+def _llm_review_chart_followup(
+    *,
+    question: str,
+    chart_context: dict[str, Any] | None,
+    chart_followup_meta: dict[str, Any] | None,
+    validated_plan: dict[str, Any],
+    query_result: Any,
+) -> dict[str, Any] | None:
+    if not chart_followup_meta:
+        return None
+    return _workspace_llm_json_response(
+        system_prompt=_load_chart_followup_prompt("review.md"),
+        user_payload={
+            "question": question,
+            "source_chart": {
+                "source_chart_id": (chart_context or {}).get("source_chart_id"),
+                "chart_title": (chart_context or {}).get("chart_title"),
+                "chart_type": (chart_context or {}).get("chart_type"),
+                "metrics": (chart_context or {}).get("metrics") or [],
+                "dimensions": (chart_context or {}).get("dimensions") or [],
+            },
+            "chart_followup": {
+                "follow_up_intent": chart_followup_meta.get("follow_up_intent"),
+                "accepted_transformations": chart_followup_meta.get("accepted_transformations") or [],
+                "rejected_transformations": chart_followup_meta.get("rejected_transformations") or [],
+                "warnings": chart_followup_meta.get("warnings") or [],
+                "requested_chart_type": chart_followup_meta.get("requested_chart_type"),
+            },
+            "validated_plan": {
+                "metric_name": validated_plan.get("metric_name"),
+                "dimensions": validated_plan.get("dimensions") or [],
+                "chart_type": validated_plan.get("chart_type"),
+                "time_grain": validated_plan.get("time_grain"),
+                "validation_warnings": validated_plan.get("validation_warnings") or [],
+            },
+            "result_shape": {
+                "chart_id": getattr(query_result, "chart_id", None),
+                "metrics": getattr(query_result, "metrics", None) or [],
+                "dimensions": getattr(query_result, "dimensions", None) or [],
+                "row_count": len(getattr(query_result, "rows", None) or []),
+            },
+        },
+        model_env_key="WORKSPACE_CHART_FOLLOWUP_REVIEW_MODEL",
+        timeout_env_key="WORKSPACE_CHART_FOLLOWUP_REVIEW_TIMEOUT_SEC",
+    )
 
 
 def _workspace_narration_prompt(question: str, response_payload: dict, summary_json: dict) -> tuple[str, str]:
@@ -7076,6 +7193,72 @@ def _persist_chart_followup_lineage(
         "chart_followup_linked",
         details=followup_payload,
     )
+
+
+def _persist_workspace_chart_artifact(
+    *,
+    tenant_id: str,
+    domain_id: str | None,
+    question: str,
+    compiled_request: dict[str, Any],
+    response_payload: dict[str, Any],
+) -> str | None:
+    try:
+        query_payload = {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "question": question,
+            "metrics": response_payload.get("metrics") or [],
+            "dimensions": response_payload.get("dimensions") or [],
+            "filters": compiled_request.get("filters") or [],
+            "limit": compiled_request.get("limit"),
+            "conversation_plan": response_payload.get("conversation_plan"),
+            "chart_followup": response_payload.get("chart_followup"),
+        }
+        chart_row = create_chart_request(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            question=question,
+            query_payload=query_payload,
+            sql=response_payload.get("sql"),
+            params=[],
+            rows_json=response_payload.get("rows"),
+        )
+        chart_id = chart_row.get("chart_id")
+        if not chart_id:
+            return None
+        create_chart_event(
+            settings,
+            chart_id,
+            "queued",
+            details={"question": question, "source": "workspace_conversation"},
+        )
+        update_chart_request(
+            settings,
+            chart_id,
+            status="ready",
+            query_payload=query_payload,
+            sql=response_payload.get("sql"),
+            params=[],
+            rows_json=response_payload.get("rows"),
+            chart_type=response_payload.get("chart_type"),
+            chart_payload=response_payload.get("chart_payload"),
+            chart_data=response_payload.get("data"),
+        )
+        create_chart_event(
+            settings,
+            chart_id,
+            "ready",
+            details={
+                "chart_type": response_payload.get("chart_type"),
+                "source": "workspace_conversation",
+            },
+        )
+        return chart_id
+    except Exception:  # noqa: BLE001
+        logger.exception("workspace.chart_persist_failed")
+        return None
 
 
 def _stream_openai_tokens(system_prompt: str, user_prompt: str) -> Iterator[str]:

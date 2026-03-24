@@ -2031,6 +2031,18 @@ def _theme_dashboard_title(theme: dict[str, Any], domain_id: str | None = None) 
     primary = str(theme.get("primary_theme") or "").strip().lower()
     families = [str(item).strip().lower() for item in (theme.get("subthemes") or []) if str(item).strip()]
     family_set = set(families)
+    domain_label = _pretty_name(domain_id)
+    if str(domain_id or "").strip().lower() == "market_performance_analysis":
+        if {"sales", "target", "benchmark"} & family_set:
+            if {"sales", "target", "benchmark"} <= family_set:
+                return "Market Performance, Targets, and Benchmarks Overview"
+            if {"sales", "target"} <= family_set:
+                return "Market Sales and Target Performance Overview"
+            if {"sales", "benchmark"} <= family_set:
+                return "Market Sales and Benchmark Overview"
+            if {"target", "benchmark"} <= family_set:
+                return "Target and Benchmark Performance Overview"
+        return "Market Performance Analysis Overview"
     if {"sales", "target", "pace"} & family_set:
         if {"sales", "target", "pace"} <= family_set:
             return "Sales, Targets, and Pace Overview"
@@ -2044,7 +2056,6 @@ def _theme_dashboard_title(theme: dict[str, Any], domain_id: str | None = None) 
         return "Benchmark and Performance Overview"
     if primary:
         return f"{_pretty_name(primary)} Overview"
-    domain_label = _pretty_name(domain_id)
     return f"{domain_label or 'Performance'} Overview"
 
 

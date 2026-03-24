@@ -147,6 +147,47 @@ User asks to reshape the chart:
 
 ---
 
+## Uniform API Principle
+
+This feature should use one uniform API contract for both of these scenarios:
+- follow-up on a chart created inside a workspace conversation
+- follow-up on a chart that already exists on a dashboard
+
+The client should not need different follow-up endpoints for these two sources.
+
+The canonical rule should be:
+- `chart_id` is the primary anchor
+- `message_id` and `dashboard_id` are optional context enrichers
+- the backend resolves both into the same internal chart context object
+
+Recommended uniform request contract:
+```json
+{
+  "user_query": "Drill this into plant",
+  "resume_context": true,
+  "stream": false,
+  "chart_followup": {
+    "source_chart_id": "chart_123",
+    "source_context_type": "conversation|dashboard",
+    "source_message_id": "wmsg_456",
+    "dashboard_id": "dash_789"
+  }
+}
+```
+
+Rules:
+- `source_chart_id` is required for chart follow-up mode
+- `source_message_id` is optional and mainly relevant for conversation-originated charts
+- `dashboard_id` is optional and mainly relevant for dashboard-originated charts
+- the backend should load the chart definition by `source_chart_id` first
+- if `source_message_id` or `dashboard_id` is present, use them to validate lineage and scope
+
+This lets the product keep one API shape while supporting both:
+- chart follow-up from chat history
+- chart follow-up from dashboards
+
+---
+
 ## Required Product Behavior
 
 ### 1) The Chart Is the First-Class Context Object
@@ -257,6 +298,224 @@ Expected semantic behavior:
 - source metric reused
 - source dashboard/chart context preserved
 - no need for the user to restate the metric name
+
+---
+
+## API Flow Example Using `chart_id`
+
+This section describes the intended API-first usage pattern for chart conversation.
+
+The key product rule is:
+- the first query creates the chart
+- the follow-up query should reference that chart explicitly using `chart_id`
+- the backend should then treat the source chart as the primary context object for refinement
+
+### Step 1: Create a conversation
+
+Create a normal workspace conversation first.
+
+`POST /workspace/tenants/{tenant_id}/domains/{domain_id}/conversations`
+
+Example:
+```json
+{
+  "user_query": "Show total productivity by process month"
+}
+```
+
+Example response:
+```json
+{
+  "conversation_id": "conv_abc123",
+  "tenant_id": "6c360137-a821-49b7-a927-a747c86a345d",
+  "domain_id": "lpg_production_distribution",
+  "run_id": "run_244f69730184"
+}
+```
+
+### Step 2: Send the first message and get the source chart
+
+Run the first chart-building message.
+
+`POST /workspace/conversations/{conversation_id}/messages`
+
+Example:
+```json
+{
+  "user_query": "Show total productivity by process month",
+  "resume_context": true,
+  "stream": false
+}
+```
+
+Important response fields:
+- `assistant_message.message_id`
+- `assistant_message.chart_json.chart_id`
+- `assistant_message.sql_text`
+
+Example response fragment:
+```json
+{
+  "assistant_message": {
+    "message_id": "wmsg_source_001",
+    "sql_text": "SELECT ...",
+    "chart_json": {
+      "chart_id": "chart_source_001",
+      "chart_type": "line",
+      "chart_title": "Total Productivity by Process Month"
+    }
+  }
+}
+```
+
+The client should persist:
+- `conversation_id`
+- `message_id`
+- `chart_id`
+
+### Step 3: Use `chart_id` for the follow-up chart question
+
+The follow-up request should explicitly identify the source chart being refined.
+
+Recommended request shape for this phase:
+
+`POST /workspace/conversations/{conversation_id}/messages`
+
+```json
+{
+  "user_query": "Now filter this to EZ zone",
+  "resume_context": true,
+  "stream": false,
+  "chart_followup": {
+    "source_chart_id": "chart_source_001",
+    "source_message_id": "wmsg_source_001"
+  }
+}
+```
+
+Example drill-down:
+```json
+{
+  "user_query": "Drill this into filling head",
+  "resume_context": true,
+  "stream": false,
+  "chart_followup": {
+    "source_chart_id": "chart_source_001",
+    "source_message_id": "wmsg_source_001"
+  }
+}
+```
+
+Example grain change:
+```json
+{
+  "user_query": "Show this by day instead of month",
+  "resume_context": true,
+  "stream": false,
+  "chart_followup": {
+    "source_chart_id": "chart_source_001",
+    "source_message_id": "wmsg_source_001"
+  }
+}
+```
+
+### Step 4: Expected backend behavior when `chart_id` is present
+
+When `chart_followup.source_chart_id` is present, the backend should:
+1. load the persisted source chart from the prior assistant message
+2. load the source chart SQL, dimensions, filters, metric, and chart type
+3. classify the user follow-up as a chart transformation intent
+4. refine the prior semantic query plan instead of replanning from scratch
+5. generate a new chart artifact and assistant message
+6. persist lineage between:
+   - source chart
+   - derived chart
+
+### Step 5: Expected follow-up response shape
+
+The response should contain a new derived chart:
+
+```json
+{
+  "assistant_message": {
+    "message_id": "wmsg_derived_002",
+    "chart_json": {
+      "chart_id": "chart_derived_002",
+      "chart_type": "line",
+      "chart_title": "Total Productivity by Process Month for EZ"
+    }
+  },
+  "response": {
+    "chart_id": "chart_derived_002",
+    "chart_followup": {
+      "source_chart_id": "chart_source_001",
+      "derived_from_message_id": "wmsg_source_001",
+      "transformation_intent": "add_filter"
+    }
+  }
+}
+```
+
+### Why `chart_id` matters
+
+Without `chart_id`, a follow-up like:
+- `show this for EZ`
+- `drill this into plant`
+- `show this by zone instead of date`
+
+is ambiguous.
+
+With `chart_id`, the backend can safely preserve:
+- source metric
+- source grain
+- source filters
+- source dimensions
+- source SQL lineage
+
+and then apply only the requested transformation.
+
+### Recommended frontend/client behavior
+
+After every successful chart-producing message, the client should cache:
+- `conversation_id`
+- `assistant_message.message_id`
+- `chart_json.chart_id`
+
+Then every chart-originated follow-up should send:
+- `chart_followup.source_chart_id`
+- optionally `chart_followup.source_message_id`
+
+This is the minimal contract needed for true chart-scoped conversation.
+
+### Same API for dashboard-native charts
+
+The same request shape should also work when the chart already exists on a dashboard and did not originate from the current conversation.
+
+Example:
+```json
+{
+  "user_query": "Show only EZ zone",
+  "resume_context": true,
+  "stream": false,
+  "chart_followup": {
+    "source_chart_id": "chart_dashboard_017",
+    "source_context_type": "dashboard",
+    "dashboard_id": "dash_7d082b3306"
+  }
+}
+```
+
+Expected backend behavior:
+1. load the dashboard chart by `source_chart_id`
+2. resolve the persisted chart SQL, metric, dimensions, filters, and dashboard scope
+3. apply the chart-follow-up transformation exactly as if the chart had come from a workspace conversation
+4. persist a new derived chart artifact with lineage to the dashboard source chart
+
+So the intended product contract is:
+- same endpoint
+- same `chart_followup` object
+- same transformation pipeline
+- only the chart context source differs internally
 
 #### 2) Carry forward or replace dimensions
 If the source chart is:
