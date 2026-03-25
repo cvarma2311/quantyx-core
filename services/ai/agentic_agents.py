@@ -1558,7 +1558,15 @@ def propose_joins(schema_graph: dict[str, Any], profiling: dict[str, Any] | None
             if left is right:
                 continue
             right_cols = {c.get("name") for c in right.get("columns", [])}
-            common = [c for c in left_cols & right_cols if c and (c.endswith("_id") or c.endswith("_code"))]
+            # Exclude internal/system columns that appear in every table but carry no
+            # business join semantics (engine_id is a Quantyx-internal row key).
+            _system_join_blocklist = {"engine_id", "id", "row_id", "record_id"}
+            common = [
+                c for c in left_cols & right_cols
+                if c
+                and (c.endswith("_id") or c.endswith("_code"))
+                and c not in _system_join_blocklist
+            ]
             for col in common:
                 confidence = 0.6
                 reason = "name_match"

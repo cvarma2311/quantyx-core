@@ -1018,7 +1018,60 @@ def _rewrite_policy_sql(fragment: str, table_alias: str, table_profile: dict[str
     return text
 
 
-def _dashboard_policy_filters(domain_id: str | None, table_alias: str, table_profile: dict[str, Any]) -> list[str]:
+def _context_scoped_tables_for_column(
+    context_text: str,
+    column_name: str,
+    known_tables: list[str],
+) -> set[str] | None:
+    """
+    Parse context_text to find whether a filter column is explicitly scoped to specific tables.
+
+    Example context_text pattern:
+        "Use these business rules for MOM_DAY_LEVEL_DATA and M60_LEVEL_METADATA:
+         - Apply the mandatory filter WHERE sbu_name IS NOT NULL ..."
+
+    If the context mentions specific tables alongside a filter column, the filter is
+    scoped to only those tables.  Tables not mentioned in the scoping block are excluded.
+
+    Returns:
+        set of lowercased table names that the filter applies to, or
+        None if no explicit table scoping is found (policy applies to all tables as usual).
+    """
+    if not context_text or not column_name or not known_tables:
+        return None
+
+    col_lower = column_name.lower()
+    table_lower_map = {t.lower(): t for t in known_tables}
+
+    # Walk paragraph-by-paragraph; a paragraph is any block separated by blank lines
+    # or newline-prefixed bullet points.
+    paragraphs = re.split(r"\n{2,}", context_text)
+    for para in paragraphs:
+        if col_lower not in para.lower():
+            continue
+        # Look for "for TABLE1 and TABLE2" / "for TABLE1, TABLE2" on any line of the paragraph
+        for_match = re.search(r"\bfor\b([^:\n]+)", para, re.IGNORECASE)
+        if not for_match:
+            continue
+        candidate_str = for_match.group(1)
+        scoped: set[str] = set()
+        for tl in table_lower_map:
+            if re.search(rf"\b{re.escape(tl)}\b", candidate_str, re.IGNORECASE):
+                scoped.add(tl)
+        if scoped:
+            return scoped
+
+    return None
+
+
+def _dashboard_policy_filters(
+    domain_id: str | None,
+    table_alias: str,
+    table_profile: dict[str, Any],
+    table_name: str | None = None,
+    context_text: str | None = None,
+    all_table_names: list[str] | None = None,
+) -> list[str]:
     filters: list[str] = []
     case_map = _table_column_case_map(table_profile)
     for policy in _load_domain_policies(domain_id):
@@ -1031,6 +1084,16 @@ def _dashboard_policy_filters(domain_id: str | None, table_alias: str, table_pro
         column_name = str(filter_def.get("column") or "").strip().lower()
         if column_name and column_name not in case_map:
             continue
+        # If context_text explicitly scopes this filter column to a set of tables,
+        # skip the policy for any table not in that set.  This lets the deployment
+        # context_text say "use these rules for TABLE_A and TABLE_B" and have the
+        # system respect that scope without any changes to policies.yml.
+        if column_name and context_text and table_name and all_table_names:
+            scoped_tables = _context_scoped_tables_for_column(
+                context_text, column_name, all_table_names
+            )
+            if scoped_tables is not None and table_name.lower() not in scoped_tables:
+                continue
         for item in filter_def.get("values") or []:
             rendered = _rewrite_policy_sql(str(item or ""), table_alias, table_profile)
             if rendered:
@@ -3760,6 +3823,7 @@ def run_agentic_workflow(
             params: list[Any] = []
             dimensions: list[str] = []
             rows: list[dict] = []
+            policy_filters: list[str] = []
 
             metric_expr = chart.get("metric_expr")
             metric_name = chart.get("metric") or metric_name
@@ -3827,7 +3891,14 @@ def run_agentic_workflow(
 
             if table_ref and metric_expr:
                 table_profile = profiling_map.get(table_name) or {}
-                policy_filters = _dashboard_policy_filters(state.get("domain_id"), table_alias, table_profile)
+                policy_filters = _dashboard_policy_filters(
+                    state.get("domain_id"),
+                    table_alias,
+                    table_profile,
+                    table_name=table_name,
+                    context_text=state.get("context_text"),
+                    all_table_names=list(profiling_map.keys()),
+                )
                 where_clause = f" WHERE {' AND '.join(policy_filters)} " if policy_filters else " "
                 if chart_type == "line":
                     if time_col:
@@ -3839,15 +3910,29 @@ def run_agentic_workflow(
                         dim_alias = "period"
                         if category_col:
                             cat_alias = "category"
+                            # Use a CTE to first identify the top N categories by total metric
+                            # value, then show their time series.  This prevents LIMIT from
+                            # cutting across categories (the old LIMIT 10 gave 10 rows total,
+                            # which could be only 1-2 categories each with a few periods).
+                            top_n_cats = 5
                             sql = (
+                                f"WITH _top_cats AS ("
+                                f"SELECT {table_alias}.{_qident(category_col)} AS {cat_alias} "
+                                f"FROM {sql_from}"
+                                f"{where_clause}"
+                                f"GROUP BY {cat_alias} "
+                                f"ORDER BY {metric_expr} DESC "
+                                f"LIMIT {top_n_cats}"
+                                f") "
                                 f"SELECT {dim_expr} AS {dim_alias}, "
                                 f"{table_alias}.{_qident(category_col)} AS {cat_alias}, "
                                 f"{metric_expr} AS \"{metric_name}\" "
-                                f"FROM {sql_from}"
+                                f"FROM {sql_from} "
+                                f"JOIN _top_cats ON {table_alias}.{_qident(category_col)} = _top_cats.{cat_alias} "
                                 f"{where_clause}"
                                 f"GROUP BY {dim_alias}, {cat_alias} "
                                 f"ORDER BY {dim_alias} DESC "
-                                f"LIMIT {line_multi_limit}"
+                                f"LIMIT {top_n_cats * line_single_limit}"
                             )
                             dimensions = [dim_alias, cat_alias]
                         else:
@@ -3923,6 +4008,29 @@ def run_agentic_workflow(
                         chart_title,
                         len(rows),
                     )
+                    # If policy filters eliminated all rows, retry without them.
+                    # This handles tables like benchmark/reference tables where a domain
+                    # policy filter column exists in the schema but contains no meaningful
+                    # values for that particular table — the data context itself signals
+                    # that the filter should not apply.
+                    if not rows and policy_filters:
+                        sql_no_policy = sql.replace(
+                            f" WHERE {' AND '.join(policy_filters)} ",
+                            " ",
+                        )
+                        if sql_no_policy != sql:
+                            try:
+                                rows_retry = run_query(settings, sql_no_policy, params)
+                                if rows_retry:
+                                    logger.info(
+                                        "dashboard.chart.policy_filter_bypassed | title=%s reason=no_rows_with_filters rows_after_retry=%s",
+                                        chart_title,
+                                        len(rows_retry),
+                                    )
+                                    rows = rows_retry
+                                    sql = sql_no_policy
+                            except Exception:
+                                pass
                 except Exception as exc:
                     logger.exception(
                         "dashboard.chart.sql_failed | title=%s sql=%s params=%s",

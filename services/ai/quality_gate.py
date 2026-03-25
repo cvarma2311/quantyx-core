@@ -59,11 +59,12 @@ def evaluate_quality_report(state: dict[str, Any]) -> dict[str, Any]:
     score = 1.0
     score -= min(0.4, 0.1 * len(warnings))
     score = max(0.0, round(score, 3))
+    # missing_quality_or_rate_chart is advisory only — many domains (sales, targets)
+    # have no productivity/rate/utilization KPIs and should not be blocked for it.
     gate_passed = (
         not blocked_metric_names
         and trend_count >= 1
         and breakdown_count >= 1
-        and quality_or_rate_count >= 1
     )
 
     return {
