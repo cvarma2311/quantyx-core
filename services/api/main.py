@@ -282,6 +282,19 @@ from services.ai.workspace_store import (
     upsert_workspace_memory,
     list_conversations_by_chart,
 )
+from services.ai.correlation_store import (
+    create_correlation_run,
+    get_correlation_run,
+    list_correlation_runs,
+    get_anomaly_results,
+    get_correlation_pairs,
+    get_investigation_threads,
+    get_forward_projections,
+    save_correlation_run_results,
+)
+from services.ai.correlation_agent import run_correlation_intelligence
+from services.ai.correlation_charts import generate_correlation_charts
+from services.ai.correlation_narrate import narrate_correlation_results
 from services.ai.user_dashboards_store import (
     create_user_dashboard,
     get_user_dashboard,
@@ -439,6 +452,13 @@ from services.api.schemas import (
     UpdateDashboardRequest,
     AddChartToDashboardRequest,
     ReorderDashboardChartsRequest,
+    CorrelationRunRequest,
+    CorrelationRunResponse,
+    CorrelationRunListResponse,
+    CorrelationAnomalyListResponse,
+    CorrelationPairListResponse,
+    CorrelationThreadListResponse,
+    CorrelationProjectionListResponse,
 )
 from services.api.validators import (
     generate_source_title,
@@ -467,7 +487,7 @@ app = FastAPI(
 
 settings = load_settings()
 catalog = load_catalog_with_registry(settings, settings.metrics_catalog_path)
-_CHART_FOLLOWUP_PROMPTS_DIR = Path(__file__).resolve().parent / "ai" / "prompts" / "chart_followup"
+_CHART_FOLLOWUP_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "ai" / "prompts" / "chart_followup"
 LOW_CONFIDENCE_THRESHOLD = 0.7
 JOB_TYPES = {
     "scan_connection",
@@ -6457,6 +6477,128 @@ def start_agentic_run(payload: dict) -> dict:
     return {"run_id": run_id, "status": job.get("status", "queued"), "job_id": job.get("job_id")}
 
 
+def _execute_passthrough_workspace_query(
+    *,
+    metric_name: str,
+    dimensions: list[str],
+    filters: list[dict],
+    intelligence_bundle: dict,
+    schema_name: str,
+    limit: int,
+) -> "QueryResult":
+    """
+    Build and execute a direct aggregate SQL query for a raw-column metric
+    (metric_raw_column_passthrough mode).  Used when the metric registry is
+    empty but scanned model data gives us the table + column information.
+
+    Handles the virtual `process_month` dimension by deriving it from the
+    table's time_column via DATE_TRUNC.
+    """
+    model_map = _build_model_intelligence_map(intelligence_bundle)
+
+    # Find the fact table that contains the metric column.
+    # Use exact match first, then substring match (e.g. "productivity" → "total_productivity").
+    target_table: str | None = None
+    target_model: dict = {}
+    metric_lower = metric_name.lower()
+
+    for tbl, model in model_map.items():
+        numeric_cols = [str(c).lower() for c in (model.get("numeric_columns") or [])]
+        if metric_lower in numeric_cols:
+            target_table = tbl
+            target_model = model
+            break
+        if any(metric_lower in col or col in metric_lower for col in numeric_cols):
+            target_table = tbl
+            target_model = model
+            break
+
+    # Fallback: first fact table
+    if not target_table:
+        for tbl, model in model_map.items():
+            if str(model.get("model_type") or "").lower() == "fact":
+                target_table = tbl
+                target_model = model
+                break
+
+    if not target_table:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "No fact table found for passthrough metric query",
+                "metric": metric_name,
+            },
+        )
+
+    # Resolve the actual column name: exact → prefix/suffix → first numeric
+    numeric_cols_actual = [str(c) for c in (target_model.get("numeric_columns") or [])]
+    numeric_cols_lower = [c.lower() for c in numeric_cols_actual]
+    actual_metric_col = metric_name  # default — may not exist in table
+
+    if metric_lower in numeric_cols_lower:
+        actual_metric_col = numeric_cols_actual[numeric_cols_lower.index(metric_lower)]
+    else:
+        # Prefer columns that contain the metric name (e.g. "total_productivity")
+        # scored: "total_" prefix < exact suffix < contains
+        candidates = [
+            (col, col_l)
+            for col, col_l in zip(numeric_cols_actual, numeric_cols_lower)
+            if metric_lower in col_l or col_l in metric_lower
+        ]
+        if candidates:
+            # Prefer the column whose name ends with the metric name (most specific)
+            candidates.sort(key=lambda x: (not x[1].endswith(metric_lower), len(x[1])))
+            actual_metric_col = candidates[0][0]
+
+    time_col = str(target_model.get("time_column") or "")
+    qualified_table = f"{schema_name}.{target_table}" if schema_name else target_table
+
+    # Build SELECT / GROUP BY
+    select_parts: list[str] = []
+    group_parts: list[str] = []
+    out_dims: list[str] = []
+
+    for dim in dimensions:
+        if dim == "process_month" and time_col:
+            select_parts.append(f"DATE_TRUNC('month', {time_col})::DATE AS process_month")
+            group_parts.append(f"DATE_TRUNC('month', {time_col})::DATE")
+            out_dims.append("process_month")
+        else:
+            select_parts.append(dim)
+            group_parts.append(dim)
+            out_dims.append(dim)
+
+    select_parts.append(f"SUM({actual_metric_col}) AS {metric_name}")
+
+    # WHERE clause
+    where_clauses: list[str] = []
+    params: list[Any] = []
+    for flt in filters:
+        field = flt.get("field")
+        op = str(flt.get("operator") or "=")
+        value = flt.get("value")
+        if field and value is not None and op in {"=", "!=", ">", ">=", "<", "<=", "ILIKE"}:
+            where_clauses.append(f"{field} {op} %s")
+            params.append(value)
+
+    sql_parts = [f"SELECT {', '.join(select_parts)}", f"FROM {qualified_table}"]
+    if where_clauses:
+        sql_parts.append("WHERE " + " AND ".join(where_clauses))
+    if group_parts:
+        sql_parts.append("GROUP BY " + ", ".join(group_parts))
+    sql_parts.append("ORDER BY " + (group_parts[0] if group_parts else "1"))
+    sql_parts.append(f"LIMIT {limit}")
+    sql_text = "\n".join(sql_parts)
+
+    rows = run_query(settings, sql_text, params or None)
+    return QueryResult(
+        metrics=[metric_name],
+        dimensions=out_dims,
+        sql=sql_text,
+        rows=[dict(r) for r in (rows or [])],
+    )
+
+
 def _workspace_query_response(
     *,
     tenant_id: str,
@@ -6557,9 +6699,24 @@ def _workspace_query_response(
         validated_plan=validated_plan,
         limit=limit,
     )
-    query_result = query(
-        QueryRequest(**compiled_request)
+    _is_passthrough = any(
+        str(w).startswith("metric_raw_column_passthrough:")
+        for w in (validated_plan.get("validation_warnings") or [])
     )
+    if _is_passthrough:
+        _, _, schema_name, _ = _resolve_scope_values(tenant_id, domain_id)
+        query_result = _execute_passthrough_workspace_query(
+            metric_name=validated_plan["metric_name"],
+            dimensions=validated_plan.get("dimensions") or [],
+            filters=validated_plan.get("filters") or [],
+            intelligence_bundle=intelligence_bundle,
+            schema_name=schema_name or "",
+            limit=limit,
+        )
+    else:
+        query_result = query(
+            QueryRequest(**compiled_request)
+        )
     metric_name = (query_result.metrics or [None])[0]
     chart_type, chart_payload, chart_warnings = build_workspace_chart(
         rows=query_result.rows,
@@ -19107,3 +19264,302 @@ def reorder_charts(dashboard_id: str, body: ReorderDashboardChartsRequest) -> di
         raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
     order = reorder_dashboard_charts(settings, dashboard_id, body.chart_ids)
     return {"dashboard_id": dashboard_id, "chart_count": len(order), "order": order}
+
+
+# ---------------------------------------------------------------------------
+# Phase 43: Statistical Correlation, Anomaly, and Forward Pattern Agent
+# ---------------------------------------------------------------------------
+
+
+def _run_correlation_background(
+    correlation_run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    analysis_mode: str,
+    forecast_periods: int,
+) -> None:
+    """Background thread: run full correlation intelligence and persist results."""
+    _log = logging.getLogger(__name__)
+    try:
+        result = run_correlation_intelligence(
+            settings,
+            correlation_run_id=correlation_run_id,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            forecast_periods=forecast_periods,
+            analysis_mode=analysis_mode,
+        )
+
+        # Generate chart specs (mutates forward_projections in-place)
+        try:
+            generate_correlation_charts(
+                correlation_run_id=correlation_run_id,
+                kpi_snapshots=result.get("kpi_snapshots") or [],
+                anomaly_results=result.get("anomaly_results") or [],
+                correlation_pairs=result.get("correlation_pairs") or [],
+                forward_projections=result.get("forward_projections") or [],
+            )
+        except Exception:
+            _log.warning("[correlation] Chart generation failed", exc_info=True)
+
+        # Narrate threads and generate summary
+        narration = {"summary_text": "", "summary_html": ""}
+        try:
+            narration = narrate_correlation_results(
+                settings,
+                anomaly_results=result.get("anomaly_results") or [],
+                correlation_pairs=result.get("correlation_pairs") or [],
+                forward_projections=result.get("forward_projections") or [],
+                investigation_threads=result.get("investigation_threads") or [],
+            )
+        except Exception:
+            _log.warning("[correlation] Narration failed", exc_info=True)
+
+        save_correlation_run_results(
+            settings,
+            correlation_run_id=correlation_run_id,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_result=result,
+            summary_text=narration.get("summary_text") or "",
+            summary_html=narration.get("summary_html") or "",
+        )
+    except Exception:
+        _log.exception("[correlation] Background run failed for %s", correlation_run_id)
+        try:
+            from services.ai.correlation_store import update_correlation_run
+            update_correlation_run(
+                settings,
+                correlation_run_id,
+                status="failed",
+                error_message="Unhandled exception in background worker",
+            )
+        except Exception:
+            pass
+
+
+@app.post(
+    "/correlation/runs",
+    response_model=CorrelationRunResponse,
+    status_code=202,
+    tags=["correlation"],
+    summary="Trigger a correlation intelligence run",
+    description=(
+        "Starts a Phase 43 statistical correlation run in the background. "
+        "Returns immediately with status='running'. Poll `/correlation/runs/{id}` for completion."
+    ),
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "scoped_by_run": {
+                            "summary": "Scoped to a specific deployment run",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "run_id": "run_1a0f427c86ec",
+                                "analysis_mode": "full",
+                                "forecast_periods": 12,
+                            },
+                        },
+                        "anomaly_only": {
+                            "summary": "Anomaly detection only (skip correlation + projection)",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "analysis_mode": "anomaly_only",
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "202": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "accepted": {
+                                "summary": "Run accepted and started",
+                                "value": {
+                                    "correlation_run_id": "corrrun_a1b2c3d4e5",
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "lpg_production_distribution",
+                                    "run_id": "run_1a0f427c86ec",
+                                    "status": "running",
+                                    "analysis_mode": "full",
+                                    "forecast_periods": 12,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def trigger_correlation_run(body: CorrelationRunRequest) -> dict:
+    correlation_run_id = f"corrrun_{uuid.uuid4().hex[:12]}"
+    effective_run_id = body.run_id or ""
+    row = create_correlation_run(
+        settings,
+        correlation_run_id=correlation_run_id,
+        tenant_id=body.tenant_id,
+        domain_id=body.domain_id,
+        run_id=effective_run_id,
+        analysis_mode=body.analysis_mode,
+        forecast_periods=body.forecast_periods,
+        triggered_by=body.triggered_by,
+    )
+    threading.Thread(
+        target=_run_correlation_background,
+        args=(
+            correlation_run_id,
+            body.tenant_id,
+            body.domain_id,
+            effective_run_id,
+            body.analysis_mode,
+            body.forecast_periods,
+        ),
+        daemon=True,
+        name=f"corrrun-{correlation_run_id}",
+    ).start()
+    return row
+
+
+@app.get(
+    "/correlation/runs/{correlation_run_id}",
+    response_model=CorrelationRunResponse,
+    tags=["correlation"],
+    summary="Get a correlation run",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "done": {
+                                "summary": "Completed run",
+                                "value": {
+                                    "correlation_run_id": "corrrun_a1b2c3d4e5",
+                                    "status": "done",
+                                    "metric_count": 8,
+                                    "anomaly_count": 3,
+                                    "correlation_pair_count": 12,
+                                    "thread_count": 2,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_correlation_run_route(correlation_run_id: str) -> dict:
+    row = get_correlation_run(settings, correlation_run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Correlation run {correlation_run_id!r} not found")
+    return row
+
+
+@app.get(
+    "/correlation/runs",
+    response_model=CorrelationRunListResponse,
+    tags=["correlation"],
+    summary="List correlation runs for a tenant/domain",
+)
+def list_correlation_runs_route(
+    tenant_id: str = Query(..., description="Tenant identifier"),
+    domain_id: str = Query(..., description="Domain identifier"),
+    limit: int = Query(20, ge=1, le=100),
+) -> dict:
+    runs = list_correlation_runs(settings, tenant_id, domain_id, limit=limit)
+    return {"runs": runs, "total": len(runs)}
+
+
+@app.get(
+    "/correlation/runs/{correlation_run_id}/anomalies",
+    response_model=CorrelationAnomalyListResponse,
+    tags=["correlation"],
+    summary="Get anomaly results for a correlation run",
+)
+def get_anomalies_route(
+    correlation_run_id: str,
+    metric_name: Optional[str] = Query(None, description="Filter by metric name"),
+    min_score: float = Query(0.0, ge=0.0, le=1.0, description="Minimum anomaly score"),
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict:
+    _assert_run_exists(correlation_run_id)
+    anomalies = get_anomaly_results(
+        settings, correlation_run_id,
+        metric_name=metric_name, min_score=min_score, limit=limit,
+    )
+    return {"correlation_run_id": correlation_run_id, "anomalies": anomalies, "total": len(anomalies)}
+
+
+@app.get(
+    "/correlation/runs/{correlation_run_id}/pairs",
+    response_model=CorrelationPairListResponse,
+    tags=["correlation"],
+    summary="Get correlation pairs for a run",
+)
+def get_pairs_route(
+    correlation_run_id: str,
+    metric_name: Optional[str] = Query(None, description="Filter to pairs involving this metric"),
+    min_abs_r: float = Query(0.0, ge=0.0, le=1.0, description="Minimum absolute Pearson r"),
+    limit: int = Query(100, ge=1, le=500),
+) -> dict:
+    _assert_run_exists(correlation_run_id)
+    pairs = get_correlation_pairs(
+        settings, correlation_run_id,
+        metric_name=metric_name, min_abs_r=min_abs_r, limit=limit,
+    )
+    return {"correlation_run_id": correlation_run_id, "pairs": pairs, "total": len(pairs)}
+
+
+@app.get(
+    "/correlation/runs/{correlation_run_id}/threads",
+    response_model=CorrelationThreadListResponse,
+    tags=["correlation"],
+    summary="Get investigation threads for a run",
+)
+def get_threads_route(
+    correlation_run_id: str,
+    metric_name: Optional[str] = Query(None, description="Filter by trigger metric"),
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    _assert_run_exists(correlation_run_id)
+    threads = get_investigation_threads(
+        settings, correlation_run_id,
+        metric_name=metric_name, min_confidence=min_confidence, limit=limit,
+    )
+    return {"correlation_run_id": correlation_run_id, "threads": threads, "total": len(threads)}
+
+
+@app.get(
+    "/correlation/runs/{correlation_run_id}/projections",
+    response_model=CorrelationProjectionListResponse,
+    tags=["correlation"],
+    summary="Get forward projections for a run",
+)
+def get_projections_route(
+    correlation_run_id: str,
+    metric_name: Optional[str] = Query(None, description="Filter by metric name"),
+) -> dict:
+    _assert_run_exists(correlation_run_id)
+    projections = get_forward_projections(
+        settings, correlation_run_id, metric_name=metric_name,
+    )
+    return {"correlation_run_id": correlation_run_id, "projections": projections, "total": len(projections)}
+
+
+def _assert_run_exists(correlation_run_id: str) -> None:
+    """Raise 404 if the correlation run does not exist."""
+    row = get_correlation_run(settings, correlation_run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Correlation run {correlation_run_id!r} not found")

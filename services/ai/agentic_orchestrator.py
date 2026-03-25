@@ -4097,6 +4097,7 @@ def run_agentic_workflow(
                 sql=sql,
                 params=params,
                 rows_json=rows,
+                run_id=run_id or None,
             ).get("chart_id")
             logger.info(
                 "dashboard.chart.request_created | run_id=%s title=%s chart_id=%s sql_is_null=%s rows=%s",
@@ -5271,6 +5272,7 @@ def run_agentic_workflow(
                 sql=chart_sql,
                 params=chart_params,
                 rows_json=rows,
+                run_id=run_id or None,
             ).get("chart_id")
             payload = build_chart_payload(chart_type, rows, metric_name, dimensions or ["category"])
             if chart_id:

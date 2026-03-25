@@ -34,19 +34,21 @@ def create_chart_request(
     sql: str | None = None,
     params: list | None = None,
     rows_json: list | dict | None = None,
+    run_id: str | None = None,
 ) -> dict:
     chart_id = f"chart_{uuid.uuid4().hex[:10]}"
     insert_sql = """
         INSERT INTO public.quantyx_chart_requests
-          (chart_id, tenant_id, domain_id, question, query_payload, sql, params, rows_json, status)
+          (chart_id, tenant_id, domain_id, run_id, question, query_payload, sql, params, rows_json, status)
         VALUES
-          (%s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, 'queued')
+          (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, 'queued')
         RETURNING chart_id, status, created_at, updated_at
     """
     params = [
         chart_id,
         tenant_id,
         domain_id,
+        run_id or None,
         question,
         _serialize_payload(query_payload),
         sql,

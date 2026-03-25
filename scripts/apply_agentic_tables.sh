@@ -252,4 +252,140 @@ CREATE INDEX IF NOT EXISTS idx_user_dashboard_charts_dashboard
 
 CREATE INDEX IF NOT EXISTS idx_user_dashboard_charts_chart
   ON public.quantyx_user_dashboard_charts (chart_id);
+
+-- Phase 43: add run_id to quantyx_chart_requests so correlation agent can
+-- load exactly the KPI charts produced by a specific canonical deployment run.
+ALTER TABLE public.quantyx_chart_requests
+  ADD COLUMN IF NOT EXISTS run_id TEXT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_chart_requests_run
+  ON public.quantyx_chart_requests (run_id, tenant_id, domain_id, status)
+  WHERE run_id IS NOT NULL;
+
+-- Phase 43: Statistical Correlation, Anomaly, and Forward Pattern Agent tables
+
+CREATE TABLE IF NOT EXISTS public.quantyx_correlation_runs (
+  correlation_run_id    TEXT PRIMARY KEY,
+  tenant_id             TEXT NOT NULL,
+  domain_id             TEXT NOT NULL,
+  run_id                TEXT NOT NULL,
+  analysis_mode         TEXT NOT NULL DEFAULT 'full',
+  status                TEXT NOT NULL DEFAULT 'pending',
+  forecast_periods      INT  NOT NULL DEFAULT 12,
+  metric_count          INT  NULL,
+  anomaly_count         INT  NULL,
+  correlation_pair_count INT  NULL,
+  thread_count          INT  NULL,
+  error_message         TEXT NULL,
+  triggered_by          TEXT NULL,
+  summary_text          TEXT NULL,
+  summary_html          TEXT NULL,
+  started_at            TIMESTAMPTZ NULL,
+  completed_at          TIMESTAMPTZ NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_correlation_runs_scope
+  ON public.quantyx_correlation_runs (tenant_id, domain_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_correlation_runs_run
+  ON public.quantyx_correlation_runs (run_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_anomaly_results (
+  anomaly_id            TEXT PRIMARY KEY,
+  correlation_run_id    TEXT NOT NULL,
+  tenant_id             TEXT NOT NULL,
+  domain_id             TEXT NOT NULL,
+  metric_name           TEXT NOT NULL,
+  anomaly_class         TEXT NOT NULL,
+  anomaly_score         NUMERIC(6,4) NOT NULL,
+  z_score               NUMERIC(8,4) NULL,
+  iqr_flag              BOOLEAN NOT NULL DEFAULT false,
+  cusum_signal          BOOLEAN NOT NULL DEFAULT false,
+  detected_at           TEXT NOT NULL,
+  period_label          TEXT NULL,
+  baseline_value        NUMERIC NULL,
+  observed_value        NUMERIC NULL,
+  deviation_pct         NUMERIC(8,2) NULL,
+  top_dimension         TEXT NULL,
+  top_dimension_value   TEXT NULL,
+  dimension_pct         NUMERIC(6,2) NULL,
+  stats_json            JSONB NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_anomaly_results_run
+  ON public.quantyx_anomaly_results (correlation_run_id, anomaly_score DESC);
+
+CREATE INDEX IF NOT EXISTS idx_anomaly_results_metric
+  ON public.quantyx_anomaly_results (tenant_id, domain_id, metric_name, detected_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_correlation_pairs (
+  pair_id               TEXT PRIMARY KEY,
+  correlation_run_id    TEXT NOT NULL,
+  tenant_id             TEXT NOT NULL,
+  domain_id             TEXT NOT NULL,
+  metric_a              TEXT NOT NULL,
+  metric_b              TEXT NOT NULL,
+  pearson_r             NUMERIC(6,4) NULL,
+  spearman_rho          NUMERIC(6,4) NULL,
+  best_lag              INT  NULL,
+  lagged_r              NUMERIC(6,4) NULL,
+  lag_direction         TEXT NULL,
+  strength_label        TEXT NOT NULL,
+  direction_label       TEXT NOT NULL,
+  sample_size           INT  NULL,
+  p_value               NUMERIC(10,6) NULL,
+  is_stable             BOOLEAN NOT NULL DEFAULT true,
+  rolling_r_json        JSONB NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_correlation_pairs_run
+  ON public.quantyx_correlation_pairs (correlation_run_id, ABS(pearson_r) DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_correlation_pairs_run_metrics
+  ON public.quantyx_correlation_pairs (correlation_run_id, metric_a, metric_b);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_investigation_threads (
+  thread_id             TEXT PRIMARY KEY,
+  correlation_run_id    TEXT NOT NULL,
+  tenant_id             TEXT NOT NULL,
+  domain_id             TEXT NOT NULL,
+  trigger_metric        TEXT NOT NULL,
+  trigger_anomaly_id    TEXT NOT NULL,
+  evidence_chain        JSONB NOT NULL,
+  leading_dimension     TEXT NULL,
+  leading_dim_value     TEXT NULL,
+  confidence            NUMERIC(6,4) NOT NULL,
+  suggested_focus       JSONB NULL,
+  narrative_text        TEXT NULL,
+  narrative_html        TEXT NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_investigation_threads_run
+  ON public.quantyx_investigation_threads (correlation_run_id, confidence DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_forward_projections (
+  projection_id         TEXT PRIMARY KEY,
+  correlation_run_id    TEXT NOT NULL,
+  tenant_id             TEXT NOT NULL,
+  domain_id             TEXT NOT NULL,
+  metric_name           TEXT NOT NULL,
+  forecast_periods      INT  NOT NULL,
+  trend_direction       TEXT NOT NULL,
+  trend_slope           NUMERIC NULL,
+  seasonality_present   BOOLEAN NOT NULL DEFAULT false,
+  inflection_signal     TEXT NULL,
+  inflection_detail     TEXT NULL,
+  projection_json       JSONB NOT NULL,
+  anomaly_density_trend TEXT NULL,
+  chart_spec            JSONB NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_forward_projections_run
+  ON public.quantyx_forward_projections (correlation_run_id, metric_name);
 SQL

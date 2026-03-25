@@ -2312,3 +2312,86 @@ class AddChartToDashboardRequest(BaseModel):
 
 class ReorderDashboardChartsRequest(BaseModel):
     chart_ids: List[str]
+
+
+# ---------------------------------------------------------------------------
+# Phase 43: Statistical Correlation, Anomaly, and Forward Pattern Agent
+# ---------------------------------------------------------------------------
+
+
+class CorrelationRunRequest(BaseModel):
+    tenant_id: str = Field(..., description="Tenant identifier")
+    domain_id: str = Field(..., description="Domain identifier")
+    run_id: Optional[str] = Field(
+        None,
+        description="Deployment run_id to scope KPI snapshots. Falls back to latest charts for tenant/domain.",
+    )
+    analysis_mode: str = Field(
+        "full",
+        description="'full' runs all analyses; 'anomaly_only' skips correlation and projections.",
+    )
+    forecast_periods: int = Field(
+        12, ge=1, le=60,
+        description="Number of periods to project forward.",
+    )
+    triggered_by: Optional[str] = Field(None, description="User or system that triggered this run.")
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "tenant_id": "VC_101",
+                "domain_id": "lpg_production_distribution",
+                "run_id": "run_1a0f427c86ec",
+                "analysis_mode": "full",
+                "forecast_periods": 12,
+            }
+        }
+    }
+
+
+class CorrelationRunResponse(BaseModel):
+    correlation_run_id: str
+    tenant_id: str
+    domain_id: str
+    run_id: str
+    status: str
+    analysis_mode: str
+    forecast_periods: int
+    metric_count: Optional[int] = None
+    anomaly_count: Optional[int] = None
+    correlation_pair_count: Optional[int] = None
+    thread_count: Optional[int] = None
+    summary_text: Optional[str] = None
+    summary_html: Optional[str] = None
+    error_message: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class CorrelationRunListResponse(BaseModel):
+    runs: List[CorrelationRunResponse]
+    total: int
+
+
+class CorrelationAnomalyListResponse(BaseModel):
+    correlation_run_id: str
+    anomalies: List[dict]
+    total: int
+
+
+class CorrelationPairListResponse(BaseModel):
+    correlation_run_id: str
+    pairs: List[dict]
+    total: int
+
+
+class CorrelationThreadListResponse(BaseModel):
+    correlation_run_id: str
+    threads: List[dict]
+    total: int
+
+
+class CorrelationProjectionListResponse(BaseModel):
+    correlation_run_id: str
+    projections: List[dict]
+    total: int

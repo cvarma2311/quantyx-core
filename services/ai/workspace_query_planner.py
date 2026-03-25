@@ -342,7 +342,16 @@ def bind_metric(metric_candidates: list[str], available_metrics: list[str]) -> t
                 best_metric = metric_name
     if best_metric:
         warnings.append(f"metric_bound:{metric_candidates[0]}->{best_metric}")
-    return best_metric, warnings
+        return best_metric, warnings
+    # Registry is empty or no match found — fall back to accepting the first
+    # non-empty candidate as a raw-column metric so chart followup queries don't
+    # hard-fail when the metric catalog hasn't been populated yet.
+    if not available_metrics and metric_candidates:
+        first = next((c for c in metric_candidates if _normalize_name(c)), None)
+        if first:
+            warnings.append(f"metric_raw_column_passthrough:{first}")
+            return first, warnings
+    return None, warnings
 
 
 def bind_dimensions(
@@ -401,11 +410,19 @@ def interpret_workspace_query(
         "response_mode": "table_only" if detect_detail_intent(question) else "chart_plus_table",
         "sort": [],
     }
+    # Strip the appended chart context block before sending to the resolver so
+    # that embedded JSON fragments are not mistakenly extracted as dimension names.
+    _chart_ctx_sep = "\n\nChart context:"
+    question_for_resolver = (
+        question.split(_chart_ctx_sep)[0].strip()
+        if _chart_ctx_sep in question
+        else question
+    )
     try:
         from services.ai.resolver import resolve_question
 
         resolved = resolve_question(
-            question,
+            question_for_resolver,
             metric_catalog,
             settings,
             allowed_metrics=list(metric_catalog.metrics.keys()),
@@ -420,7 +437,7 @@ def interpret_workspace_query(
         ]
     except Exception:
         pass
-    lower_question = question.lower()
+    lower_question = question_for_resolver.lower()
     by_match = re.search(r"\bby\s+(.+?)(?:\s+for\b|\s+on\b|$)", lower_question)
     if by_match:
         parts = re.split(r",| and ", by_match.group(1))

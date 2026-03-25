@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
+import threading
 import uuid
 from datetime import date, datetime, time as dt_time
 from decimal import Decimal
@@ -11,6 +14,8 @@ from psycopg2.extras import Json
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, execute_returning_query, run_query
+
+_log = logging.getLogger(__name__)
 
 
 STATUS_ACTIVE = "active"
@@ -292,7 +297,128 @@ def finalize_canonical_deployment(settings: Settings, run_id: str) -> dict[str, 
         """,
         [run_id],
     )
-    return rows[0] if rows else None
+    canonical_row = rows[0] if rows else None
+
+    # Phase 43: auto-trigger correlation intelligence after canonical deployment
+    if canonical_row and os.getenv("CORRELATION_AUTO_TRIGGER", "true").lower() != "false":
+        _trigger_correlation_run_async(settings, canonical_row)
+
+    return canonical_row
+
+
+def _trigger_correlation_run_async(
+    settings: Settings,
+    canonical_row: dict[str, Any],
+) -> None:
+    """
+    Spawn a daemon thread to run Phase 43 correlation intelligence after
+    a canonical deployment is finalised.
+
+    Imports are done inside the function to avoid circular imports between
+    workspace_store ↔ correlation_agent ↔ correlation_store.
+
+    Respects the CORRELATION_AUTO_TRIGGER env var (default: true).
+    """
+    run_id = canonical_row.get("run_id") or ""
+    tenant_id = canonical_row.get("tenant_id") or ""
+    domain_id = canonical_row.get("domain_id") or ""
+
+    if not tenant_id or not domain_id:
+        return
+
+    forecast_periods = int(os.getenv("CORRELATION_FORECAST_PERIODS", "12"))
+    analysis_mode = os.getenv("CORRELATION_ANALYSIS_MODE", "full")
+
+    def _worker() -> None:
+        try:
+            from services.ai.correlation_store import (
+                create_correlation_run,
+                save_correlation_run_results,
+            )
+            from services.ai.correlation_agent import run_correlation_intelligence
+            from services.ai.correlation_charts import generate_correlation_charts
+            from services.ai.correlation_narrate import narrate_correlation_results
+
+            correlation_run_id = f"corrrun_{uuid.uuid4().hex[:12]}"
+            _log.info(
+                "[workspace_store] Auto-triggering correlation run %s "
+                "for run_id=%s tenant=%s domain=%s",
+                correlation_run_id, run_id, tenant_id, domain_id,
+            )
+
+            create_correlation_run(
+                settings,
+                correlation_run_id=correlation_run_id,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+                analysis_mode=analysis_mode,
+                forecast_periods=forecast_periods,
+                triggered_by="finalize_canonical_deployment",
+            )
+
+            result = run_correlation_intelligence(
+                settings,
+                correlation_run_id=correlation_run_id,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+                forecast_periods=forecast_periods,
+                analysis_mode=analysis_mode,
+            )
+
+            try:
+                generate_correlation_charts(
+                    correlation_run_id=correlation_run_id,
+                    kpi_snapshots=result.get("kpi_snapshots") or [],
+                    anomaly_results=result.get("anomaly_results") or [],
+                    correlation_pairs=result.get("correlation_pairs") or [],
+                    forward_projections=result.get("forward_projections") or [],
+                )
+            except Exception:
+                _log.warning("[workspace_store] Correlation chart generation failed", exc_info=True)
+
+            narration: dict[str, Any] = {"summary_text": "", "summary_html": ""}
+            try:
+                narration = narrate_correlation_results(
+                    settings,
+                    anomaly_results=result.get("anomaly_results") or [],
+                    correlation_pairs=result.get("correlation_pairs") or [],
+                    forward_projections=result.get("forward_projections") or [],
+                    investigation_threads=result.get("investigation_threads") or [],
+                )
+            except Exception:
+                _log.warning("[workspace_store] Correlation narration failed", exc_info=True)
+
+            save_correlation_run_results(
+                settings,
+                correlation_run_id=correlation_run_id,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_result=result,
+                summary_text=narration.get("summary_text") or "",
+                summary_html=narration.get("summary_html") or "",
+            )
+
+            _log.info(
+                "[workspace_store] Correlation run %s completed — "
+                "anomalies=%d pairs=%d threads=%d",
+                correlation_run_id,
+                result.get("anomaly_count", 0),
+                result.get("correlation_pair_count", 0),
+                result.get("thread_count", 0),
+            )
+
+        except Exception:
+            _log.exception(
+                "[workspace_store] Auto-correlation worker failed for run_id=%s", run_id
+            )
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f"correlation-auto-{run_id[-8:] if run_id else 'unknown'}",
+    ).start()
 
 
 def update_deployment(

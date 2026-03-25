@@ -9,6 +9,10 @@ What it does:
 2) Creates deployment via POST /workspace/deployments.
 3) Streams run progress from /agentic/runs/{run_id}/stream (or polls events).
 4) Prints final run status.
+5) Prints anomaly debug + followup artifacts.
+6) Waits for Phase 43 correlation intelligence run (auto-triggered on canonical
+   deployment) then prints a full statistical summary: anomalies, correlation
+   pairs, investigation threads, and forward projections.
 
 Usage examples:
   python3 scripts/demo_workspace_deployment_lpg.py
@@ -29,6 +33,13 @@ Usage examples:
   python3 scripts/demo_workspace_deployment_lpg.py \
     --context-id ctx_ops_glossary \
     --context-ids ctx_kpi_formulas ctx_chart_guidance
+
+  # Skip correlation intelligence step
+  python3 scripts/demo_workspace_deployment_lpg.py --skip-correlation
+
+  # Use anomaly-only mode with fewer forecast periods
+  python3 scripts/demo_workspace_deployment_lpg.py \
+    --correlation-mode anomaly_only --forecast-periods 6
 """
 
 import argparse
@@ -420,6 +431,293 @@ def _print_anomaly_debug(api_base: str, *, tenant_id: str, domain_id: str, run_i
         print("Anomaly stages ran, but no investigation artifact was persisted.")
 
 
+# ---------------------------------------------------------------------------
+# Correlation intelligence helpers (Phase 43)
+# ---------------------------------------------------------------------------
+
+_CORRELATION_TERMINAL = {"done", "failed", "error"}
+
+
+def _find_correlation_run(
+    api_base: str,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+) -> dict[str, Any] | None:
+    """Return the most recent correlation run linked to this deployment run_id."""
+    query = urllib.parse.urlencode({"tenant_id": tenant_id, "domain_id": domain_id, "limit": 10})
+    code, resp = _request(api_base, "GET", f"/correlation/runs?{query}", timeout=20)
+    if code != 200:
+        return None
+    runs: list[dict[str, Any]] = (resp or {}).get("runs") or []
+    # Prefer a run whose run_id matches the deployment run_id exactly
+    for r in runs:
+        if str(r.get("run_id") or "") == run_id:
+            return r
+    # Fall back to the latest run for this scope
+    return runs[0] if runs else None
+
+
+def _trigger_correlation_run(
+    api_base: str,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    analysis_mode: str = "full",
+    forecast_periods: int = 12,
+) -> dict[str, Any] | None:
+    """POST /correlation/runs to explicitly start a correlation run."""
+    payload: dict[str, Any] = {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "analysis_mode": analysis_mode,
+        "forecast_periods": forecast_periods,
+        "triggered_by": "demo_workspace_deployment_lpg.py",
+    }
+    code, resp = _request(api_base, "POST", "/correlation/runs", payload, timeout=30)
+    if code in {200, 201, 202}:
+        return resp
+    print(f"  [correlation] Trigger failed: status={code} body={resp}")
+    return None
+
+
+def _wait_for_correlation_run(
+    api_base: str,
+    correlation_run_id: str,
+    *,
+    timeout_seconds: float = 300.0,
+    poll_seconds: float = 4.0,
+) -> dict[str, Any]:
+    """Poll /correlation/runs/{id} until terminal status or timeout."""
+    deadline = time.monotonic() + timeout_seconds
+    last: dict[str, Any] = {}
+    dots = 0
+    while time.monotonic() < deadline:
+        code, resp = _request(
+            api_base,
+            "GET",
+            f"/correlation/runs/{urllib.parse.quote(correlation_run_id)}",
+            timeout=20,
+        )
+        if code == 200 and isinstance(resp, dict):
+            last = resp
+            status = str(resp.get("status") or "").lower()
+            dots += 1
+            print(
+                f"\r  [correlation] {correlation_run_id} status={status} "
+                f"anomalies={resp.get('anomaly_count', '?')} "
+                f"pairs={resp.get('correlation_pair_count', '?')} "
+                f"threads={resp.get('thread_count', '?')} {'.' * (dots % 4)}   ",
+                end="",
+                flush=True,
+            )
+            if status in _CORRELATION_TERMINAL:
+                print()  # newline after dots
+                return last
+        time.sleep(poll_seconds)
+    print()
+    return last
+
+
+def _print_correlation_summary(
+    api_base: str,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    analysis_mode: str = "full",
+    forecast_periods: int = 12,
+    timeout_seconds: float = 300.0,
+) -> None:
+    """
+    Locate (or trigger) the correlation run for this deployment, wait for it,
+    then print a structured summary of all statistical findings.
+    """
+    print("\n" + "=" * 70)
+    print("Phase 43 — Statistical Correlation Intelligence")
+    print("=" * 70)
+
+    # Give the auto-trigger a few seconds to register the run record
+    print("  Waiting for auto-triggered correlation run to appear...")
+    time.sleep(6)
+
+    corr_run = _find_correlation_run(
+        api_base, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id
+    )
+    if corr_run:
+        correlation_run_id = str(corr_run.get("correlation_run_id") or "")
+        print(f"  Found correlation run: {correlation_run_id} (status={corr_run.get('status')})")
+    else:
+        print("  Auto-triggered run not found — manually triggering correlation run...")
+        corr_run = _trigger_correlation_run(
+            api_base,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            analysis_mode=analysis_mode,
+            forecast_periods=forecast_periods,
+        )
+        if not corr_run:
+            print("  Could not start correlation run. Skipping.")
+            return
+        correlation_run_id = str(corr_run.get("correlation_run_id") or "")
+        print(f"  Started correlation run: {correlation_run_id}")
+
+    # Already done?
+    if str(corr_run.get("status") or "").lower() not in _CORRELATION_TERMINAL:
+        print(f"  Polling for completion (timeout={timeout_seconds:.0f}s)...")
+        corr_run = _wait_for_correlation_run(
+            api_base,
+            correlation_run_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    final_status = str(corr_run.get("status") or "unknown")
+    print(f"\nCorrelation run {correlation_run_id}")
+    print(
+        _json_dump(
+            {
+                "status": final_status,
+                "analysis_mode": corr_run.get("analysis_mode"),
+                "forecast_periods": corr_run.get("forecast_periods"),
+                "metric_count": corr_run.get("metric_count"),
+                "anomaly_count": corr_run.get("anomaly_count"),
+                "correlation_pair_count": corr_run.get("correlation_pair_count"),
+                "thread_count": corr_run.get("thread_count"),
+                "started_at": corr_run.get("started_at"),
+                "completed_at": corr_run.get("completed_at"),
+                "error_message": corr_run.get("error_message"),
+            }
+        )
+    )
+
+    if corr_run.get("summary_text"):
+        print("\nExecutive Summary:")
+        print(f"  {corr_run['summary_text']}")
+
+    if final_status == "failed":
+        print("\nCorrelation run failed — skipping detail sections.")
+        return
+
+    # --- Anomalies ---
+    print("\n--- Anomalies (top 10 by score) ---")
+    q = urllib.parse.urlencode({"min_score": "0.0", "limit": "10"})
+    code, resp = _request(
+        api_base,
+        "GET",
+        f"/correlation/runs/{urllib.parse.quote(correlation_run_id)}/anomalies?{q}",
+        timeout=20,
+    )
+    if code == 200:
+        anomalies: list[dict[str, Any]] = (resp or {}).get("anomalies") or []
+        total = (resp or {}).get("total", 0)
+        print(f"  Total: {total}")
+        for a in anomalies[:10]:
+            dim_note = ""
+            if a.get("top_dimension") and a.get("top_dimension_value"):
+                dim_note = f"  [{a['top_dimension']}={a['top_dimension_value']} {a.get('dimension_pct','?')}%]"
+            print(
+                f"  {a.get('metric_name','?')} | {a.get('anomaly_class','?')} | "
+                f"score={a.get('anomaly_score','?')} z={a.get('z_score','?')} | "
+                f"at={a.get('detected_at','?')} | dev={a.get('deviation_pct','?')}%{dim_note}"
+            )
+    else:
+        print(f"  Anomaly lookup failed: status={code}")
+
+    # --- Correlation pairs ---
+    print("\n--- Top Correlation Pairs ---")
+    q = urllib.parse.urlencode({"min_abs_r": "0.2", "limit": "10"})
+    code, resp = _request(
+        api_base,
+        "GET",
+        f"/correlation/runs/{urllib.parse.quote(correlation_run_id)}/pairs?{q}",
+        timeout=20,
+    )
+    if code == 200:
+        pairs: list[dict[str, Any]] = (resp or {}).get("pairs") or []
+        total = (resp or {}).get("total", 0)
+        print(f"  Total (|r|≥0.2): {total}")
+        for p in pairs[:10]:
+            lag_note = ""
+            if p.get("best_lag"):
+                lag_note = f" lag={p['best_lag']} ({p.get('lag_direction','')})"
+            print(
+                f"  {p.get('metric_a','?')} ↔ {p.get('metric_b','?')} | "
+                f"r={p.get('pearson_r','?')} | {p.get('strength_label','?')} {p.get('direction_label','?')}"
+                f"{lag_note} | stable={p.get('is_stable','?')}"
+            )
+    else:
+        print(f"  Pairs lookup failed: status={code}")
+
+    # --- Investigation threads ---
+    print("\n--- Investigation Threads ---")
+    q = urllib.parse.urlencode({"min_confidence": "0.0", "limit": "10"})
+    code, resp = _request(
+        api_base,
+        "GET",
+        f"/correlation/runs/{urllib.parse.quote(correlation_run_id)}/threads?{q}",
+        timeout=20,
+    )
+    if code == 200:
+        threads: list[dict[str, Any]] = (resp or {}).get("threads") or []
+        total = (resp or {}).get("total", 0)
+        print(f"  Total: {total}")
+        for t in threads[:5]:
+            print(
+                f"  trigger={t.get('trigger_metric','?')} | "
+                f"confidence={t.get('confidence','?')} | "
+                f"focus={t.get('suggested_focus','[]')}"
+            )
+            if t.get("narrative_text"):
+                # Wrap long narrative text at 80 chars
+                text = str(t["narrative_text"])
+                print(f"    {text[:200]}{'...' if len(text) > 200 else ''}")
+    else:
+        print(f"  Threads lookup failed: status={code}")
+
+    # --- Forward projections ---
+    print("\n--- Forward Projections ---")
+    code, resp = _request(
+        api_base,
+        "GET",
+        f"/correlation/runs/{urllib.parse.quote(correlation_run_id)}/projections",
+        timeout=20,
+    )
+    if code == 200:
+        projections: list[dict[str, Any]] = (resp or {}).get("projections") or []
+        total = (resp or {}).get("total", 0)
+        print(f"  Total: {total}")
+        for proj in projections:
+            inflection = f" | signal={proj['inflection_signal']}" if proj.get("inflection_signal") else ""
+            seasonal = " | seasonal" if proj.get("seasonality_present") else ""
+            next_pt = (proj.get("projection_json") or [{}])[0]
+            forecast_note = ""
+            if next_pt.get("forecast") is not None:
+                forecast_note = (
+                    f" | next={next_pt['forecast']:.2f} "
+                    f"[{next_pt.get('lower_1sigma','?'):.2f}, {next_pt.get('upper_1sigma','?'):.2f}]"
+                )
+            print(
+                f"  {proj.get('metric_name','?')} | trend={proj.get('trend_direction','?')}"
+                f"{seasonal}{inflection}{forecast_note}"
+            )
+    else:
+        print(f"  Projections lookup failed: status={code}")
+
+    print(
+        f"\nUseful endpoints:"
+        f"\n  GET {api_base.rstrip('/')}/correlation/runs/{correlation_run_id}"
+        f"\n  GET {api_base.rstrip('/')}/correlation/runs/{correlation_run_id}/anomalies"
+        f"\n  GET {api_base.rstrip('/')}/correlation/runs/{correlation_run_id}/pairs"
+        f"\n  GET {api_base.rstrip('/')}/correlation/runs/{correlation_run_id}/threads"
+        f"\n  GET {api_base.rstrip('/')}/correlation/runs/{correlation_run_id}/projections"
+    )
+    print("=" * 70)
+
+
 def _print_anomaly_followups(api_base: str, *, tenant_id: str, domain_id: str, run_id: str) -> None:
     query = urllib.parse.urlencode(
         {
@@ -520,6 +818,31 @@ def main() -> int:
         "--summary-only",
         action="store_true",
         help="Print compact event summaries instead of full artifacts and metadata.",
+    )
+    parser.add_argument(
+        "--skip-correlation",
+        action="store_true",
+        help="Skip Phase 43 correlation intelligence step.",
+    )
+    parser.add_argument(
+        "--correlation-mode",
+        choices=["full", "anomaly_only"],
+        default="full",
+        help="'full' runs all analyses; 'anomaly_only' skips correlation pairs and projections.",
+    )
+    parser.add_argument(
+        "--forecast-periods",
+        type=int,
+        default=12,
+        metavar="N",
+        help="Number of periods to project forward in Phase 43 (default: 12).",
+    )
+    parser.add_argument(
+        "--correlation-timeout",
+        type=float,
+        default=300.0,
+        metavar="SECS",
+        help="Max seconds to wait for correlation run to complete (default: 300).",
     )
     args = parser.parse_args()
 
@@ -655,6 +978,19 @@ def main() -> int:
         domain_id=args.domain_id,
         run_id=run_id,
     )
+
+    if not args.skip_correlation:
+        _print_correlation_summary(
+            args.api_base,
+            tenant_id=tenant_id,
+            domain_id=args.domain_id,
+            run_id=run_id,
+            analysis_mode=args.correlation_mode,
+            forecast_periods=args.forecast_periods,
+            timeout_seconds=args.correlation_timeout,
+        )
+    else:
+        print("\n[correlation] Skipped (--skip-correlation).")
 
     return 0
 
