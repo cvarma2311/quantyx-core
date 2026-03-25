@@ -211,4 +211,45 @@ CREATE TABLE IF NOT EXISTS public.quantyx_workspace_conversation_memory (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_memory_conversation
   ON public.quantyx_workspace_conversation_memory (conversation_id);
+
+-- Phase 38: Chart Conversations and User Dashboard Management
+
+ALTER TABLE public.quantyx_workspace_conversations
+  ADD COLUMN IF NOT EXISTS source_chart_id TEXT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_workspace_conversations_chart
+  ON public.quantyx_workspace_conversations (source_chart_id, created_at DESC)
+  WHERE source_chart_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.quantyx_user_dashboards (
+  dashboard_id   TEXT PRIMARY KEY,
+  tenant_id      TEXT NOT NULL,
+  domain_id      TEXT NOT NULL,
+  name           TEXT NOT NULL,
+  description    TEXT NULL,
+  status         TEXT NOT NULL DEFAULT 'active',
+  created_by     TEXT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_dashboards_tenant
+  ON public.quantyx_user_dashboards (tenant_id, domain_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_user_dashboard_charts (
+  entry_id       TEXT PRIMARY KEY,
+  dashboard_id   TEXT NOT NULL REFERENCES public.quantyx_user_dashboards(dashboard_id)
+                   ON DELETE CASCADE,
+  chart_id       TEXT NOT NULL,
+  position       INTEGER NOT NULL DEFAULT 0,
+  added_by       TEXT NULL,
+  added_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (dashboard_id, chart_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_dashboard_charts_dashboard
+  ON public.quantyx_user_dashboard_charts (dashboard_id, position ASC);
+
+CREATE INDEX IF NOT EXISTS idx_user_dashboard_charts_chart
+  ON public.quantyx_user_dashboard_charts (chart_id);
 SQL

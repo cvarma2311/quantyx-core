@@ -367,20 +367,64 @@ def create_workspace_conversation(
     title: str,
     display_name: str | None = None,
     created_by: str | None = None,
+    source_chart_id: str | None = None,
 ) -> dict[str, Any]:
     conversation_id = f"conv_{uuid.uuid4().hex[:12]}"
     rows = execute_returning_query(
         settings,
         """
         INSERT INTO public.quantyx_workspace_conversations (
-          conversation_id, tenant_id, domain_id, run_id, title, display_name, status, created_by, created_at, updated_at
+          conversation_id, tenant_id, domain_id, run_id, title, display_name, status, created_by,
+          source_chart_id, created_at, updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now(), now())
-        RETURNING conversation_id, tenant_id, domain_id, run_id, title, display_name, status, created_by, created_at, updated_at
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+        RETURNING conversation_id, tenant_id, domain_id, run_id, title, display_name, status, created_by,
+                  source_chart_id, created_at, updated_at
         """,
-        [conversation_id, tenant_id, domain_id, run_id, title, display_name or title, STATUS_ACTIVE, created_by],
+        [conversation_id, tenant_id, domain_id, run_id, title, display_name or title, STATUS_ACTIVE, created_by, source_chart_id],
     )
     return rows[0]
+
+
+def list_conversations_by_chart(
+    settings: Settings,
+    chart_id: str,
+    tenant_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    filters = ["c.source_chart_id = %s"]
+    params: list[Any] = [chart_id]
+    if tenant_id is not None:
+        filters.append("c.tenant_id = %s")
+        params.append(tenant_id)
+    params.extend([limit, offset])
+    return run_query(
+        settings,
+        f"""
+        SELECT c.conversation_id,
+               c.tenant_id,
+               c.domain_id,
+               c.run_id,
+               c.source_chart_id,
+               c.title,
+               c.display_name,
+               c.status,
+               c.created_at,
+               c.updated_at,
+               COALESCE(m.message_count, 0) AS message_count
+          FROM public.quantyx_workspace_conversations c
+          LEFT JOIN (
+            SELECT conversation_id, COUNT(*)::int AS message_count
+              FROM public.quantyx_workspace_messages
+             GROUP BY conversation_id
+          ) m ON m.conversation_id = c.conversation_id
+         WHERE {' AND '.join(filters)}
+         ORDER BY c.created_at DESC
+         LIMIT %s OFFSET %s
+        """,
+        params,
+    )
 
 
 def list_workspace_conversations(

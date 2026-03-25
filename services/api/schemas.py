@@ -2277,3 +2277,38 @@ class DbtManifestLatestResponse(BaseModel):
             }
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 42: Chart Conversations and User Dashboard Management
+# ---------------------------------------------------------------------------
+
+
+class CreateConversationRequest(BaseModel):
+    run_id: str
+    tenant_id: str
+    domain_id: str
+    source_chart_id: Optional[str] = None
+
+
+class CreateDashboardRequest(BaseModel):
+    tenant_id: str
+    domain_id: str
+    name: str
+    description: Optional[str] = None
+    created_by: Optional[str] = None
+
+
+class UpdateDashboardRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class AddChartToDashboardRequest(BaseModel):
+    chart_id: str
+    position: Optional[int] = None
+    added_by: Optional[str] = None
+
+
+class ReorderDashboardChartsRequest(BaseModel):
+    chart_ids: List[str]

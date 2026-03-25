@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Iterator, List, TypeVar
+from typing import Callable, Iterator, List, Optional, TypeVar
 
 import base64
 import contextlib
@@ -280,6 +280,18 @@ from services.ai.workspace_store import (
     update_deployment,
     update_workspace_conversation,
     upsert_workspace_memory,
+    list_conversations_by_chart,
+)
+from services.ai.user_dashboards_store import (
+    create_user_dashboard,
+    get_user_dashboard,
+    list_user_dashboards,
+    update_user_dashboard,
+    delete_user_dashboard,
+    add_chart_to_dashboard,
+    remove_chart_from_dashboard,
+    reorder_dashboard_charts,
+    get_dashboard_with_charts,
 )
 from services.ai.view_query_store import (
     create_view_query_run,
@@ -422,6 +434,11 @@ from services.api.schemas import (
     CanvasListResponse,
     CanvasDetailResponse,
     CanvasTreeResponse,
+    CreateConversationRequest,
+    CreateDashboardRequest,
+    UpdateDashboardRequest,
+    AddChartToDashboardRequest,
+    ReorderDashboardChartsRequest,
 )
 from services.api.validators import (
     generate_source_title,
@@ -8140,6 +8157,7 @@ def workspace_create_conversation(payload: dict) -> dict:
         title=title,
         display_name=payload.get("display_name") or title,
         created_by=payload.get("created_by"),
+        source_chart_id=payload.get("source_chart_id"),
     )
     return {
         **conversation,
@@ -18429,3 +18447,663 @@ def get_chart_plan(dashboard_id: str) -> dict:
         "chart_candidates": spec.get("chart_candidates") or [],
         "chart_plan": spec.get("chart_plan") or [],
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 42: Chart Conversations and User Dashboard Management
+# ---------------------------------------------------------------------------
+
+
+@app.post(
+    "/agentic/conversations",
+    tags=["agentic"],
+    summary="Create a new agentic conversation",
+    status_code=201,
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "basic": {
+                            "summary": "Create a conversation for a run",
+                            "value": {
+                                "run_id": "run_abc123def456",
+                                "tenant_id": "a13",
+                                "domain_id": "market_performance_analysis",
+                            },
+                        },
+                        "from_chart": {
+                            "summary": "Create a conversation linked to a chart",
+                            "value": {
+                                "run_id": "run_abc123def456",
+                                "tenant_id": "a13",
+                                "domain_id": "market_performance_analysis",
+                                "source_chart_id": "chart_344ec6b3c9",
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "201": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "created": {
+                                "summary": "Conversation created",
+                                "value": {
+                                    "conversation_id": "conv_6f0f0f1a2b3c",
+                                    "tenant_id": "a13",
+                                    "domain_id": "market_performance_analysis",
+                                    "run_id": "run_abc123def456",
+                                    "title": "Market Performance Analysis Conversation",
+                                    "display_name": "Market Performance Analysis Conversation",
+                                    "status": "active",
+                                    "source_chart_id": None,
+                                    "run_display_name": "Market Performance Analysis Deployment v2",
+                                    "created_at": "2026-03-25T10:00:00Z",
+                                    "updated_at": "2026-03-25T10:00:00Z",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def create_agentic_conversation(body: CreateConversationRequest) -> dict:
+    run_row = run_query(
+        settings,
+        "SELECT run_id, tenant_id, domain_id, display_name FROM public.quantyx_agent_runs WHERE run_id = %s LIMIT 1",
+        [body.run_id],
+    )
+    if not run_row:
+        raise HTTPException(status_code=404, detail=f"Run {body.run_id!r} not found")
+    run = run_row[0]
+    title = generate_conversation_title(None, body.domain_id)
+    conversation = create_workspace_conversation(
+        settings,
+        tenant_id=body.tenant_id,
+        domain_id=body.domain_id,
+        run_id=body.run_id,
+        title=title,
+        source_chart_id=body.source_chart_id,
+    )
+    return {**conversation, "run_display_name": run.get("display_name")}
+
+
+@app.get(
+    "/charts/{chart_id}/conversations",
+    tags=["charts"],
+    summary="List conversations started from a chart",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "with_conversations": {
+                                "summary": "Chart has linked conversations",
+                                "value": {
+                                    "chart_id": "chart_344ec6b3c9",
+                                    "total": 2,
+                                    "conversations": [
+                                        {
+                                            "conversation_id": "conv_6f0f0f1a2b3c",
+                                            "tenant_id": "a13",
+                                            "domain_id": "market_performance_analysis",
+                                            "run_id": "run_abc123def456",
+                                            "source_chart_id": "chart_344ec6b3c9",
+                                            "title": "Daily Sales Deep Dive",
+                                            "status": "active",
+                                            "message_count": 7,
+                                            "created_at": "2026-03-25T10:00:00Z",
+                                            "updated_at": "2026-03-25T10:05:00Z",
+                                        },
+                                        {
+                                            "conversation_id": "conv_9a1b2c3d4e5f",
+                                            "tenant_id": "a13",
+                                            "domain_id": "market_performance_analysis",
+                                            "run_id": "run_abc123def456",
+                                            "source_chart_id": "chart_344ec6b3c9",
+                                            "title": "Market Performance Analysis Conversation",
+                                            "status": "active",
+                                            "message_count": 3,
+                                            "created_at": "2026-03-24T09:00:00Z",
+                                            "updated_at": "2026-03-24T09:10:00Z",
+                                        },
+                                    ],
+                                },
+                            },
+                            "no_conversations": {
+                                "summary": "No conversations linked to this chart yet",
+                                "value": {
+                                    "chart_id": "chart_c762fa59d7",
+                                    "total": 0,
+                                    "conversations": [],
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_chart_conversations(
+    chart_id: str,
+    tenant_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    conversations = list_conversations_by_chart(
+        settings,
+        chart_id=chart_id,
+        tenant_id=tenant_id,
+        limit=limit,
+        offset=offset,
+    )
+    return {"chart_id": chart_id, "total": len(conversations), "conversations": conversations}
+
+
+@app.post(
+    "/dashboards/",
+    tags=["dashboards"],
+    summary="Create a named user dashboard",
+    status_code=201,
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "sales_overview": {
+                            "summary": "Create a sales overview dashboard",
+                            "value": {
+                                "tenant_id": "a13",
+                                "domain_id": "market_performance_analysis",
+                                "name": "HPCL Sales Overview",
+                                "description": "Key sales and target charts for FY2026",
+                                "created_by": "user_001",
+                            },
+                        },
+                        "minimal": {
+                            "summary": "Minimal — name only",
+                            "value": {
+                                "tenant_id": "a13",
+                                "domain_id": "market_performance_analysis",
+                                "name": "My Dashboard",
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "201": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "created": {
+                                "summary": "Dashboard created",
+                                "value": {
+                                    "dashboard_id": "udash_a1b2c3d4e5",
+                                    "tenant_id": "a13",
+                                    "domain_id": "market_performance_analysis",
+                                    "name": "HPCL Sales Overview",
+                                    "description": "Key sales and target charts for FY2026",
+                                    "status": "active",
+                                    "chart_count": 0,
+                                    "created_by": "user_001",
+                                    "created_at": "2026-03-25T10:00:00Z",
+                                    "updated_at": "2026-03-25T10:00:00Z",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def create_dashboard(body: CreateDashboardRequest) -> dict:
+    return create_user_dashboard(
+        settings,
+        tenant_id=body.tenant_id,
+        domain_id=body.domain_id,
+        name=body.name,
+        description=body.description,
+        created_by=body.created_by,
+    )
+
+
+@app.get(
+    "/dashboards/",
+    tags=["dashboards"],
+    summary="List user dashboards for a tenant",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "active_dashboards": {
+                                "summary": "Active dashboards for a tenant",
+                                "value": {
+                                    "total": 2,
+                                    "dashboards": [
+                                        {
+                                            "dashboard_id": "udash_a1b2c3d4e5",
+                                            "name": "HPCL Sales Overview",
+                                            "domain_id": "market_performance_analysis",
+                                            "description": "Key sales and target charts for FY2026",
+                                            "status": "active",
+                                            "chart_count": 4,
+                                            "created_by": "user_001",
+                                            "updated_at": "2026-03-25T10:05:00Z",
+                                        },
+                                        {
+                                            "dashboard_id": "udash_f6g7h8i9j0",
+                                            "name": "LPG Distribution KPIs",
+                                            "domain_id": "lpg_production_distribution",
+                                            "description": None,
+                                            "status": "active",
+                                            "chart_count": 2,
+                                            "created_by": "user_002",
+                                            "updated_at": "2026-03-24T08:00:00Z",
+                                        },
+                                    ],
+                                },
+                            },
+                            "empty": {
+                                "summary": "No dashboards yet",
+                                "value": {"total": 0, "dashboards": []},
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_dashboards(
+    tenant_id: str,
+    domain_id: Optional[str] = None,
+    status: str = "active",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    dashboards = list_user_dashboards(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    return {"total": len(dashboards), "dashboards": dashboards}
+
+
+@app.get(
+    "/dashboards/{dashboard_id}",
+    tags=["dashboards"],
+    summary="Get a dashboard with all its charts",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "with_charts": {
+                                "summary": "Dashboard with charts in order",
+                                "value": {
+                                    "dashboard_id": "udash_a1b2c3d4e5",
+                                    "name": "HPCL Sales Overview",
+                                    "domain_id": "market_performance_analysis",
+                                    "description": "Key sales and target charts for FY2026",
+                                    "status": "active",
+                                    "chart_count": 2,
+                                    "created_by": "user_001",
+                                    "created_at": "2026-03-25T10:00:00Z",
+                                    "updated_at": "2026-03-25T10:05:00Z",
+                                    "charts": [
+                                        {
+                                            "entry_id": "dce_001",
+                                            "position": 0,
+                                            "chart_id": "chart_344ec6b3c9",
+                                            "title": "Daily Sales by Month",
+                                            "chart_type": "line",
+                                            "metric": "daily_sales",
+                                            "status": "ready",
+                                            "added_at": "2026-03-25T10:01:00Z",
+                                        },
+                                        {
+                                            "entry_id": "dce_002",
+                                            "position": 1,
+                                            "chart_id": "chart_c762fa59d7",
+                                            "title": "Target Qty Tmt by Month",
+                                            "chart_type": "line",
+                                            "metric": "TARGET_QTY_TMT",
+                                            "status": "ready",
+                                            "added_at": "2026-03-25T10:02:00Z",
+                                        },
+                                    ],
+                                },
+                            },
+                            "empty_dashboard": {
+                                "summary": "Dashboard with no charts yet",
+                                "value": {
+                                    "dashboard_id": "udash_f6g7h8i9j0",
+                                    "name": "New Dashboard",
+                                    "domain_id": "market_performance_analysis",
+                                    "description": None,
+                                    "status": "active",
+                                    "chart_count": 0,
+                                    "charts": [],
+                                    "created_at": "2026-03-25T10:00:00Z",
+                                    "updated_at": "2026-03-25T10:00:00Z",
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_dashboard(dashboard_id: str, tenant_id: Optional[str] = None) -> dict:
+    dash = get_dashboard_with_charts(settings, dashboard_id, tenant_id=tenant_id)
+    if not dash:
+        raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
+    return dash
+
+
+@app.patch(
+    "/dashboards/{dashboard_id}",
+    tags=["dashboards"],
+    summary="Update dashboard metadata",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "rename": {
+                            "summary": "Rename the dashboard",
+                            "value": {"name": "HPCL FY2026 Executive Dashboard"},
+                        },
+                        "update_description": {
+                            "summary": "Update description only",
+                            "value": {"description": "Refreshed for Q4 FY2026 board review"},
+                        },
+                        "rename_and_describe": {
+                            "summary": "Rename and update description",
+                            "value": {
+                                "name": "HPCL FY2026 Executive Dashboard",
+                                "description": "Refreshed for Q4 FY2026 board review",
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "updated": {
+                                "summary": "Dashboard updated",
+                                "value": {
+                                    "dashboard_id": "udash_a1b2c3d4e5",
+                                    "name": "HPCL FY2026 Executive Dashboard",
+                                    "description": "Refreshed for Q4 FY2026 board review",
+                                    "status": "active",
+                                    "chart_count": 4,
+                                    "updated_at": "2026-03-25T11:00:00Z",
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def patch_dashboard(dashboard_id: str, body: UpdateDashboardRequest) -> dict:
+    dash = update_user_dashboard(
+        settings,
+        dashboard_id,
+        name=body.name,
+        description=body.description,
+    )
+    if not dash:
+        raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
+    return dash
+
+
+@app.delete(
+    "/dashboards/{dashboard_id}",
+    tags=["dashboards"],
+    summary="Delete or archive a dashboard",
+    description="Soft-delete (archive) by default. Pass `permanent=true` to hard-delete the dashboard and all its chart entries.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "archived": {
+                                "summary": "Soft-deleted (archived)",
+                                "value": {"dashboard_id": "udash_a1b2c3d4e5", "status": "archived"},
+                            },
+                            "permanently_deleted": {
+                                "summary": "Hard-deleted (permanent=true)",
+                                "value": {"dashboard_id": "udash_a1b2c3d4e5", "deleted": True},
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def delete_dashboard(dashboard_id: str, permanent: bool = False) -> dict:
+    existing = get_user_dashboard(settings, dashboard_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
+    delete_user_dashboard(settings, dashboard_id, permanent=permanent)
+    if permanent:
+        return {"dashboard_id": dashboard_id, "deleted": True}
+    return {"dashboard_id": dashboard_id, "status": "archived"}
+
+
+@app.post(
+    "/dashboards/{dashboard_id}/charts",
+    tags=["dashboards"],
+    summary="Add a chart to a dashboard",
+    status_code=201,
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "append": {
+                            "summary": "Append chart at the end (no position)",
+                            "value": {"chart_id": "chart_344ec6b3c9"},
+                        },
+                        "at_position": {
+                            "summary": "Insert chart at position 0 (front)",
+                            "value": {"chart_id": "chart_344ec6b3c9", "position": 0},
+                        },
+                        "with_user": {
+                            "summary": "Add chart, record who added it",
+                            "value": {
+                                "chart_id": "chart_c762fa59d7",
+                                "position": 2,
+                                "added_by": "user_001",
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "201": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "added": {
+                                "summary": "Chart added to dashboard",
+                                "value": {
+                                    "entry_id": "dce_001",
+                                    "dashboard_id": "udash_a1b2c3d4e5",
+                                    "chart_id": "chart_344ec6b3c9",
+                                    "position": 0,
+                                    "added_by": "user_001",
+                                    "added_at": "2026-03-25T10:01:00Z",
+                                },
+                            }
+                        }
+                    }
+                }
+            },
+            "409": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "duplicate": {
+                                "summary": "Chart already in dashboard",
+                                "value": {"detail": "Chart 'chart_344ec6b3c9' already in dashboard"},
+                            }
+                        }
+                    }
+                }
+            },
+        },
+    },
+)
+def add_chart(dashboard_id: str, body: AddChartToDashboardRequest) -> dict:
+    dash = get_user_dashboard(settings, dashboard_id)
+    if not dash:
+        raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
+    chart_row = run_query(
+        settings,
+        "SELECT chart_id FROM public.quantyx_chart_requests WHERE chart_id = %s LIMIT 1",
+        [body.chart_id],
+    )
+    if not chart_row:
+        raise HTTPException(status_code=404, detail=f"Chart {body.chart_id!r} not found")
+    try:
+        entry = add_chart_to_dashboard(
+            settings,
+            dashboard_id=dashboard_id,
+            chart_id=body.chart_id,
+            position=body.position,
+            added_by=body.added_by,
+        )
+    except Exception as exc:
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            raise HTTPException(status_code=409, detail=f"Chart {body.chart_id!r} already in dashboard")
+        raise
+    return entry
+
+
+@app.delete(
+    "/dashboards/{dashboard_id}/charts/{chart_id}",
+    tags=["dashboards"],
+    summary="Remove a chart from a dashboard",
+    description="Removes the chart entry from the dashboard. Does not delete the underlying chart.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "removed": {
+                                "summary": "Chart removed from dashboard",
+                                "value": {
+                                    "dashboard_id": "udash_a1b2c3d4e5",
+                                    "chart_id": "chart_344ec6b3c9",
+                                    "removed": True,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def remove_chart(dashboard_id: str, chart_id: str) -> dict:
+    dash = get_user_dashboard(settings, dashboard_id)
+    if not dash:
+        raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
+    remove_chart_from_dashboard(settings, dashboard_id, chart_id)
+    return {"dashboard_id": dashboard_id, "chart_id": chart_id, "removed": True}
+
+
+@app.put(
+    "/dashboards/{dashboard_id}/charts/order",
+    tags=["dashboards"],
+    summary="Reorder charts in a dashboard",
+    description="Supply the full ordered list of chart_ids. Positions are normalized to 0, 1, 2, … in the given order.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "reorder_three": {
+                            "summary": "Reorder 3 charts",
+                            "value": {
+                                "chart_ids": [
+                                    "chart_c762fa59d7",
+                                    "chart_344ec6b3c9",
+                                    "chart_ce1784971c",
+                                ]
+                            },
+                        },
+                        "move_to_front": {
+                            "summary": "Promote one chart to position 0",
+                            "value": {
+                                "chart_ids": [
+                                    "chart_ce1784971c",
+                                    "chart_344ec6b3c9",
+                                    "chart_c762fa59d7",
+                                ]
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "reordered": {
+                                "summary": "New chart order",
+                                "value": {
+                                    "dashboard_id": "udash_a1b2c3d4e5",
+                                    "chart_count": 3,
+                                    "order": [
+                                        {"position": 0, "chart_id": "chart_c762fa59d7"},
+                                        {"position": 1, "chart_id": "chart_344ec6b3c9"},
+                                        {"position": 2, "chart_id": "chart_ce1784971c"},
+                                    ],
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def reorder_charts(dashboard_id: str, body: ReorderDashboardChartsRequest) -> dict:
+    dash = get_user_dashboard(settings, dashboard_id)
+    if not dash:
+        raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
+    order = reorder_dashboard_charts(settings, dashboard_id, body.chart_ids)
+    return {"dashboard_id": dashboard_id, "chart_count": len(order), "order": order}
