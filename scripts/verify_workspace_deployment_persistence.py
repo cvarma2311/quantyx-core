@@ -45,7 +45,7 @@ What this verifies:
      - quantyx_semantic_contracts
      - quantyx_semantic_nodes / quantyx_semantic_edges
      - quantyx_fact_views_registry
-     - quantyx_dashboard_specs
+     - quantyx_dashboards (Phase 44 unified; was quantyx_dashboard_specs)
   3) Workspace chat persistence:
      - quantyx_workspace_conversations
      - quantyx_workspace_messages
@@ -616,17 +616,17 @@ def main() -> int:
                 settings,
                 """
                 SELECT COUNT(*) AS count
-                  FROM public.quantyx_dashboard_specs
-                 WHERE tenant_id = %s AND domain_id = %s
+                  FROM public.quantyx_dashboards
+                 WHERE tenant_id = %s AND domain_id = %s AND dashboard_type = 'system'
                 """,
                 [tenant_id, domain_id],
             ),
             "sample": _rows(
                 settings,
                 """
-                SELECT dashboard_id, title, created_at, updated_at
-                  FROM public.quantyx_dashboard_specs
-                 WHERE tenant_id = %s AND domain_id = %s
+                SELECT dashboard_id, name AS title, dashboard_type, created_at, updated_at
+                  FROM public.quantyx_dashboards
+                 WHERE tenant_id = %s AND domain_id = %s AND dashboard_type = 'system'
                  ORDER BY created_at DESC
                 """,
                 [tenant_id, domain_id],

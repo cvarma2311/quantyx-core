@@ -10,9 +10,8 @@ What it does:
 3) Streams run progress from /agentic/runs/{run_id}/stream (or polls events).
 4) Prints final run status.
 5) Prints anomaly debug + followup artifacts.
-6) Waits for Phase 43 correlation intelligence run (auto-triggered on canonical
-   deployment) then prints a full statistical summary: anomalies, correlation
-   pairs, investigation threads, and forward projections.
+6) Prints the Phase 43 correlation summary used upstream by anomaly
+   investigation in the agentic run, or triggers it only as a fallback.
 
 Usage examples:
   python3 scripts/demo_workspace_deployment_lpg.py
@@ -34,7 +33,7 @@ Usage examples:
     --context-id ctx_ops_glossary \
     --context-ids ctx_kpi_formulas ctx_chart_guidance
 
-  # Skip correlation intelligence step
+  # Skip correlation summary / fallback trigger
   python3 scripts/demo_workspace_deployment_lpg.py --skip-correlation
 
   # Use anomaly-only mode with fewer forecast periods
@@ -533,16 +532,16 @@ def _print_correlation_summary(
     timeout_seconds: float = 300.0,
 ) -> None:
     """
-    Locate (or trigger) the correlation run for this deployment, wait for it,
-    then print a structured summary of all statistical findings.
+    Locate the correlation run for this deployment. Agentic runs now create it
+    before anomaly investigation. If none exists, trigger one as a fallback for
+    the demo, then print a structured summary of all statistical findings.
     """
     print("\n" + "=" * 70)
     print("Phase 43 — Statistical Correlation Intelligence")
     print("=" * 70)
 
-    # Give the auto-trigger a few seconds to register the run record
-    print("  Waiting for auto-triggered correlation run to appear...")
-    time.sleep(6)
+    print("  Looking for correlation run created during the agentic workflow...")
+    time.sleep(2)
 
     corr_run = _find_correlation_run(
         api_base, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id
@@ -551,7 +550,7 @@ def _print_correlation_summary(
         correlation_run_id = str(corr_run.get("correlation_run_id") or "")
         print(f"  Found correlation run: {correlation_run_id} (status={corr_run.get('status')})")
     else:
-        print("  Auto-triggered run not found — manually triggering correlation run...")
+        print("  No inline correlation run found — manually triggering correlation run...")
         corr_run = _trigger_correlation_run(
             api_base,
             tenant_id=tenant_id,

@@ -299,8 +299,25 @@ def finalize_canonical_deployment(settings: Settings, run_id: str) -> dict[str, 
     )
     canonical_row = rows[0] if rows else None
 
+    existing_correlation_rows: list[dict[str, Any]] = []
+    if canonical_row:
+        try:
+            existing_correlation_rows = run_query(
+                settings,
+                """
+                SELECT correlation_run_id, status
+                  FROM public.quantyx_correlation_runs
+                 WHERE run_id = %s
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                """,
+                [run_id],
+            )
+        except Exception:
+            existing_correlation_rows = []
+
     # Phase 43: auto-trigger correlation intelligence after canonical deployment
-    if canonical_row and os.getenv("CORRELATION_AUTO_TRIGGER", "true").lower() != "false":
+    if canonical_row and not existing_correlation_rows and os.getenv("CORRELATION_AUTO_TRIGGER", "true").lower() != "false":
         _trigger_correlation_run_async(settings, canonical_row)
 
     return canonical_row

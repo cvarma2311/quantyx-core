@@ -118,6 +118,15 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 38. **Phase 41: Chart Conversation, Drill-Down, and Follow-Up Visual Analytics**
    - Make every chart conversational so users can ask follow-up questions, apply filters, drill into dimensions, and get new SQL-backed charts derived from the selected chart context.
 
+39. **Phase 42: Chart Conversations and User Dashboard Management**
+   - Chart-based conversations with follow-up context, user-created dashboards, and chart pinning.
+
+40. **Phase 43: Statistical Correlation, Anomaly, and Forward Pattern Agent**
+   - Z-score/IQR/CUSUM anomaly detection, Pearson/Spearman/lagged correlations, STL decomposition forward projections, and investigation threads.
+
+41. **Phase 44: Unified Dashboard and Chart Schema**
+   - Consolidate `quantyx_dashboard_specs`, `quantyx_user_dashboards`, and `quantyx_user_dashboard_charts` into a single `quantyx_dashboards` + `quantyx_dashboard_charts` model with a `dashboard_type` discriminator. Evolve `quantyx_chart_requests` with `chart_source`, `title`, and `created_by`. Merge the two `GET /dashboards` endpoints into one.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -141,3 +150,6 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 39 depends on Phases 24/31/34/36/37 and hardens workspace conversation query interpretation with LLM-first plan extraction, deterministic validation, and safe SQL/chart compilation.
 - Phase 40 depends on Phases 27/31/35/36/37/39 and broadens dashboard composition from single-table heuristics to context-driven, cross-table dashboard intelligence with improved title synthesis and larger, value-ranked chart sets.
 - Phase 41 depends on Phases 24/31/33/34/39/40 and extends workspace conversation into chart-scoped follow-up analysis, safe SQL refinement, drill-down charts, and chart-aware artifact persistence.
+- Phase 42 depends on Phase 41 (chart conversation protocol) and Phase 24/34 (workspace and user identity).
+- Phase 43 depends on Phases 24/34/35/36/37 and adds statistical intelligence over persisted chart and KPI data.
+- Phase 44 depends on Phases 05/12/23/24/34/42 and is a backward-compatible schema consolidation — no functional change to analytics, only data model unification.

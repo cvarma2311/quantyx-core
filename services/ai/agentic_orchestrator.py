@@ -10,6 +10,7 @@ import re
 import time
 import traceback
 import urllib.request
+import uuid
 
 try:
     from langgraph.graph import StateGraph, END
@@ -43,7 +44,11 @@ from services.ai.agentic_agents import (
     build_dashboard_theme_from_charts,
     deterministic_dashboard_title,
 )
-from services.ai.semantic_graph_store import persist_semantic_graph, persist_dashboard_spec
+from services.ai.semantic_graph_store import persist_semantic_graph
+from services.ai.dashboards_store import (
+    create_dashboard as _create_dashboard,
+    add_chart as _add_chart_to_dashboard,
+)
 from services.ai.anomaly_detection import detect_agentic_anomalies
 from services.ai.anomaly_detection import rank_high_signal_investigative_areas
 from services.ai.anomaly_store import (
@@ -56,6 +61,9 @@ from services.ai.anomaly_store import (
     update_anomaly_investigation,
 )
 from services.ai.anomaly_dashboard import build_anomaly_dashboard_spec
+from services.ai.correlation_agent import run_correlation_intelligence
+from services.ai.correlation_narrate import narrate_correlation_results
+from services.ai.correlation_store import create_correlation_run, save_correlation_run_results
 from services.ai.views import create_views_from_schema, create_joined_views, extract_schema_table_names
 from services.ai.charts_store import create_chart_request, update_chart_request
 from services.ai.charts import build_chart_payload, infer_chart_type
@@ -508,6 +516,7 @@ def _llm_plan_anomaly_investigation(
     dashboard_spec: dict[str, Any],
     investigation_summary: dict[str, Any],
     anomalies_payload: list[dict[str, Any]],
+    correlation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     system_prompt = _load_anomaly_prompt("plan.md")
     return _llm_json_response(
@@ -535,6 +544,7 @@ def _llm_plan_anomaly_investigation(
             },
             "investigation_summary": investigation_summary,
             "anomalies": anomalies_payload,
+            "correlation_context": correlation_context or {},
         },
         model_env_key="AGENTIC_ANOMALY_PLAN_MODEL",
         timeout_env_key="AGENTIC_ANOMALY_PLAN_TIMEOUT_SEC",
@@ -772,6 +782,7 @@ def _llm_summarize_anomaly_investigation(
     anomalies_payload: list[dict[str, Any]],
     executed_queries: list[dict[str, Any]],
     rejected_queries: list[dict[str, Any]],
+    correlation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     system_prompt = _load_anomaly_prompt("synthesize.md")
     return _llm_json_response(
@@ -790,6 +801,7 @@ def _llm_summarize_anomaly_investigation(
             },
             "investigation_summary": investigation_summary,
             "anomalies": anomalies_payload,
+            "correlation_context": correlation_context or {},
             "evidence_query_results": executed_queries,
             "rejected_queries": rejected_queries,
         },
@@ -1127,6 +1139,7 @@ def _fallback_anomaly_investigation_payload(
     anomalies_payload: list[dict[str, Any]],
     high_signal_areas_by_anomaly: dict[str, list[dict[str, Any]]],
     executed_queries: list[dict[str, Any]],
+    correlation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     prioritized = [item for item in anomalies_payload if isinstance(item, dict)][:3]
     if not prioritized:
@@ -1167,12 +1180,26 @@ def _fallback_anomaly_investigation_payload(
             driver_summary = (
                 f"{top_area.get('dimension')}={top_area.get('value') if top_area.get('value') is not None else top_area.get('top_value')}"
             )
+        related_correlations = [row for row in (item.get("related_correlations") or []) if isinstance(row, dict)]
+        related_threads = [row for row in (item.get("related_investigation_threads") or []) if isinstance(row, dict)]
+        correlation_note = None
+        if related_correlations:
+            top_corr = related_correlations[0]
+            peer_metric = top_corr.get("peer_metric")
+            if peer_metric:
+                correlation_note = f"It also co-moves with {peer_metric} (r={top_corr.get('pearson_r')})."
+        if related_threads and not correlation_note:
+            focus = [str(v) for v in (related_threads[0].get("suggested_focus") or []) if str(v).strip()]
+            if focus:
+                correlation_note = f"Correlation investigation suggests focus on {', '.join(focus[:2])}."
         explanation = (
             f"{metric_name} deviated materially during {period}. "
             f"Actual was {actual} against a baseline of {baseline}, creating deviation {deviation}."
         )
         if driver_summary:
             explanation += f" The most concentrated explanatory slice is {driver_summary}."
+        if correlation_note:
+            explanation += f" {correlation_note}"
         hypotheses.append(
             {
                 "title": f"{metric_name} anomaly requires operational review",
@@ -1186,6 +1213,8 @@ def _fallback_anomaly_investigation_payload(
                     "baseline": baseline,
                     "deviation": deviation,
                     "high_signal_area": top_area,
+                    "related_correlations": related_correlations[:3],
+                    "related_investigation_threads": related_threads[:2],
                 },
                 "validation_step": (
                     f"Compare {metric_name} against plant, zone, and operational hour slices for {period}."
@@ -1208,6 +1237,7 @@ def _fallback_anomaly_investigation_payload(
         insights.append(
             f"{metric_name} moved from baseline {baseline} to actual {actual} during {period}."
             + (f" Top concentration is in {driver_summary}." if driver_summary else "")
+            + (f" {correlation_note}" if correlation_note else "")
         )
         dashboard_suggestions.append(
             {
@@ -1227,6 +1257,119 @@ def _fallback_anomaly_investigation_payload(
         "insights": insights,
         "dashboard_suggestions": dashboard_suggestions,
     }
+
+
+def _summarize_correlation_context(
+    *,
+    correlation_run_id: str | None,
+    correlation_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    result = correlation_result or {}
+    anomaly_results = [item for item in (result.get("anomaly_results") or []) if isinstance(item, dict)]
+    correlation_pairs = [item for item in (result.get("correlation_pairs") or []) if isinstance(item, dict)]
+    investigation_threads = [item for item in (result.get("investigation_threads") or []) if isinstance(item, dict)]
+    forward_projections = [item for item in (result.get("forward_projections") or []) if isinstance(item, dict)]
+    return {
+        "correlation_run_id": correlation_run_id,
+        "summary": {
+            "metric_count": result.get("metric_count"),
+            "anomaly_count": len(anomaly_results),
+            "correlation_pair_count": len(correlation_pairs),
+            "thread_count": len(investigation_threads),
+            "projection_count": len(forward_projections),
+            "summary_text": result.get("summary_text"),
+            "error_message": result.get("error_message"),
+        },
+        "anomaly_results": anomaly_results[:20],
+        "correlation_pairs": correlation_pairs[:20],
+        "investigation_threads": investigation_threads[:10],
+        "forward_projections": forward_projections[:10],
+    }
+
+
+def _enrich_anomalies_with_correlation_context(
+    anomalies_payload: list[dict[str, Any]],
+    correlation_context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    context = correlation_context or {}
+    anomaly_results = [item for item in (context.get("anomaly_results") or []) if isinstance(item, dict)]
+    correlation_pairs = [item for item in (context.get("correlation_pairs") or []) if isinstance(item, dict)]
+    investigation_threads = [item for item in (context.get("investigation_threads") or []) if isinstance(item, dict)]
+
+    anomaly_lookup: dict[str, list[dict[str, Any]]] = {}
+    for row in anomaly_results:
+        metric_name = str(row.get("metric_name") or "").strip().lower()
+        if metric_name:
+            anomaly_lookup.setdefault(metric_name, []).append(row)
+
+    pair_lookup: dict[str, list[dict[str, Any]]] = {}
+    for row in correlation_pairs:
+        metric_a = str(row.get("metric_a") or "").strip()
+        metric_b = str(row.get("metric_b") or "").strip()
+        if metric_a:
+            pair_lookup.setdefault(metric_a.lower(), []).append(
+                {
+                    "peer_metric": metric_b,
+                    "pearson_r": row.get("pearson_r"),
+                    "spearman_rho": row.get("spearman_rho"),
+                    "best_lag": row.get("best_lag"),
+                    "lag_direction": row.get("lag_direction"),
+                    "strength_label": row.get("strength_label"),
+                    "direction_label": row.get("direction_label"),
+                }
+            )
+        if metric_b:
+            pair_lookup.setdefault(metric_b.lower(), []).append(
+                {
+                    "peer_metric": metric_a,
+                    "pearson_r": row.get("pearson_r"),
+                    "spearman_rho": row.get("spearman_rho"),
+                    "best_lag": row.get("best_lag"),
+                    "lag_direction": row.get("lag_direction"),
+                    "strength_label": row.get("strength_label"),
+                    "direction_label": row.get("direction_label"),
+                }
+            )
+
+    thread_lookup: dict[str, list[dict[str, Any]]] = {}
+    for row in investigation_threads:
+        trigger_metric = str(row.get("trigger_metric") or "").strip().lower()
+        if trigger_metric:
+            thread_lookup.setdefault(trigger_metric, []).append(
+                {
+                    "confidence": row.get("confidence"),
+                    "leading_dimension": row.get("leading_dimension"),
+                    "leading_dim_value": row.get("leading_dim_value"),
+                    "suggested_focus": row.get("suggested_focus") or [],
+                    "narrative_text": row.get("narrative_text"),
+                }
+            )
+
+    enriched: list[dict[str, Any]] = []
+    for item in anomalies_payload:
+        if not isinstance(item, dict):
+            continue
+        keys = [
+            str(item.get("metric_name") or "").strip().lower(),
+            str(item.get("raw_signal_name") or "").strip().lower(),
+        ]
+        related_anomalies: list[dict[str, Any]] = []
+        related_pairs: list[dict[str, Any]] = []
+        related_threads: list[dict[str, Any]] = []
+        for key in [value for value in keys if value]:
+            related_anomalies.extend(anomaly_lookup.get(key, []))
+            related_pairs.extend(pair_lookup.get(key, []))
+            related_threads.extend(thread_lookup.get(key, []))
+        enriched.append(
+            {
+                **item,
+                "correlation_run_id": context.get("correlation_run_id"),
+                "related_correlation_anomalies": related_anomalies[:3],
+                "related_correlations": related_pairs[:5],
+                "related_investigation_threads": related_threads[:3],
+            }
+        )
+    return enriched
 
 
 def _chart_rerank_enabled(settings) -> bool:
@@ -4098,6 +4241,9 @@ def run_agentic_workflow(
                 params=params,
                 rows_json=rows,
                 run_id=run_id or None,
+                chart_source="agentic_run",
+                title=chart_title,
+                created_by="DashboardAgent",
             ).get("chart_id")
             logger.info(
                 "dashboard.chart.request_created | run_id=%s title=%s chart_id=%s sql_is_null=%s rows=%s",
@@ -4577,14 +4723,32 @@ def run_agentic_workflow(
             {},
             event_callback=event_callback,
         )
-        dash_id = persist_dashboard_spec(
+        _quality = dashboard_spec.get("quality") or {}
+        dash_result = _create_dashboard(
             settings,
-            state.get("tenant_id") or "",
-            state.get("domain_id") or "",
-            dashboard_spec,
-            title=dashboard_title,
+            tenant_id=state.get("tenant_id") or "",
+            domain_id=state.get("domain_id") or "",
+            name=dashboard_title,
+            dashboard_type="system",
+            run_id=run_id or None,
+            chart_plan=dashboard_spec.get("chart_plan"),
+            quality_score=(
+                float(_quality["quality_score"])
+                if isinstance(_quality, dict) and _quality.get("quality_score") is not None
+                else None
+            ),
+            quality_gate_passed=(
+                bool(_quality.get("gate_passed"))
+                if isinstance(_quality, dict)
+                else None
+            ),
         )
+        dash_id = dash_result.get("dashboard_id")
         state["dashboard_id"] = dash_id
+        for _pos, _cid in enumerate(chart_ids):
+            _add_chart_to_dashboard(
+                settings, dash_id, _cid, position=_pos, added_by="DashboardAgent",
+            )
         _emit(
             settings,
             run_id,
@@ -4630,6 +4794,129 @@ def run_agentic_workflow(
         )
         return state
 
+    def correlation_node(state: dict[str, Any]) -> dict[str, Any]:
+        logger.info(
+            "agentic.correlation.enter | run_id=%s dashboard_id=%s domain=%s",
+            run_id,
+            state.get("dashboard_id"),
+            state.get("domain_id"),
+        )
+        _emit(
+            settings,
+            run_id,
+            "CorrelationAgent",
+            "running",
+            "Correlation Agent started",
+            event_callback=event_callback,
+        )
+        if not _env_bool("AGENTIC_CORRELATION_ENABLED", True):
+            state["correlation_run_id"] = None
+            state["correlation_result"] = {}
+            _emit(
+                settings,
+                run_id,
+                "CorrelationAgent",
+                "completed",
+                "Correlation Agent skipped",
+                {"reason": "disabled"},
+                event_callback=event_callback,
+            )
+            return state
+
+        tenant_id = str(state.get("tenant_id") or "").strip()
+        domain_id = str(state.get("domain_id") or "").strip()
+        if not tenant_id or not domain_id:
+            state["correlation_run_id"] = None
+            state["correlation_result"] = {}
+            _emit(
+                settings,
+                run_id,
+                "CorrelationAgent",
+                "completed",
+                "Correlation Agent skipped",
+                {"reason": "missing_scope"},
+                event_callback=event_callback,
+            )
+            return state
+
+        forecast_periods = _resolve_int_setting(
+            state,
+            "correlation_forecast_periods",
+            "CORRELATION_FORECAST_PERIODS",
+            12,
+            minimum=1,
+        )
+        analysis_mode = str(
+            (state.get("runtime_tuning") or {}).get("correlation_analysis_mode")
+            or os.getenv("CORRELATION_ANALYSIS_MODE", "full")
+        ).strip().lower() or "full"
+        correlation_run_id = f"corrrun_{uuid.uuid4().hex[:12]}"
+        create_correlation_run(
+            settings,
+            correlation_run_id=correlation_run_id,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            analysis_mode=analysis_mode,
+            forecast_periods=forecast_periods,
+            triggered_by="agentic_workflow",
+        )
+        result = run_correlation_intelligence(
+            settings,
+            correlation_run_id=correlation_run_id,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            forecast_periods=forecast_periods,
+            analysis_mode=analysis_mode,
+        )
+        narration: dict[str, Any] = {"summary_text": "", "summary_html": ""}
+        try:
+            narration = narrate_correlation_results(
+                settings,
+                anomaly_results=result.get("anomaly_results") or [],
+                correlation_pairs=result.get("correlation_pairs") or [],
+                forward_projections=result.get("forward_projections") or [],
+                investigation_threads=result.get("investigation_threads") or [],
+            )
+        except Exception:
+            logger.warning("agentic.correlation.narration_failed | run_id=%s", run_id, exc_info=True)
+        save_correlation_run_results(
+            settings,
+            correlation_run_id=correlation_run_id,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_result=result,
+            summary_text=narration.get("summary_text") or "",
+            summary_html=narration.get("summary_html") or "",
+        )
+        state["correlation_run_id"] = correlation_run_id
+        state["correlation_result"] = {
+            **result,
+            "summary_text": narration.get("summary_text") or "",
+            "summary_html": narration.get("summary_html") or "",
+        }
+        _emit(
+            settings,
+            run_id,
+            "CorrelationAgent",
+            "completed",
+            "Correlation Agent completed",
+            {
+                "correlation_run_id": correlation_run_id,
+                "analysis_mode": analysis_mode,
+                "forecast_periods": forecast_periods,
+                "metric_count": result.get("metric_count"),
+                "anomaly_count": result.get("anomaly_count"),
+                "correlation_pair_count": result.get("correlation_pair_count"),
+                "thread_count": result.get("thread_count"),
+                "summary_text": narration.get("summary_text") or "",
+                "error_message": result.get("error_message"),
+            },
+            event_callback=event_callback,
+        )
+        return state
+
     def anomaly_detection_node(state: dict[str, Any]) -> dict[str, Any]:
         logger.info(
             "agentic.anomaly_detection.enter | run_id=%s dashboard_id=%s has_dashboard_spec=%s metric_defs=%s profiling_tables=%s",
@@ -4646,6 +4933,10 @@ def run_agentic_workflow(
             "running",
             "Anomaly Detection Agent started",
             event_callback=event_callback,
+        )
+        correlation_context = _summarize_correlation_context(
+            correlation_run_id=str(state.get("correlation_run_id") or "").strip() or None,
+            correlation_result=state.get("correlation_result") if isinstance(state.get("correlation_result"), dict) else None,
         )
         evidence_coverage = state.get("evidence_coverage") or {}
         quality_report = state.get("quality_report") or {}
@@ -4676,6 +4967,7 @@ def run_agentic_workflow(
                     "reason": "evidence_coverage_failed",
                     "evidence_coverage": evidence_coverage,
                     "readiness_advisory": readiness_advisory,
+                    "correlation_context": correlation_context,
                 },
                 quality_json={
                     "status": "evidence_coverage_failed",
@@ -4728,6 +5020,7 @@ def run_agentic_workflow(
                     "reason": "dashboard_quality_failed",
                     "quality_report": quality_report,
                     "readiness_advisory": readiness_advisory,
+                    "correlation_context": correlation_context,
                 },
                 quality_json={
                     "status": "dashboard_quality_failed",
@@ -4859,10 +5152,14 @@ def run_agentic_workflow(
             summary_text=str(((detection.get("summary") or {}).get("top_anomalies") or [{}])[0].get("metric_name") or "Anomalies detected"),
             severity_score=float(((candidates[0].get("evidence") or {}).get("severity_score") or 0.0)),
             confidence_score=float(((candidates[0].get("evidence") or {}).get("confidence_score") or 0.0)),
-            anomaly_summary_json=detection.get("summary") or {},
+            anomaly_summary_json={
+                **(detection.get("summary") or {}),
+                "correlation_context": correlation_context,
+            },
             quality_json={
                 "status": "phase_38_2_detection_only",
                 "runtime_config": runtime_config,
+                "correlation_run_id": correlation_context.get("correlation_run_id"),
             },
         )
         created_anomaly_ids: list[str] = []
@@ -4938,13 +5235,18 @@ def run_agentic_workflow(
                     "high_signal_investigative_areas": fallback_high_signal_areas_by_anomaly.get(str(anomaly_id or ""), []),
                 }
             )
+        anomalies_payload = _enrich_anomalies_with_correlation_context(anomalies_payload, correlation_context)
         llm_plan = _llm_plan_anomaly_investigation(
             settings,
             domain_id=state.get("domain_id"),
             context_text=state.get("context_text"),
             dashboard_spec=state.get("dashboard_spec") or {},
-            investigation_summary=detection.get("summary") or {},
+            investigation_summary={
+                **(detection.get("summary") or {}),
+                "correlation_context": correlation_context.get("summary") or {},
+            },
             anomalies_payload=anomalies_payload,
+            correlation_context=correlation_context,
         )
         logger.info(
             "agentic.anomaly_detection.plan | run_id=%s plan_present=%s prioritized_ids=%s",
@@ -4985,10 +5287,12 @@ def run_agentic_workflow(
                     "evidence_focus": llm_plan.get("evidence_focus"),
                     "prioritized_anomaly_ids": llm_prioritized_anomaly_ids,
                     "prioritized_investigative_areas": llm_high_signal_areas_by_anomaly,
+                    "correlation_context": correlation_context.get("summary") or {},
                 },
                 anomalies_payload=anomalies_payload,
                 executed_queries=executed_queries,
                 rejected_queries=rejected_queries,
+                correlation_context=correlation_context,
             )
         elif runtime_config["llm_enabled"]:
             planning_failed = True
@@ -4998,6 +5302,7 @@ def run_agentic_workflow(
                 anomalies_payload=anomalies_payload,
                 high_signal_areas_by_anomaly=effective_high_signal_areas_by_anomaly,
                 executed_queries=executed_queries,
+                correlation_context=correlation_context,
             )
         for anomaly_id in created_anomaly_ids:
             candidate = next((item for item in anomalies_payload if str(item.get("anomaly_id") or "") == anomaly_id), None)
@@ -5011,6 +5316,10 @@ def run_agentic_workflow(
                     **evidence,
                     "high_signal_investigative_areas": effective_high_signal_areas_by_anomaly.get(anomaly_id, []),
                     "fallback_high_signal_investigative_areas": fallback_high_signal_areas_by_anomaly.get(anomaly_id, []),
+                    "related_correlation_anomalies": candidate.get("related_correlation_anomalies") or [],
+                    "related_correlations": candidate.get("related_correlations") or [],
+                    "related_investigation_threads": candidate.get("related_investigation_threads") or [],
+                    "correlation_run_id": correlation_context.get("correlation_run_id"),
                 },
             )
         if llm_synthesis:
@@ -5077,6 +5386,7 @@ def run_agentic_workflow(
                     "action_ids": created_action_ids,
                     "insights": llm_synthesis.get("insights") or [],
                     "dashboard_suggestions": llm_synthesis.get("dashboard_suggestions") or [],
+                    "correlation_context": correlation_context,
                 },
                 quality_json={
                     "status": "llm_anomaly_investigation_completed" if llm_plan else "deterministic_fallback_completed",
@@ -5088,6 +5398,7 @@ def run_agentic_workflow(
                     "action_count": len(created_action_ids),
                     "planning_failed": planning_failed,
                     "runtime_config": runtime_config,
+                    "correlation_run_id": correlation_context.get("correlation_run_id"),
                     "warnings": [
                         item
                         for item in [
@@ -5114,11 +5425,13 @@ def run_agentic_workflow(
             state["anomaly_llm_plan"] = llm_plan or {}
             state["anomaly_executed_queries"] = executed_queries
             state["anomaly_rejected_queries"] = rejected_queries
+            state["anomaly_correlation_context"] = correlation_context
         else:
             state["anomaly_llm_synthesis"] = {}
             state["anomaly_llm_plan"] = llm_plan or {}
             state["anomaly_executed_queries"] = executed_queries
             state["anomaly_rejected_queries"] = rejected_queries
+            state["anomaly_correlation_context"] = correlation_context
         state["high_signal_investigative_areas"] = effective_high_signal_areas_by_anomaly
         _emit(
             settings,
@@ -5140,6 +5453,8 @@ def run_agentic_workflow(
                 "anomaly_insights": state.get("anomaly_insights") or [],
                 "summary": detection.get("summary") or {},
                 "runtime_config": runtime_config,
+                "correlation_run_id": correlation_context.get("correlation_run_id"),
+                "correlation_summary": correlation_context.get("summary"),
             },
             event_callback=event_callback,
         )
@@ -5273,6 +5588,9 @@ def run_agentic_workflow(
                 params=chart_params,
                 rows_json=rows,
                 run_id=run_id or None,
+                chart_source="agentic_run",
+                title=chart.get("title"),
+                created_by="AnomalyDetectionAgent",
             ).get("chart_id")
             payload = build_chart_payload(chart_type, rows, metric_name, dimensions or ["category"])
             if chart_id:
@@ -5299,13 +5617,19 @@ def run_agentic_workflow(
                 }
             )
         anomaly_dashboard_spec["charts"] = enriched_charts
-        anomaly_dashboard_id = persist_dashboard_spec(
+        _anomaly_dash = _create_dashboard(
             settings,
-            state.get("tenant_id") or "",
-            state.get("domain_id") or "",
-            anomaly_dashboard_spec,
-            title=dashboard_title,
+            tenant_id=state.get("tenant_id") or "",
+            domain_id=state.get("domain_id") or "",
+            name=dashboard_title,
+            dashboard_type="system",
+            run_id=run_id or None,
         )
+        anomaly_dashboard_id = _anomaly_dash.get("dashboard_id")
+        for _pos, _cid in enumerate(chart_ids):
+            _add_chart_to_dashboard(
+                settings, anomaly_dashboard_id, _cid, position=_pos, added_by="AnomalyDetectionAgent",
+            )
         create_anomaly_dashboard_link(
             settings,
             investigation_id=investigation_id,
@@ -5375,6 +5699,7 @@ def run_agentic_workflow(
     graph.add_node("chart_planner", chart_planner_node)
     graph.add_node("quality", quality_node)
     graph.add_node("dashboard", dashboard_node)
+    graph.add_node("correlation", correlation_node)
     graph.add_node("anomaly_detection", anomaly_detection_node)
     graph.add_node("anomaly_dashboard", anomaly_dashboard_node)
 
@@ -5394,7 +5719,8 @@ def run_agentic_workflow(
     graph.add_edge("rollup", "chart_planner")
     graph.add_edge("chart_planner", "quality")
     graph.add_edge("quality", "dashboard")
-    graph.add_edge("dashboard", "anomaly_detection")
+    graph.add_edge("dashboard", "correlation")
+    graph.add_edge("correlation", "anomaly_detection")
     graph.add_edge("anomaly_detection", "anomaly_dashboard")
     graph.add_edge("anomaly_dashboard", END)
     logger.info(
@@ -5413,10 +5739,11 @@ def run_agentic_workflow(
             "chart_planner",
             "quality",
             "dashboard",
+            "correlation",
             "anomaly_detection",
             "anomaly_dashboard",
         ],
-        [("dashboard", "anomaly_detection"), ("anomaly_detection", "anomaly_dashboard")],
+        [("dashboard", "correlation"), ("correlation", "anomaly_detection"), ("anomaly_detection", "anomaly_dashboard")],
     )
 
     app = graph.compile()

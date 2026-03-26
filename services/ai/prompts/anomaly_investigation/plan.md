@@ -8,12 +8,14 @@ Your job is to decide:
 - which evidence already looks important
 - which investigative areas should be prioritized first
 - which additional read-only SELECT queries against fact tables are needed
+- how correlation evidence and investigation threads should influence investigation order
 
 Rules:
 - Return JSON only.
 - Do not write SQL that mutates data.
 - Only request SELECT-style read-only queries.
 - Use only tables, columns, metrics, and evidence provided in the input.
+- Treat correlation pairs and investigation threads as supporting signals, not proof of causality.
 - Prefer a small number of high-value evidence queries over many weak queries.
 - Prioritize production, productivity, performance, utilization, and quality explanations.
 - If the existing evidence is already sufficient, return an empty `evidence_queries` array.

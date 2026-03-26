@@ -52,6 +52,38 @@ def _j(value: Any) -> str | None:
 # quantyx_correlation_runs
 # ---------------------------------------------------------------------------
 
+def _fallback_run_dict(
+    correlation_run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    analysis_mode: str,
+    forecast_periods: int,
+) -> dict:
+    """Minimal dict matching CorrelationRunResponse when the table doesn't exist yet."""
+    return {
+        "correlation_run_id": correlation_run_id,
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "status": "running",
+        "analysis_mode": analysis_mode,
+        "forecast_periods": forecast_periods,
+        "metric_count": None,
+        "anomaly_count": None,
+        "correlation_pair_count": None,
+        "thread_count": None,
+        "error_message": None,
+        "triggered_by": None,
+        "summary_text": None,
+        "summary_html": None,
+        "started_at": None,
+        "completed_at": None,
+        "created_at": None,
+        "updated_at": None,
+    }
+
+
 def create_correlation_run(
     settings: Settings,
     *,
@@ -66,6 +98,7 @@ def create_correlation_run(
     """
     Insert a new correlation run record with status='running'.
     Returns the inserted row as a dict.
+    Degrades gracefully if Phase 43 tables have not been created yet.
     """
     sql = """
         INSERT INTO public.quantyx_correlation_runs
@@ -93,7 +126,18 @@ def create_correlation_run(
             )
             row = cur.fetchone()
         c.commit()
-        return dict(row) if row else {"correlation_run_id": correlation_run_id}
+        return dict(row) if row else _fallback_run_dict(
+            correlation_run_id, tenant_id, domain_id, run_id, analysis_mode, forecast_periods
+        )
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning(
+            "[correlation.store] quantyx_correlation_runs table missing — "
+            "run bash scripts/apply_agentic_tables.sh to create Phase 43 tables"
+        )
+        return _fallback_run_dict(
+            correlation_run_id, tenant_id, domain_id, run_id, analysis_mode, forecast_periods
+        )
     finally:
         c.close()
 
@@ -143,6 +187,9 @@ def update_correlation_run(
         with c.cursor() as cur:
             cur.execute(sql, values)
         c.commit()
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_correlation_runs table missing — update skipped")
     finally:
         c.close()
 
@@ -161,6 +208,10 @@ def get_correlation_run(
             cur.execute(sql, [correlation_run_id])
             row = cur.fetchone()
         return dict(row) if row else None
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_correlation_runs table missing — get skipped")
+        return None
     finally:
         c.close()
 
@@ -183,6 +234,10 @@ def list_correlation_runs(
             cur.execute(sql, [tenant_id, domain_id, limit])
             rows = cur.fetchall()
         return [dict(r) for r in rows]
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_correlation_runs table missing — list skipped")
+        return []
     finally:
         c.close()
 
@@ -214,6 +269,10 @@ def get_latest_correlation_run(
             cur.execute(sql, params)
             row = cur.fetchone()
         return dict(row) if row else None
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_correlation_runs table missing — get_latest skipped")
+        return None
     finally:
         c.close()
 
@@ -279,6 +338,10 @@ def save_anomaly_results(
             execute_values(cur, sql, rows)
         c.commit()
         return len(rows)
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_anomaly_results table missing — save skipped")
+        return 0
     finally:
         c.close()
 
@@ -309,6 +372,10 @@ def get_anomaly_results(
             cur.execute(sql, params)
             rows = cur.fetchall()
         return [dict(r) for r in rows]
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_anomaly_results table missing — get skipped")
+        return []
     finally:
         c.close()
 
@@ -378,6 +445,10 @@ def save_correlation_pairs(
             execute_values(cur, sql, rows)
         c.commit()
         return len(rows)
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_correlation_pairs table missing — save skipped")
+        return 0
     finally:
         c.close()
 
@@ -409,6 +480,10 @@ def get_correlation_pairs(
             cur.execute(sql, params)
             rows = cur.fetchall()
         return [dict(r) for r in rows]
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_correlation_pairs table missing — get skipped")
+        return []
     finally:
         c.close()
 
@@ -468,6 +543,10 @@ def save_investigation_threads(
             execute_values(cur, sql, rows)
         c.commit()
         return len(rows)
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_investigation_threads table missing — save skipped")
+        return 0
     finally:
         c.close()
 
@@ -499,6 +578,10 @@ def get_investigation_threads(
             cur.execute(sql, params)
             rows = cur.fetchall()
         return [dict(r) for r in rows]
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_investigation_threads table missing — get skipped")
+        return []
     finally:
         c.close()
 
@@ -554,6 +637,10 @@ def save_forward_projections(
             execute_values(cur, sql, rows)
         c.commit()
         return len(rows)
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_forward_projections table missing — save skipped")
+        return 0
     finally:
         c.close()
 
@@ -581,6 +668,10 @@ def get_forward_projections(
             cur.execute(sql, params)
             rows = cur.fetchall()
         return [dict(r) for r in rows]
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+        logger.warning("[correlation.store] quantyx_forward_projections table missing — get skipped")
+        return []
     finally:
         c.close()
 

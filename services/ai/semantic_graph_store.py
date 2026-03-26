@@ -497,56 +497,85 @@ def persist_dashboard_spec(
     spec: dict[str, Any],
     title: str = "Auto Dashboard",
 ) -> str:
-    dashboard_id = f"dash_{uuid.uuid4().hex[:10]}"
-    execute_non_query(
+    """Deprecated: delegates to dashboards_store.create_dashboard()."""
+    from services.ai.dashboards_store import create_dashboard
+    result = create_dashboard(
         settings,
-        """
-        INSERT INTO public.quantyx_dashboard_specs (
-          dashboard_id, tenant_id, domain_id, title, spec, created_at, updated_at
-        )
-        VALUES (%s, %s, %s, %s, %s::jsonb, now(), now())
-        """,
-        [dashboard_id, tenant_id, domain_id, title, Json(spec, dumps=_json_dumps)],
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        name=title,
+        dashboard_type="system",
+        chart_plan=spec.get("chart_plan"),
+        quality_score=(
+            float(spec["quality"]["quality_score"])
+            if isinstance(spec.get("quality"), dict) and spec["quality"].get("quality_score") is not None
+            else None
+        ),
+        quality_gate_passed=(
+            bool(spec["quality"].get("gate_passed"))
+            if isinstance(spec.get("quality"), dict)
+            else None
+        ),
     )
-    return dashboard_id
+    return result.get("dashboard_id") or f"dash_{uuid.uuid4().hex[:10]}"
 
 
 def list_dashboard_specs(settings: Settings, tenant_id: str, domain_id: str | None) -> list[dict[str, Any]]:
-    if domain_id:
-        return run_query(
-            settings,
-            """
-            SELECT dashboard_id, tenant_id, domain_id, title, spec, created_at, updated_at
-              FROM public.quantyx_dashboard_specs
-             WHERE tenant_id = %s AND domain_id = %s
-             ORDER BY created_at DESC
-            """,
-            [tenant_id, domain_id],
-        )
-    return run_query(
-        settings,
-        """
-        SELECT dashboard_id, tenant_id, domain_id, title, spec, created_at, updated_at
-          FROM public.quantyx_dashboard_specs
-         WHERE tenant_id = %s
-         ORDER BY created_at DESC
-        """,
-        [tenant_id],
-    )
+    """Deprecated: delegates to dashboards_store.list_dashboards()."""
+    from services.ai.dashboards_store import list_dashboards, get_dashboard_with_charts
+    rows = list_dashboards(settings, tenant_id, domain_id, dashboard_type="system", status="active", limit=200)
+    # Synthesize backward-compat spec field so callers using spec.get("charts") still work
+    result = []
+    for row in rows:
+        dash = get_dashboard_with_charts(settings, row["dashboard_id"])
+        if dash:
+            row["spec"] = _synthesize_spec(dash)
+            row["title"] = row.get("name")
+        result.append(row)
+    return result
 
 
 def get_dashboard_spec(settings: Settings, dashboard_id: str) -> dict[str, Any] | None:
-    rows = run_query(
-        settings,
-        """
-        SELECT dashboard_id, tenant_id, domain_id, title, spec, created_at, updated_at
-          FROM public.quantyx_dashboard_specs
-         WHERE dashboard_id = %s
-         LIMIT 1
-        """,
-        [dashboard_id],
-    )
-    return rows[0] if rows else None
+    """Deprecated: delegates to dashboards_store.get_dashboard_with_charts()."""
+    from services.ai.dashboards_store import get_dashboard_with_charts
+    dash = get_dashboard_with_charts(settings, dashboard_id)
+    if not dash:
+        return None
+    dash["spec"] = _synthesize_spec(dash)
+    dash["title"] = dash.get("name")
+    return dash
+
+
+def _synthesize_spec(dash: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct a backward-compat spec blob from a unified dashboard + charts dict."""
+    charts_out = []
+    for c in dash.get("charts") or []:
+        qp = c.get("query_payload") or {}
+        if isinstance(qp, str):
+            import json
+            try:
+                qp = json.loads(qp)
+            except Exception:
+                qp = {}
+        charts_out.append({
+            "chart_id": c.get("chart_id"),
+            "title": c.get("title_override") or c.get("title") or c.get("question"),
+            "type": c.get("chart_type"),
+            "sql": c.get("sql"),
+            "params": c.get("params") or [],
+            "metric": (qp.get("metrics") or [None])[0],
+            "dimensions": qp.get("dimensions") or [],
+            "chart_data": c.get("rows_json") or c.get("chart_data") or [],
+            "chart_payload": c.get("chart_payload"),
+        })
+    return {
+        "charts": charts_out,
+        "chart_plan": dash.get("chart_plan") or [],
+        "quality": {
+            "quality_score": dash.get("quality_score"),
+            "gate_passed": dash.get("quality_gate_passed"),
+        },
+    }
 
 
 def update_dashboard_spec(
@@ -556,23 +585,18 @@ def update_dashboard_spec(
     spec: dict[str, Any] | None = None,
     title: str | None = None,
 ) -> None:
-    updates = []
-    values: list[Any] = []
+    """Deprecated: delegates to dashboards_store.update_dashboard()."""
+    from services.ai.dashboards_store import update_dashboard
+    update_kw: dict[str, Any] = {}
     if title is not None:
-        updates.append("title = %s")
-        values.append(title)
+        update_kw["name"] = title
     if spec is not None:
-        updates.append("spec = %s::jsonb")
-        values.append(Json(spec, dumps=_json_dumps))
-    if not updates:
-        return
-    updates.append("updated_at = now()")
-    execute_non_query(
-        settings,
-        f"""
-        UPDATE public.quantyx_dashboard_specs
-           SET {", ".join(updates)}
-         WHERE dashboard_id = %s
-        """,
-        [*values, dashboard_id],
-    )
+        update_kw["chart_plan"] = spec.get("chart_plan")
+        quality = spec.get("quality") or {}
+        if isinstance(quality, dict):
+            if quality.get("quality_score") is not None:
+                update_kw["quality_score"] = float(quality["quality_score"])
+            if quality.get("gate_passed") is not None:
+                update_kw["quality_gate_passed"] = bool(quality["gate_passed"])
+    if update_kw:
+        update_dashboard(settings, dashboard_id, **update_kw)

@@ -130,15 +130,63 @@ CREATE TABLE IF NOT EXISTS public.quantyx_rollup_registry (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.quantyx_dashboard_specs (
-  dashboard_id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
-  domain_id TEXT NOT NULL,
-  title TEXT NOT NULL,
-  spec JSONB NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+-- RETIRED (Phase 44): quantyx_dashboard_specs — replaced by quantyx_dashboards (dashboard_type='system')
+-- Kept here for reference only. Drop after Phase 44 migration is validated:
+--   DROP TABLE public.quantyx_dashboard_specs;
+-- CREATE TABLE IF NOT EXISTS public.quantyx_dashboard_specs (
+--   dashboard_id TEXT PRIMARY KEY, tenant_id TEXT, domain_id TEXT,
+--   title TEXT, spec JSONB, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
+-- );
+
+-- ── Phase 44: Unified dashboard table ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.quantyx_dashboards (
+  dashboard_id          TEXT PRIMARY KEY,
+  tenant_id             TEXT NOT NULL,
+  domain_id             TEXT NOT NULL,
+  name                  TEXT NOT NULL,
+  description           TEXT NULL,
+  dashboard_type        TEXT NOT NULL DEFAULT 'system',   -- 'system' | 'user'
+  status                TEXT NOT NULL DEFAULT 'active',
+  run_id                TEXT NULL,
+  latest_refresh_id     TEXT NULL,
+  quality_score         FLOAT NULL,
+  quality_gate_passed   BOOLEAN NULL,
+  chart_plan            JSONB NULL,
+  created_by            TEXT NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_dashboards_tenant
+  ON public.quantyx_dashboards (tenant_id, domain_id, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_dashboards_type
+  ON public.quantyx_dashboards (tenant_id, dashboard_type, status);
+
+-- ── Phase 44: Unified chart-link table ────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.quantyx_dashboard_charts (
+  entry_id              TEXT PRIMARY KEY,
+  dashboard_id          TEXT NOT NULL
+    REFERENCES public.quantyx_dashboards(dashboard_id) ON DELETE CASCADE,
+  chart_id              TEXT NOT NULL,
+  position              INTEGER NOT NULL DEFAULT 0,
+  title_override        TEXT NULL,
+  added_by              TEXT NULL,
+  added_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (dashboard_id, chart_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dashboard_charts_dashboard
+  ON public.quantyx_dashboard_charts (dashboard_id, position ASC);
+
+CREATE INDEX IF NOT EXISTS idx_dashboard_charts_chart
+  ON public.quantyx_dashboard_charts (chart_id);
+
+-- RETIRED (Phase 44): quantyx_user_dashboards + quantyx_user_dashboard_charts
+-- Both merged into quantyx_dashboards (dashboard_type='user') + quantyx_dashboard_charts
+-- Drop after Phase 44 migration is validated:
+--   DROP TABLE public.quantyx_user_dashboard_charts;
+--   DROP TABLE public.quantyx_user_dashboards;
 
 CREATE TABLE IF NOT EXISTS public.quantyx_anomaly_investigations (
   investigation_id TEXT PRIMARY KEY,

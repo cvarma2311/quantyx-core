@@ -66,6 +66,17 @@ from services.ai.charts_store import (
     get_latest_chart_request_by_question,
     update_chart_request,
 )
+from services.ai.dashboards_store import (
+    create_dashboard as _ds_create_dashboard,
+    list_dashboards as _ds_list_dashboards,
+    get_dashboard as _ds_get_dashboard,
+    get_dashboard_with_charts as _ds_get_with_charts,
+    update_dashboard as _ds_update_dashboard,
+    delete_dashboard as _ds_delete_dashboard,
+    add_chart as _ds_add_chart,
+    remove_chart as _ds_remove_chart,
+    reorder_charts as _ds_reorder_charts,
+)
 from services.ai.schema_loader import load_manifest_models
 from services.ai.dbt_manifest import (
     run_dbt_compile,
@@ -225,7 +236,7 @@ from services.ai.semantic_feedback_store import (
     list_semantic_feedback,
     apply_semantic_feedback,
 )
-from services.ai.semantic_graph_store import list_dashboard_specs, get_dashboard_spec, update_dashboard_spec
+from services.ai.semantic_graph_store import list_dashboard_specs, get_dashboard_spec, update_dashboard_spec  # noqa: F401 — delegating shims kept for call sites below during Phase 44 cutover
 from services.ai.dashboard_refresh_store import (
     create_dashboard_refresh_run,
     update_dashboard_refresh_status,
@@ -295,7 +306,7 @@ from services.ai.correlation_store import (
 from services.ai.correlation_agent import run_correlation_intelligence
 from services.ai.correlation_charts import generate_correlation_charts
 from services.ai.correlation_narrate import narrate_correlation_results
-from services.ai.user_dashboards_store import (
+from services.ai.user_dashboards_store import (  # noqa: F401 — delegating shims; kept during Phase 44 cutover
     create_user_dashboard,
     get_user_dashboard,
     list_user_dashboards,
@@ -7515,6 +7526,7 @@ def _persist_workspace_chart_artifact(
             sql=response_payload.get("sql"),
             params=[],
             rows_json=response_payload.get("rows"),
+            chart_source="workspace",
         )
         chart_id = chart_row.get("chart_id")
         if not chart_id:
@@ -11452,80 +11464,81 @@ def _normalize_dashboard_spec_titles(
         }
     },
 )
-def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> DashboardListResponse:
-    def _latest_agentic_run_id_for_dashboard(dashboard_id: str) -> str | None:
-        rows = run_query(
-            settings,
-            """
-            SELECT run_id
-              FROM public.quantyx_agent_run_events
-             WHERE agent_name = 'DashboardAgent'
-               AND status = 'completed'
-               AND (
-                 artifacts->>'dashboard_id' = %s
-                 OR artifacts->'raw_json'->>'dashboard_id' = %s
-               )
-             ORDER BY created_at DESC
-             LIMIT 1
-            """,
-            [dashboard_id, dashboard_id],
-        )
-        return rows[0].get("run_id") if rows else None
-
-    def _latest_refresh_id_for_dashboard(dashboard_id: str) -> str | None:
-        rows = run_query(
-            settings,
-            """
-            SELECT refresh_id
-              FROM public.quantyx_dashboard_refresh_runs
-             WHERE dashboard_id = %s
-             ORDER BY created_at DESC
-             LIMIT 1
-            """,
-            [dashboard_id],
-        )
-        return rows[0].get("refresh_id") if rows else None
-
-    dashboards = list_dashboard_specs(settings, tenant_id, domain_id)
+def list_dashboards_endpoint(
+    tenant_id: str,
+    domain_id: str | None = None,
+    dashboard_type: str | None = None,
+    status: str = "active",
+    limit: int = 50,
+    offset: int = 0,
+) -> DashboardListResponse:
+    dashboards = _ds_list_dashboards(
+        settings, tenant_id, domain_id,
+        dashboard_type=dashboard_type,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
     payload = []
     for dash in dashboards:
-        spec, resolved_title = _normalize_dashboard_spec_titles(
-            dash.get("spec") or {},
-            domain_id=dash.get("domain_id"),
-            dashboard_title=dash.get("title"),
-        )
-        charts = spec.get("charts") or []
-        dashboard_id = dash.get("dashboard_id")
-        latest_run_id = None
-        latest_refresh_id = None
-        if dashboard_id:
+        d_type = dash.get("dashboard_type", "system")
+        d_id = dash.get("dashboard_id")
+        name = dash.get("name") or ""
+
+        # For system dashboards enrich with resolved title and agentic run id
+        latest_run_id = dash.get("run_id")
+        latest_refresh_id = dash.get("latest_refresh_id")
+        if d_type == "system" and d_id and not latest_run_id:
             try:
-                latest_run_id = _latest_agentic_run_id_for_dashboard(dashboard_id)
+                rows = run_query(
+                    settings,
+                    """
+                    SELECT run_id FROM public.quantyx_agent_run_events
+                     WHERE agent_name = 'DashboardAgent' AND status = 'completed'
+                       AND (artifacts->>'dashboard_id' = %s OR artifacts->'raw_json'->>'dashboard_id' = %s)
+                     ORDER BY created_at DESC LIMIT 1
+                    """,
+                    [d_id, d_id],
+                )
+                latest_run_id = rows[0].get("run_id") if rows else None
             except Exception:
-                latest_run_id = None
+                pass
+        if d_id and not latest_refresh_id:
             try:
-                latest_refresh_id = _latest_refresh_id_for_dashboard(dashboard_id)
+                rows = run_query(
+                    settings,
+                    "SELECT refresh_id FROM public.quantyx_dashboard_refresh_runs WHERE dashboard_id = %s ORDER BY created_at DESC LIMIT 1",
+                    [d_id],
+                )
+                latest_refresh_id = rows[0].get("refresh_id") if rows else None
             except Exception:
-                latest_refresh_id = None
-        payload.append(
-            {
-                "dashboard_id": dashboard_id,
-                "tenant_id": dash.get("tenant_id"),
-                "domain_id": dash.get("domain_id"),
-                "title": resolved_title,
-                "name": resolved_title,
-                "dashboard_title": resolved_title,
-                "chart_count": len(charts),
-                "chart_titles": [c.get("title") for c in charts if isinstance(c, dict) and c.get("title")],
-                "latest_agentic_run_id": latest_run_id,
-                "latest_refresh_id": latest_refresh_id,
-                "created_at": dash.get("created_at"),
-                "chart_plan": spec.get("chart_plan") or [],
-                "quality_score": ((spec.get("quality") or {}).get("quality_score") if isinstance(spec.get("quality"), dict) else None),
-                "quality_gate_passed": ((spec.get("quality") or {}).get("gate_passed") if isinstance(spec.get("quality"), dict) else None),
-            }
-        )
-    return DashboardListResponse(dashboards=payload)
+                pass
+
+        def _iso(v):
+            return v.isoformat() if hasattr(v, "isoformat") else v
+
+        payload.append({
+            "dashboard_id": d_id,
+            "dashboard_type": d_type,
+            "tenant_id": dash.get("tenant_id"),
+            "domain_id": dash.get("domain_id"),
+            "name": name,
+            "title": name,
+            "dashboard_title": name,
+            "description": dash.get("description"),
+            "status": dash.get("status", "active"),
+            "chart_count": int(dash.get("chart_count") or 0),
+            "run_id": latest_run_id,
+            "latest_agentic_run_id": latest_run_id,
+            "latest_refresh_id": latest_refresh_id,
+            "quality_score": dash.get("quality_score"),
+            "quality_gate_passed": dash.get("quality_gate_passed"),
+            "chart_plan": dash.get("chart_plan") or [],
+            "created_by": dash.get("created_by"),
+            "created_at": _iso(dash.get("created_at")),
+            "updated_at": _iso(dash.get("updated_at")),
+        })
+    return DashboardListResponse(total=len(payload), dashboards=payload)
 
 
 @app.get(
@@ -11583,27 +11596,72 @@ def list_dashboards_endpoint(tenant_id: str, domain_id: str | None = None) -> Da
         }
     },
 )
-def get_dashboard_endpoint(dashboard_id: str) -> DashboardResponse:
-    row = get_dashboard_spec(settings, dashboard_id)
-    if not row:
+def get_dashboard_endpoint(dashboard_id: str, tenant_id: str | None = None) -> DashboardResponse:
+    dash = _ds_get_with_charts(settings, dashboard_id, tenant_id=tenant_id)
+    if not dash:
         raise HTTPException(status_code=404, detail="Dashboard not found")
-    spec, resolved_title = _normalize_dashboard_spec_titles(
-        row.get("spec") or {},
-        domain_id=row.get("domain_id"),
-        dashboard_title=row.get("title"),
-    )
-    if row.get("spec") and row["spec"].get("chart_plan"):
-        spec["chart_plan"] = row["spec"].get("chart_plan")
-    if row.get("spec") and row["spec"].get("chart_candidates"):
-        spec["chart_candidates"] = row["spec"].get("chart_candidates")
+
+    d_type = dash.get("dashboard_type", "system")
+    name = dash.get("name") or ""
+
+    # Build unified charts list (new format)
+    charts_out = []
+    for c in dash.get("charts") or []:
+        charts_out.append({
+            "entry_id": c.get("entry_id"),
+            "chart_id": c.get("chart_id"),
+            "position": c.get("position", 0),
+            "title_override": c.get("title_override"),
+            "title": c.get("title_override") or c.get("title") or c.get("question"),
+            "chart_type": c.get("chart_type"),
+            "chart_source": c.get("chart_source"),
+            "status": c.get("status"),
+            "chart_payload": c.get("chart_payload"),
+            "added_by": c.get("added_by"),
+            "added_at": c.get("added_at"),
+        })
+
+    # For system dashboards also expose the legacy spec structure for refresh worker / existing consumers
+    spec: dict = {}
+    if d_type == "system":
+        spec, resolved_title = _normalize_dashboard_spec_titles(
+            {"charts": [
+                {"chart_id": c.get("chart_id"), "title": c.get("title_override") or c.get("title") or c.get("question"),
+                 "type": c.get("chart_type"), "sql": c.get("sql"), "params": c.get("params") or [],
+                 "metric": ((c.get("query_payload") or {}).get("metrics") or [None])[0] if isinstance(c.get("query_payload"), dict) else None,
+                 "dimensions": (c.get("query_payload") or {}).get("dimensions") or [] if isinstance(c.get("query_payload"), dict) else [],
+                 "chart_data": c.get("rows_json") or c.get("chart_data") or [],
+                 "chart_payload": c.get("chart_payload")}
+                for c in dash.get("charts") or []
+            ], "chart_plan": dash.get("chart_plan") or []},
+            domain_id=dash.get("domain_id"),
+            dashboard_title=name,
+        )
+        spec["chart_plan"] = dash.get("chart_plan") or []
+    else:
+        resolved_title = name
+
+    def _iso(v):
+        return v.isoformat() if hasattr(v, "isoformat") else v
+
     return DashboardResponse(
-        dashboard_id=row["dashboard_id"],
-        tenant_id=row["tenant_id"],
-        domain_id=row["domain_id"],
+        dashboard_id=dash["dashboard_id"],
+        tenant_id=dash["tenant_id"],
+        domain_id=dash["domain_id"],
         title=resolved_title,
-        spec=spec,
-        created_at=row.get("created_at"),
-        updated_at=row.get("updated_at"),
+        name=name,
+        dashboard_type=d_type,
+        description=dash.get("description"),
+        status=dash.get("status", "active"),
+        run_id=dash.get("run_id"),
+        latest_refresh_id=dash.get("latest_refresh_id"),
+        quality_score=dash.get("quality_score"),
+        quality_gate_passed=dash.get("quality_gate_passed"),
+        created_by=dash.get("created_by"),
+        charts=charts_out,
+        spec=spec if d_type == "system" else {},
+        created_at=_iso(dash.get("created_at")),
+        updated_at=_iso(dash.get("updated_at")),
     )
 
 
@@ -17877,6 +17935,7 @@ def query(request: QueryRequest) -> QueryResult:
                     sql=rollup_sql,
                     params=rollup_params,
                     rows_json=rollup_rows,
+                    chart_source="workspace",
                 )
                 create_chart_event(
                     settings,
@@ -18091,6 +18150,7 @@ def query(request: QueryRequest) -> QueryResult:
                 sql=built.sql,
                 params=built.params,
                 rows_json=rows,
+                chart_source="workspace",
             )
             create_chart_event(
                 settings,
@@ -18180,6 +18240,7 @@ def create_chart(request: ChartRequest) -> ChartStatusResponse:
         domain_id=domain_id,
         question=request.question,
         query_payload=query_payload,
+        chart_source="workspace",
     )
     create_chart_event(
         settings,
@@ -18883,9 +18944,9 @@ def list_chart_conversations(
 
 
 @app.post(
-    "/dashboards/",
+    "/dashboards",
     tags=["dashboards"],
-    summary="Create a named user dashboard",
+    summary="Create a dashboard",
     status_code=201,
     openapi_extra={
         "requestBody": {
@@ -18941,13 +19002,14 @@ def list_chart_conversations(
         },
     },
 )
-def create_dashboard(body: CreateDashboardRequest) -> dict:
-    return create_user_dashboard(
+def create_dashboard_endpoint(body: CreateDashboardRequest) -> dict:
+    return _ds_create_dashboard(
         settings,
         tenant_id=body.tenant_id,
         domain_id=body.domain_id,
         name=body.name,
         description=body.description,
+        dashboard_type=getattr(body, "dashboard_type", "user") or "user",
         created_by=body.created_by,
     )
 
@@ -18955,7 +19017,8 @@ def create_dashboard(body: CreateDashboardRequest) -> dict:
 @app.get(
     "/dashboards/",
     tags=["dashboards"],
-    summary="List user dashboards for a tenant",
+    include_in_schema=False,  # retired — use GET /dashboards (no trailing slash)
+    summary="List user dashboards for a tenant (deprecated alias)",
     openapi_extra={
         "responses": {
             "200": {
@@ -19001,28 +19064,26 @@ def create_dashboard(body: CreateDashboardRequest) -> dict:
         }
     },
 )
-def list_dashboards(
+def list_dashboards_user_alias(
     tenant_id: str,
     domain_id: Optional[str] = None,
     status: str = "active",
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
-    dashboards = list_user_dashboards(
-        settings,
-        tenant_id=tenant_id,
-        domain_id=domain_id,
-        status=status,
-        limit=limit,
-        offset=offset,
+    """Deprecated trailing-slash alias — delegates to unified list_dashboards_endpoint."""
+    result = list_dashboards_endpoint(
+        tenant_id=tenant_id, domain_id=domain_id,
+        dashboard_type="user", status=status, limit=limit, offset=offset,
     )
-    return {"total": len(dashboards), "dashboards": dashboards}
+    return {"total": result.total, "dashboards": result.dashboards}
 
 
 @app.get(
     "/dashboards/{dashboard_id}",
     tags=["dashboards"],
-    summary="Get a dashboard with all its charts",
+    include_in_schema=False,  # retired duplicate — primary handler is get_dashboard_endpoint above
+    summary="Get a dashboard with all its charts (deprecated duplicate)",
     openapi_extra={
         "responses": {
             "200": {
@@ -19086,11 +19147,9 @@ def list_dashboards(
         }
     },
 )
-def get_dashboard(dashboard_id: str, tenant_id: Optional[str] = None) -> dict:
-    dash = get_dashboard_with_charts(settings, dashboard_id, tenant_id=tenant_id)
-    if not dash:
-        raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
-    return dash
+def get_dashboard_user_alias(dashboard_id: str, tenant_id: Optional[str] = None) -> dict:
+    """Retired duplicate — primary handler is get_dashboard_endpoint."""
+    return get_dashboard_endpoint(dashboard_id, tenant_id=tenant_id)
 
 
 @app.patch(
@@ -19145,9 +19204,8 @@ def get_dashboard(dashboard_id: str, tenant_id: Optional[str] = None) -> dict:
     },
 )
 def patch_dashboard(dashboard_id: str, body: UpdateDashboardRequest) -> dict:
-    dash = update_user_dashboard(
-        settings,
-        dashboard_id,
+    dash = _ds_update_dashboard(
+        settings, dashboard_id,
         name=body.name,
         description=body.description,
     )
@@ -19182,13 +19240,14 @@ def patch_dashboard(dashboard_id: str, body: UpdateDashboardRequest) -> dict:
         }
     },
 )
-def delete_dashboard(dashboard_id: str, permanent: bool = False) -> dict:
-    existing = get_user_dashboard(settings, dashboard_id)
+def delete_dashboard_endpoint(dashboard_id: str, permanent: bool = False) -> dict:
+    existing = _ds_get_dashboard(settings, dashboard_id)
     if not existing:
         raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
-    delete_user_dashboard(settings, dashboard_id, permanent=permanent)
     if permanent:
+        _ds_delete_dashboard(settings, dashboard_id)
         return {"dashboard_id": dashboard_id, "deleted": True}
+    _ds_update_dashboard(settings, dashboard_id, status="archived")
     return {"dashboard_id": dashboard_id, "status": "archived"}
 
 
@@ -19257,8 +19316,8 @@ def delete_dashboard(dashboard_id: str, permanent: bool = False) -> dict:
         },
     },
 )
-def add_chart(dashboard_id: str, body: AddChartToDashboardRequest) -> dict:
-    dash = get_user_dashboard(settings, dashboard_id)
+def add_chart_endpoint(dashboard_id: str, body: AddChartToDashboardRequest) -> dict:
+    dash = _ds_get_dashboard(settings, dashboard_id)
     if not dash:
         raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
     chart_row = run_query(
@@ -19269,11 +19328,12 @@ def add_chart(dashboard_id: str, body: AddChartToDashboardRequest) -> dict:
     if not chart_row:
         raise HTTPException(status_code=404, detail=f"Chart {body.chart_id!r} not found")
     try:
-        entry = add_chart_to_dashboard(
+        entry = _ds_add_chart(
             settings,
             dashboard_id=dashboard_id,
             chart_id=body.chart_id,
             position=body.position,
+            title_override=getattr(body, "title_override", None),
             added_by=body.added_by,
         )
     except Exception as exc:
@@ -19309,11 +19369,11 @@ def add_chart(dashboard_id: str, body: AddChartToDashboardRequest) -> dict:
         }
     },
 )
-def remove_chart(dashboard_id: str, chart_id: str) -> dict:
-    dash = get_user_dashboard(settings, dashboard_id)
+def remove_chart_endpoint(dashboard_id: str, chart_id: str) -> dict:
+    dash = _ds_get_dashboard(settings, dashboard_id)
     if not dash:
         raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
-    remove_chart_from_dashboard(settings, dashboard_id, chart_id)
+    _ds_remove_chart(settings, dashboard_id, chart_id)
     return {"dashboard_id": dashboard_id, "chart_id": chart_id, "removed": True}
 
 
@@ -19375,11 +19435,11 @@ def remove_chart(dashboard_id: str, chart_id: str) -> dict:
         },
     },
 )
-def reorder_charts(dashboard_id: str, body: ReorderDashboardChartsRequest) -> dict:
-    dash = get_user_dashboard(settings, dashboard_id)
+def reorder_charts_endpoint(dashboard_id: str, body: ReorderDashboardChartsRequest) -> dict:
+    dash = _ds_get_dashboard(settings, dashboard_id)
     if not dash:
         raise HTTPException(status_code=404, detail=f"Dashboard {dashboard_id!r} not found")
-    order = reorder_dashboard_charts(settings, dashboard_id, body.chart_ids)
+    order = _ds_reorder_charts(settings, dashboard_id, body.chart_ids)
     return {"dashboard_id": dashboard_id, "chart_count": len(order), "order": order}
 
 
@@ -19409,17 +19469,61 @@ def _run_correlation_background(
             analysis_mode=analysis_mode,
         )
 
-        # Generate chart specs (mutates forward_projections in-place)
+        # Generate chart specs and register each one in quantyx_chart_requests
         try:
-            generate_correlation_charts(
+            corr_charts = generate_correlation_charts(
                 correlation_run_id=correlation_run_id,
                 kpi_snapshots=result.get("kpi_snapshots") or [],
                 anomaly_results=result.get("anomaly_results") or [],
                 correlation_pairs=result.get("correlation_pairs") or [],
                 forward_projections=result.get("forward_projections") or [],
             )
+            registered_chart_ids: list[str] = []
+            for cc in corr_charts:
+                spec = cc.get("spec") or {}
+                chart_title = spec.get("title") or cc.get("chart_type", "")
+                created = create_chart_request(
+                    settings,
+                    tenant_id=tenant_id,
+                    domain_id=domain_id,
+                    question=None,
+                    query_payload=None,
+                    run_id=run_id or correlation_run_id,
+                    chart_source="correlation",
+                    title=chart_title,
+                    created_by="CorrelationAgent",
+                )
+                cid = created.get("chart_id")
+                if cid:
+                    update_chart_request(
+                        settings,
+                        cid,
+                        status="completed",
+                        chart_type=cc.get("chart_type"),
+                        chart_payload=spec,
+                    )
+                    registered_chart_ids.append(cid)
+
+            # Create a correlation dashboard and link all charts
+            if registered_chart_ids:
+                dash = _ds_create_dashboard(
+                    settings,
+                    tenant_id=tenant_id,
+                    domain_id=domain_id,
+                    name=f"Correlation Analysis — {domain_id}",
+                    description=f"Auto-generated by CorrelationAgent (run {correlation_run_id})",
+                    dashboard_type="system",
+                    run_id=run_id or correlation_run_id,
+                )
+                dash_id = dash.get("dashboard_id")
+                if dash_id:
+                    for pos, cid in enumerate(registered_chart_ids):
+                        _ds_add_chart(
+                            settings, dash_id, cid,
+                            position=pos, added_by="CorrelationAgent",
+                        )
         except Exception:
-            _log.warning("[correlation] Chart generation failed", exc_info=True)
+            _log.warning("[correlation] Chart generation/registration failed", exc_info=True)
 
         # Narrate threads and generate summary
         narration = {"summary_text": "", "summary_html": ""}

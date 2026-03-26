@@ -319,17 +319,30 @@ class ViewQueryHistoryResponse(BaseModel):
 
 
 class DashboardListResponse(BaseModel):
+    total: int = 0
     dashboards: List[dict]
 
 
 class DashboardResponse(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+
     dashboard_id: str
     tenant_id: str
     domain_id: str
     title: str
-    spec: dict
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    name: Optional[str] = None
+    dashboard_type: str = "system"          # 'system' | 'user'
+    description: Optional[str] = None
+    status: str = "active"
+    run_id: Optional[str] = None
+    latest_refresh_id: Optional[str] = None
+    quality_score: Optional[float] = None
+    quality_gate_passed: Optional[bool] = None
+    created_by: Optional[str] = None
+    charts: Optional[List[dict]] = None     # populated by GET /dashboards/{id}
+    spec: Optional[dict] = None             # legacy field for system dashboards (refresh worker)
+    created_at: Optional[Any] = None
+    updated_at: Optional[Any] = None
 
 
 class DashboardUpdateRequest(BaseModel):
@@ -2296,17 +2309,20 @@ class CreateDashboardRequest(BaseModel):
     domain_id: str
     name: str
     description: Optional[str] = None
+    dashboard_type: str = "user"            # 'system' | 'user'
     created_by: Optional[str] = None
 
 
 class UpdateDashboardRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    status: Optional[str] = None           # 'active' | 'archived'
 
 
 class AddChartToDashboardRequest(BaseModel):
     chart_id: str
     position: Optional[int] = None
+    title_override: Optional[str] = None   # display title for this slot
     added_by: Optional[str] = None
 
 

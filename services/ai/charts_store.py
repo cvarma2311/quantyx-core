@@ -35,13 +35,17 @@ def create_chart_request(
     params: list | None = None,
     rows_json: list | dict | None = None,
     run_id: str | None = None,
+    chart_source: str | None = None,
+    title: str | None = None,
+    created_by: str | None = None,
 ) -> dict:
     chart_id = f"chart_{uuid.uuid4().hex[:10]}"
     insert_sql = """
         INSERT INTO public.quantyx_chart_requests
-          (chart_id, tenant_id, domain_id, run_id, question, query_payload, sql, params, rows_json, status)
+          (chart_id, tenant_id, domain_id, run_id, question, query_payload, sql, params, rows_json,
+           chart_source, title, created_by, status)
         VALUES
-          (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, 'queued')
+          (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s, %s, %s, 'queued')
         RETURNING chart_id, status, created_at, updated_at
     """
     params = [
@@ -54,6 +58,9 @@ def create_chart_request(
         sql,
         _serialize_payload(params),
         _serialize_payload(rows_json),
+        chart_source,
+        title,
+        created_by,
     ]
     conn = psycopg2.connect(
         host=settings.db_host,
@@ -68,7 +75,7 @@ def create_chart_request(
             row = cur.fetchone()
         conn.commit()
         return dict(row) if row else {"chart_id": chart_id, "status": "queued"}
-    except psycopg2.errors.UndefinedTable:
+    except (psycopg2.errors.UndefinedTable, psycopg2.errors.UndefinedColumn):
         return {"chart_id": chart_id, "status": "queued"}
     finally:
         conn.close()

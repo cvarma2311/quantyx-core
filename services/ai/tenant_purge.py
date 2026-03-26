@@ -88,7 +88,9 @@ def purge_tenant_data(
                 "quantyx_dashboard_refresh_runs",
                 "quantyx_chart_events",
                 "quantyx_chart_requests",
-                "quantyx_dashboard_specs",
+                "quantyx_dashboard_charts",   # Phase 44 unified chart-link table
+                "quantyx_dashboards",          # Phase 44 unified dashboard table
+                "quantyx_dashboard_specs",     # retired after Phase 44 migration — keep until old tables dropped
                 "quantyx_agent_runs",
                 "quantyx_fact_views_registry",
                 "quantyx_context_extraction_agents",
@@ -130,6 +132,8 @@ def purge_tenant_data(
                 "quantyx_semantic_contracts",
                 "quantyx_policy_audit",
                 "quantyx_usage_stats",
+                "quantyx_user_dashboards",          # retired after Phase 44 migration
+                "quantyx_user_dashboard_charts",    # retired after Phase 44 migration
             ]
             ordered = []
             for name in deletion_order:
