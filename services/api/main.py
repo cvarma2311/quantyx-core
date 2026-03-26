@@ -6477,6 +6477,70 @@ def start_agentic_run(payload: dict) -> dict:
     return {"run_id": run_id, "status": job.get("status", "queued"), "job_id": job.get("job_id")}
 
 
+def _split_select_items(select_body: str) -> list[str]:
+    """Split a SQL SELECT body by top-level commas (respecting parentheses)."""
+    items: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in select_body:
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        items.append("".join(current))
+    return items
+
+
+def _extract_metric_expr_from_sql(source_sql: str, metric_name: str) -> str | None:
+    """
+    Extract the aggregate expression for `metric_name` from the SELECT clause of
+    `source_sql`.  Returns the expression without the AS alias, with table aliases
+    stripped, so it can be dropped into a new query against a different table.
+
+    Example:
+        source_sql has:  CASE WHEN SUM(t."total_net_hours") > 0 THEN ...  AS "productivity"
+        Returns:         CASE WHEN SUM("total_net_hours") > 0 THEN SUM("total_production") / SUM("total_net_hours") ELSE 0 END
+    """
+    m = re.search(r"\bSELECT\b(.*?)\bFROM\b", source_sql, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    select_body = m.group(1)
+
+    _sql_kw = frozenset(
+        "CASE WHEN THEN ELSE END SUM AVG MIN MAX COUNT AND OR NOT IF "
+        "NULLIF COALESCE ROUND CAST OVER PARTITION BY NULL AS SELECT "
+        "FROM WHERE GROUP ORDER HAVING LIMIT DISTINCT IS IN BETWEEN "
+        "LIKE DATE_TRUNC DATE_PART EXTRACT ILIKE SIMILAR TO".split()
+    )
+
+    def _strip_alias(match: re.Match) -> str:  # type: ignore[type-arg]
+        alias = match.group(1)
+        if alias.upper() in _sql_kw:
+            return match.group(0)
+        return match.group(2)
+
+    metric_lower = metric_name.lower()
+    for item in _split_select_items(select_body):
+        item = item.strip()
+        alias_m = re.search(r'\bAS\s+["`]?(\w+)["`]?\s*$', item, re.IGNORECASE)
+        if alias_m and alias_m.group(1).lower() == metric_lower:
+            expr = item[: alias_m.start()].strip()
+            # Strip table alias prefix: t."col" → "col"
+            expr = re.sub(r'\b[A-Za-z_]\w*\."(\w+)"', r'"\1"', expr)
+            # Strip unquoted alias.col → col (preserving SQL keywords)
+            expr = re.sub(r'\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)\b', _strip_alias, expr)
+            return expr
+    return None
+
+
 def _execute_passthrough_workspace_query(
     *,
     metric_name: str,
@@ -6485,11 +6549,16 @@ def _execute_passthrough_workspace_query(
     intelligence_bundle: dict,
     schema_name: str,
     limit: int,
+    chart_context: dict | None = None,
 ) -> "QueryResult":
     """
     Build and execute a direct aggregate SQL query for a raw-column metric
     (metric_raw_column_passthrough mode).  Used when the metric registry is
     empty but scanned model data gives us the table + column information.
+
+    When chart_context is supplied and contains a source SQL, the metric
+    expression is extracted from that SQL (preserving the original business
+    formula) rather than defaulting to SUM(column).
 
     Handles the virtual `process_month` dimension by deriving it from the
     table's time_column via DATE_TRUNC.
@@ -6568,7 +6637,26 @@ def _execute_passthrough_workspace_query(
             group_parts.append(dim)
             out_dims.append(dim)
 
-    select_parts.append(f"SUM({actual_metric_col}) AS {metric_name}")
+    # Prefer the formula from the source chart SQL (preserves business logic like CASE WHEN).
+    # Fall back to naive SUM(column) only when no chart context is available.
+    source_metric_expr: str | None = None
+    if chart_context:
+        source_sql = (chart_context.get("sql") or "").strip()
+        if source_sql:
+            source_metric_expr = _extract_metric_expr_from_sql(source_sql, metric_name)
+
+    if source_metric_expr:
+        logger.info(
+            "passthrough_query | using source chart formula for %s: %s",
+            metric_name, source_metric_expr[:120],
+        )
+        select_parts.append(f"{source_metric_expr} AS {metric_name}")
+    else:
+        logger.info(
+            "passthrough_query | no source formula found for %s, falling back to SUM(%s)",
+            metric_name, actual_metric_col,
+        )
+        select_parts.append(f"SUM({actual_metric_col}) AS {metric_name}")
 
     # WHERE clause
     where_clauses: list[str] = []
@@ -6660,6 +6748,16 @@ def _workspace_query_response(
         explicit_metrics=effective_metrics,
         explicit_dimensions=effective_dimensions,
     )
+    # When the user said "instead of date/time", strip any auto-injected time dimensions
+    # (the planner may re-add process_month via time_grain logic even if we excluded it above).
+    _instead_of_time = bool(re.search(
+        r"\binstead\s+of\s+(date|time|month|day|week|period|process_month|process_date|the\s+date|the\s+time)\b",
+        question.lower(),
+    ))
+    if _instead_of_time and chart_context:
+        plan_dims = validated_plan.get("dimensions") or []
+        plan_dims = [d for d in plan_dims if not _is_time_dimension_name(d)]
+        validated_plan["dimensions"] = plan_dims
     if chart_followup_meta:
         merged_filters = list(validated_plan.get("filters") or [])
         for flt in chart_followup_meta.get("filter_hints") or []:
@@ -6712,6 +6810,7 @@ def _workspace_query_response(
             intelligence_bundle=intelligence_bundle,
             schema_name=schema_name or "",
             limit=limit,
+            chart_context=chart_context,
         )
     else:
         query_result = query(
@@ -7015,6 +7114,9 @@ def _classify_chart_followup_intent(question: str, chart_context: dict[str, Any]
         return "explain_point_or_segment"
     if "roll up" in lowered or "summary by" in lowered:
         return "roll_up"
+    # "instead of" means replace a dimension — not a hierarchical drill-down
+    if "instead of" in lowered:
+        return "regenerate_with_adjustment"
     if "drill" in lowered or "break this by" in lowered or re.search(r"\bby\s+[a-z]", lowered):
         return "drill_down"
     if any(token in lowered for token in ("exclude ", "without ", "remove ", "except ")):
@@ -7164,6 +7266,12 @@ def _chart_context_explicit_overrides(
     requested_grain = _requested_time_grain_from_question(question)
     requested_chart_type, requested_chart_reason = _requested_chart_type_from_question(question)
 
+    # Detect "instead of [date/time/month/...]" — user wants to DROP the time dimension
+    _replacing_time_dim = bool(re.search(
+        r"\binstead\s+of\s+(date|time|month|day|week|period|process_month|process_date|the\s+date|the\s+time)\b",
+        question.lower(),
+    ))
+
     if intent in {"drill_down", "roll_up"}:
         transition_dims, transition_error = _resolve_hierarchy_transition(
             current_dimensions=source_dimensions or dimensions_out,
@@ -7190,14 +7298,23 @@ def _chart_context_explicit_overrides(
                 accepted.append(f"replaced dimensions with {', '.join(resolved_requested_dims[:2])}")
             else:
                 accepted.append(f"carried forward dimensions {', '.join(resolved_requested_dims[:2])}")
-        elif not dimensions_out and source_dimensions:
-            dimensions_out = source_dimensions[:1]
-            accepted.append(f"carried forward dimension {source_dimensions[0]}")
+        else:
+            # No explicit dims resolved — strip time if user said "instead of date"
+            if _replacing_time_dim:
+                dimensions_out = [d for d in dimensions_out if not _is_time_dimension_name(d)]
+                if not dimensions_out and source_dimensions:
+                    non_time = [d for d in source_dimensions if not _is_time_dimension_name(d)]
+                    dimensions_out = non_time or []
+                accepted.append("removed time dimension per 'instead of date' request")
+            elif not dimensions_out and source_dimensions:
+                dimensions_out = source_dimensions[:1]
+                accepted.append(f"carried forward dimension {source_dimensions[0]}")
     elif requested_dims and intent not in {"change_grain", "explain_point_or_segment", "change_chart_type"}:
         resolved_requested_dims = [allowed_lookup.get(_norm_followup_name(name)) for name in requested_dims]
         resolved_requested_dims = [name for name in resolved_requested_dims if name]
         if resolved_requested_dims:
-            time_dimensions = [str(name) for name in source_dimensions if _is_time_dimension_name(name)]
+            # Preserve time dimension unless user said "instead of date/time"
+            time_dimensions = [] if _replacing_time_dim else [str(name) for name in source_dimensions if _is_time_dimension_name(name)]
             business_dimensions = [str(name) for name in resolved_requested_dims if not _is_time_dimension_name(name)]
             dimensions_out = list(dict.fromkeys(time_dimensions + business_dimensions)) or dimensions_out
             if source_dimensions and dimensions_out != source_dimensions:
