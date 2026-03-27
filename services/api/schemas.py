@@ -340,7 +340,6 @@ class DashboardResponse(BaseModel):
     quality_gate_passed: Optional[bool] = None
     created_by: Optional[str] = None
     charts: Optional[List[dict]] = None     # populated by GET /dashboards/{id}
-    spec: Optional[dict] = None             # legacy field for system dashboards (refresh worker)
     created_at: Optional[Any] = None
     updated_at: Optional[Any] = None
 

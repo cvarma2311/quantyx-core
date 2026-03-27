@@ -7517,6 +7517,9 @@ def _persist_workspace_chart_artifact(
             "conversation_plan": response_payload.get("conversation_plan"),
             "chart_followup": response_payload.get("chart_followup"),
         }
+        _metric_names = response_payload.get("metrics") or []
+        _dims = response_payload.get("dimensions") or []
+        _clean_title = workspace_chart_title(_metric_names[0] if _metric_names else None, _dims)
         chart_row = create_chart_request(
             settings,
             tenant_id=tenant_id,
@@ -7527,6 +7530,7 @@ def _persist_workspace_chart_artifact(
             params=[],
             rows_json=response_payload.get("rows"),
             chart_source="workspace",
+            title=_clean_title,
         )
         chart_id = chart_row.get("chart_id")
         if not chart_id:
@@ -11604,7 +11608,7 @@ def get_dashboard_endpoint(dashboard_id: str, tenant_id: str | None = None) -> D
     d_type = dash.get("dashboard_type", "system")
     name = dash.get("name") or ""
 
-    # Build unified charts list (new format)
+    # Build unified charts list
     charts_out = []
     for c in dash.get("charts") or []:
         charts_out.append({
@@ -11612,34 +11616,17 @@ def get_dashboard_endpoint(dashboard_id: str, tenant_id: str | None = None) -> D
             "chart_id": c.get("chart_id"),
             "position": c.get("position", 0),
             "title_override": c.get("title_override"),
-            "title": c.get("title_override") or c.get("title") or c.get("question"),
+            "title": c.get("title_override") or c.get("title") or (c.get("question") or "").split("\n\nChart context:")[0].strip() or None,
             "chart_type": c.get("chart_type"),
             "chart_source": c.get("chart_source"),
             "status": c.get("status"),
             "chart_payload": c.get("chart_payload"),
+            "chart_data": c.get("chart_data") or c.get("rows_json"),
             "added_by": c.get("added_by"),
             "added_at": c.get("added_at"),
         })
 
-    # For system dashboards also expose the legacy spec structure for refresh worker / existing consumers
-    spec: dict = {}
-    if d_type == "system":
-        spec, resolved_title = _normalize_dashboard_spec_titles(
-            {"charts": [
-                {"chart_id": c.get("chart_id"), "title": c.get("title_override") or c.get("title") or c.get("question"),
-                 "type": c.get("chart_type"), "sql": c.get("sql"), "params": c.get("params") or [],
-                 "metric": ((c.get("query_payload") or {}).get("metrics") or [None])[0] if isinstance(c.get("query_payload"), dict) else None,
-                 "dimensions": (c.get("query_payload") or {}).get("dimensions") or [] if isinstance(c.get("query_payload"), dict) else [],
-                 "chart_data": c.get("rows_json") or c.get("chart_data") or [],
-                 "chart_payload": c.get("chart_payload")}
-                for c in dash.get("charts") or []
-            ], "chart_plan": dash.get("chart_plan") or []},
-            domain_id=dash.get("domain_id"),
-            dashboard_title=name,
-        )
-        spec["chart_plan"] = dash.get("chart_plan") or []
-    else:
-        resolved_title = name
+    resolved_title = name
 
     def _iso(v):
         return v.isoformat() if hasattr(v, "isoformat") else v
@@ -11659,7 +11646,6 @@ def get_dashboard_endpoint(dashboard_id: str, tenant_id: str | None = None) -> D
         quality_gate_passed=dash.get("quality_gate_passed"),
         created_by=dash.get("created_by"),
         charts=charts_out,
-        spec=spec if d_type == "system" else {},
         created_at=_iso(dash.get("created_at")),
         updated_at=_iso(dash.get("updated_at")),
     )
