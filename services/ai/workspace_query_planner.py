@@ -475,7 +475,7 @@ def interpret_workspace_query(
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "question": question,
+                        "question": question_for_resolver,
                         "available_metrics": list(metric_catalog.metrics.keys()),
                         "available_dimensions": allowed_dimensions,
                         "output_schema": {
@@ -533,7 +533,11 @@ def validate_workspace_query_plan(
     explicit_metrics: list[str] | None = None,
     explicit_dimensions: list[str] | None = None,
 ) -> dict[str, Any]:
-    detail_intent = (raw_plan.get("intent") == "detail_query") or detect_detail_intent(question)
+    # Strip appended chart context block so it doesn't pollute time-grain detection
+    # or date filter parsing (e.g. "by Month" in chart title triggers month grain).
+    _chart_ctx_sep = "\n\nChart context:"
+    question_clean = question.split(_chart_ctx_sep)[0].strip() if _chart_ctx_sep in question else question
+    detail_intent = (raw_plan.get("intent") == "detail_query") or detect_detail_intent(question_clean)
     metric_candidates = list(explicit_metrics or []) + list(raw_plan.get("metric_candidates") or raw_plan.get("metrics") or [])
     metric_name, metric_warnings = bind_metric(metric_candidates, list(metric_catalog.metrics.keys()))
     dimension_candidates = list(explicit_dimensions or []) + list(raw_plan.get("dimensions") or [])
@@ -555,8 +559,8 @@ def validate_workspace_query_plan(
         item if isinstance(item, dict) else item.model_dump()
         for item in (raw_plan.get("filters") or [])
     ]
-    date_filters = parse_exact_date_filters(question, allowed_dimensions)
-    relative_date_filters = parse_relative_date_filters(question, allowed_dimensions)
+    date_filters = parse_exact_date_filters(question_clean, allowed_dimensions)
+    relative_date_filters = parse_relative_date_filters(question_clean, allowed_dimensions)
     if date_filters:
         raw_filters = [flt for flt in raw_filters if str(flt.get("field", "")).lower() not in {"process_date", "pdate", "date_day", "date"}]
         raw_filters.extend(date_filters)
@@ -593,7 +597,7 @@ def validate_workspace_query_plan(
         chart_type = "grouped_bar"
     if detail_intent:
         chart_type = "table"
-    time_grain = raw_plan.get("time_grain") or _detect_time_grain(question, raw_filters)
+    time_grain = raw_plan.get("time_grain") or _detect_time_grain(question_clean, raw_filters)
     if (
         not detail_intent
         and time_grain == "month"
