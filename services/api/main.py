@@ -11622,24 +11622,22 @@ def get_dashboard_endpoint(dashboard_id: str, tenant_id: str | None = None) -> D
         })
 
     # For system dashboards also expose the legacy spec structure for refresh worker / existing consumers
-    spec: dict = {}
-    if d_type == "system":
-        spec, resolved_title = _normalize_dashboard_spec_titles(
-            {"charts": [
-                {"chart_id": c.get("chart_id"), "title": c.get("title_override") or c.get("title") or c.get("question"),
-                 "type": c.get("chart_type"), "sql": c.get("sql"), "params": c.get("params") or [],
-                 "metric": ((c.get("query_payload") or {}).get("metrics") or [None])[0] if isinstance(c.get("query_payload"), dict) else None,
-                 "dimensions": (c.get("query_payload") or {}).get("dimensions") or [] if isinstance(c.get("query_payload"), dict) else [],
-                 "chart_data": c.get("rows_json") or c.get("chart_data") or [],
-                 "chart_payload": c.get("chart_payload")}
-                for c in dash.get("charts") or []
-            ], "chart_plan": dash.get("chart_plan") or []},
-            domain_id=dash.get("domain_id"),
-            dashboard_title=name,
-        )
-        spec["chart_plan"] = dash.get("chart_plan") or []
-    else:
-        resolved_title = name
+    spec, resolved_title = _normalize_dashboard_spec_titles(
+        {"charts": [
+            {"chart_id": c.get("chart_id"), "title": c.get("title_override") or c.get("title") or c.get("question"),
+             "type": c.get("chart_type"), "sql": c.get("sql"), "params": c.get("params") or [],
+             "metric": ((c.get("query_payload") or {}).get("metrics") or [None])[0] if isinstance(
+                 c.get("query_payload"), dict) else None,
+             "dimensions": (c.get("query_payload") or {}).get("dimensions") or [] if isinstance(c.get("query_payload"),
+                                                                                                dict) else [],
+             "chart_data": c.get("rows_json") or c.get("chart_data") or [],
+             "chart_payload": c.get("chart_payload")}
+            for c in dash.get("charts") or []
+        ], "chart_plan": dash.get("chart_plan") or []},
+        domain_id=dash.get("domain_id"),
+        dashboard_title=name,
+    )
+    spec["chart_plan"] = dash.get("chart_plan") or []
 
     def _iso(v):
         return v.isoformat() if hasattr(v, "isoformat") else v
@@ -11659,7 +11657,7 @@ def get_dashboard_endpoint(dashboard_id: str, tenant_id: str | None = None) -> D
         quality_gate_passed=dash.get("quality_gate_passed"),
         created_by=dash.get("created_by"),
         charts=charts_out,
-        spec=spec if d_type == "system" else {},
+        spec=spec,
         created_at=_iso(dash.get("created_at")),
         updated_at=_iso(dash.get("updated_at")),
     )
