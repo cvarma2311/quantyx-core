@@ -48,6 +48,19 @@ def _j(value: Any) -> str | None:
     return json.dumps(value, default=str)
 
 
+def _serialize_row(row: Any) -> dict:
+    """Convert a psycopg2 RealDictRow to a plain dict, serializing
+    datetime objects to ISO strings so that Pydantic Optional[str]
+    fields in the API response model don't cause a 500."""
+    result: dict = {}
+    for k, v in dict(row).items():
+        if isinstance(v, datetime):
+            result[k] = v.isoformat()
+        else:
+            result[k] = v
+    return result
+
+
 # ---------------------------------------------------------------------------
 # quantyx_correlation_runs
 # ---------------------------------------------------------------------------
@@ -126,7 +139,7 @@ def create_correlation_run(
             )
             row = cur.fetchone()
         c.commit()
-        return dict(row) if row else _fallback_run_dict(
+        return _serialize_row(row) if row else _fallback_run_dict(
             correlation_run_id, tenant_id, domain_id, run_id, analysis_mode, forecast_periods
         )
     except psycopg2.errors.UndefinedTable:
@@ -207,7 +220,7 @@ def get_correlation_run(
         with c.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, [correlation_run_id])
             row = cur.fetchone()
-        return dict(row) if row else None
+        return _serialize_row(row) if row else None
     except psycopg2.errors.UndefinedTable:
         c.rollback()
         logger.warning("[correlation.store] quantyx_correlation_runs table missing — get skipped")
@@ -233,7 +246,7 @@ def list_correlation_runs(
         with c.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, [tenant_id, domain_id, limit])
             rows = cur.fetchall()
-        return [dict(r) for r in rows]
+        return [_serialize_row(r) for r in rows]
     except psycopg2.errors.UndefinedTable:
         c.rollback()
         logger.warning("[correlation.store] quantyx_correlation_runs table missing — list skipped")

@@ -1098,7 +1098,7 @@ def build_schema_graph(schema_payload: dict) -> dict[str, Any]:
     return {"tables": tables}
 
 
-def enrich_schema_graph_columns(settings: Settings, schema_graph: dict[str, Any], schema_name: str) -> dict[str, Any]:
+def enrich_schema_graph_columns(settings: Settings, schema_graph: dict[str, Any], schema_name: str, scoped_conn=None) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
     tables = list(schema_graph.get("tables", []) or [])
     for table in tables:
@@ -1119,6 +1119,7 @@ def enrich_schema_graph_columns(settings: Settings, schema_graph: dict[str, Any]
                  ORDER BY ordinal_position
                 """,
                 [schema_name, name],
+                scoped_conn=scoped_conn,
             )
             table["columns"] = [
                 {
@@ -1129,11 +1130,11 @@ def enrich_schema_graph_columns(settings: Settings, schema_graph: dict[str, Any]
                 if row.get("column_name")
             ]
         except Exception:
-            logger.warning("enrich_schema_graph_columns: failed loading column metadata %s.%s", schema_name, name)
+            logger.exception("enrich_schema_graph_columns: failed loading column metadata %s.%s scoped_conn=%r", schema_name, name, scoped_conn)
     return {"tables": tables}
 
 
-def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name: str) -> dict[str, Any]:
+def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name: str, scoped_conn=None) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
     profiling: dict[str, Any] = {"tables": []}
     for table in schema_graph.get("tables", []):
@@ -1153,6 +1154,7 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
                      ORDER BY ordinal_position
                     """,
                     [schema_name, name],
+                    scoped_conn=scoped_conn,
                 )
                 columns = [
                     {
@@ -1163,7 +1165,7 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
                     if row.get("column_name")
                 ]
             except Exception:
-                logger.warning("profile_tables: failed loading column metadata %s.%s", schema_name, name)
+                logger.exception("profile_tables: failed loading column metadata %s.%s scoped_conn=%r", schema_name, name, scoped_conn)
         numeric = [c["name"] for c in columns if c.get("data_type") in NUMERIC_TYPES]
         time_cols = [c["name"] for c in columns if c.get("data_type") in TIME_TYPES]
         categorical = [c["name"] for c in columns if c.get("data_type") not in NUMERIC_TYPES | TIME_TYPES]
@@ -1177,6 +1179,7 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
                 settings,
                 f"SELECT COUNT(*) AS cnt FROM {_qident(schema_name)}.{_qident(name)}",
                 [],
+                scoped_conn=scoped_conn,
             )
             row_count = rows[0]["cnt"] if rows else None
         except Exception:
@@ -1200,6 +1203,7 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
                         f"WHERE {_qident(col)} IS NOT NULL LIMIT 5000"
                     ),
                     [],
+                    scoped_conn=scoped_conn,
                 )
                 samples[col] = [r["value"] for r in sample_rows]
             except Exception:
@@ -1221,6 +1225,7 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
                         f"FROM {_qident(schema_name)}.{_qident(name)}"
                     ),
                     [],
+                    scoped_conn=scoped_conn,
                 )
                 distinct_cnt = distinct_rows[0]["distinct_cnt"] if distinct_rows else None
                 candidate_keys.append(
@@ -2540,6 +2545,16 @@ def propose_chart_candidates(
         if edge.get("relationship") in {"many_to_one", "one_to_many"}:
             left_table = edge.get("left_table")
             if not left_table:
+                continue
+            # Skip if the join key is an identifier/code column — not meaningful as a chart category
+            _join_key = str(edge.get("left_key") or "").lower()
+            _join_tokens = _split_tokens(_join_key)
+            if (
+                _join_key.endswith("_id") or _join_key == "id"
+                or any(tok in IDENTIFIER_KEY_TOKENS for tok in _join_tokens)
+                or _join_key.endswith("_code") or "code" in _join_tokens
+                or any(tok in IDENTIFIER_CODE_TOKENS for tok in _join_tokens)
+            ):
                 continue
             left_metrics = [
                 m

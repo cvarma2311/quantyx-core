@@ -142,7 +142,7 @@ def load_kpi_snapshots(
                     SELECT chart_id, question, query_payload, rows_json
                       FROM public.quantyx_chart_requests
                      WHERE run_id = %s
-                       AND status IN ('done', 'complete', 'success')
+                       AND status IN ('done', 'complete', 'success', 'ready')
                        AND rows_json IS NOT NULL
                      ORDER BY created_at ASC
                     """,
@@ -158,7 +158,7 @@ def load_kpi_snapshots(
                       FROM public.quantyx_chart_requests
                      WHERE tenant_id = %s
                        AND domain_id  = %s
-                       AND status IN ('done', 'complete', 'success')
+                       AND status IN ('done', 'complete', 'success', 'ready')
                        AND rows_json IS NOT NULL
                      ORDER BY created_at DESC
                      LIMIT 10

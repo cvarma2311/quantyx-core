@@ -67,7 +67,7 @@ from services.ai.correlation_store import create_correlation_run, save_correlati
 from services.ai.views import create_views_from_schema, create_joined_views, extract_schema_table_names
 from services.ai.charts_store import create_chart_request, update_chart_request
 from services.ai.charts import build_chart_payload, infer_chart_type
-from services.ai.db import run_query, execute_non_query
+from services.ai.db import ScopedConnection, run_query, execute_non_query
 from services.ai.quality_gate import evaluate_quality_report
 from services.ai.metrics_registry import upsert_metric
 from services.ai.onboarding.models_registry import upsert_fact, upsert_dimension
@@ -471,8 +471,13 @@ def _should_skip_anomaly_for_dashboard_quality(quality_report: dict[str, Any] | 
     if score < 0.65:
         return True
     chart_rejections = [item for item in (report.get("chart_rejections") or []) if isinstance(item, dict)]
-    edges_checked = int(report.get("edges_checked") or 0)
-    if edges_checked > 0 and len(chart_rejections) >= max(2, edges_checked):
+    # Use chart_selection total as the denominator, not edges_checked.
+    # edges_checked counts join/ontology graph edges (often 2-3 for simple schemas)
+    # which made the gate trigger with just 2 rejections even when quality_score=0.9.
+    # Block only when the majority of proposed charts were rejected.
+    selection_diagnostics = report.get("chart_selection_diagnostics") or {}
+    total_proposed = int(selection_diagnostics.get("selected_count") or 0) + len(chart_rejections)
+    if total_proposed > 0 and len(chart_rejections) / total_proposed > 0.5:
         return True
     return False
 
@@ -734,6 +739,7 @@ def _execute_llm_evidence_queries(
     evidence_queries: list[dict[str, Any]],
     max_queries: int = 5,
     row_limit: int = 200,
+    scoped_conn: ScopedConnection | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     allowed_tables = _allowed_fact_tables(profiling_stats)
     executed: list[dict[str, Any]] = []
@@ -756,7 +762,7 @@ def _execute_llm_evidence_queries(
         if " limit " not in safe_sql.lower():
             safe_sql = f"{safe_sql} LIMIT {int(row_limit)}"
         try:
-            rows = run_query(settings, safe_sql, [])
+            rows = run_query(settings, safe_sql, [], scoped_conn=scoped_conn)
             executed.append(
                 {
                     "query_id": query_id,
@@ -1496,11 +1502,19 @@ def _llm_propose_chart_candidates(
         )
     table_payload = []
     for table in (profiling.get("tables") or [])[:10]:
+        sample_values = table.get("sample_values") or {}
+        # Only include categorical columns that were sampled and actually have
+        # non-null distinct values. Columns not yet sampled (beyond the sampling
+        # cap) are included as-is — we just don't know about them yet.
+        usable_categoricals = [
+            col for col in (table.get("categorical_columns") or [])[:12]
+            if col not in sample_values or sample_values[col]
+        ]
         table_payload.append(
             {
                 "table": table.get("name"),
                 "time_columns": (table.get("time_columns") or [])[:6],
-                "categorical_columns": (table.get("categorical_columns") or [])[:12],
+                "categorical_columns": usable_categoricals,
             }
         )
     system_prompt = (
@@ -2854,6 +2868,44 @@ def _persist_agentic_registry_outputs(
     return result
 
 
+def _scoped_conn_from_state(state: dict[str, Any], settings=None) -> ScopedConnection | None:
+    """Reconstruct a ScopedConnection from the serialised dict stored in LangGraph state.
+
+    Two-tier resolution:
+    1. Full credentials stored in state["scoped_conn"] (from public.databases lookup at run start)
+    2. Same-server fallback: App DB host/port/user + state["database_name"]
+       (covers the common case where customer DB is on the same PostgreSQL server)
+    """
+    _log = logging.getLogger(__name__)
+    raw = state.get("scoped_conn")
+    if raw and isinstance(raw, dict):
+        try:
+            sc = ScopedConnection.from_dict(raw)
+            _log.debug("_scoped_conn_from_state: tier-1 resolved conn=%r", sc)
+            return sc
+        except Exception:
+            _log.exception("_scoped_conn_from_state: failed deserialising scoped_conn dict %r", raw)
+    else:
+        _log.warning("_scoped_conn_from_state: no scoped_conn in state (keys=%s), falling to tier-2", list(state.keys()))
+
+    # Tier 2: same server as App DB, different database name
+    db_name = str(state.get("database_name") or "").strip()
+    if db_name and settings is not None:
+        sc2 = ScopedConnection(
+            connection_id=str(state.get("connection_id") or ""),
+            host=settings.db_host,
+            port=int(settings.db_port or 5432),
+            user=settings.db_user,
+            password=settings.db_password,
+            database_name=db_name,
+            schema_name=str(state.get("schema_name") or "public"),
+        )
+        _log.info("_scoped_conn_from_state: tier-2 fallback conn=%r", sc2)
+        return sc2
+    _log.warning("_scoped_conn_from_state: returning None — no scoped_conn and no database_name in state")
+    return None
+
+
 def run_agentic_workflow(
     settings,
     run_id: str,
@@ -2894,6 +2946,7 @@ def run_agentic_workflow(
             settings,
             build_schema_graph(schema_payload),
             schema_name,
+            scoped_conn=_scoped_conn_from_state(state, settings),
         )
         tables = state["schema_graph"].get("tables", []) or []
         with_columns = sum(1 for t in tables if (t.get("columns") or []))
@@ -2935,7 +2988,12 @@ def run_agentic_workflow(
     def profiling_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(settings, run_id, "ProfilingAgent", "running", "Profiling Agent started", event_callback=event_callback)
         schema_name = state.get("schema_name") or "public"
-        state["profiling_stats"] = profile_tables(settings, state.get("schema_graph", {}), schema_name)
+        state["profiling_stats"] = profile_tables(
+            settings,
+            state.get("schema_graph", {}),
+            schema_name,
+            scoped_conn=_scoped_conn_from_state(state, settings),
+        )
         prof_tables = state["profiling_stats"].get("tables", []) or []
         logger.info(
             "agentic.profiling.output | run_id=%s tables=%s sample=%s",
@@ -3359,7 +3417,7 @@ def run_agentic_workflow(
                     "LEFT JOIN r "
                     "ON l.join_key = r.join_key"
                 )
-                rows = run_query(settings, sql, [])
+                rows = run_query(settings, sql, [], scoped_conn=_scoped_conn_from_state(state, settings))
                 if rows:
                     total = rows[0].get("total") or 0
                     matched = rows[0].get("matched") or 0
@@ -4058,11 +4116,21 @@ def run_agentic_workflow(
                             # cutting across categories (the old LIMIT 10 gave 10 rows total,
                             # which could be only 1-2 categories each with a few periods).
                             top_n_cats = 5
+                            # Build a null-safe where clause for the category filter.
+                            # NULL = NULL is always FALSE in SQL, so we must exclude NULLs
+                            # in _top_cats and in the main query to avoid 0-row results.
+                            cat_not_null = f"{table_alias}.{_qident(category_col)} IS NOT NULL"
+                            if policy_filters:
+                                top_cats_where = f" WHERE {' AND '.join(policy_filters)} AND {cat_not_null} "
+                                main_where = f" WHERE {' AND '.join(policy_filters)} AND {cat_not_null} "
+                            else:
+                                top_cats_where = f" WHERE {cat_not_null} "
+                                main_where = f" WHERE {cat_not_null} "
                             sql = (
                                 f"WITH _top_cats AS ("
                                 f"SELECT {table_alias}.{_qident(category_col)} AS {cat_alias} "
                                 f"FROM {sql_from}"
-                                f"{where_clause}"
+                                f"{top_cats_where}"
                                 f"GROUP BY {cat_alias} "
                                 f"ORDER BY {metric_expr} DESC "
                                 f"LIMIT {top_n_cats}"
@@ -4072,7 +4140,7 @@ def run_agentic_workflow(
                                 f"{metric_expr} AS \"{metric_name}\" "
                                 f"FROM {sql_from} "
                                 f"JOIN _top_cats ON {table_alias}.{_qident(category_col)} = _top_cats.{cat_alias} "
-                                f"{where_clause}"
+                                f"{main_where}"
                                 f"GROUP BY {dim_alias}, {cat_alias} "
                                 f"ORDER BY {dim_alias} DESC "
                                 f"LIMIT {top_n_cats * line_single_limit}"
@@ -4145,7 +4213,8 @@ def run_agentic_workflow(
 
             if sql:
                 try:
-                    rows = run_query(settings, sql, params)
+                    _dashboard_scoped_conn = _scoped_conn_from_state(state, settings)
+                    rows = run_query(settings, sql, params, scoped_conn=_dashboard_scoped_conn)
                     logger.info(
                         "dashboard.chart.sql_ok | title=%s rows=%s",
                         chart_title,
@@ -4163,7 +4232,7 @@ def run_agentic_workflow(
                         )
                         if sql_no_policy != sql:
                             try:
-                                rows_retry = run_query(settings, sql_no_policy, params)
+                                rows_retry = run_query(settings, sql_no_policy, params, scoped_conn=_dashboard_scoped_conn)
                                 if rows_retry:
                                     logger.info(
                                         "dashboard.chart.policy_filter_bypassed | title=%s reason=no_rows_with_filters rows_after_retry=%s",
@@ -4486,6 +4555,7 @@ def run_agentic_workflow(
             f"Dashboard ready: {dashboard_title}",
         )
         fast_mode = os.getenv("AGENTIC_DASHBOARD_FAST_MODE", "false").lower() in {"1", "true", "yes"}
+        _dashboard_scoped_conn = _scoped_conn_from_state(state, settings)
         counts = {"nodes": 0, "edges": 0}
         created_views: list[str] = []
         joined_views: list[dict[str, Any]] = []
@@ -4605,6 +4675,7 @@ def run_agentic_workflow(
                 state.get("database_name") or "",
                 state.get("schema_name") or "public",
                 state.get("schema_payload") or {},
+                scoped_conn=_dashboard_scoped_conn,
             )
             created_views = [
                 str(item.get("view_name"))
@@ -4640,6 +4711,7 @@ def run_agentic_workflow(
                 state.get("domain_id") or "",
                 state.get("schema_name") or "public",
                 state.get("join_edges") or [],
+                scoped_conn=_dashboard_scoped_conn,
             )
             evidence_coverage = _build_evidence_coverage_summary(
                 extract_schema_table_names(state.get("schema_payload") or {}),
@@ -5269,6 +5341,7 @@ def run_agentic_workflow(
                 evidence_queries=[item for item in (llm_plan.get("evidence_queries") or []) if isinstance(item, dict)],
                 max_queries=max_evidence_queries,
                 row_limit=evidence_query_row_limit,
+                scoped_conn=_scoped_conn_from_state(state, settings),
             )
             logger.info(
                 "agentic.anomaly_detection.queries | run_id=%s executed=%s rejected=%s",

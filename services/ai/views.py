@@ -7,7 +7,7 @@ from typing import Any
 import psycopg2
 
 from services.ai.config import Settings
-from services.ai.db import execute_non_query, run_query
+from services.ai.db import ScopedConnection, execute_non_query, run_query
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,39 @@ def _registry_columns(settings: Settings) -> set[str]:
     return {str(r.get("column_name")) for r in rows if r.get("column_name")}
 
 
-def _relation_columns(settings: Settings, schema_name: str, relation_name: str) -> list[str]:
+def _execute_ddl(settings: Settings, sql: str, scoped_conn: ScopedConnection | None = None) -> None:
+    """Execute a DDL statement (CREATE VIEW etc.) against the customer DB when scoped_conn is provided,
+    or the App DB otherwise."""
+    if scoped_conn:
+        conn = psycopg2.connect(
+            host=scoped_conn.host,
+            port=scoped_conn.port,
+            dbname=scoped_conn.database_name,
+            user=scoped_conn.user,
+            password=scoped_conn.password,
+        )
+    else:
+        conn = psycopg2.connect(
+            host=settings.db_host,
+            port=settings.db_port,
+            dbname=settings.db_name,
+            user=settings.db_user,
+            password=settings.db_password,
+        )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _relation_columns(
+    settings: Settings,
+    schema_name: str,
+    relation_name: str,
+    scoped_conn: ScopedConnection | None = None,
+) -> list[str]:
     rows = run_query(
         settings,
         """
@@ -45,6 +77,7 @@ def _relation_columns(settings: Settings, schema_name: str, relation_name: str) 
          ORDER BY ordinal_position
         """,
         [schema_name, relation_name],
+        scoped_conn=scoped_conn,
     )
     return [str(r.get("column_name")) for r in rows if r.get("column_name")]
 
@@ -72,6 +105,7 @@ def ensure_fact_view(
     database_name: str,
     schema_name: str,
     source_table: str,
+    scoped_conn: ScopedConnection | None = None,
 ) -> str:
     fact_table = source_table if source_table.startswith("fact_") else f"fact_{source_table}"
     q_schema = _qident(schema_name)
@@ -81,19 +115,7 @@ def ensure_fact_view(
         CREATE OR REPLACE VIEW {q_schema}.{q_fact_table} AS
         SELECT * FROM {q_schema}.{q_source_table}
     """
-    conn = psycopg2.connect(
-        host=settings.db_host,
-        port=settings.db_port,
-        dbname=settings.db_name,
-        user=settings.db_user,
-        password=settings.db_password,
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-        conn.commit()
-    finally:
-        conn.close()
+    _execute_ddl(settings, sql, scoped_conn=scoped_conn)
 
     _insert_registry_row(
         settings,
@@ -216,6 +238,7 @@ def create_views_from_schema(
     database_name: str,
     schema_name: str,
     schema_payload: dict[str, Any],
+    scoped_conn: ScopedConnection | None = None,
 ) -> list[dict[str, Any]]:
     created: list[dict[str, Any]] = []
     for name in extract_schema_table_names(schema_payload):
@@ -228,6 +251,7 @@ def create_views_from_schema(
                 database_name,
                 schema_name,
                 name,
+                scoped_conn=scoped_conn,
             )
             created.append(
                 {
@@ -255,6 +279,7 @@ def create_joined_views(
     domain_id: str,
     schema_name: str,
     join_edges: list[dict[str, Any]],
+    scoped_conn: ScopedConnection | None = None,
 ) -> list[dict[str, Any]]:
     created: list[dict[str, Any]] = []
     for edge in join_edges[:5]:
@@ -271,8 +296,8 @@ def create_joined_views(
         q_right = _qident(right)
         q_left_key = _qident(left_key)
         q_right_key = _qident(right_key)
-        left_columns = _relation_columns(settings, schema_name, left)
-        right_columns = _relation_columns(settings, schema_name, right)
+        left_columns = _relation_columns(settings, schema_name, left, scoped_conn=scoped_conn)
+        right_columns = _relation_columns(settings, schema_name, right, scoped_conn=scoped_conn)
         left_aliases = {
             col: col for col in left_columns
         }
@@ -291,7 +316,7 @@ def create_joined_views(
             f"ON l.{q_left_key} = r.{q_right_key}"
         )
         try:
-            execute_non_query(settings, sql, [])
+            _execute_ddl(settings, sql, scoped_conn=scoped_conn)
             _insert_registry_row(
                 settings,
                 {

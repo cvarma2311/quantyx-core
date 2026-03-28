@@ -36,7 +36,10 @@ from services.ai.connection_registry import (
     register_connection,
     register_connection_scopes,
     resolve_connection_scope,
+    resolve_database_credentials_cached,
 )
+from services.ai.crypto import decrypt_password
+from services.ai.db import ScopedConnection
 from services.ai.onboarding.scan_store import persist_schema_scan
 from services.ai.onboarding.scan_store import load_latest_scan_result, load_latest_scan_for_scope
 from services.ai.resolver import resolve_question
@@ -578,6 +581,55 @@ def _resolve_scope_values(
     if not database_name or not schema_name:
         raise HTTPException(status_code=400, detail="tenant scope not configured")
     return (connection_id, database_name, schema_name, registry.get("tables") if registry else None)
+
+
+def _resolve_scoped_conn(tenant_id: str, domain_id: str) -> ScopedConnection | None:
+    """Resolve full connection credentials for a tenant/domain scope.
+
+    Two-tier resolution:
+    1. Full credentials from public.databases (supports different server/user)
+    2. Same-server fallback: App DB host/port/user + database_name from scope
+       (covers the common case where customer DB is on the same PostgreSQL server)
+
+    Never raises; safe to call speculatively.
+    """
+    try:
+        registry = get_tenant_scope(settings, tenant_id, domain_id)
+        connection_id = (registry or {}).get("connection_id")
+        if not connection_id:
+            logger.warning("_resolve_scoped_conn: no connection_id for tenant=%s domain=%s", tenant_id, domain_id)
+            return None
+        scopes = resolve_connection_scope(settings, connection_id)
+        if not scopes:
+            logger.warning("_resolve_scoped_conn: no scopes for connection_id=%s", connection_id)
+            return None
+        schema_name = scopes[0].get("schema_name") or "public"
+        database_name = scopes[0].get("database_name") or ""
+
+        # Tier 1: full credentials from public.databases
+        cred = resolve_database_credentials_cached(settings, connection_id, schema_name)
+        if cred:
+            logger.info("_resolve_scoped_conn: tier-1 resolved conn=%r", cred)
+            return cred
+
+        # Tier 2: same server as App DB, just a different database name
+        if database_name:
+            sc = ScopedConnection(
+                connection_id=connection_id,
+                host=settings.db_host,
+                port=int(settings.db_port or 5432),
+                user=settings.db_user,
+                password=settings.db_password,
+                database_name=database_name,
+                schema_name=schema_name,
+            )
+            logger.info("_resolve_scoped_conn: tier-2 fallback conn=%r", sc)
+            return sc
+        logger.warning("_resolve_scoped_conn: no database_name in scope for connection_id=%s", connection_id)
+        return None
+    except Exception:
+        logger.exception("_resolve_scoped_conn: unexpected error for tenant=%s domain=%s", tenant_id, domain_id)
+        return None
 
 
 def _load_job_payload(payload: dict | str | None) -> dict:
@@ -1182,9 +1234,15 @@ def _execute_job(job: dict) -> dict:
             rows: list[dict] = []
             status = "ok"
             error_message = None
+            _dash_chart_scoped_conn = None
+            if chart_row:
+                _dc_tenant = chart_row.get("tenant_id")
+                _dc_domain = chart_row.get("domain_id")
+                if _dc_tenant and _dc_domain:
+                    _dash_chart_scoped_conn = _resolve_scoped_conn(_dc_tenant, _dc_domain)
             try:
                 if sql:
-                    rows = run_query(settings, sql, params if isinstance(params, list) else [])
+                    rows = run_query(settings, sql, params if isinstance(params, list) else [], scoped_conn=_dash_chart_scoped_conn)
                 elif chart_obj.get("chart_data") and isinstance(chart_obj.get("chart_data"), list):
                     rows = chart_obj.get("chart_data") or []
                 elif chart_obj.get("rows") and isinstance(chart_obj.get("rows"), list):
@@ -4062,7 +4120,7 @@ def generate_dbt_scaffold(payload: DbtScaffoldRequest) -> DbtScaffoldResponse:
             "host": payload.host,
             "port": payload.port or 5432,
             "user": payload.user,
-            "password": payload.password,
+            "password": decrypt_password(payload.password or ""),
         }
     write_scaffold_files(dbt_project_path, scaffold_payload)
     scaffold_id = persist_scaffold(
@@ -6475,6 +6533,7 @@ def start_agentic_run(payload: dict) -> dict:
         "connection_id": payload.get("connection_id") or connection_id,
         "database_name": payload.get("database") or database,
         "runtime_tuning": payload.get("runtime_tuning") or {},
+        "scoped_conn": (_sc := _resolve_scoped_conn(tenant_id, domain_id)) and _sc.to_dict(),
     }
     job = create_job(
         settings,
@@ -6561,6 +6620,7 @@ def _execute_passthrough_workspace_query(
     schema_name: str,
     limit: int,
     chart_context: dict | None = None,
+    scoped_conn: ScopedConnection | None = None,
 ) -> "QueryResult":
     """
     Build and execute a direct aggregate SQL query for a raw-column metric
@@ -6689,7 +6749,7 @@ def _execute_passthrough_workspace_query(
     sql_parts.append(f"LIMIT {limit}")
     sql_text = "\n".join(sql_parts)
 
-    rows = run_query(settings, sql_text, params or None)
+    rows = run_query(settings, sql_text, params or None, scoped_conn=scoped_conn)
     return QueryResult(
         metrics=[metric_name],
         dimensions=out_dims,
@@ -6822,6 +6882,7 @@ def _workspace_query_response(
             schema_name=schema_name or "",
             limit=limit,
             chart_context=chart_context,
+            scoped_conn=_resolve_scoped_conn(tenant_id, domain_id),
         )
     else:
         query_result = query(
@@ -8143,6 +8204,7 @@ def _start_workspace_deployment(payload: dict) -> dict:
         "connection_id": payload.get("connection_id") or connection_id,
         "database_name": payload.get("database") or database,
         "runtime_tuning": payload.get("runtime_tuning") or {},
+        "scoped_conn": (_sc2 := _resolve_scoped_conn(tenant_id, domain_id)) and _sc2.to_dict(),
     }
     job = create_job(
         settings,
@@ -11107,7 +11169,7 @@ def views_query(request: ViewQueryRequest) -> ViewQueryResponse:
         )
     if "limit" not in sql_text.lower():
         sql_text = f"{sql_text} LIMIT {request.limit}"
-    rows = run_query(settings, sql_text, [])
+    rows = run_query(settings, sql_text, [], scoped_conn=_resolve_scoped_conn(request.tenant_id, resolved_domain_id))
     columns = list(rows[0].keys()) if rows else []
     query_id = f"vq_{uuid.uuid4().hex[:10]}"
     create_view_query_run(
@@ -13861,7 +13923,7 @@ def _run_scan_connection(
                     port=connection.port,
                     database=database.name,
                     user=connection.user,
-                    password=connection.password,
+                    password=decrypt_password(connection.password),
                     schema=schema.name,
                     tables=schema.tables,
                     limit=schema.limit,
@@ -13960,7 +14022,7 @@ def _run_scan_connection(
                             "host": connection.host,
                             "port": connection.port,
                             "user": connection.user,
-                            "password": connection.password,
+                            "password": decrypt_password(connection.password),
                         }
                         write_scaffold_files(dbt_project_path, payload)
                         persist_scaffold(
@@ -16290,6 +16352,7 @@ def _build_scoped_dimension_access(
     metrics: list[Metric],
     join_edges: list[dict[str, Any]] | None,
     model_map: dict[str, dict[str, Any]] | None,
+    scoped_conn: ScopedConnection | None = None,
 ) -> tuple[set[str], dict[str, list[str]], dict[str, str]]:
     base_tables = {
         _normalize_table_token(_infer_fact_table_from_metric_sql(metric.sql))
@@ -16312,7 +16375,7 @@ def _build_scoped_dimension_access(
     column_tables: dict[str, list[str]] = {}
     preferred_table_for_column: dict[str, str] = {}
     for table in ranked_tables:
-        cols = [str(col) for col in _list_fact_table_columns(schema_name, table) if str(col or "").strip()]
+        cols = [str(col) for col in _list_fact_table_columns(schema_name, table, scoped_conn=scoped_conn) if str(col or "").strip()]
         for col in cols:
             allowed_columns.add(col)
             column_tables.setdefault(col, [])
@@ -17110,7 +17173,7 @@ def _missing_required_intelligence(bundle: dict[str, Any]) -> list[str]:
     return missing
 
 
-def _list_fact_table_columns(schema_name: str, table_name: str) -> list[str]:
+def _list_fact_table_columns(schema_name: str, table_name: str, scoped_conn: ScopedConnection | None = None) -> list[str]:
     if not schema_name or not table_name:
         return []
     sql = """
@@ -17121,17 +17184,17 @@ def _list_fact_table_columns(schema_name: str, table_name: str) -> list[str]:
          ORDER BY ordinal_position
     """
     try:
-        rows = run_query(settings, sql, [schema_name, table_name])
+        rows = run_query(settings, sql, [schema_name, table_name], scoped_conn=scoped_conn)
     except Exception:
         return []
     return [row.get("column_name") for row in rows if row.get("column_name")]
 
 
-def _fact_columns_for_metric(metric_sql: str, schema_name: str) -> set[str]:
+def _fact_columns_for_metric(metric_sql: str, schema_name: str, scoped_conn: ScopedConnection | None = None) -> set[str]:
     fact_table = _infer_fact_table_from_metric_sql(metric_sql)
     if not fact_table:
         return set()
-    return set(_list_fact_table_columns(schema_name, fact_table))
+    return set(_list_fact_table_columns(schema_name, fact_table, scoped_conn=scoped_conn))
 
 
 def _augment_catalog_dimensions_from_facts(
@@ -17158,7 +17221,7 @@ def _augment_catalog_dimensions_from_facts(
         table_name = fact.get("table_name")
         if not table_name:
             continue
-        db_dims = _list_fact_table_columns(schema_name, table_name)
+        db_dims = _list_fact_table_columns(schema_name, table_name, scoped_conn=_resolve_scoped_conn(tenant_id, domain_id))
         if not db_dims:
             continue
         for dim in db_dims:
@@ -17195,7 +17258,7 @@ def _dimension_candidates_for_scope(
         table_name = fact.get("table_name")
         if not table_name:
             continue
-        db_dims = _list_fact_table_columns(schema_name, table_name)
+        db_dims = _list_fact_table_columns(schema_name, table_name, scoped_conn=_resolve_scoped_conn(tenant_id, domain_id))
         candidates.update(db_dims)
     return sorted(candidates)
 
@@ -17338,6 +17401,7 @@ def query(request: QueryRequest) -> QueryResult:
             request.tenant_id,
             domain_id,
         )
+        _query_scoped_conn = _resolve_scoped_conn(request.tenant_id, domain_id)
         intelligence_bundle = _load_run_scoped_intelligence(
             tenant_id=request.tenant_id,
             domain_id=domain_id,
@@ -17429,7 +17493,7 @@ def query(request: QueryRequest) -> QueryResult:
         for fact in facts_for_scope:
             table_name = fact.get("table_name")
             if table_name:
-                db_dims = _list_fact_table_columns(schema_name, table_name)
+                db_dims = _list_fact_table_columns(schema_name, table_name, scoped_conn=_query_scoped_conn)
                 fact_dims_map[table_name] = set(db_dims)
         _log_step("fact_columns_loaded")
         dimension_candidates = (intelligence_bundle or {}).get("dimension_candidates") or _dimension_candidates_for_scope(
@@ -17589,13 +17653,14 @@ def query(request: QueryRequest) -> QueryResult:
 
     metric_dimension_set = set()
     for metric in metrics_all:
-        fact_cols = _fact_columns_for_metric(metric.sql, settings.db_schema)
+        fact_cols = _fact_columns_for_metric(metric.sql, settings.db_schema, scoped_conn=_query_scoped_conn)
         metric_dimension_set.update(fact_cols)
     scoped_dimension_set, scoped_column_tables, preferred_table_for_column = _build_scoped_dimension_access(
         schema_name=schema_name or settings.db_schema,
         metrics=metrics,
         join_edges=scoped_join_edges,
         model_map=model_intelligence_map,
+        scoped_conn=_query_scoped_conn,
     )
     if scoped_dimension_set:
         metric_dimension_set.update(scoped_dimension_set)
@@ -17643,7 +17708,7 @@ def query(request: QueryRequest) -> QueryResult:
             metric_scope_tables = _join_connected_tables(metric_base_tables, scoped_join_edges) | metric_base_tables
             metric_dims: set[str] = set()
             for table in metric_scope_tables:
-                metric_dims.update(_list_fact_table_columns(settings.db_schema, table))
+                metric_dims.update(_list_fact_table_columns(schema_name or settings.db_schema, table, scoped_conn=_query_scoped_conn))
             logger.info(
                 "query.metric_scope_cols | metric=%s base_table=%s tables=%s cols=%s",
                 metric.name,
@@ -17877,7 +17942,7 @@ def query(request: QueryRequest) -> QueryResult:
             if rollup_sql_payload:
                 rollup_sql, rollup_params = rollup_sql_payload
                 try:
-                    rollup_rows = run_query(settings, rollup_sql, rollup_params)
+                    rollup_rows = run_query(settings, rollup_sql, rollup_params, scoped_conn=_query_scoped_conn)
                     rollup_used = True
                     sql_text = rollup_sql
                     row_count = len(rollup_rows)
@@ -18007,7 +18072,7 @@ def query(request: QueryRequest) -> QueryResult:
         sql_text = built.sql
         logger.info("sql: %s", built.sql)
         logger.info("params: %s", built.params)
-        rows = run_query(settings, built.sql, built.params)
+        rows = run_query(settings, built.sql, built.params, scoped_conn=_query_scoped_conn)
         row_count = len(rows)
         logger.info("rows: %s", row_count)
         _log_step("sql_executed")
@@ -18086,7 +18151,7 @@ def query(request: QueryRequest) -> QueryResult:
             by_company_sql = by_company_built.sql
             logger.info("by_company_sql: %s", by_company_sql)
             logger.info("by_company_params: %s", by_company_built.params)
-            by_company_rows = run_query(settings, by_company_built.sql, by_company_built.params)
+            by_company_rows = run_query(settings, by_company_built.sql, by_company_built.params, scoped_conn=_query_scoped_conn)
             logger.info("by_company_rows: %s", len(by_company_rows))
 
     execution_ms = int((time.perf_counter() - start_time) * 1000)
@@ -18719,7 +18784,12 @@ def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
             raise HTTPException(status_code=400, detail="No SQL stored for chart")
         logger.info("charts.refresh | chart_id=%s sql=%s params=%s", chart_id, row.get("sql"), row.get("params"))
         try:
-            rows = run_query(settings, row.get("sql") or "", row.get("params") or [])
+            _chart_tenant_id = row.get("tenant_id")
+            _chart_domain_id = row.get("domain_id")
+            _chart_scoped_conn = None
+            if _chart_tenant_id and _chart_domain_id:
+                _chart_scoped_conn = _resolve_scoped_conn(_chart_tenant_id, _chart_domain_id)
+            rows = run_query(settings, row.get("sql") or "", row.get("params") or [], scoped_conn=_chart_scoped_conn)
             payload = build_chart_payload(
                 row.get("chart_type") or "bar",
                 rows,
