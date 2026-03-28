@@ -7298,6 +7298,17 @@ def _chart_context_explicit_overrides(
                 accepted.append(f"{action} to {', '.join(transition_dims[:2])}")
             else:
                 accepted.append(f"carried forward dimensions {', '.join(transition_dims[:2])}")
+        elif requested_dims:
+            # Hierarchy transition failed — use the user's explicitly requested dimensions
+            # without inheriting time dimensions from the source chart. This handles cases
+            # like "by Zone" on a time-series chart where the user wants a categorical breakdown.
+            resolved_requested = [allowed_lookup.get(_norm_followup_name(name)) for name in requested_dims]
+            resolved_requested = [name for name in resolved_requested if name]
+            if resolved_requested:
+                dimensions_out = resolved_requested
+                accepted.append(f"applied requested dimensions {', '.join(resolved_requested[:2])}")
+            else:
+                rejected.append(transition_error or "invalid_chart_followup_dimension")
         else:
             rejected.append(transition_error or "invalid_chart_followup_dimension")
     elif intent == "regenerate_with_adjustment":

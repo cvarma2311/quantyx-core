@@ -237,8 +237,17 @@ def build_query(
 
     order_clause = ""
     if order_by_metric and metrics:
-        alias = metrics[0].name.replace('"', '""')
-        direction = "DESC" if order_desc else "ASC"
-        order_clause = f' ORDER BY "{alias}" {direction}'
+        # When the leading dimension is time-based, order by it ASC for correct
+        # chronological display rather than ordering by metric value.
+        _time_tokens = {"date", "day", "week", "month", "quarter", "year", "period"}
+        _first_dim_name = dimensions[0].name.lower() if dimensions else ""
+        _first_dim_is_time = any(token in _first_dim_name for token in _time_tokens)
+        if _first_dim_is_time and dimensions:
+            time_alias = dimensions[0].name.replace('"', '""')
+            order_clause = f' ORDER BY "{time_alias}" ASC'
+        else:
+            alias = metrics[0].name.replace('"', '""')
+            direction = "DESC" if order_desc else "ASC"
+            order_clause = f' ORDER BY "{alias}" {direction}'
     sql = f"SELECT {', '.join(select_parts)} {base_sql}{where_clause}{group_by}{order_clause} LIMIT {limit}"
     return BuiltQuery(sql=sql, params=where_params)
