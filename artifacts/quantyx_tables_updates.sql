@@ -1190,6 +1190,9 @@ CREATE TABLE IF NOT EXISTS public.quantyx_chart_requests (
   status TEXT NOT NULL DEFAULT 'queued',
   error_message TEXT,
   timing_ms JSONB,
+  insight_text TEXT,
+  narrative_text TEXT,
+  stats_json JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

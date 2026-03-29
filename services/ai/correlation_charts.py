@@ -83,6 +83,13 @@ def forecast_band_spec(
       { period_offset, forecast, lower_1sigma, upper_1sigma,
         lower_2sigma, upper_2sigma }
     """
+    # Sort historical data ascending so the chart reads left→right chronologically
+    # and so timestamps[-1] is always the most recent actual date.
+    if timestamps and len(timestamps) == len(series):
+        paired = sorted(zip(timestamps, series), key=lambda x: x[0])
+        timestamps = [p[0] for p in paired]
+        series = [p[1] for p in paired]
+
     # Build unified data array: historical then forecast
     data: list[dict] = []
     for i, (ts, val) in enumerate(zip(timestamps, series)):
@@ -99,12 +106,25 @@ def forecast_band_spec(
             }
         )
 
-    # Synthetic period labels for forecast points
+    # Compute forecast period labels as real dates when possible,
+    # falling back to offset notation only if parsing fails.
     last_ts = timestamps[-1] if timestamps else "T+0"
+    try:
+        from datetime import datetime, timedelta, timezone
+        # Strip trailing timezone info variants and parse
+        base_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+        def _forecast_label(offset: int) -> str:
+            dt = base_dt + timedelta(days=offset)
+            return dt.isoformat()
+    except Exception:
+        def _forecast_label(offset: int) -> str:  # type: ignore[misc]
+            return f"{last_ts}+{offset}"
+
     for pt in projection_json:
+        offset = int(pt.get("period_offset") or 0)
         data.append(
             {
-                "period": f"{last_ts}+{pt['period_offset']}",
+                "period": _forecast_label(offset),
                 "actual": None,
                 "forecast": pt["forecast"],
                 "lower_1s": pt["lower_1sigma"],

@@ -388,4 +388,14 @@ CREATE TABLE IF NOT EXISTS public.quantyx_forward_projections (
 
 CREATE INDEX IF NOT EXISTS idx_forward_projections_run
   ON public.quantyx_forward_projections (correlation_run_id, metric_name);
+
+-- Phase 46: Per-chart inference, narrative and stats persistence
+ALTER TABLE public.quantyx_chart_requests
+  ADD COLUMN IF NOT EXISTS insight_text   TEXT  NULL,
+  ADD COLUMN IF NOT EXISTS narrative_text TEXT  NULL,
+  ADD COLUMN IF NOT EXISTS stats_json     JSONB NULL;
+
+COMMENT ON COLUMN public.quantyx_chart_requests.insight_text   IS 'One-line callout: top dimension value or latest trend delta (LLM-generated, deterministic fallback)';
+COMMENT ON COLUMN public.quantyx_chart_requests.narrative_text IS 'Best/worst dimension comparison sentence (LLM-generated, deterministic fallback)';
+COMMENT ON COLUMN public.quantyx_chart_requests.stats_json     IS 'Descriptive statistics over primary metric: {count, min, max, avg, total}';
 SQL

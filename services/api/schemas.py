@@ -190,6 +190,9 @@ class ChartStatusResponse(BaseModel):
     params: Optional[List[Any]] = None
     rows_json: Optional[List[dict]] = None
     error_message: Optional[str] = None
+    insight_text: Optional[str] = None
+    narrative_text: Optional[str] = None
+    stats_json: Optional[dict] = None
 
 
 class RollupCreateRequest(BaseModel):

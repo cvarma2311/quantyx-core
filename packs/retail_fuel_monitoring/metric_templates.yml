@@ -1,0 +1,92 @@
+industry: retail_fuel_monitoring
+version: 2
+
+# Templates with explicit formula + base_table are applied directly by
+# _propose_template_metrics without column-matching heuristics.
+# Formulas use CASE WHEN to embed business filters inline so the SQL builder
+# can use them as-is in a SELECT expression.
+#
+# Key filter semantics (for reference):
+#   mark_as_false = 'true'        → confirmed real dry-out (text field)
+#   dry_out_in_days = '1'         → short-term / DryOut
+#   dry_out_in_days = '2'         → extended / IntraDryOut
+#   alert_status = 'Open'         → unresolved alert (long-term needs date check in query)
+#   interlock_name filtering is a semantic hint; ChartPlannerAgent applies it via context
+
+templates:
+  - name: dryout_count
+    type: count
+    base_table: alerts
+    formula: "COUNT(CASE WHEN dry_out_in_days = '1' AND mark_as_false = 'true' THEN 1 END)"
+    time_column: created_at
+    preferred_dimensions: [product_code, zone, bu]
+    description: Number of confirmed short-term dry-out events (outlets stocked out for 1 day)
+    measure_hint: count
+    is_executive_kpi: true
+    metric_priority: 4000
+
+  - name: intra_dryout_count
+    type: count
+    base_table: alerts
+    formula: "COUNT(CASE WHEN dry_out_in_days = '2' AND mark_as_false = 'true' THEN 1 END)"
+    time_column: created_at
+    preferred_dimensions: [product_code, zone, bu]
+    description: Number of confirmed extended dry-out events (intra-day or multi-shift, 2-day duration)
+    measure_hint: count
+    is_executive_kpi: true
+    metric_priority: 4000
+
+  - name: permanent_dryout_count
+    type: count
+    base_table: alerts
+    formula: "COUNT(CASE WHEN alert_status = 'Open' AND mark_as_false = 'true' THEN 1 END)"
+    time_column: created_at
+    preferred_dimensions: [product_code, zone]
+    description: Number of dry-out alerts that remain unresolved (open status). Long-term stockouts.
+    measure_hint: count
+    is_executive_kpi: true
+    metric_priority: 3800
+
+  - name: outlets_with_dryout
+    type: count_distinct
+    base_table: alerts
+    formula: "COUNT(DISTINCT CASE WHEN mark_as_false = 'true' THEN sap_id END)"
+    time_column: created_at
+    preferred_dimensions: [zone, product_code, bu]
+    description: Count of unique retail outlets (sap_id) with at least one confirmed dry-out alert
+    measure_hint: count
+    is_executive_kpi: true
+    metric_priority: 3800
+
+  - name: dryout_outlet_count
+    type: count_distinct
+    base_table: alerts
+    formula: "COUNT(DISTINCT sap_id)"
+    time_column: created_at
+    preferred_dimensions: [zone, product_code]
+    description: Total unique outlets with any alert (use with filter context for with/without dry-out analysis)
+    measure_hint: count
+    is_executive_kpi: false
+    metric_priority: 2000
+
+  - name: loss_of_sale
+    type: sum
+    base_table: loss_of_sales
+    formula: "SUM(loss_of_sale)"
+    time_column: stock_date
+    preferred_dimensions: [product_no]
+    description: Total revenue lost due to fuel stockouts. Sourced from loss_of_sales table.
+    measure_hint: revenue
+    is_executive_kpi: true
+    metric_priority: 4500
+
+  - name: avg_dryout_duration_days
+    type: avg
+    base_table: alerts
+    formula: "AVG(CASE WHEN mark_as_false = 'true' THEN CAST(dry_out_in_days AS NUMERIC) END)"
+    time_column: created_at
+    preferred_dimensions: [product_code, zone]
+    description: Average dry-out duration in days across confirmed dry-out events
+    measure_hint: duration
+    is_executive_kpi: false
+    metric_priority: 2500

@@ -44,7 +44,7 @@ from services.ai.onboarding.scan_store import persist_schema_scan
 from services.ai.onboarding.scan_store import load_latest_scan_result, load_latest_scan_for_scope
 from services.ai.resolver import resolve_question
 from services.ai.semantic_graph_resolver import resolve_question_semantic, log_semantic_usage
-from services.ai.charts import build_chart_payload, infer_chart_type, infer_chart_type_with_llm
+from services.ai.charts import build_chart_payload, infer_chart_type, infer_chart_type_with_llm, build_chart_inference
 from services.ai.workspace_query_planner import (
     build_workspace_chart,
     compile_workspace_query_plan,
@@ -945,10 +945,20 @@ def _execute_chart_job(payload: dict) -> dict:
 
         chart_payload = None
         chart_data = None
-        if chart_type and metric_names:
-            chart = build_chart_payload(chart_type, rows, metric_names[0], dimensions)
+        metric_name = metric_names[0] if metric_names else ""
+        dim_key = dimensions[0] if dimensions else None
+        if chart_type and metric_name:
+            chart = build_chart_payload(chart_type, rows, metric_name, dimensions)
             chart_payload = chart.get("chart_payload")
             chart_data = chart.get("data")
+        inference = build_chart_inference(
+            settings,
+            chart_type=chart_type or "bar",
+            rows=rows,
+            metric_name=metric_name,
+            dim_key=dim_key,
+            chart_title=chart_row.get("title") or query_payload.get("question"),
+        )
         update_chart_request(
             settings,
             chart_id,
@@ -960,6 +970,9 @@ def _execute_chart_job(payload: dict) -> dict:
             chart_payload=chart_payload,
             chart_data=chart_data,
             timing_ms=timing,
+            insight_text=inference["insight_text"],
+            narrative_text=inference["narrative_text"],
+            stats_json=inference["stats_json"],
         )
         create_chart_event(
             settings,
@@ -7613,6 +7626,18 @@ def _persist_workspace_chart_artifact(
             "queued",
             details={"question": question, "source": "workspace_conversation"},
         )
+        _ws_rows = response_payload.get("rows") or []
+        _ws_chart_type = response_payload.get("chart_type") or "bar"
+        _ws_metric = (_metric_names[0] if _metric_names else None) or ""
+        _ws_dim_key = (_dims[0] if _dims else None)
+        inference = build_chart_inference(
+            settings,
+            chart_type=_ws_chart_type,
+            rows=_ws_rows,
+            metric_name=_ws_metric,
+            dim_key=_ws_dim_key,
+            chart_title=_clean_title or question,
+        )
         update_chart_request(
             settings,
             chart_id,
@@ -7620,17 +7645,20 @@ def _persist_workspace_chart_artifact(
             query_payload=query_payload,
             sql=response_payload.get("sql"),
             params=[],
-            rows_json=response_payload.get("rows"),
-            chart_type=response_payload.get("chart_type"),
+            rows_json=_ws_rows,
+            chart_type=_ws_chart_type,
             chart_payload=response_payload.get("chart_payload"),
             chart_data=response_payload.get("data"),
+            insight_text=inference["insight_text"],
+            narrative_text=inference["narrative_text"],
+            stats_json=inference["stats_json"],
         )
         create_chart_event(
             settings,
             chart_id,
             "ready",
             details={
-                "chart_type": response_payload.get("chart_type"),
+                "chart_type": _ws_chart_type,
                 "source": "workspace_conversation",
             },
         )
@@ -18790,11 +18818,18 @@ def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
             if _chart_tenant_id and _chart_domain_id:
                 _chart_scoped_conn = _resolve_scoped_conn(_chart_tenant_id, _chart_domain_id)
             rows = run_query(settings, row.get("sql") or "", row.get("params") or [], scoped_conn=_chart_scoped_conn)
-            payload = build_chart_payload(
-                row.get("chart_type") or "bar",
-                rows,
-                (row.get("query_payload") or {}).get("metrics", [None])[0] or "metric",
-                (row.get("query_payload") or {}).get("dimensions", []) or ["category"],
+            _refresh_chart_type = row.get("chart_type") or "bar"
+            _refresh_metric = (row.get("query_payload") or {}).get("metrics", [None])[0] or "metric"
+            _refresh_dims = (row.get("query_payload") or {}).get("dimensions", []) or ["category"]
+            _refresh_dim_key = _refresh_dims[0] if _refresh_dims else None
+            payload = build_chart_payload(_refresh_chart_type, rows, _refresh_metric, _refresh_dims)
+            inference = build_chart_inference(
+                settings,
+                chart_type=_refresh_chart_type,
+                rows=rows,
+                metric_name=_refresh_metric,
+                dim_key=_refresh_dim_key,
+                chart_title=row.get("title"),
             )
             update_chart_request(
                 settings,
@@ -18803,6 +18838,9 @@ def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
                 rows_json=rows,
                 chart_payload=payload.get("chart_payload"),
                 chart_data=payload.get("data"),
+                insight_text=inference["insight_text"],
+                narrative_text=inference["narrative_text"],
+                stats_json=inference["stats_json"],
             )
             row = get_chart_request(settings, chart_id)
             logger.info(
@@ -18830,6 +18868,9 @@ def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
         params=row.get("params"),
         rows_json=row.get("rows_json"),
         error_message=row.get("error_message"),
+        insight_text=row.get("insight_text"),
+        narrative_text=row.get("narrative_text"),
+        stats_json=row.get("stats_json"),
     )
 
 
@@ -19562,12 +19603,26 @@ def _run_correlation_background(
                 )
                 cid = created.get("chart_id")
                 if cid:
+                    _bg_rows = cc.get("data") or []
+                    _bg_metric = cc.get("metric_name") or ""
+                    _bg_chart_type = cc.get("chart_type") or "line"
+                    bg_inference = build_chart_inference(
+                        settings,
+                        chart_type=_bg_chart_type,
+                        rows=_bg_rows,
+                        metric_name=_bg_metric,
+                        dim_key=None,
+                        chart_title=chart_title,
+                    )
                     update_chart_request(
                         settings,
                         cid,
                         status="completed",
-                        chart_type=cc.get("chart_type"),
+                        chart_type=_bg_chart_type,
                         chart_payload=spec,
+                        insight_text=bg_inference["insight_text"] or cc.get("description") or "",
+                        narrative_text=bg_inference["narrative_text"],
+                        stats_json=bg_inference["stats_json"],
                     )
                     registered_chart_ids.append(cid)
 

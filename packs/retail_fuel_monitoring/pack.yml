@@ -1,0 +1,8 @@
+industry: retail_fuel_monitoring
+version: 1
+release_date: "2026-03-28"
+notes: >
+  Retail fuel monitoring domain pack for tracking dry-out (stockout) events
+  at fuel retail outlets (ROs). Covers MS (Petrol), HSD (Diesel), and E20.
+  Supports analysis of dry-out frequency, duration categories, loss-of-sale
+  impact, and regional performance across the RO network.

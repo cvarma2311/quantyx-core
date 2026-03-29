@@ -1,0 +1,216 @@
+industry: retail_fuel_monitoring
+version: 2
+
+title: Retail Fuel Monitoring Ontology
+
+# ── Entity Types ─────────────────────────────────────────────────────────────
+entity_types:
+  retail_outlet:
+    examples: [sap_id, outlet_name, ro_name, outlet_code]
+    description: Fuel retail outlet (petrol/diesel station), identified by sap_id
+    join_key: sap_id
+    tables: [alerts, location_master]
+    note: sap_id is a unique identifier — never use as a chart dimension or breakdown
+
+  organizational_unit:
+    examples: [zone, region, territory, district, zone_code]
+    description: >
+      Geographic and sales org hierarchy for the RO network.
+      Zone is the most useful breakdown dimension for regional analysis.
+      Comes from location_master; join to alerts via sap_id.
+    join_key: zone
+    tables: [location_master]
+
+  product:
+    examples: [product_code, product_name, product_no, fuel_type, ms, hsd, e20]
+    description: >
+      Fuel product. The alerts table uses product_code; the loss_of_sales table uses product_no.
+      These are different columns with different value sets — do not conflate them.
+    join_key: product_code
+    tables: [alerts, loss_of_sales]
+
+  alert:
+    examples: [alert_id, interlock_name, indent_status, alert_status, mark_as_false,
+               dry_out_in_days, dry_out_start_time, dry_out_end_time, closed_at, bu]
+    description: >
+      A dry-out or stockout alert event for a retail outlet.
+      Each row represents one alert instance.
+    join_key: alert_id
+    tables: [alerts]
+
+  time:
+    examples: [created_at, stock_date, dry_out_start_time, month, year, report_date, process_date]
+    description: >
+      Time dimensions. Use created_at::date in alerts. Use stock_date::date in loss_of_sales.
+      dry_out_start_time is in UTC — convert to Asia/Kolkata when filtering or displaying.
+    tables: [alerts, loss_of_sales]
+
+# ── Product Code Mappings ─────────────────────────────────────────────────────
+# These are the known mappings. The AI should handle other product codes gracefully
+# (label as UNKNOWN or include as-is) rather than excluding them.
+product_codes:
+  alerts_table:
+    column: product_code
+    mappings:
+      - code: "2811000"
+        label: MS
+        description: Petrol (Motor Spirit)
+      - code: "2812000"
+        label: HSD
+        description: High Speed Diesel
+      - code: "2822000"
+        label: E20
+        description: Ethanol-blended Petrol (20%)
+    other_observed_codes: ["3912000", "3672000", "2816000", "3373000"]
+    case_expression: >
+      CASE
+        WHEN product_code = '2811000' THEN 'MS'
+        WHEN product_code = '2812000' THEN 'HSD'
+        WHEN product_code = '2822000' THEN 'E20'
+        ELSE 'UNKNOWN'
+      END AS product_name
+  loss_of_sales_table:
+    column: product_no
+    note: Different column name and value set from alerts.product_code
+    observed_codes: ["1322000", "1683000", "1683100", "2682000", "3672000", "3373000"]
+
+# ── Dry-Out Categories ────────────────────────────────────────────────────────
+# Semantic definitions only — the SQL signal is what tells the AI how to detect each type.
+# These do not restrict what metrics or dimensions can be used alongside them.
+dryout_categories:
+  - name: dryout
+    aliases: [dry out, dry-out, stockout, stock out, fuel unavailability, fuel outage,
+              short term dryout, 1-day dryout, RO dry, outlet dry]
+    description: Standard dry-out — outlet ran out of fuel for 1 day
+    detection_signal: "dry_out_in_days = '1' (text column)"
+
+  - name: intra_dryout
+    aliases: [intra dry out, intra dry-out, Intra DryOut, extended dryout, 2-day dryout,
+              two day dryout, extended dry out, prolonged dryout]
+    description: Extended/intra dry-out — outlet ran out of fuel for 2 days
+    detection_signal: "dry_out_in_days = '2' (text column)"
+
+  - name: permanent_dryout
+    aliases: [permanent dry out, Permanent DryOut, long-term dryout, chronic dryout,
+              unresolved dryout, open dryout, 5-day dryout, persistent dryout]
+    description: >
+      Dry-out unresolved for more than 5 days. Detected via alert_status = 'Open'
+      combined with alert age (created_at <= NOW() - INTERVAL '5 days').
+      Best aggregated monthly. mark_as_false filter does not apply.
+    detection_signal: "alert_status = 'Open' AND created_at <= NOW() - INTERVAL '5 days'"
+
+# ── Term Aliases ──────────────────────────────────────────────────────────────
+# Vocabulary map — helps the AI recognise how users phrase questions in this domain.
+# Not a restriction — variations map to the same underlying concept.
+term_aliases:
+  # Dry-out event
+  dry_out: [dryout, dry-out, stockout, stock out, fuel outage, fuel unavailability,
+            stock unavailability, outlet dry, no stock, out of stock, fuel shortage, RO outage]
+  intra_dryout: [intra dry out, intra dryout, extended dryout, 2 day dryout, two day dryout]
+  permanent_dryout: [permanent dry out, permanent dryout, long term dryout, chronic dryout,
+                     unresolved dryout, 5 day dryout, five day dryout, open dryout]
+
+  # Product names
+  ms: [petrol, motor spirit, MS, ms fuel, 2811000]
+  hsd: [diesel, HSD, high speed diesel, 2812000]
+  e20: [E20, ethanol blend, ethanol blended petrol, 2822000]
+
+  # Time grains
+  daily: [day wise, day-wise, per day, daily trend, date wise, date-wise, each day]
+  monthly: [month wise, month-wise, per month, monthly trend, month on month, MoM, each month]
+
+  # Geography
+  zone: [zone wise, zone-wise, by zone, per zone, zone code, zone level, regional by zone]
+  region: [region wise, region-wise, by region, per region, region level]
+
+  # Financial impact
+  loss_of_sale: [loss of sales, revenue loss, financial loss, financial impact, sales loss,
+                 revenue impact, LoS, LOS, stockout loss, lost revenue, sales impact]
+
+  # Outlet classification
+  outlets_with_dryout: [with dryout, outlets with dry out, affected outlets, impacted outlets,
+                        ROs with dry out, dryout ROs, dry outlets]
+  outlets_without_dryout: [without dryout, outlets without dry out, unaffected outlets,
+                            available outlets, ROs without dry out, non-dry outlets, healthy outlets]
+
+  # Alert fields (confusing names)
+  confirmed_alert: [mark_as_false = true, real dryout, valid dryout, confirmed stockout]
+  open_alert: [alert_status = Open, unresolved, still open, not closed, ongoing]
+
+# ── Table Reference ───────────────────────────────────────────────────────────
+tables:
+  alerts:
+    description: Main alerts table — one row per dry-out alert event
+    key_columns:
+      - name: created_at
+        type: timestamp
+        usage: canonical date dimension; cast to date as created_at::date for day/month aggregation
+      - name: sap_id
+        type: text
+        usage: retail outlet identifier; join to location_master for geographic dimensions
+      - name: product_code
+        type: text
+        usage: fuel product code; use CASE expression to map to MS/HSD/E20 for display
+      - name: interlock_name
+        type: text
+        usage: >
+          distinguishes alert type. The dry-out interlock is
+          'Dry Out Each Indent Wise MainFlow'. This is a quality guardrail — see policies.
+      - name: indent_status
+        type: text
+        usage: quality guardrail — certain values indicate noise/invalid records; see policies
+      - name: alert_status
+        type: text
+        usage: 'Open' indicates the alert is still unresolved; used to detect permanent dry-outs
+      - name: mark_as_false
+        type: text
+        usage: >
+          text field storing 'true' or 'false' (NOT a boolean).
+          'true' = confirmed real dry-out (counterintuitively named).
+          Apply for short/extended dry-outs; not required for permanent dry-out queries.
+      - name: dry_out_in_days
+        type: text
+        usage: text field — '1' = short-term dryout, '2' = intra/extended dryout
+      - name: dry_out_start_time
+        type: timestamp with time zone
+        usage: stored in UTC; convert to Asia/Kolkata for date filtering and display
+      - name: dry_out_end_time
+        type: timestamp with time zone
+        usage: >
+          nullable; use COALESCE(dry_out_end_time, closed_at, updated_at)
+          for effective end time in date-overlap queries
+      - name: bu
+        type: text
+        usage: business unit; 'RO' = retail outlet. Filter when restricting to petrol stations only.
+
+  location_master:
+    description: Retail outlet geographic master — zone, region, and business unit mapping
+    key_columns:
+      - name: sap_id
+        type: text
+        usage: join key to alerts.sap_id
+      - name: zone
+        type: text
+        usage: primary geographic breakdown dimension
+      - name: bu
+        type: text
+        usage: filter bu = 'RO' when computing total outlet base (for with/without dryout coverage metrics)
+
+  loss_of_sales:
+    description: Daily revenue lost due to fuel stockouts at retail outlets
+    key_columns:
+      - name: stock_date
+        type: text or timestamp
+        usage: cast to date as stock_date::timestamp::date; canonical time dimension for this table
+      - name: loss_of_sale
+        type: numeric
+        usage: revenue lost; aggregate with SUM for period totals
+      - name: product_no
+        type: text
+        usage: product identifier in this table — different column name from alerts.product_code
+
+# ── Geographic Hierarchy ─────────────────────────────────────────────────────
+hierarchies:
+  - name: geo_org
+    levels: [zone, region, territory, district]
+    description: Geographic rollup for retail outlet network; zone is the primary breakdown

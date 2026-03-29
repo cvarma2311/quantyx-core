@@ -1,0 +1,26 @@
+industry: retail_fuel_monitoring
+version: 2
+
+datasets:
+  - name: fuel_alerts
+    source_model: alerts
+    description: >
+      Dry-out alert events for retail outlets — one row per alert.
+      Always filter: interlock_name = 'Dry Out Each Indent Wise MainFlow',
+      indent_status NOT IN (Cancelled, TempClosed, ProductLowLevel, OfflineOrFalseAlarm, NotAvailable),
+      mark_as_false = 'true' (for short/extended dry-outs).
+      Use created_at::date as the canonical date dimension.
+
+  - name: retail_outlet_geo
+    source_model: location_master
+    description: >
+      Retail outlet geographic master — sap_id, zone, region, bu.
+      Join to alerts on sap_id. Filter bu = 'RO' when computing
+      total outlet counts (with + without dry-out).
+
+  - name: loss_of_sale
+    source_model: loss_of_sales
+    description: >
+      Daily revenue lost due to fuel stockouts at retail outlets.
+      Key columns: stock_date (cast to date), loss_of_sale (sum), product_no.
+      Note: uses product_no (not product_code) — apply the known product_no filter list.

@@ -100,40 +100,24 @@ _ROLE_TARGETS: dict[str, tuple[int, int]] = {
     "supporting_diagnostics": (1, 4),
 }
 _SQL_IDENTIFIER_IGNORE = {
-    "sum",
-    "avg",
-    "average",
-    "count",
-    "distinct",
-    "round",
-    "nullif",
-    "coalesce",
-    "case",
-    "when",
-    "then",
-    "else",
-    "end",
-    "as",
-    "date",
-    "extract",
-    "year",
-    "month",
-    "day",
-    "from",
-    "and",
-    "or",
-    "not",
-    "null",
-    "cast",
-    "on",
-    "in",
-    "over",
-    "partition",
-    "by",
-    "order",
-    "desc",
-    "asc",
-    "current_date",
+    # aggregate functions
+    "sum", "avg", "average", "count", "distinct", "round", "nullif",
+    "coalesce", "min", "max", "stddev", "variance", "median",
+    # conditional expressions
+    "case", "when", "then", "else", "end",
+    # keywords
+    "as", "from", "where", "having", "group", "order", "by",
+    "and", "or", "not", "in", "on", "is", "like", "between",
+    "join", "left", "right", "inner", "outer", "with", "select",
+    "desc", "asc", "limit", "offset", "all", "any", "exists",
+    "union", "intersect", "except", "filter",
+    # type functions / date
+    "date", "extract", "year", "month", "day", "hour", "minute",
+    "second", "epoch", "cast", "over", "partition",
+    "current_date", "current_timestamp", "now", "interval",
+    "date_trunc", "to_char", "to_date",
+    # null / bool literals
+    "null", "true", "false",
 }
 
 
@@ -934,9 +918,43 @@ def _propose_template_metrics(profiling: dict[str, Any], domain_id: str | None) 
     if not templates:
         return []
     result: list[dict[str, Any]] = []
+    profiling_table_names = {str(t.get("name") or "").strip() for t in profiling.get("tables", []) if t.get("name")}
     for template in templates:
         tname = str(template.get("name") or "").strip().lower()
         ttype = str(template.get("type") or "").strip().lower()
+        # If the template provides an explicit formula + base_table, use it directly
+        # without any column-matching heuristics. This lets domain packs define
+        # business-filter-embedded formulas (e.g. CASE WHEN dry_out_in_days = '1'...)
+        # that map directly to the SQL builder's SELECT expression.
+        explicit_formula = str(template.get("formula") or "").strip()
+        explicit_base_table = str(template.get("base_table") or "").strip()
+        if explicit_formula and explicit_base_table:
+            if profiling_table_names and explicit_base_table not in profiling_table_names:
+                # Skip if the table isn't in the profiled scope
+                continue
+            time_col = str(template.get("time_column") or "").strip() or None
+            preferred_dims = list(template.get("preferred_dimensions") or [])
+            metric_priority = int(template.get("metric_priority") or 3000)
+            is_executive_kpi = bool(template.get("is_executive_kpi", True))
+            result.append(
+                {
+                    "metric_name": tname,
+                    "display_name": tname.replace("_", " ").title(),
+                    "description": template.get("description") or tname,
+                    "formula": explicit_formula,
+                    "base_table": explicit_base_table,
+                    "metric_type": ttype,
+                    "metric_intent": template.get("measure_hint") or ttype,
+                    "semantic_role": "measure_additive",
+                    "measure_confidence": 0.95,
+                    "is_executive_kpi": is_executive_kpi,
+                    "metric_source": "template",
+                    "metric_priority": metric_priority,
+                    "preferred_time_column": time_col,
+                    "preferred_breakdowns": preferred_dims,
+                }
+            )
+            continue
         for table in profiling.get("tables", []):
             table_name = table.get("name")
             if not table_name:
@@ -1367,8 +1385,11 @@ def _extract_formula_identifiers(formula: str | None, base_table: str | None = N
     text = str(formula or "")
     if not text:
         return set()
-    refs = {match for match in re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', text)}
-    bare_tokens = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", text)
+    # Strip single-quoted string literals so values like 'dry-out' or 'true'
+    # don't produce spurious column references like 'dry', 'out', 'true'.
+    text_no_strings = re.sub(r"'[^']*'", " ", text)
+    refs = {match for match in re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', text_no_strings)}
+    bare_tokens = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", text_no_strings)
     for token in bare_tokens:
         lower = token.lower()
         if lower in _SQL_IDENTIFIER_IGNORE:

@@ -85,6 +85,7 @@ def get_chart_request(settings: Settings, chart_id: str) -> dict | None:
     sql = """
         SELECT chart_id, tenant_id, domain_id, question, query_payload, sql, params,
                rows_json, chart_type, chart_payload, chart_data, status, error_message, timing_ms,
+               insight_text, narrative_text, stats_json,
                created_at, updated_at
           FROM public.quantyx_chart_requests
          WHERE chart_id = %s
@@ -153,6 +154,9 @@ def update_chart_request(
     chart_data: list | dict | None = None,
     error_message: str | None = None,
     timing_ms: dict | None = None,
+    insight_text: str | None = None,
+    narrative_text: str | None = None,
+    stats_json: dict | None = None,
 ) -> None:
     updates = []
     values: list[object] = []
@@ -186,6 +190,15 @@ def update_chart_request(
     if timing_ms is not None:
         updates.append("timing_ms = %s::jsonb")
         values.append(_serialize_payload(timing_ms))
+    if insight_text is not None:
+        updates.append("insight_text = %s")
+        values.append(insight_text)
+    if narrative_text is not None:
+        updates.append("narrative_text = %s")
+        values.append(narrative_text)
+    if stats_json is not None:
+        updates.append("stats_json = %s::jsonb")
+        values.append(_serialize_payload(stats_json))
     updates.append("updated_at = now()")
     if not updates:
         return

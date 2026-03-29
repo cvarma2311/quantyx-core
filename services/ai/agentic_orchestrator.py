@@ -64,9 +64,10 @@ from services.ai.anomaly_dashboard import build_anomaly_dashboard_spec
 from services.ai.correlation_agent import run_correlation_intelligence
 from services.ai.correlation_narrate import narrate_correlation_results
 from services.ai.correlation_store import create_correlation_run, save_correlation_run_results
+from services.ai.correlation_charts import generate_correlation_charts
 from services.ai.views import create_views_from_schema, create_joined_views, extract_schema_table_names
 from services.ai.charts_store import create_chart_request, update_chart_request
-from services.ai.charts import build_chart_payload, infer_chart_type
+from services.ai.charts import build_chart_payload, infer_chart_type, build_chart_inference
 from services.ai.db import ScopedConnection, run_query, execute_non_query
 from services.ai.quality_gate import evaluate_quality_report
 from services.ai.metrics_registry import upsert_metric
@@ -1814,6 +1815,14 @@ def _llm_propose_context_metrics(
         "If the context implies formulas or KPI names, translate them into candidate metrics. "
         "Return JSON only with keys: metrics, rationale. "
         "metrics must be a list of objects with keys: metric_name, display_name, description, base_table, formula, grain, preferred_time_column, preferred_dimensions, metric_type, confidence, rationale. "
+        "CRITICAL: The 'formula' field must be a valid SQL aggregate expression ONLY. "
+        "Valid examples: COUNT(*), SUM(column_name), AVG(column_name), COUNT(DISTINCT column_name), "
+        "COUNT(CASE WHEN column_name = value THEN 1 END), SUM(CASE WHEN col = val THEN col2 ELSE 0 END), "
+        "ROUND(100.0*SUM(col)/NULLIF(SUM(total),0),2). "
+        "Do NOT include WHERE, FROM, JOIN, HAVING, GROUP BY, or any SQL clause in the formula. "
+        "The formula is used as a SELECT expression inside a pre-built query. "
+        "To filter by a condition, embed it using CASE WHEN inside the aggregate: "
+        "e.g. COUNT(CASE WHEN status = 'active' THEN 1 END) not COUNT(*) WHERE status = 'active'. "
         "If no metric is strongly implied by the context, return an empty metrics array."
     )
     user_payload = {
@@ -4126,22 +4135,23 @@ def run_agentic_workflow(
                             else:
                                 top_cats_where = f" WHERE {cat_not_null} "
                                 main_where = f" WHERE {cat_not_null} "
+                            cat_expr = f"{table_alias}.{_qident(category_col)}"
                             sql = (
                                 f"WITH _top_cats AS ("
-                                f"SELECT {table_alias}.{_qident(category_col)} AS {cat_alias} "
+                                f"SELECT {cat_expr} AS {cat_alias} "
                                 f"FROM {sql_from}"
                                 f"{top_cats_where}"
-                                f"GROUP BY {cat_alias} "
+                                f"GROUP BY {cat_expr} "
                                 f"ORDER BY {metric_expr} DESC "
                                 f"LIMIT {top_n_cats}"
                                 f") "
                                 f"SELECT {dim_expr} AS {dim_alias}, "
-                                f"{table_alias}.{_qident(category_col)} AS {cat_alias}, "
+                                f"{cat_expr} AS {cat_alias}, "
                                 f"{metric_expr} AS \"{metric_name}\" "
                                 f"FROM {sql_from} "
-                                f"JOIN _top_cats ON {table_alias}.{_qident(category_col)} = _top_cats.{cat_alias} "
+                                f"JOIN _top_cats ON {cat_expr} = _top_cats.{cat_alias} "
                                 f"{main_where}"
-                                f"GROUP BY {dim_alias}, {cat_alias} "
+                                f"GROUP BY {dim_expr}, {cat_expr} "
                                 f"ORDER BY {dim_alias} DESC "
                                 f"LIMIT {top_n_cats * line_single_limit}"
                             )
@@ -4152,19 +4162,20 @@ def run_agentic_workflow(
                                 f"{metric_expr} AS \"{metric_name}\" "
                                 f"FROM {sql_from}"
                                 f"{where_clause}"
-                                f"GROUP BY {dim_alias} "
+                                f"GROUP BY {dim_expr} "
                                 f"ORDER BY {dim_alias} DESC "
                                 f"LIMIT {line_single_limit}"
                             )
                             dimensions = [dim_alias]
                     elif category_col:
                         dim_alias = "category"
+                        cat_expr = f"{table_alias}.{_qident(category_col)}"
                         sql = (
-                            f"SELECT {table_alias}.{_qident(category_col)} AS {dim_alias}, "
+                            f"SELECT {cat_expr} AS {dim_alias}, "
                             f"{metric_expr} AS \"{metric_name}\" "
                             f"FROM {sql_from}"
                             f"{where_clause}"
-                            f"GROUP BY {dim_alias} "
+                            f"GROUP BY {cat_expr} "
                             f"ORDER BY \"{metric_name}\" DESC "
                             f"LIMIT {category_limit}"
                         )
@@ -4173,13 +4184,14 @@ def run_agentic_workflow(
                     dim_col = category_col or time_col
                     if dim_col:
                         dim_alias = "category"
+                        dim_col_expr = f"{table_alias}.{_qident(dim_col)}"
                         limit = bar_limit if chart_type == "bar" else pie_limit
                         sql = (
-                            f"SELECT {table_alias}.{_qident(dim_col)} AS {dim_alias}, "
+                            f"SELECT {dim_col_expr} AS {dim_alias}, "
                             f"{metric_expr} AS \"{metric_name}\" "
                             f"FROM {sql_from}"
                             f"{where_clause}"
-                            f"GROUP BY {dim_alias} "
+                            f"GROUP BY {dim_col_expr} "
                             f"ORDER BY \"{metric_name}\" DESC "
                             f"LIMIT {limit}"
                         )
@@ -4326,9 +4338,14 @@ def run_agentic_workflow(
                 chart_ids.append(chart_id)
                 payload = build_chart_payload(chart_type, rows, metric_name, dimensions or ["category"])
                 dim_key = dimensions[0] if dimensions else None
-                insight = _chart_insight(chart_type, rows, metric_name, dim_key)
-                stats = _chart_stats(rows, metric_name)
-                narrative = _chart_narrative(rows, metric_name, dim_key)
+                inference = build_chart_inference(
+                    settings,
+                    chart_type=chart_type,
+                    rows=rows,
+                    metric_name=metric_name,
+                    dim_key=dim_key,
+                    chart_title=chart_title,
+                )
                 update_chart_request(
                     settings,
                     chart_id,
@@ -4339,6 +4356,9 @@ def run_agentic_workflow(
                     chart_type=chart_type,
                     chart_payload=payload.get("chart_payload"),
                     chart_data=payload.get("data"),
+                    insight_text=inference["insight_text"],
+                    narrative_text=inference["narrative_text"],
+                    stats_json=inference["stats_json"],
                 )
                 logger.info(
                     "dashboard.chart.request_updated | run_id=%s chart_id=%s status=ready sql_is_null=%s rows=%s dims=%s",
@@ -4357,9 +4377,9 @@ def run_agentic_workflow(
                         "metric_name": metric_name,
                         "sql": sql,
                         "rows_count": len(rows),
-                        "insight": insight,
-                        "stats": stats,
-                        "narrative": narrative,
+                        "insight_text": inference["insight_text"],
+                        "narrative_text": inference["narrative_text"],
+                        "stats": inference["stats_json"],
                         "chart_payload": payload.get("chart_payload"),
                         "chart_data": payload.get("data"),
                         "dashboard_title": dashboard_title,
@@ -4962,6 +4982,81 @@ def run_agentic_workflow(
             summary_text=narration.get("summary_text") or "",
             summary_html=narration.get("summary_html") or "",
         )
+        # Generate and persist correlation charts inline so they are available
+        # immediately in the same agentic run (no separate background trigger needed).
+        try:
+            corr_charts = generate_correlation_charts(
+                correlation_run_id=correlation_run_id,
+                kpi_snapshots=result.get("kpi_snapshots") or [],
+                anomaly_results=result.get("anomaly_results") or [],
+                correlation_pairs=result.get("correlation_pairs") or [],
+                forward_projections=result.get("forward_projections") or [],
+            )
+            _corr_chart_ids: list[str] = []
+            for corr_chart in corr_charts:
+                chart_type = str(corr_chart.get("chart_type") or "line")
+                metric_name = str(corr_chart.get("metric_name") or "")
+                title = (
+                    f"{chart_type.replace('_', ' ').title()}: {metric_name}"
+                    if metric_name
+                    else chart_type.replace("_", " ").title()
+                )
+                created = create_chart_request(
+                    settings,
+                    tenant_id,
+                    domain_id,
+                    question=title,
+                    query_payload={
+                        "chart_type": chart_type,
+                        "metric_name": metric_name,
+                        "pair_id": corr_chart.get("pair_id"),
+                        "correlation_run_id": correlation_run_id,
+                    },
+                    sql=None,
+                    params=[],
+                    rows_json=[],
+                    run_id=run_id,
+                    chart_source="correlation_agent",
+                    title=title,
+                    created_by="CorrelationAgent",
+                )
+                corr_chart_id = (created or {}).get("chart_id")
+                if corr_chart_id:
+                    corr_rows = corr_chart.get("data") or []
+                    corr_inference = build_chart_inference(
+                        settings,
+                        chart_type=chart_type,
+                        rows=corr_rows,
+                        metric_name=metric_name,
+                        dim_key=None,
+                        chart_title=title,
+                    )
+                    update_chart_request(
+                        settings,
+                        corr_chart_id,
+                        status="ready",
+                        chart_type=chart_type,
+                        chart_payload=corr_chart.get("spec"),
+                        insight_text=corr_inference["insight_text"] or corr_chart.get("description") or "",
+                        narrative_text=corr_inference["narrative_text"],
+                        stats_json=corr_inference["stats_json"],
+                    )
+                    _corr_chart_ids.append(corr_chart_id)
+            state["correlation_chart_ids"] = _corr_chart_ids
+            logger.info(
+                "agentic.correlation.charts_persisted | run_id=%s correlation_run_id=%s count=%s",
+                run_id,
+                correlation_run_id,
+                len(corr_charts),
+            )
+        except Exception:
+            logger.warning(
+                "agentic.correlation.chart_persistence_failed | run_id=%s correlation_run_id=%s",
+                run_id,
+                correlation_run_id,
+                exc_info=True,
+            )
+            state.setdefault("correlation_chart_ids", [])
         state["correlation_run_id"] = correlation_run_id
         state["correlation_result"] = {
             **result,
@@ -5666,6 +5761,15 @@ def run_agentic_workflow(
                 created_by="AnomalyDetectionAgent",
             ).get("chart_id")
             payload = build_chart_payload(chart_type, rows, metric_name, dimensions or ["category"])
+            dim_key = dimensions[0] if dimensions else None
+            inference = build_chart_inference(
+                settings,
+                chart_type=chart_type,
+                rows=rows,
+                metric_name=metric_name,
+                dim_key=dim_key,
+                chart_title=chart.get("title"),
+            )
             if chart_id:
                 update_chart_request(
                     settings,
@@ -5677,6 +5781,9 @@ def run_agentic_workflow(
                     chart_type=chart_type,
                     chart_payload=payload.get("chart_payload"),
                     chart_data=payload.get("data"),
+                    insight_text=inference["insight_text"],
+                    narrative_text=inference["narrative_text"],
+                    stats_json=inference["stats_json"],
                 )
                 chart_ids.append(chart_id)
             enriched_charts.append(
@@ -5686,6 +5793,8 @@ def run_agentic_workflow(
                     "chart_type": chart_type,
                     "chart_payload": payload.get("chart_payload"),
                     "chart_data": payload.get("data"),
+                    "insight_text": inference["insight_text"],
+                    "narrative_text": inference["narrative_text"],
                     "dashboard_title": dashboard_title,
                 }
             )
@@ -5760,6 +5869,108 @@ def run_agentic_workflow(
         )
         return state
 
+    def correlation_dashboard_node(state: dict[str, Any]) -> dict[str, Any]:
+        logger.info(
+            "agentic.correlation_dashboard.enter | run_id=%s correlation_run_id=%s chart_ids=%s",
+            run_id,
+            state.get("correlation_run_id"),
+            len(state.get("correlation_chart_ids") or []),
+        )
+        _emit(
+            settings,
+            run_id,
+            "CorrelationDashboardAgent",
+            "running",
+            "Correlation Dashboard Agent started",
+            event_callback=event_callback,
+        )
+        correlation_run_id = str(state.get("correlation_run_id") or "").strip()
+        chart_ids: list[str] = [str(c) for c in (state.get("correlation_chart_ids") or []) if str(c).strip()]
+        if not correlation_run_id or not chart_ids:
+            logger.info(
+                "agentic.correlation_dashboard.skip | run_id=%s reason=%s",
+                run_id,
+                "no_correlation_run_id" if not correlation_run_id else "no_charts",
+            )
+            _emit(
+                settings,
+                run_id,
+                "CorrelationDashboardAgent",
+                "completed",
+                "Correlation Dashboard Agent skipped",
+                {"reason": "no_correlation_run_id" if not correlation_run_id else "no_charts"},
+                event_callback=event_callback,
+            )
+            return state
+        correlation_result = state.get("correlation_result") or {}
+        summary_text = str(correlation_result.get("summary_text") or "").strip()
+        dashboard_title = f"Correlation Dashboard — {state.get('domain_id') or 'Domain'}"
+        _corr_dash = _create_dashboard(
+            settings,
+            tenant_id=str(state.get("tenant_id") or ""),
+            domain_id=str(state.get("domain_id") or ""),
+            name=dashboard_title,
+            dashboard_type="system",
+            run_id=run_id or None,
+        )
+        correlation_dashboard_id = (_corr_dash or {}).get("dashboard_id")
+        if not correlation_dashboard_id:
+            logger.warning(
+                "agentic.correlation_dashboard.create_failed | run_id=%s correlation_run_id=%s",
+                run_id,
+                correlation_run_id,
+            )
+            _emit(
+                settings,
+                run_id,
+                "CorrelationDashboardAgent",
+                "completed",
+                "Correlation Dashboard Agent failed to create dashboard",
+                {"error": "dashboard_create_failed"},
+                event_callback=event_callback,
+            )
+            return state
+        for pos, cid in enumerate(chart_ids):
+            _add_chart_to_dashboard(
+                settings,
+                correlation_dashboard_id,
+                cid,
+                position=pos,
+                added_by="CorrelationDashboardAgent",
+            )
+        logger.info(
+            "agentic.correlation_dashboard.persisted | run_id=%s correlation_run_id=%s dashboard_id=%s chart_count=%s",
+            run_id,
+            correlation_run_id,
+            correlation_dashboard_id,
+            len(chart_ids),
+        )
+        state["correlation_dashboard_id"] = correlation_dashboard_id
+        state["correlation_dashboard_spec"] = {
+            "dashboard_id": correlation_dashboard_id,
+            "dashboard_title": dashboard_title,
+            "correlation_run_id": correlation_run_id,
+            "chart_ids": chart_ids,
+            "chart_count": len(chart_ids),
+            "summary_text": summary_text,
+        }
+        _emit(
+            settings,
+            run_id,
+            "CorrelationDashboardAgent",
+            "completed",
+            "Correlation Dashboard Agent completed",
+            {
+                "dashboard_id": correlation_dashboard_id,
+                "dashboard_title": dashboard_title,
+                "correlation_run_id": correlation_run_id,
+                "chart_ids": chart_ids,
+                "chart_count": len(chart_ids),
+            },
+            event_callback=event_callback,
+        )
+        return state
+
     graph.add_node("schema", schema_node)
     graph.add_node("profiling", profiling_node)
     graph.add_node("context", context_node)
@@ -5773,6 +5984,7 @@ def run_agentic_workflow(
     graph.add_node("quality", quality_node)
     graph.add_node("dashboard", dashboard_node)
     graph.add_node("correlation", correlation_node)
+    graph.add_node("correlation_dashboard", correlation_dashboard_node)
     graph.add_node("anomaly_detection", anomaly_detection_node)
     graph.add_node("anomaly_dashboard", anomaly_dashboard_node)
 
@@ -5793,7 +6005,8 @@ def run_agentic_workflow(
     graph.add_edge("chart_planner", "quality")
     graph.add_edge("quality", "dashboard")
     graph.add_edge("dashboard", "correlation")
-    graph.add_edge("correlation", "anomaly_detection")
+    graph.add_edge("correlation", "correlation_dashboard")
+    graph.add_edge("correlation_dashboard", "anomaly_detection")
     graph.add_edge("anomaly_detection", "anomaly_dashboard")
     graph.add_edge("anomaly_dashboard", END)
     logger.info(
