@@ -47,7 +47,7 @@
     --connection-id 2 \
     --database hpcl_ceg \
     --schema public \
-    --tables alerts \
+    --tables alerts location_master\
     --context-text "
   BUSINESS CONTEXT
   Retail outlets dry out (run out of fuel stock) and generate alerts. The goal is to monitor

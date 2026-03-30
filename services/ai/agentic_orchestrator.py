@@ -398,32 +398,57 @@ def _build_discovery_system_prompt(chart_limit: int, max_tool_calls: int) -> str
         f"You are a senior data analyst building an operational intelligence dashboard.\n\n"
         f"You have access to a tool `query_data` — use it to explore the data before proposing charts. "
         f"Call it up to {max_tool_calls} times. Each call returns up to 50 rows.\n\n"
-        f"SCOPE RULES (strictly enforced):\n"
+        f"SCOPE RULES (strictly enforced by the system — violations are blocked automatically):\n"
         f"- ONLY query tables listed in the 'tables' section of the provided context.\n"
         f"- Tables are already schema-qualified (e.g. \"public\".\"alerts\") — always use that exact form.\n"
         f"- NEVER query information_schema, pg_catalog, or any system tables.\n"
-        f"- NEVER query tables not listed in the provided context, even if you discover them.\n"
-        f"- If a query fails, retry using the schema-qualified name from the context. Do not explore other tables.\n\n"
+        f"- If a tool call returns an error saying a table is not in scope, ACCEPT that restriction immediately.\n"
+        f"  Do NOT retry the same table, do NOT try alternate names for it. Move on to a different query\n"
+        f"  using only the tables that are in scope.\n\n"
+        f"BUSINESS CONTEXT RULES (mandatory — read the 'business_context' section carefully):\n"
+        f"- The business context defines KEY DIMENSIONS with explicit CASE WHEN column encodings.\n"
+        f"  You MUST apply these encodings in every chart SQL — never plot raw column values.\n"
+        f"- The business context defines KEY METRICS with exact filter conditions (WHERE clauses).\n"
+        f"  You MUST apply those filters exactly as specified. Do not invent or relax them.\n"
+        f"- The business context defines ANALYTICAL ANGLES — use these as your chart topics.\n"
+        f"  Derive your chart ideas from these angles, not from generic exploration.\n\n"
         f"CHART PROPOSAL RULES:\n"
         f"1. Propose up to {chart_limit} charts as a JSON object: {{\"charts\": [...], \"rationale\": \"...\"}}\n"
         f"2. Each chart must have: title, chart_type, metric_name, sql, x_axis, y_axis, series_by (or null).\n"
         f"3. chart_type must be one of: line | bar | stacked_bar | pie | area\n"
         f"4. sql must be a single valid PostgreSQL SELECT statement using only the scoped tables.\n"
         f"5. DATES MUST BE DYNAMIC — always use CURRENT_DATE, CURRENT_DATE - INTERVAL '30 days', "
-        f"DATE_TRUNC('month', ...) etc. NEVER hardcode specific dates like '2026-03-01'.\n"
-        f"6. Apply business filters inline using WHERE or CASE WHEN. Do not assume pre-filtered views.\n"
+        f"DATE_TRUNC('month', ...) etc. NEVER hardcode specific dates.\n"
+        f"6. Apply all business filters and CASE WHEN encodings from the business context inline in SQL.\n"
         f"7. ORDER BY time column ASC for time-series charts.\n"
         f"8. For multi-series (series_by not null): the series_by column must appear in SELECT.\n"
         f"9. x_axis and y_axis must match exact column aliases in your SELECT clause.\n"
         f"10. Always include LIMIT 500 at the end of chart SQL.\n\n"
         f"EXPLORATION GUIDANCE:\n"
-        f"- First check data date ranges and row counts for each scoped table.\n"
-        f"- Check distinct values for key categorical columns if not already visible in the static context.\n"
-        f"- Verify a JOIN works before using it in chart SQL.\n"
-        f"- Prioritise charts that show trends over time, breakdowns by category, and cross-table comparisons.\n"
-        f"- Use the business context to understand which columns carry operational significance.\n"
+        f"- Check data date ranges and verify key column values align with the business context definitions.\n"
+        f"- Do NOT explore tables that are not in scope — focus all tool calls on the provided tables.\n"
         f"- When proposing charts, return ONLY valid JSON — no markdown, no code fences."
     )
+
+
+def _extract_business_context_block(context_text: str | None) -> str:
+    """
+    Pull the structured business context block out of context_text.
+    Looks for sections starting with KEY DIMENSIONS, KEY METRICS, ANALYTICAL ANGLES,
+    BUSINESS CONTEXT, or DOMAIN OVERVIEW. Returns the matched block (up to 4000 chars).
+    Falls back to the first 3000 chars of context_text if none found.
+    """
+    if not context_text:
+        return ""
+    markers = ["KEY DIMENSIONS", "KEY METRICS", "ANALYTICAL ANGLES", "BUSINESS CONTEXT", "DOMAIN OVERVIEW"]
+    earliest = len(context_text)
+    for marker in markers:
+        idx = context_text.upper().find(marker)
+        if 0 <= idx < earliest:
+            earliest = idx
+    if earliest < len(context_text):
+        return context_text[earliest:earliest + 4000].strip()
+    return context_text[:3000].strip()
 
 
 def _build_discovery_user_payload(
@@ -452,14 +477,18 @@ def _build_discovery_user_payload(
             "distinct_values": (sample.distinct_values if sample else {}),
             "row_count_estimate": (sample.row_count_estimate if sample else 0),
         })
+    business_ctx = _extract_business_context_block(context_text)
     return {
         "domain_id": domain_id or "",
         "db_schema": schema,
-        "context": (context_text or "")[:6000],
+        "business_context": business_ctx,
         "tables": tables_payload,
         "instructions": (
-            f"IMPORTANT: Only query tables listed above. "
-            f"Always use the qualified_name (e.g. \"{schema}\".\"table_name\") in all SQL — never unqualified names."
+            f"CRITICAL RULES:\n"
+            f"1. Only query tables listed in 'tables' above. Never query any other table.\n"
+            f"2. Always use the qualified_name (e.g. \"{schema}\".\"table_name\") in all SQL.\n"
+            f"3. The 'business_context' section defines mandatory column encodings (CASE WHEN), "
+            f"metric filters, and chart topics. Apply them exactly in every chart SQL you propose."
         ),
     }
 
@@ -480,9 +509,26 @@ def _qualify_table_refs(sql: str, schema: str, known_tables: list[str]) -> str:
     return sql
 
 
+_FROM_JOIN_TABLE_RE = re.compile(
+    r'\b(?:FROM|JOIN)\s+(?:"[^"]+"\s*\.\s*)?(?:"([^"]+)"|([a-zA-Z_][a-zA-Z0-9_]*))',
+    re.IGNORECASE,
+)
+
+
+def _extract_sql_tables(sql: str) -> list[str]:
+    """Return all table names referenced in FROM / JOIN clauses."""
+    return [m.group(1) or m.group(2) for m in _FROM_JOIN_TABLE_RE.finditer(sql)]
+
+
 def _run_tool_call(sql: str, settings, schema: str, known_tables: list[str] | None = None, scoped_conn=None) -> list[dict]:
     """Execute a validated, LIMIT-enforced LLM tool-call query. Returns rows as dicts."""
     limit = int(os.getenv("CHART_DISCOVERY_TOOL_ROW_LIMIT", "50"))
+    # Reject queries that reference tables outside the profiled scope
+    if known_tables:
+        allowed = {t.lower() for t in known_tables}
+        for ref in _extract_sql_tables(sql):
+            if ref.lower() not in allowed:
+                return [{"_error": f"Table '{ref}' is not in the scoped table list. Only query: {known_tables}"}]
     # Qualify any unscoped table references before validation
     if known_tables and schema:
         sql = _qualify_table_refs(sql, schema, known_tables)
@@ -710,6 +756,7 @@ def _execute_discovery_charts(
     domain_id: str | None,
     run_id: str | None,
     dashboard_id: str | None,
+    scoped_conn=None,
 ) -> tuple[list[str], list[str]]:
     """
     Validate → EXPLAIN dry-run → Execute → Store each LLM-proposed chart spec.
@@ -743,14 +790,14 @@ def _execute_discovery_charts(
 
         # 3. EXPLAIN dry-run
         try:
-            run_query(settings, f"EXPLAIN {sql}", [])
+            run_query(settings, f"EXPLAIN {sql}", [], scoped_conn=scoped_conn)
         except Exception as exc:
             logger.warning("chart_discovery.explain_failed | title=%s err=%s", title, exc)
             continue
 
         # 4. Execute
         try:
-            rows = run_query(settings, sql, [])
+            rows = run_query(settings, sql, [], scoped_conn=scoped_conn)
             rows = [dict(r) for r in (rows or [])]
         except Exception as exc:
             logger.warning("chart_discovery.exec_failed | title=%s err=%s", title, exc)
@@ -4755,6 +4802,7 @@ def run_agentic_workflow(
                         domain_id=state.get("domain_id"),
                         run_id=run_id,
                         dashboard_id=None,
+                        scoped_conn=_scoped_conn,
                     )
                 _tool_call_log = (discovery_diag or {}).get("tool_calls") or []
                 logger.info(

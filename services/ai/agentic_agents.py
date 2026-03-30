@@ -1449,6 +1449,9 @@ def validate_metric_candidates(
             )
             continue
         preferred_time_column = str(candidate.get("preferred_time_column") or candidate.get("time_column") or "").strip() or None
+        # Normalise "table.column" → "column" so dot-qualified LLM output matches bare profiling columns
+        if preferred_time_column:
+            preferred_time_column = preferred_time_column.split(".")[-1].strip() or preferred_time_column
         if preferred_time_column and preferred_time_column not in all_columns:
             rejected.append(
                 {
@@ -1459,7 +1462,7 @@ def validate_metric_candidates(
             )
             continue
         preferred_breakdowns = [
-            str(col)
+            str(col).split(".")[-1].strip()
             for col in (candidate.get("preferred_dimensions") or candidate.get("preferred_breakdowns") or [])
             if str(col or "").strip()
         ]
