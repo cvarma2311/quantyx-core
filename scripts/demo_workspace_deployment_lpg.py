@@ -875,8 +875,6 @@ def main() -> int:
         "schema_name": args.schema,
         "schema_payload": schema_payload,
     }
-    if context_text:
-        payload["context_text"] = context_text
     if context_ids:
         payload["context_ids"] = context_ids
 
@@ -924,7 +922,43 @@ def main() -> int:
                 )
         return 1
 
-    print("Starting workspace deployment with payload:")
+    # Ingest and enrich context before starting the deployment run.
+    # Enrichment is synchronous on the server side (~1-3s) so by the time we reach
+    # /workspace/deployments, the enriched_context is already stored and will be
+    # loaded into state["context_text"] for all agents.
+    if context_text:
+        print("\nIngesting business context...")
+        print(f"  raw_text length: {len(context_text)} chars")
+        ingest_payload = {
+            "tenant_id": tenant_id,
+            "domain_id": args.domain_id,
+            "source_type": "business_context",
+            "source_title": f"Context for {tenant_id}",
+            "raw_text": context_text,
+            "metadata": {
+                "connection_id": str(args.connection_id),
+                "database": args.database,
+                "schema": args.schema,
+            },
+        }
+        ctx_code, ctx_resp = _request(args.api_base, "POST", "/context/ingest", ingest_payload)
+        if ctx_code not in {200, 201}:
+            print(f"  WARNING: context ingest failed: status={ctx_code} body={ctx_resp}")
+            print("  Falling back to inline context_text in deployment payload.")
+            payload["context_text"] = context_text
+        else:
+            ingested_context_id = ctx_resp.get("context_id")
+            enrich_status = ctx_resp.get("status", "unknown")
+            print(f"  context_id: {ingested_context_id}")
+            print(f"  enrichment status: {enrich_status}")
+            if enrich_status == "enriched":
+                print("  Business context understood and enriched successfully.")
+            elif enrich_status == "skipped":
+                print("  WARNING: enrichment skipped — raw context will be used.")
+            existing_ids = list(payload.get("context_ids") or [])
+            payload["context_ids"] = existing_ids + [ingested_context_id]
+
+    print("\nStarting workspace deployment:")
     safe_payload = dict(payload)
     if safe_payload.get("context_text"):
         safe_payload["context_text"] = f"<{len(str(safe_payload['context_text']))} chars>"

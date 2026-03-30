@@ -127,6 +127,15 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 41. **Phase 44: Unified Dashboard and Chart Schema**
    - Consolidate `quantyx_dashboard_specs`, `quantyx_user_dashboards`, and `quantyx_user_dashboard_charts` into a single `quantyx_dashboards` + `quantyx_dashboard_charts` model with a `dashboard_type` discriminator. Evolve `quantyx_chart_requests` with `chart_source`, `title`, and `created_by`. Merge the two `GET /dashboards` endpoints into one.
 
+42. **Phase 45: Scoped Connection Credentials Resolution**
+   - Resolve tenant-scoped database credentials from a connections registry so each deployment run uses the right host/db/schema without hardcoding env vars.
+
+43. **Phase 46: Per-Chart Inference, Narrative & Stats Persistence**
+   - Persist `insight_text`, `narrative_text`, and `stats_json` for every chart type (dashboard, anomaly, correlation, workspace, job, refresh). LLM-first inference with deterministic fallback.
+
+44. **Phase 47: LLM Chart Discovery — Data-Aware Dashboard Intelligence**
+   - Feed real sample rows + distinct column values + business context to an LLM to propose domain-specific chart SQL directly. Fully switchable via `CHART_DISCOVERY_MODE` env var. Produces charts like "Daily DryOut Trend by Product (MS/HSD/E20)" that the formula-first pipeline cannot.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.

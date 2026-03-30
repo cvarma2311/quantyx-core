@@ -1,0 +1,86 @@
+ quantyx-core git:(Agentic-flow) ✗ python3 scripts/demo_workspace_deployment_lpg.py \
+    --tenant-id lpg_algo_01 \
+    --api-base http://localhost:8787 \
+    --domain-id lpg_production_distribution \
+    --connection-id 2 \
+    --database hpcl_ceg \
+    --schema public \
+    --tables lpg_plants lpg_plant_operations \
+    --context-text "Total production is calculated as ROUND((SUM(production_14_2kg) * 14.2 + SUM(production_19kg) * 19) / 1000, 0). Productivity is calculated as
+  CASE WHEN MEASURE(total_net_hours) > 0 THEN MEASURE(total_production) / MEASURE(total_net_hours) ELSE 0 END. Use process_date as the canonical operational date.
+  Prefer charts for total production by day and month. Prefer charts for productivity by day and month. Do not use sap_id, plant_id, or identifier/code fields as
+  chart categories. Default sorting should be descending for all queries, including time-based trends."
+
+
+  python3 scripts/demo_workspace_deployment_lpg.py \
+    --tenant-id perf_2703 \
+    --api-base http://localhost:8787 \
+    --domain-id market_performance_analysis \
+    --connection-id 2 \
+    --database hpcl_ceg \
+    --schema public \
+    --tables MOM_DAY_LEVEL_DATA M60_LEVEL_METADATA industry_performance \
+    --context-text "Tables in scope:
+  - MOM_DAY_LEVEL_DATA: Contains daily sales data for HPCL.
+  - M60_LEVEL_METADATA: Contains monthly targets and pace metadata for HPCL.
+  - industry_performance: Contains industry performance data for comparison.
+
+  Use these business rules:
+  - Apply the mandatory filter WHERE sbu_name IS NOT NULL
+    AND sbu_name != '0'
+    AND sbu_name NOT IN ('Common','Mumbai Ref','Renewable Energy','Visakh Ref') where needed.
+  - Prefer daily analysis from MOM_DAY_LEVEL_DATA.
+  - Prefer monthly target and pace analysis from M60_LEVEL_METADATA.
+  - Use date/day columns from MOM_DAY_LEVEL_DATA as canonical daily time dimensions where available.
+  - Use month/year or year_monthname style columns from M60_LEVEL_METADATA as canonical monthly time dimensions where available.
+  - Use industry_performance for benchmark and comparison views where relevant.
+  - Prefer charts for daily sales, monthly target quantity, monthly pace, and industry comparisons by business-relevant dimensions such as zone, region, and SBU.
+  - Do not use identifier/code fields as chart categories unless no better business dimension exists.
+  - Default sorting should be descending for ranked/tabular outputs. For time-series charts, use ascending chronological order."
+
+
+
+  python3 scripts/demo_workspace_deployment_lpg.py \
+    --tenant-id fuel_alerts_992 \
+    --api-base http://localhost:8787 \
+    --domain-id retail_fuel_monitoring \
+    --connection-id 2 \
+    --database hpcl_ceg \
+    --schema public \
+    --tables alerts \
+    --context-text "
+  BUSINESS CONTEXT
+  Retail outlets dry out (run out of fuel stock) and generate alerts. The goal is to monitor
+  dry-out frequency, supply fulfillment speed, and revenue loss across products, zones, and time.
+
+  KEY DIMENSIONS (use these as chart breakdowns and categories):
+  - Product type (alerts.product_code decoded): MS (Petrol) = 2811000, HSD (Diesel) = 2812000,
+    E20 = 2822000. Any other value = UNKNOWN. Always decode product_code to product name in charts.
+  - Zone (location_master.zone via JOIN on sap_id): NCZ, NWZ, etc. Never use sap_id as a category.
+  - Dry-out category (alerts.dry_out_in_days): '1' = Short-term, '2' = Extended,
+    alert_status='Open' unresolved >5 days = Permanent.
+  - Supply stage group (alerts.progress_rate decoded):
+    CASE WHEN progress_rate <= 3 THEN 'Not Raised/Pending'
+         WHEN progress_rate <= 10 THEN 'WIP'
+         ELSE 'Delivered' END
+    Use this grouping — never plot raw progress_rate numbers.
+  - Time: created_at for events (daily/monthly). stock_date for loss of sale.
+
+  KEY METRICS:
+  - Dry-out count: COUNT(*) of valid alerts (mark_as_false='true', interlock_name='Dry Out Each
+    Indent Wise MainFlow', bu='RO', exclude indent_status IN ('Cancelled','TempClosed',
+    'ProductLowLevel','OfflineOrFalseAlarm','NotAvailable'))
+  - Loss of sale volume: SUM(loss_of_sale) from loss_of_sales grouped by stock_date, product_no
+  - Outlets with dry-out: COUNT(DISTINCT sap_id) experiencing a dry-out per zone/product/period
+  - Dry-out rate: outlets_with_dryout / total_outlets * 100 per zone
+  - Indent fulfillment by stage: COUNT(*) grouped by supply stage group above
+
+  ANALYTICAL ANGLES (derive charts that answer these business questions):
+  - Which products (MS/HSD/E20) have the highest dry-out frequency? Trend over time.
+  - Which zones have the most outlets affected, broken down by product?
+  - What is the supply chain stage distribution — how many indents are stuck in WIP vs delivered?
+  - How does loss of sale distribute across product types and zones?
+  - What is the dry-out category mix (short/extended/permanent) by zone and product?
+
+  Default sort: descending for all ranked/volume outputs." \
+   2>&1 | tee debug-logs/fuel-run-$(date +%H%M%S).log

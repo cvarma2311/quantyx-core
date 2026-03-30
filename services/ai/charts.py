@@ -456,3 +456,167 @@ def build_chart_inference(
         "narrative_text": _deterministic_narrative(rows, metric_name, dim_key),
         "stats_json":     stats,
     }
+
+
+# ── Phase 47: Discovery chart payload builder ─────────────────────────────────
+
+def _build_single_series_payload(
+    chart_type: str,
+    rows: list[dict],
+    x_axis: str | None,
+    y_axis: str | None,
+    spec: dict,
+) -> dict:
+    """Build an amCharts 5 payload for a single-series discovery chart."""
+    if not rows or not x_axis or not y_axis:
+        return {"chart_type": chart_type, "chart_payload": None, "data": []}
+
+    data = [{"x": row.get(x_axis), "y": row.get(y_axis)} for row in rows]
+
+    if chart_type in {"pie", "donut"}:
+        chart_payload = {
+            "root": {"useTheme": "Animated"},
+            "chart": {"type": "PieChart"},
+            "series": {"type": "PieSeries", "valueField": "y", "categoryField": "x"},
+            "legend": {"type": "Legend"},
+        }
+        if chart_type == "donut":
+            chart_payload["series"]["innerRadius"] = "55%"
+        return {"chart_type": chart_type, "chart_payload": chart_payload, "data": data}
+
+    if chart_type in {"line", "area"}:
+        axis = _default_time_axis([row.get(x_axis) for row in rows[:10]])
+        series_obj: dict[str, Any] = {
+            "type": "LineSeries",
+            "name": spec.get("metric_name") or y_axis,
+            "valueYField": "y",
+            "valueXField": "x",
+        }
+        if chart_type == "area":
+            series_obj["fillOpacity"] = 0.35
+        return {
+            "chart_type": chart_type,
+            "chart_payload": {
+                "root": {"useTheme": "Animated"},
+                "chart": {"type": "XYChart", "panX": True, "panY": False},
+                "xAxis": axis,
+                "yAxis": {"type": "ValueAxis"},
+                "series": [series_obj],
+                "legend": {"type": "Legend"},
+            },
+            "data": data,
+        }
+
+    # bar / stacked_bar fallback as plain bar
+    return {
+        "chart_type": chart_type,
+        "chart_payload": {
+            "root": {"useTheme": "Animated"},
+            "chart": {"type": "XYChart", "panX": False, "panY": False},
+            "xAxis": {"type": "CategoryAxis", "categoryField": "x"},
+            "yAxis": {"type": "ValueAxis"},
+            "series": [
+                {
+                    "type": "ColumnSeries",
+                    "name": spec.get("metric_name") or y_axis,
+                    "valueYField": "y",
+                    "categoryXField": "x",
+                }
+            ],
+            "legend": {"type": "Legend"},
+        },
+        "data": data,
+    }
+
+
+def _build_multi_series_payload(
+    chart_type: str,
+    rows: list[dict],
+    x_axis: str | None,
+    y_axis: str | None,
+    series_by: str,
+    spec: dict,
+) -> dict:
+    """Pivot rows into multi-series format for line/bar charts."""
+    if not rows or not x_axis or not y_axis:
+        return {"chart_type": chart_type, "chart_payload": None, "data": []}
+
+    # Collect unique series values (preserve order of first occurrence)
+    series_names: list[str] = list(dict.fromkeys(
+        str(row.get(series_by)) for row in rows if row.get(series_by) is not None
+    ))
+
+    if chart_type in {"line", "area"}:
+        # For multi-series line: keep raw rows, use nameField pivot pattern
+        data = [
+            {"x": row.get(x_axis), "series": row.get(series_by), "y": row.get(y_axis)}
+            for row in rows
+        ]
+        axis = _default_time_axis([row.get(x_axis) for row in rows[:10]])
+        series_obj: dict[str, Any] = {
+            "type": "LineSeries",
+            "nameField": "series",
+            "valueYField": "y",
+            "valueXField": "x",
+        }
+        if chart_type == "area":
+            series_obj["fillOpacity"] = 0.35
+        return {
+            "chart_type": chart_type,
+            "chart_payload": {
+                "root": {"useTheme": "Animated"},
+                "chart": {"type": "XYChart", "panX": True, "panY": False},
+                "xAxis": axis,
+                "yAxis": {"type": "ValueAxis"},
+                "series": [series_obj],
+                "legend": {"type": "Legend"},
+            },
+            "data": data,
+        }
+
+    # grouped/stacked bar — pivot rows into wide format
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        cat = str(row.get(x_axis))
+        sname = str(row.get(series_by))
+        if cat not in grouped:
+            grouped[cat] = {"x": cat}
+        grouped[cat][sname] = row.get(y_axis)
+
+    stacked = chart_type == "stacked_bar"
+    return {
+        "chart_type": chart_type,
+        "chart_payload": {
+            "root": {"useTheme": "Animated"},
+            "chart": {"type": "XYChart", "panX": False, "panY": False},
+            "xAxis": {"type": "CategoryAxis", "categoryField": "x"},
+            "yAxis": {"type": "ValueAxis"},
+            "series": [
+                {
+                    "type": "ColumnSeries",
+                    "name": sname,
+                    "valueYField": sname,
+                    "categoryXField": "x",
+                    "stacked": stacked,
+                }
+                for sname in series_names
+            ],
+            "legend": {"type": "Legend"},
+        },
+        "data": list(grouped.values()),
+    }
+
+
+def build_discovery_chart_payload(spec: dict, rows: list[dict]) -> dict:
+    """
+    Convert a LLM discovery chart spec + result rows into an amCharts 5 payload.
+    Respects `series_by` for multi-series pivot. Falls back to single-series otherwise.
+    """
+    chart_type = str(spec.get("chart_type") or "bar").lower()
+    x_axis = spec.get("x_axis")
+    y_axis = spec.get("y_axis")
+    series_by = spec.get("series_by")
+
+    if series_by and rows and any(series_by in row for row in rows):
+        return _build_multi_series_payload(chart_type, rows, x_axis, y_axis, series_by, spec)
+    return _build_single_series_payload(chart_type, rows, x_axis, y_axis, spec)

@@ -43,6 +43,12 @@ from services.ai.agentic_agents import (
     build_story_sections,
     build_dashboard_theme_from_charts,
     deterministic_dashboard_title,
+    _chart_discovery_enabled,
+    _chart_discovery_only,
+    _validate_discovery_sql,
+    _enforce_tool_limit,
+    _fetch_table_samples,
+    TableSample,
 )
 from services.ai.semantic_graph_store import persist_semantic_graph
 from services.ai.dashboards_store import (
@@ -67,7 +73,7 @@ from services.ai.correlation_store import create_correlation_run, save_correlati
 from services.ai.correlation_charts import generate_correlation_charts
 from services.ai.views import create_views_from_schema, create_joined_views, extract_schema_table_names
 from services.ai.charts_store import create_chart_request, update_chart_request
-from services.ai.charts import build_chart_payload, infer_chart_type, build_chart_inference
+from services.ai.charts import build_chart_payload, infer_chart_type, build_chart_inference, build_discovery_chart_payload
 from services.ai.db import ScopedConnection, run_query, execute_non_query
 from services.ai.quality_gate import evaluate_quality_report
 from services.ai.metrics_registry import upsert_metric
@@ -352,6 +358,478 @@ def _llm_json_response(
     except Exception:
         logging.getLogger(__name__).warning("agentic.anomaly_llm_failed", exc_info=True)
         return None
+
+
+# ── Phase 47: LLM Chart Discovery ────────────────────────────────────────────
+
+_QUERY_DATA_TOOL_DEF = {
+    "type": "function",
+    "function": {
+        "name": "query_data",
+        "description": (
+            "Execute a read-only SQL SELECT query against the database and return up to 50 rows. "
+            "Use this to explore data before proposing charts — check date ranges, distinct values, "
+            "sample records, and counts. Always include LIMIT in your SQL; the system enforces "
+            "LIMIT 50 regardless of what you write."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": (
+                        "A valid PostgreSQL SELECT statement. "
+                        "Must not contain INSERT, UPDATE, DELETE, DROP, or any DDL."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Brief explanation of what you are exploring and why.",
+                },
+            },
+            "required": ["sql", "reason"],
+        },
+    },
+}
+
+
+def _build_discovery_system_prompt(chart_limit: int, max_tool_calls: int) -> str:
+    return (
+        f"You are a senior data analyst building an operational intelligence dashboard.\n\n"
+        f"You have access to a tool `query_data` — use it to explore the data before proposing charts. "
+        f"Call it up to {max_tool_calls} times. Each call returns up to 50 rows.\n\n"
+        f"SCOPE RULES (strictly enforced):\n"
+        f"- ONLY query tables listed in the 'tables' section of the provided context.\n"
+        f"- Tables are already schema-qualified (e.g. \"public\".\"alerts\") — always use that exact form.\n"
+        f"- NEVER query information_schema, pg_catalog, or any system tables.\n"
+        f"- NEVER query tables not listed in the provided context, even if you discover them.\n"
+        f"- If a query fails, retry using the schema-qualified name from the context. Do not explore other tables.\n\n"
+        f"CHART PROPOSAL RULES:\n"
+        f"1. Propose up to {chart_limit} charts as a JSON object: {{\"charts\": [...], \"rationale\": \"...\"}}\n"
+        f"2. Each chart must have: title, chart_type, metric_name, sql, x_axis, y_axis, series_by (or null).\n"
+        f"3. chart_type must be one of: line | bar | stacked_bar | pie | area\n"
+        f"4. sql must be a single valid PostgreSQL SELECT statement using only the scoped tables.\n"
+        f"5. DATES MUST BE DYNAMIC — always use CURRENT_DATE, CURRENT_DATE - INTERVAL '30 days', "
+        f"DATE_TRUNC('month', ...) etc. NEVER hardcode specific dates like '2026-03-01'.\n"
+        f"6. Apply business filters inline using WHERE or CASE WHEN. Do not assume pre-filtered views.\n"
+        f"7. ORDER BY time column ASC for time-series charts.\n"
+        f"8. For multi-series (series_by not null): the series_by column must appear in SELECT.\n"
+        f"9. x_axis and y_axis must match exact column aliases in your SELECT clause.\n"
+        f"10. Always include LIMIT 500 at the end of chart SQL.\n\n"
+        f"EXPLORATION GUIDANCE:\n"
+        f"- First check data date ranges and row counts for each scoped table.\n"
+        f"- Check distinct values for key categorical columns if not already visible in the static context.\n"
+        f"- Verify a JOIN works before using it in chart SQL.\n"
+        f"- Prioritise charts that show trends over time, breakdowns by category, and cross-table comparisons.\n"
+        f"- Use the business context to understand which columns carry operational significance.\n"
+        f"- When proposing charts, return ONLY valid JSON — no markdown, no code fences."
+    )
+
+
+def _build_discovery_user_payload(
+    domain_id: str | None,
+    context_text: str | None,
+    profiling: dict,
+    table_samples: dict[str, "TableSample"],
+    schema: str = "public",
+) -> dict:
+    tables_payload = []
+    for table_info in profiling.get("tables") or []:
+        tname = str(table_info.get("name") or "").strip()
+        if not tname:
+            continue
+        sample = table_samples.get(tname)
+        col_schema = [
+            {"name": c.get("name"), "type": c.get("type") or c.get("data_type")}
+            for c in (table_info.get("columns") or [])
+            if c.get("name")
+        ]
+        tables_payload.append({
+            "name": tname,
+            "qualified_name": f'"{schema}"."{tname}"',
+            "schema": col_schema,
+            "sample_rows": (sample.rows[:20] if sample else []),
+            "distinct_values": (sample.distinct_values if sample else {}),
+            "row_count_estimate": (sample.row_count_estimate if sample else 0),
+        })
+    return {
+        "domain_id": domain_id or "",
+        "db_schema": schema,
+        "context": (context_text or "")[:6000],
+        "tables": tables_payload,
+        "instructions": (
+            f"IMPORTANT: Only query tables listed above. "
+            f"Always use the qualified_name (e.g. \"{schema}\".\"table_name\") in all SQL — never unqualified names."
+        ),
+    }
+
+
+def _qualify_table_refs(sql: str, schema: str, known_tables: list[str]) -> str:
+    """Rewrite unqualified known table references to schema.table form.
+    Skips tables already preceded by '.' or '"' (already schema-qualified).
+    """
+    for table in known_tables:
+        # Negative lookbehind for both '.' and '"' to avoid double-qualifying
+        # e.g. "public"."alerts" or public.alerts must not be touched.
+        sql = re.sub(
+            rf'(?<![."])(\b{re.escape(table)}\b)',
+            f'"{schema}"."{table}"',
+            sql,
+            flags=re.IGNORECASE,
+        )
+    return sql
+
+
+def _run_tool_call(sql: str, settings, schema: str, known_tables: list[str] | None = None, scoped_conn=None) -> list[dict]:
+    """Execute a validated, LIMIT-enforced LLM tool-call query. Returns rows as dicts."""
+    limit = int(os.getenv("CHART_DISCOVERY_TOOL_ROW_LIMIT", "50"))
+    # Qualify any unscoped table references before validation
+    if known_tables and schema:
+        sql = _qualify_table_refs(sql, schema, known_tables)
+    enforced_sql = _enforce_tool_limit(sql, limit)
+    valid, err = _validate_discovery_sql(enforced_sql)
+    if not valid:
+        return [{"_error": err}]
+    try:
+        rows = run_query(settings, enforced_sql, [], scoped_conn=scoped_conn)
+        return [dict(r) for r in (rows or [])]
+    except Exception as exc:
+        return [{"_error": str(exc)[:300]}]
+
+
+def _parse_discovery_charts(content: str) -> list[dict]:
+    """Extract the charts list from LLM response content (JSON or markdown-wrapped)."""
+    logger = logging.getLogger(__name__)
+    # Strip markdown code fences if present
+    cleaned = re.sub(r"```(?:json)?\s*", "", content).strip().rstrip("`").strip()
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            charts = parsed.get("charts") or []
+            if isinstance(charts, list):
+                return [c for c in charts if isinstance(c, dict)]
+        if isinstance(parsed, list):
+            return [c for c in parsed if isinstance(c, dict)]
+    except Exception as exc:
+        logger.warning("chart_discovery.parse_failed | err=%s content_head=%s", exc, content[:200])
+    return []
+
+
+def _llm_chart_discovery(
+    settings,
+    *,
+    domain_id: str | None,
+    context_text: str | None,
+    profiling: dict,
+    table_samples: dict[str, "TableSample"],
+    schema: str = "public",
+    scoped_conn=None,
+) -> tuple[list[dict], dict]:
+    """
+    Agentic tool-calling loop:
+    - LLM receives static context (schema + sample rows + distinct values)
+    - LLM may call query_data tool up to CHART_DISCOVERY_TOOL_CALL_LIMIT times
+    - App enforces LIMIT 50 on every tool call
+    - LLM returns final JSON chart specs
+    Returns (chart_specs, diagnostics).
+    """
+    logger = logging.getLogger(__name__)
+    if not _chart_discovery_enabled():
+        return [], {}
+
+    model = os.getenv("CHART_DISCOVERY_MODEL", "gpt-4o-mini")
+    timeout = int(os.getenv("CHART_DISCOVERY_TIMEOUT_SEC", "10000"))
+    max_tool_calls = int(os.getenv("CHART_DISCOVERY_TOOL_CALL_LIMIT", "6"))
+    chart_limit = int(os.getenv("CHART_DISCOVERY_CHART_LIMIT", "10"))
+
+    known_tables = [
+        str(t.get("name") or "").strip()
+        for t in (profiling.get("tables") or [])
+        if t.get("name")
+    ]
+
+    messages: list[dict] = [
+        {"role": "system", "content": _build_discovery_system_prompt(chart_limit, max_tool_calls)},
+        {"role": "user", "content": json.dumps(
+            _build_discovery_user_payload(domain_id, context_text, profiling, table_samples, schema=schema),
+            default=str,
+        )},
+    ]
+    tools = [_QUERY_DATA_TOOL_DEF]
+    tool_calls_made = 0
+    diagnostics: dict[str, Any] = {"tool_calls": [], "model": model, "proposed": 0}
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        remaining = max(5, int(deadline - time.monotonic()))
+        payload = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": 0.2,
+        }
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=json.dumps(payload, default=str).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=remaining) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            logger.warning("chart_discovery.llm_request_failed | err=%s", exc)
+            diagnostics["error"] = str(exc)[:200]
+            break
+
+        choice = body["choices"][0]
+        message = choice["message"]
+        finish_reason = choice.get("finish_reason", "")
+
+        # LLM wants to call a tool
+        if finish_reason == "tool_calls":
+            tool_calls_in_msg = message.get("tool_calls") or []
+            if not tool_calls_in_msg:
+                break
+
+            if tool_calls_made >= max_tool_calls:
+                # Tool call limit hit — LLM still wants to explore but we must stop.
+                # Append a no-tool follow-up so the LLM produces its final JSON output.
+                messages.append({
+                    "role": "assistant",
+                    "content": message.get("content"),
+                    "tool_calls": tool_calls_in_msg,
+                })
+                # Provide dummy tool result so the conversation stays valid
+                for tool_call in tool_calls_in_msg:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps([{"_info": "Tool call limit reached. Please output your final chart specs now."}]),
+                    })
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have reached the maximum number of tool calls. "
+                        "Based on all the data you have gathered so far, please output your final chart "
+                        "specifications now as a JSON object: {\"charts\": [...], \"rationale\": \"...\"}. "
+                        "Do not call any more tools."
+                    ),
+                })
+                # Final call with no tools
+                remaining = max(5, int(deadline - time.monotonic()))
+                final_payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                }
+                final_request = urllib.request.Request(
+                    "https://api.openai.com/v1/chat/completions",
+                    data=json.dumps(final_payload, default=str).encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {settings.openai_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(final_request, timeout=remaining) as resp:
+                        final_body = json.loads(resp.read().decode("utf-8"))
+                    content = str(final_body["choices"][0]["message"].get("content") or "")
+                except Exception as exc:
+                    logger.warning("chart_discovery.final_call_failed | err=%s", exc)
+                    content = ""
+                charts = _parse_discovery_charts(content)
+                diagnostics["proposed"] = len(charts)
+                diagnostics["tool_call_limit_hit"] = True
+                logger.info(
+                    "chart_discovery.complete_after_limit | model=%s tool_calls=%s proposed=%s",
+                    model, tool_calls_made, len(charts),
+                )
+                return charts, diagnostics
+
+            # Append assistant message with tool_calls
+            messages.append({
+                "role": "assistant",
+                "content": message.get("content"),
+                "tool_calls": tool_calls_in_msg,
+            })
+            for tool_call in tool_calls_in_msg:
+                if tool_calls_made >= max_tool_calls:
+                    break
+                try:
+                    args = json.loads(tool_call["function"]["arguments"])
+                except Exception:
+                    args = {}
+                sql = str(args.get("sql") or "")
+                reason = str(args.get("reason") or "")
+                rows = _run_tool_call(sql, settings, schema=schema, known_tables=known_tables, scoped_conn=scoped_conn)
+                has_error = len(rows) == 1 and "_error" in rows[0]
+                diagnostics["tool_calls"].append({
+                    "sql": sql,
+                    "reason": reason,
+                    "rows_returned": len(rows),
+                    "error": rows[0].get("_error") if has_error else None,
+                })
+                tool_calls_made += 1
+                logger.info(
+                    "chart_discovery.tool_call | #%s reason=%r sql=%r rows=%s error=%s",
+                    tool_calls_made, reason, sql[:200], len(rows),
+                    rows[0].get("_error") if has_error else None,
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": json.dumps(rows, default=str),
+                })
+            continue
+
+        # LLM has produced final chart specs (finish_reason == "stop")
+        content = str(message.get("content") or "")
+        charts = _parse_discovery_charts(content)
+        diagnostics["proposed"] = len(charts)
+        logger.info(
+            "chart_discovery.complete | model=%s tool_calls=%s proposed=%s",
+            model, tool_calls_made, len(charts),
+        )
+        return charts, diagnostics
+
+    diagnostics["timeout"] = True
+    return [], diagnostics
+
+
+def _execute_discovery_charts(
+    settings,
+    specs: list[dict],
+    schema: str,
+    tenant_id: str | None,
+    domain_id: str | None,
+    run_id: str | None,
+    dashboard_id: str | None,
+) -> tuple[list[str], list[str]]:
+    """
+    Validate → EXPLAIN dry-run → Execute → Store each LLM-proposed chart spec.
+    Returns (chart_ids, titles) for successful charts.
+    """
+    logger = logging.getLogger(__name__)
+    chart_ids: list[str] = []
+    titles: list[str] = []
+    _HARDCODED_DATE_RE = re.compile(r"'\d{4}-\d{2}-\d{2}'")
+
+    for spec in specs:
+        title = str(spec.get("title") or "Discovery Chart").strip()
+        sql_raw = str(spec.get("sql") or "").strip()
+        chart_type = str(spec.get("chart_type") or "bar").lower()
+        x_axis = spec.get("x_axis")
+        y_axis = spec.get("y_axis")
+        metric_name = str(spec.get("metric_name") or y_axis or "value").strip()
+
+        # 1. Validate SQL is SELECT-only
+        valid, err = _validate_discovery_sql(sql_raw)
+        if not valid:
+            logger.warning("chart_discovery.spec_rejected | title=%s reason=%s", title, err)
+            continue
+
+        # Append LIMIT 500 for chart storage
+        sql = _enforce_tool_limit(sql_raw, limit=500)
+
+        # 2. Warn on hardcoded dates (don't reject)
+        if _HARDCODED_DATE_RE.search(sql):
+            logger.warning("chart_discovery.hardcoded_date | title=%s", title)
+
+        # 3. EXPLAIN dry-run
+        try:
+            run_query(settings, f"EXPLAIN {sql}", [])
+        except Exception as exc:
+            logger.warning("chart_discovery.explain_failed | title=%s err=%s", title, exc)
+            continue
+
+        # 4. Execute
+        try:
+            rows = run_query(settings, sql, [])
+            rows = [dict(r) for r in (rows or [])]
+        except Exception as exc:
+            logger.warning("chart_discovery.exec_failed | title=%s err=%s", title, exc)
+            continue
+
+        # 5. Skip empty results
+        if not rows:
+            logger.info("chart_discovery.empty_result | title=%s", title)
+            continue
+
+        # 6. Column presence check
+        row_keys = set(rows[0].keys())
+        if x_axis and x_axis not in row_keys:
+            logger.warning("chart_discovery.missing_x_axis | title=%s x_axis=%s cols=%s", title, x_axis, row_keys)
+            x_axis = next(iter(row_keys), x_axis)
+        if y_axis and y_axis not in row_keys:
+            logger.warning("chart_discovery.missing_y_axis | title=%s y_axis=%s cols=%s", title, y_axis, row_keys)
+            y_axis = next((k for k in row_keys if k != x_axis), y_axis)
+
+        # 7. Build amCharts payload
+        try:
+            payload = build_discovery_chart_payload(spec, rows)
+        except Exception as exc:
+            logger.warning("chart_discovery.payload_failed | title=%s err=%s", title, exc)
+            payload = {"chart_type": chart_type, "chart_payload": None, "data": []}
+
+        # 8. Run inference
+        try:
+            from services.ai.charts import build_chart_inference
+            inference = build_chart_inference(
+                settings=settings,
+                chart_type=chart_type,
+                metric_name=metric_name,
+                rows=rows,
+                dimensions=[x_axis] if x_axis else [],
+                title=title,
+            )
+        except Exception:
+            inference = {"insight_text": None, "narrative_text": None, "stats_json": None}
+
+        # 9. Store chart request
+        try:
+            chart_id = create_chart_request(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+                question=title,
+                metric_name=metric_name,
+                chart_type=chart_type,
+                source="llm_discovery",
+            )
+            if chart_id:
+                update_chart_request(
+                    settings,
+                    chart_id,
+                    status="ready",
+                    sql=sql,
+                    params=[],
+                    rows_json=rows,
+                    chart_type=chart_type,
+                    chart_payload=payload.get("chart_payload"),
+                    chart_data=payload.get("data"),
+                    insight_text=inference.get("insight_text"),
+                    narrative_text=inference.get("narrative_text"),
+                    stats_json=inference.get("stats_json"),
+                )
+                if dashboard_id:
+                    try:
+                        _add_chart_to_dashboard(settings, dashboard_id=dashboard_id, chart_id=chart_id)
+                    except Exception as exc:
+                        logger.warning("chart_discovery.dashboard_link_failed | chart_id=%s err=%s", chart_id, exc)
+                chart_ids.append(chart_id)
+                titles.append(title)
+                logger.info("chart_discovery.stored | title=%s chart_id=%s rows=%s", title, chart_id, len(rows))
+        except Exception as exc:
+            logger.warning("chart_discovery.store_failed | title=%s err=%s", title, exc)
+
+    return chart_ids, titles
 
 
 def _llm_generate_dashboard_title(
@@ -2537,7 +3015,7 @@ def _persist_agentic_semantic_assets(
                         run_id,
                         hierarchy_name,
                         "agentic",
-                        Json(levels),
+                        list(levels) if levels else [],
                         description,
                         artifact_key,
                         "active",
@@ -2604,6 +3082,12 @@ def _persist_agentic_registry_outputs(
     database_name = str(state.get("database_name") or "").strip()
     schema_name = str(state.get("schema_name") or "public").strip() or "public"
     if not tenant_id or not domain_id or not connection_id or not database_name:
+        logging.getLogger(__name__).error(
+            "agentic.registry.persist.aborted | run_id=%s MISSING REQUIRED SCOPE "
+            "tenant_id=%r domain_id=%r connection_id=%r database_name=%r — "
+            "refusing to persist to prevent cross-tenant data contamination",
+            run_id, tenant_id, domain_id, connection_id, database_name,
+        )
         return {"facts": 0, "dimensions": 0, "metrics": 0}
 
     profiling_tables = (state.get("profiling_stats") or {}).get("tables") or []
@@ -2647,11 +3131,19 @@ def _persist_agentic_registry_outputs(
             time_column = time_cols[0] if time_cols else None
             grain = "day" if time_column else "unknown"
             fact_model = f"fact_{base_table}"
+            artifact_key = f"{tenant_id}__{domain_id}__{fact_model}"
             try:
+                # Retire any previous is_current row for this artifact_key before inserting the new one.
+                execute_non_query(
+                    settings,
+                    "UPDATE public.quantyx_facts_registry SET is_current = false, updated_at = now() "
+                    "WHERE artifact_key = %s AND tenant_id = %s AND is_current = true",
+                    [artifact_key, tenant_id],
+                )
                 upsert_fact(
                     settings,
                     {
-                        "fact_id": f"{domain_id}__{fact_model}",
+                        "fact_id": f"{run_id}__{fact_model}",
                         "tenant_id": tenant_id,
                         "domain_id": domain_id,
                         "connection_id": connection_id,
@@ -2663,7 +3155,7 @@ def _persist_agentic_registry_outputs(
                         "measures": measures,
                         "dimensions": dimensions,
                         "description": f"Agentic inferred fact for {base_table}",
-                        "artifact_key": f"{domain_id}__{fact_model}",
+                        "artifact_key": artifact_key,
                         "lifecycle_status": "active",
                         "source_type": "agentic",
                         "source_run_id": run_id,
@@ -2692,11 +3184,19 @@ def _persist_agentic_registry_outputs(
                 entry["tables"].add(table_name)
         for dim_name, meta in dim_map.items():
             tables_list = sorted(list(meta["tables"]))[:8]
+            dim_artifact_key = f"{tenant_id}__{domain_id}__dim__{dim_name}"
             try:
+                # Retire any previous is_current row for this artifact_key before inserting.
+                execute_non_query(
+                    settings,
+                    "UPDATE public.quantyx_dimensions_registry SET is_current = false, updated_at = now() "
+                    "WHERE artifact_key = %s AND tenant_id = %s AND is_current = true",
+                    [dim_artifact_key, tenant_id],
+                )
                 upsert_dimension(
                     settings,
                     {
-                        "dimension_id": f"{domain_id}__dim__{dim_name}",
+                        "dimension_id": f"{run_id}__dim__{dim_name}",
                         "tenant_id": tenant_id,
                         "domain_id": domain_id,
                         "connection_id": connection_id,
@@ -2706,7 +3206,7 @@ def _persist_agentic_registry_outputs(
                         "keys": meta["keys"] or [dim_name],
                         "attributes": meta["attributes"] or [],
                         "description": f"Agentic inferred dimension used in {', '.join(tables_list)}",
-                        "artifact_key": f"{domain_id}__dim__{dim_name}",
+                        "artifact_key": dim_artifact_key,
                         "lifecycle_status": "active",
                         "source_type": "agentic",
                         "source_run_id": run_id,
@@ -2997,12 +3497,17 @@ def run_agentic_workflow(
     def profiling_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(settings, run_id, "ProfilingAgent", "running", "Profiling Agent started", event_callback=event_callback)
         schema_name = state.get("schema_name") or "public"
-        state["profiling_stats"] = profile_tables(
-            settings,
-            state.get("schema_graph", {}),
-            schema_name,
-            scoped_conn=_scoped_conn_from_state(state, settings),
-        )
+        try:
+            state["profiling_stats"] = profile_tables(
+                settings,
+                state.get("schema_graph", {}),
+                schema_name,
+                scoped_conn=_scoped_conn_from_state(state, settings),
+            )
+        except Exception:
+            logger.exception("agentic.profiling.failed | run_id=%s — profile_tables raised, continuing with empty stats", run_id)
+            _emit(settings, run_id, "ProfilingAgent", "failed", "Profiling failed — continuing with empty stats", event_callback=event_callback)
+            state["profiling_stats"] = {"tables": []}
         prof_tables = state["profiling_stats"].get("tables", []) or []
         logger.info(
             "agentic.profiling.output | run_id=%s tables=%s sample=%s",
@@ -3156,16 +3661,63 @@ def run_agentic_workflow(
         if "glossary_terms" not in state:
             state["glossary_terms"] = []
         if not state["glossary_terms"] and state.get("profiling_stats"):
-            inferred_terms = []
+            # Build heuristic fallback first
+            heuristic_terms = []
             for table in state["profiling_stats"].get("tables", []):
                 name = table.get("name")
                 if name:
-                    inferred_terms.append({"term": name.replace("_", " "), "synonyms": [name], "abbreviations": []})
+                    heuristic_terms.append({"term": name.replace("_", " "), "synonyms": [name], "abbreviations": []})
                 for col in (table.get("numeric_columns") or []) + (table.get("time_columns") or []) + (
                     table.get("categorical_columns") or []
                 ):
-                    inferred_terms.append({"term": col.replace("_", " "), "synonyms": [col], "abbreviations": []})
-            state["glossary_terms"] = inferred_terms
+                    heuristic_terms.append({"term": col.replace("_", " "), "synonyms": [col], "abbreviations": []})
+            # LLM enrichment: generate proper business glossary definitions
+            _glossary_system_prompt = (
+                "You are a domain expert who creates precise business glossaries for operational databases.\n"
+                "Given a schema (tables and columns) and optional business context, return a JSON object:\n"
+                "{\"glossary\": [{\"term\": \"...\", \"definition\": \"one-line business definition\", "
+                "\"synonyms\": [\"...\"], \"abbreviations\": [\"...\"]}]}\n"
+                "Rules:\n"
+                "- Use plain English. Avoid technical jargon unless it is a recognised industry term.\n"
+                "- Use business context to infer the correct domain meaning of ambiguous column names.\n"
+                "- For table names, give a definition of what the table represents as a business entity.\n"
+                "- For column names, give the business meaning of what the value represents.\n"
+                "- Synonyms and abbreviations may be empty lists if none apply.\n"
+                "- Return ONLY valid JSON — no markdown, no code fences."
+            )
+            tables_summary = []
+            for table in state["profiling_stats"].get("tables", []):
+                tables_summary.append({
+                    "table": table.get("name"),
+                    "columns": (table.get("numeric_columns") or []) + (table.get("time_columns") or []) + (table.get("categorical_columns") or []),
+                    "row_count": table.get("row_count"),
+                })
+            _glossary_payload = {
+                "context": (state.get("context_text") or "")[:4000],
+                "schema": tables_summary,
+            }
+            llm_glossary = _llm_json_response(
+                settings,
+                system_prompt=_glossary_system_prompt,
+                user_payload=_glossary_payload,
+                model_env_key="AGENTIC_CONTEXT_METRIC_MODEL",
+                timeout_env_key="AGENTIC_CONTEXT_METRIC_TIMEOUT_SEC",
+            )
+            llm_terms = (llm_glossary or {}).get("glossary") or []
+            if llm_terms and isinstance(llm_terms, list):
+                logger.info("agentic.glossary.llm_enriched | run_id=%s llm_terms=%s", run_id, len(llm_terms))
+                state["glossary_terms"] = [
+                    {
+                        "term": t.get("term", ""),
+                        "definition": t.get("definition", ""),
+                        "synonyms": t.get("synonyms") or [],
+                        "abbreviations": t.get("abbreviations") or [],
+                    }
+                    for t in llm_terms if t.get("term")
+                ]
+            else:
+                logger.info("agentic.glossary.llm_fallback | run_id=%s using heuristic terms=%s", run_id, len(heuristic_terms))
+                state["glossary_terms"] = heuristic_terms
         logger.info(
             "agentic.glossary.output | run_id=%s terms=%s",
             run_id,
@@ -3200,6 +3752,7 @@ def run_agentic_workflow(
 
     def ontology_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(settings, run_id, "OntologyAgent", "running", "Ontology Agent started", event_callback=event_callback)
+        # Heuristic baseline
         ontology = propose_ontology(
             state.get("context_entities") or [],
             state.get("hierarchy_hints") or [],
@@ -3213,6 +3766,54 @@ def run_agentic_workflow(
                     inferred.append(name.replace("_", " "))
             if inferred:
                 ontology["concepts"] = inferred
+        # LLM enrichment: infer entity hierarchies and relationships
+        _ontology_system_prompt = (
+            "You are a data architect who infers business entity ontologies from database schemas.\n"
+            "Given a schema (tables, columns) and optional business context, return a JSON object:\n"
+            "{\n"
+            "  \"concepts\": [\"EntityName\", ...],\n"
+            "  \"hierarchy_edges\": [{\"parent\": \"...\", \"child\": \"...\", \"confidence\": 0.8, \"source\": \"llm\"}],\n"
+            "  \"synonym_edges\": [{\"term\": \"...\", \"synonym\": \"...\", \"confidence\": 0.7, \"source\": \"llm\"}]\n"
+            "}\n"
+            "Rules:\n"
+            "- Concepts are business entity names (e.g. 'Zone', 'Distributor', 'Product', 'Outlet').\n"
+            "- Hierarchy edges represent is-a, part-of, or belongs-to relationships between entities.\n"
+            "- Synonym edges map column/table names to their business aliases.\n"
+            "- Use business context to identify meaningful hierarchies (e.g. Region > Zone > Outlet).\n"
+            "- Return ONLY valid JSON — no markdown, no code fences."
+        )
+        tables_summary = [
+            {"table": t.get("name"), "columns": (t.get("numeric_columns") or []) + (t.get("time_columns") or []) + (t.get("categorical_columns") or [])}
+            for t in (state.get("profiling_stats") or {}).get("tables", [])
+        ]
+        _ontology_payload = {
+            "context": (state.get("context_text") or "")[:4000],
+            "schema": tables_summary,
+            "existing_concepts": ontology.get("concepts", [])[:20],
+        }
+        llm_ontology = _llm_json_response(
+            settings,
+            system_prompt=_ontology_system_prompt,
+            user_payload=_ontology_payload,
+            model_env_key="AGENTIC_CONTEXT_METRIC_MODEL",
+            timeout_env_key="AGENTIC_CONTEXT_METRIC_TIMEOUT_SEC",
+        )
+        if llm_ontology and isinstance(llm_ontology, dict):
+            llm_concepts = llm_ontology.get("concepts") or []
+            llm_edges = llm_ontology.get("hierarchy_edges") or []
+            llm_synonyms = llm_ontology.get("synonym_edges") or []
+            if llm_concepts or llm_edges:
+                logger.info(
+                    "agentic.ontology.llm_enriched | run_id=%s concepts=%s hierarchy_edges=%s synonym_edges=%s",
+                    run_id, len(llm_concepts), len(llm_edges), len(llm_synonyms),
+                )
+                ontology["concepts"] = llm_concepts
+                ontology["hierarchy_edges"] = llm_edges
+                ontology["synonym_edges"] = llm_synonyms
+            else:
+                logger.info("agentic.ontology.llm_empty | run_id=%s keeping heuristic ontology", run_id)
+        else:
+            logger.info("agentic.ontology.llm_fallback | run_id=%s using heuristic ontology", run_id)
         state["ontology"] = ontology
         logger.info(
             "agentic.ontology.output | run_id=%s concepts=%s hierarchy_edges=%s synonym_edges=%s",
@@ -3623,7 +4224,64 @@ def run_agentic_workflow(
             "Semantic Model Agent started",
             event_callback=event_callback,
         )
-        state["model_classifications"] = classify_models(state.get("profiling_stats", {}))
+        # Heuristic classification baseline
+        heuristic_classifications = classify_models(state.get("profiling_stats", {}))
+        # LLM enrichment: classify fact vs dimension using business context
+        _model_system_prompt = (
+            "You are a data modelling expert who classifies database tables as fact or dimension tables.\n"
+            "Given table profiling statistics and optional business context, return a JSON object:\n"
+            "{\"classifications\": [{\"table\": \"...\", \"model_type\": \"fact|dimension\", "
+            "\"confidence\": 0.9, \"reasoning\": \"one sentence explanation\"}]}\n"
+            "Rules:\n"
+            "- Fact tables: transactional records, time-series measurements, event logs, operational data. "
+            "Typically contain numeric measures, timestamps, and foreign keys to dimensions.\n"
+            "- Dimension tables: master data, reference data, lookup tables. "
+            "Typically contain descriptive attributes, names, codes, categories.\n"
+            "- Use the business context to resolve ambiguous tables — e.g. an 'alerts' table in fuel monitoring "
+            "is a fact table even if it has few numeric columns.\n"
+            "- confidence: 0.9 if clear, 0.7 if somewhat ambiguous, 0.5 if genuinely uncertain.\n"
+            "- Return ONLY valid JSON — no markdown, no code fences."
+        )
+        tables_profile = []
+        for t in (state.get("profiling_stats") or {}).get("tables", []):
+            tables_profile.append({
+                "table": t.get("name"),
+                "row_count": t.get("row_count"),
+                "numeric_columns": t.get("numeric_columns") or [],
+                "time_columns": t.get("time_columns") or [],
+                "categorical_columns": (t.get("categorical_columns") or [])[:10],
+            })
+        _model_payload = {
+            "context": (state.get("context_text") or "")[:4000],
+            "tables": tables_profile,
+        }
+        llm_model = _llm_json_response(
+            settings,
+            system_prompt=_model_system_prompt,
+            user_payload=_model_payload,
+            model_env_key="AGENTIC_CONTEXT_METRIC_MODEL",
+            timeout_env_key="AGENTIC_CONTEXT_METRIC_TIMEOUT_SEC",
+        )
+        llm_classifications = (llm_model or {}).get("classifications") or []
+        if llm_classifications and isinstance(llm_classifications, list):
+            # Validate and merge: only keep entries that have table + model_type
+            valid_llm = [
+                {
+                    "table": c.get("table"),
+                    "model_type": c.get("model_type", "fact") if c.get("model_type") in ("fact", "dimension") else "fact",
+                    "confidence": float(c.get("confidence") or 0.7),
+                    "reasoning": c.get("reasoning", ""),
+                    "numeric_columns": next((h.get("numeric_columns", 0) for h in heuristic_classifications if h.get("table") == c.get("table")), 0),
+                    "time_columns": next((h.get("time_columns", 0) for h in heuristic_classifications if h.get("table") == c.get("table")), 0),
+                    "categorical_columns": next((h.get("categorical_columns", 0) for h in heuristic_classifications if h.get("table") == c.get("table")), 0),
+                }
+                for c in llm_classifications if c.get("table")
+            ]
+            logger.info("agentic.model.llm_enriched | run_id=%s models=%s", run_id, len(valid_llm))
+            state["model_classifications"] = valid_llm
+        else:
+            logger.info("agentic.model.llm_fallback | run_id=%s using heuristic classifications=%s", run_id, len(heuristic_classifications))
+            state["model_classifications"] = heuristic_classifications
         logger.info(
             "agentic.model.output | run_id=%s models=%s sample=%s",
             run_id,
@@ -3668,7 +4326,67 @@ def run_agentic_workflow(
             "Rollup Planner Agent started",
             event_callback=event_callback,
         )
-        rollups = propose_rollups(state.get("metric_defs", []), state.get("profiling_stats", {}))
+        # Heuristic rollup baseline
+        heuristic_rollups = propose_rollups(state.get("metric_defs", []), state.get("profiling_stats", {}))
+        # LLM enrichment: propose analytically meaningful rollup dimensions using business context
+        _rollup_system_prompt = (
+            "You are a business intelligence architect who designs metric rollup tables.\n"
+            "Given metric definitions, table profiling data, and business context, propose the most "
+            "analytically useful rollup dimensions and time grains for each metric.\n"
+            "Return a JSON object:\n"
+            "{\"rollups\": [{\"metric_name\": \"...\", \"dimensions\": [\"time_col\", \"category_col\"], "
+            "\"time_grain\": \"day|week|month|quarter|year\", \"reasoning\": \"...\"}]}\n"
+            "Rules:\n"
+            "- dimensions[0] MUST be the primary time column for the metric's table.\n"
+            "- dimensions[1..n] should be the most analytically meaningful categoricals "
+            "(e.g. prefer 'zone', 'product_code', 'region' over generic IDs).\n"
+            "- Use business context to identify which categoricals are operationally important.\n"
+            "- time_grain should reflect the operational reporting cadence from the business context.\n"
+            "- Only include rollups for metrics that exist in the provided metric_defs list.\n"
+            "- Return ONLY valid JSON — no markdown, no code fences."
+        )
+        metrics_summary = [
+            {"metric_name": m.get("metric_name"), "base_table": m.get("base_table"), "formula": m.get("formula")}
+            for m in (state.get("metric_defs") or [])[:20]
+        ]
+        tables_profile = []
+        for t in (state.get("profiling_stats") or {}).get("tables", []):
+            tables_profile.append({
+                "table": t.get("name"),
+                "time_columns": t.get("time_columns") or [],
+                "categorical_columns": (t.get("categorical_columns") or [])[:10],
+                "sample_values": {
+                    col: (t.get("sample_values") or {}).get(col, [])[:5]
+                    for col in (t.get("categorical_columns") or [])[:5]
+                },
+            })
+        _rollup_payload = {
+            "context": (state.get("context_text") or "")[:3000],
+            "metric_defs": metrics_summary,
+            "tables": tables_profile,
+        }
+        llm_rollup = _llm_json_response(
+            settings,
+            system_prompt=_rollup_system_prompt,
+            user_payload=_rollup_payload,
+            model_env_key="AGENTIC_CONTEXT_METRIC_MODEL",
+            timeout_env_key="AGENTIC_CONTEXT_METRIC_TIMEOUT_SEC",
+        )
+        llm_rollups = (llm_rollup or {}).get("rollups") or []
+        if llm_rollups and isinstance(llm_rollups, list):
+            valid_llm_rollups = [
+                {
+                    "metric_name": r.get("metric_name"),
+                    "dimensions": r.get("dimensions") or [],
+                    "time_grain": r.get("time_grain", "month") if r.get("time_grain") in ("day", "week", "month", "quarter", "year") else "month",
+                }
+                for r in llm_rollups if r.get("metric_name") and r.get("dimensions")
+            ]
+            logger.info("agentic.rollup.llm_enriched | run_id=%s candidates=%s", run_id, len(valid_llm_rollups))
+            rollups = valid_llm_rollups
+        else:
+            logger.info("agentic.rollup.llm_fallback | run_id=%s using heuristic candidates=%s", run_id, len(heuristic_rollups))
+            rollups = heuristic_rollups
         logger.info(
             "agentic.rollup.candidates | run_id=%s candidates=%s",
             run_id,
@@ -3989,6 +4707,88 @@ def run_agentic_workflow(
         runtime_chart_rejections: list[dict[str, Any]] = []
         profiling_map = {t.get("name"): t for t in (state.get("profiling_stats", {}).get("tables") or [])}
         join_edges = state.get("join_edges") or []
+
+        # ── Phase 47: LLM Chart Discovery ──────────────────────────────────
+        discovery_chart_ids: list[str] = []
+        discovery_titles: list[str] = []
+        if not _chart_discovery_enabled():
+            _emit(
+                settings, run_id, "ChartDiscoveryAgent", "skipped",
+                f"Chart discovery skipped (CHART_DISCOVERY_MODE={os.getenv('CHART_DISCOVERY_MODE', 'unset')})",
+                event_callback=event_callback,
+            )
+        if _chart_discovery_enabled():
+            profiled_table_names = [
+                t.get("name") for t in (state.get("profiling_stats", {}).get("tables") or [])
+                if t.get("name")
+            ]
+            _emit(
+                settings, run_id, "ChartDiscoveryAgent", "running",
+                f"Sampling data from {len(profiled_table_names)} table(s)...",
+                event_callback=event_callback,
+            )
+            try:
+                _scoped_conn = _scoped_conn_from_state(state, settings)
+                table_samples = _fetch_table_samples(
+                    settings,
+                    table_names=profiled_table_names,
+                    schema=schema_name,
+                    scoped_conn=_scoped_conn,
+                )
+                discovery_specs, discovery_diag = _llm_chart_discovery(
+                    settings,
+                    domain_id=state.get("domain_id"),
+                    context_text=state.get("context_text"),
+                    profiling=state.get("profiling_stats") or {},
+                    table_samples=table_samples,
+                    schema=schema_name,
+                    scoped_conn=_scoped_conn,
+                )
+                state["chart_discovery_diagnostics"] = discovery_diag
+                if discovery_specs:
+                    # dashboard_id not yet created — pass None, link later
+                    discovery_chart_ids, discovery_titles = _execute_discovery_charts(
+                        settings,
+                        discovery_specs,
+                        schema=schema_name,
+                        tenant_id=state.get("tenant_id"),
+                        domain_id=state.get("domain_id"),
+                        run_id=run_id,
+                        dashboard_id=None,
+                    )
+                _tool_call_log = (discovery_diag or {}).get("tool_calls") or []
+                logger.info(
+                    "chart_discovery.tool_call_log | run_id=%s calls=%s",
+                    run_id, json.dumps(_tool_call_log, default=str),
+                )
+                _emit(
+                    settings, run_id, "ChartDiscoveryAgent", "completed",
+                    f"Discovery: {len(discovery_chart_ids)} chart(s) generated",
+                    {
+                        "mode": os.getenv("CHART_DISCOVERY_MODE", "discovery_only"),
+                        "tool_calls_made": len(_tool_call_log),
+                        "tool_call_log": _tool_call_log,
+                        "llm_proposed": (discovery_diag or {}).get("proposed", 0),
+                        "tool_call_limit_hit": (discovery_diag or {}).get("tool_call_limit_hit", False),
+                        "context_text_chars": len(state.get("context_text") or ""),
+                        "tables_sampled": len(profiled_table_names),
+                        "chart_ids": discovery_chart_ids,
+                    },
+                    event_callback=event_callback,
+                )
+            except Exception as _disc_err:
+                logger.warning("chart_discovery.error | run_id=%s err=%s", run_id, _disc_err, exc_info=True)
+                _emit(
+                    settings, run_id, "ChartDiscoveryAgent", "failed",
+                    f"Chart discovery failed: {_disc_err}",
+                    event_callback=event_callback,
+                )
+        # ── End Phase 47 ───────────────────────────────────────────────────
+
+        if _chart_discovery_only():
+            # Skip legacy chart planner entirely — jump past the for loop
+            charts_spec = []
+
         for chart in charts_spec:
             metric_name = chart.get("metric") or "metric"
             metric_col = chart.get("metric_column")
@@ -4841,6 +5641,18 @@ def run_agentic_workflow(
             _add_chart_to_dashboard(
                 settings, dash_id, _cid, position=_pos, added_by="DashboardAgent",
             )
+        # Link discovery charts to the newly created dashboard
+        if dash_id and discovery_chart_ids:
+            _offset = len(chart_ids)
+            for _pos, _cid in enumerate(discovery_chart_ids):
+                try:
+                    _add_chart_to_dashboard(
+                        settings, dash_id, _cid,
+                        position=_offset + _pos,
+                        added_by="ChartDiscoveryAgent",
+                    )
+                except Exception as _link_err:
+                    logger.warning("chart_discovery.dashboard_link_failed | chart_id=%s err=%s", _cid, _link_err)
         _emit(
             settings,
             run_id,
@@ -4855,8 +5667,11 @@ def run_agentic_workflow(
                 "dashboard_title": dashboard_title,
                 "views": len(created_views),
                 "joined_views": joined_views,
-                "chart_ids": chart_ids,
-                "chart_titles": [c.get("title") for c in enriched_charts if c.get("title")],
+                "chart_ids": chart_ids + discovery_chart_ids,
+                "chart_titles": [c.get("title") for c in enriched_charts if c.get("title")] + discovery_titles,
+                "discovery_chart_ids": discovery_chart_ids,
+                "discovery_chart_titles": discovery_titles,
+                "chart_discovery_diagnostics": state.get("chart_discovery_diagnostics"),
                 "chart_details": enriched_charts,
                 "dashboard_theme": dashboard_theme,
                 "dashboard_title_reason": dashboard_spec.get("dashboard_title_reason"),

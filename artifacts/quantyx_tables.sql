@@ -538,6 +538,7 @@ CREATE TABLE IF NOT EXISTS public.quantyx_business_context (
   source_type TEXT NOT NULL,
   source_title TEXT NULL,
   raw_text TEXT NOT NULL,
+  enriched_context TEXT NULL,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   status TEXT NOT NULL DEFAULT 'submitted',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

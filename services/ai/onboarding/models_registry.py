@@ -53,6 +53,11 @@ def upsert_fact(settings: Settings, payload: dict[str, Any]) -> str:
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
         ON CONFLICT (fact_id)
         DO UPDATE SET
+          tenant_id = EXCLUDED.tenant_id,
+          domain_id = EXCLUDED.domain_id,
+          connection_id = EXCLUDED.connection_id,
+          database_name = EXCLUDED.database_name,
+          schema_name = EXCLUDED.schema_name,
           table_name = EXCLUDED.table_name,
           grain = EXCLUDED.grain,
           time_column = EXCLUDED.time_column,
@@ -127,6 +132,22 @@ def list_facts(
     """
     try:
         return run_query(settings, sql, [tenant_id, domain_id, connection_id, database_name, schema_name])
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def list_facts_by_run(settings: Settings, run_id: str) -> list[dict]:
+    sql = """
+        SELECT fact_id, tenant_id, domain_id, connection_id, database_name, schema_name,
+               table_name, grain, time_column, measures, dimensions, description,
+               lifecycle_status, source_type, source_run_id, artifact_key, version_no, is_current,
+               created_at, updated_at
+          FROM public.quantyx_facts_registry
+         WHERE source_run_id = %s
+         ORDER BY created_at DESC
+    """
+    try:
+        return run_query(settings, sql, [run_id])
     except psycopg2.errors.UndefinedTable:
         return []
 
@@ -269,6 +290,11 @@ def upsert_dimension(settings: Settings, payload: dict[str, Any]) -> str:
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
         ON CONFLICT (dimension_id)
         DO UPDATE SET
+          tenant_id = EXCLUDED.tenant_id,
+          domain_id = EXCLUDED.domain_id,
+          connection_id = EXCLUDED.connection_id,
+          database_name = EXCLUDED.database_name,
+          schema_name = EXCLUDED.schema_name,
           name = EXCLUDED.name,
           keys = EXCLUDED.keys,
           attributes = EXCLUDED.attributes,
@@ -339,6 +365,22 @@ def list_dimensions(
     """
     try:
         return run_query(settings, sql, [tenant_id, domain_id, connection_id, database_name, schema_name])
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def list_dimensions_by_run(settings: Settings, run_id: str) -> list[dict]:
+    sql = """
+        SELECT dimension_id, tenant_id, domain_id, connection_id, database_name, schema_name,
+               name, keys, attributes, description,
+               lifecycle_status, source_type, source_run_id, artifact_key, version_no, is_current,
+               created_at, updated_at
+          FROM public.quantyx_dimensions_registry
+         WHERE source_run_id = %s
+         ORDER BY created_at DESC
+    """
+    try:
+        return run_query(settings, sql, [run_id])
     except psycopg2.errors.UndefinedTable:
         return []
 

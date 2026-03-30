@@ -179,8 +179,10 @@ from services.ai.onboarding.models_registry import (
     delete_fact,
     list_dimensions,
     list_dimensions_all,
+    list_dimensions_by_run,
     list_facts,
     list_facts_all,
+    list_facts_by_run,
     update_dimension,
     update_fact,
     upsert_dimension,
@@ -211,8 +213,10 @@ from services.ai.context_store import (
     set_context_active,
     update_context,
     update_context_file_metadata,
+    update_enriched_context,
     update_extraction,
 )
+from services.ai.context_enrichment import enrich_context_text
 from services.ai.context_extraction import extract_context
 from services.ai.context_merge import merge_extractions
 from services.ai.context_apply import apply_extractions
@@ -485,6 +489,9 @@ _log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, _log_level, logging.INFO))
 logger = logging.getLogger("quantyx.api")
 
+# Bump this manually after each significant edit to confirm the latest code is running.
+BUILD_VERSION = "2026.03.29.003"
+
 app = FastAPI(
     title="quantyx-core-services API",
     version="0.1.0",
@@ -551,7 +558,13 @@ def _langsmith_project_context(tenant_id: str | None):
         try:
             from langsmith.run_helpers import tracing_context  # type: ignore
 
-            tracing_cm = tracing_context(project_name=project)
+            _extra_tags = [f"build:{BUILD_VERSION}"]
+            env_tags = [t.strip() for t in os.getenv("LANGCHAIN_TAGS", "").split(",") if t.strip()]
+            tracing_cm = tracing_context(
+                project_name=project,
+                tags=env_tags + _extra_tags,
+                metadata={"build_version": BUILD_VERSION},
+            )
         except Exception:
             tracing_cm = None
         if tracing_cm is None:
@@ -573,11 +586,17 @@ def _resolve_scope_values(
     if not connection_id:
         raise HTTPException(status_code=400, detail="tenant scope not configured")
 
-    scopes = resolve_connection_scope(settings, connection_id)
-    if not scopes:
-        raise HTTPException(status_code=404, detail="tenant scope connection not registered")
-    database_name = scopes[0].get("database_name")
-    schema_name = scopes[0].get("schema_name")
+    # Prefer database_name/schema_name stored on the tenant scope itself — these are
+    # the exact values written to facts/dimensions/metrics during the agentic run.
+    # Fall back to the connection's registered scope only if the tenant scope lacks them.
+    database_name = (registry or {}).get("database_name")
+    schema_name = (registry or {}).get("schema_name")
+    if not database_name or not schema_name:
+        scopes = resolve_connection_scope(settings, connection_id)
+        if not scopes:
+            raise HTTPException(status_code=404, detail="tenant scope connection not registered")
+        database_name = database_name or scopes[0].get("database_name")
+        schema_name = schema_name or scopes[0].get("schema_name")
     if not database_name or not schema_name:
         raise HTTPException(status_code=400, detail="tenant scope not configured")
     return (connection_id, database_name, schema_name, registry.get("tables") if registry else None)
@@ -870,7 +889,8 @@ def _load_context_text(context_id: str) -> tuple[dict, str, list[str]]:
     if not context_row:
         raise HTTPException(status_code=404, detail="Context not found")
     file_texts = get_context_file_texts(settings, context_id)
-    combined_parts = [context_row["raw_text"]] if context_row.get("raw_text") else []
+    effective_text = context_row.get("enriched_context") or context_row.get("raw_text")
+    combined_parts = [effective_text] if effective_text else []
     combined_parts.extend(file_texts)
     combined_text = "\n\n".join([part for part in combined_parts if part])
     return context_row, combined_text, file_texts
@@ -1759,7 +1779,7 @@ def _log_scan_step(step: str, details: dict | None = None) -> None:
     },
 )
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "build_version": BUILD_VERSION}
 
 
 @app.get(
@@ -5381,7 +5401,26 @@ def ingest_context(payload: ContextIngestRequest) -> ContextIngestResponse:
         link_context_files(settings, context_id, payload.file_ids)
         logger.info("context.ingest: link.files.complete | %s", {"context_id": context_id})
     logger.info("context.ingest: complete | %s", {"context_id": context_id})
-    return ContextIngestResponse(context_id=context_id, status="submitted")
+    enrich_status = "no_text"
+    if payload.raw_text and payload.raw_text.strip():
+        logger.info(
+            "context.enrich.start | context_id=%s raw_len=%s",
+            context_id,
+            len(payload.raw_text),
+        )
+        enriched = enrich_context_text(settings, payload.raw_text)
+        if enriched:
+            update_enriched_context(settings, context_id, enriched)
+            enrich_status = "enriched"
+            logger.info(
+                "context.enrich.complete | context_id=%s enriched_len=%s",
+                context_id,
+                len(enriched),
+            )
+        else:
+            enrich_status = "skipped"
+            logger.warning("context.enrich.skipped | context_id=%s", context_id)
+    return ContextIngestResponse(context_id=context_id, status=enrich_status)
 
 
 @app.post(
@@ -17054,8 +17093,17 @@ def _load_run_scoped_intelligence(
     schema_name: str,
 ) -> dict[str, Any]:
     persisted_glossary = fetch_glossary_terms(settings, tenant_id, domain_id)
-    facts_rows = list_facts(settings, tenant_id, domain_id, connection_id, database_name, schema_name)
-    dimension_rows = list_dimensions(settings, tenant_id, domain_id, connection_id, database_name, schema_name)
+    if run_id:
+        facts_rows = list_facts_by_run(settings, run_id)
+        dimension_rows = list_dimensions_by_run(settings, run_id)
+        # Fall back to tenant-scoped query if this run has no facts/dims yet
+        if not facts_rows:
+            facts_rows = list_facts(settings, tenant_id, domain_id, connection_id, database_name, schema_name)
+        if not dimension_rows:
+            dimension_rows = list_dimensions(settings, tenant_id, domain_id, connection_id, database_name, schema_name)
+    else:
+        facts_rows = list_facts(settings, tenant_id, domain_id, connection_id, database_name, schema_name)
+        dimension_rows = list_dimensions(settings, tenant_id, domain_id, connection_id, database_name, schema_name)
     metrics_rows = fetch_registry_metrics(
         settings,
         tenant_id=tenant_id,
@@ -17074,13 +17122,6 @@ def _load_run_scoped_intelligence(
         schema_name=schema_name,
         include_all_statuses=True,
     )
-    if run_id:
-        run_filtered_facts = [row for row in facts_rows if row.get("source_run_id") == run_id]
-        run_filtered_dimensions = [row for row in dimension_rows if row.get("source_run_id") == run_id]
-        if run_filtered_facts:
-            facts_rows = run_filtered_facts
-        if run_filtered_dimensions:
-            dimension_rows = run_filtered_dimensions
     agent_artifacts = _latest_completed_agent_raw_artifacts(run_id) if run_id else {}
     schema_graph_artifact = (
         get_schema_graph_artifact(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import os
 import re
@@ -2819,3 +2821,138 @@ def select_charts(
         "selected_count": len(enriched),
     }
     return enriched, diagnostics
+
+
+# ── Phase 47: LLM Chart Discovery ────────────────────────────────────────────
+
+@dataclass
+class TableSample:
+    table_name: str
+    rows: list[dict] = field(default_factory=list)
+    distinct_values: dict[str, list] = field(default_factory=dict)
+    row_count_estimate: int = 0
+
+
+def _chart_discovery_enabled() -> bool:
+    return os.getenv("CHART_DISCOVERY_MODE", "discovery_only").lower() in {"discovery", "discovery_only"}
+
+
+def _chart_discovery_only() -> bool:
+    return os.getenv("CHART_DISCOVERY_MODE", "discovery_only").lower() == "discovery_only"
+
+
+_FORBIDDEN_SQL_RE = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|EXEC|EXECUTE)\b",
+    re.IGNORECASE,
+)
+
+
+def _validate_discovery_sql(sql: str) -> tuple[bool, str | None]:
+    """Lightweight SELECT-only check used for both tool-call and chart SQL."""
+    if not sql or not sql.strip().upper().startswith("SELECT"):
+        return False, "not_a_select"
+    if _FORBIDDEN_SQL_RE.search(sql):
+        return False, "forbidden_statement"
+    max_len = int(os.getenv("CHART_DISCOVERY_SQL_MAX_LEN", "4000"))
+    if len(sql) > max_len:
+        return False, "sql_too_long"
+    return True, None
+
+
+def _enforce_tool_limit(sql: str, limit: int = 50) -> str:
+    """Rewrite LLM query_data SQL to cap row count."""
+    clean = sql.strip().rstrip(";")
+    if re.search(r"\bLIMIT\s+\d+", clean, re.IGNORECASE):
+        clean = re.sub(r"\bLIMIT\s+\d+", f"LIMIT {limit}", clean, flags=re.IGNORECASE)
+    else:
+        clean = f"{clean} LIMIT {limit}"
+    return clean
+
+
+def _is_categorical_column(col: dict) -> bool:
+    """Return True for low-cardinality string/enum columns suitable for distinct-value sampling."""
+    dtype = str(col.get("type") or col.get("data_type") or "").lower()
+    name = str(col.get("name") or "").lower()
+    # skip numeric, time, bool
+    if any(t in dtype for t in ("int", "numeric", "float", "real", "double", "timestamp", "date", "bool")):
+        return False
+    # skip obvious id/key columns
+    if any(tok in name for tok in ("_id", "_key", "_uuid", "uuid", "sap_id", "jde")):
+        return False
+    return "char" in dtype or "text" in dtype or "varchar" in dtype or dtype == "name"
+
+
+def _fetch_table_samples(settings, table_names: list[str], schema: str, scoped_conn=None) -> dict[str, TableSample]:
+    """
+    Fetch sample rows and top-N distinct values per categorical column for each table.
+    Runs tables in parallel. Returns dict[table_name, TableSample].
+    """
+    sample_rows_n = int(os.getenv("CHART_DISCOVERY_SAMPLE_ROWS", "40"))
+    distinct_limit = int(os.getenv("CHART_DISCOVERY_DISTINCT_LIMIT", "20"))
+    cat_cols_max = int(os.getenv("CHART_DISCOVERY_CAT_COLS_MAX", "8"))
+    timeout_sec = int(os.getenv("CHART_DISCOVERY_TIMEOUT_SEC", "10000"))
+
+    logger = logging.getLogger(__name__)
+    results: dict[str, TableSample] = {}
+
+    def _sample_table(table_name: str) -> TableSample:
+        sample = TableSample(table_name=table_name)
+        q_schema = f'"{schema}"'
+        q_table = f'"{table_name}"'
+        try:
+            rows = run_query(
+                settings,
+                f"SELECT * FROM {q_schema}.{q_table} LIMIT {sample_rows_n}",
+                [],
+                scoped_conn=scoped_conn,
+            )
+            sample.rows = [dict(r) for r in (rows or [])]
+            sample.row_count_estimate = len(sample.rows)
+        except Exception as exc:
+            logger.warning("chart_discovery.sample_failed | table=%s err=%s", table_name, exc)
+            return sample
+
+        # Infer categorical columns from the first row's keys
+        if sample.rows:
+            cat_cols = []
+            for col_name in list(sample.rows[0].keys()):
+                val = sample.rows[0].get(col_name)
+                if val is None:
+                    continue
+                if isinstance(val, str) and not any(
+                    tok in col_name.lower() for tok in ("_id", "_key", "uuid", "sap_id")
+                ):
+                    cat_cols.append(col_name)
+            cat_cols = cat_cols[:cat_cols_max]
+            distinct_values: dict[str, list] = {}
+            for col_name in cat_cols:
+                try:
+                    q_col = f'"{col_name}"'
+                    dv_rows = run_query(
+                        settings,
+                        f"SELECT {q_col} AS value, COUNT(*) AS cnt "
+                        f"FROM {q_schema}.{q_table} "
+                        f"WHERE {q_col} IS NOT NULL "
+                        f"GROUP BY {q_col} ORDER BY cnt DESC LIMIT {distinct_limit}",
+                        [],
+                        scoped_conn=scoped_conn,
+                    )
+                    distinct_values[col_name] = [
+                        {"value": r["value"], "count": int(r["cnt"])} for r in (dv_rows or [])
+                    ]
+                except Exception:
+                    pass
+            sample.distinct_values = distinct_values
+        return sample
+
+    with ThreadPoolExecutor(max_workers=min(len(table_names), 4)) as executor:
+        futures = {executor.submit(_sample_table, t): t for t in table_names}
+        for future in as_completed(futures, timeout=timeout_sec):
+            tname = futures[future]
+            try:
+                results[tname] = future.result()
+            except Exception as exc:
+                logger.warning("chart_discovery.future_failed | table=%s err=%s", tname, exc)
+                results[tname] = TableSample(table_name=tname)
+
+    return results

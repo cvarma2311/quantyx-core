@@ -57,6 +57,15 @@ def create_context(
     return context_id
 
 
+def update_enriched_context(settings: Settings, context_id: str, enriched_context: str) -> None:
+    sql = """
+        UPDATE public.quantyx_business_context
+           SET enriched_context = %s, updated_at = now()
+         WHERE context_id = %s
+    """
+    execute_non_query(settings, sql, [enriched_context, context_id])
+
+
 def create_context_file(
     settings: Settings,
     tenant_id: str,
@@ -277,6 +286,7 @@ def get_context(settings: Settings, context_id: str) -> dict | None:
                schema_name,
                source_title,
                raw_text,
+               enriched_context,
                metadata,
                status
           FROM public.quantyx_business_context
@@ -416,7 +426,7 @@ def persist_extraction_agent(
 
 
 def update_context(settings: Settings, context_id: str, updates: dict[str, Any]) -> None:
-    allowed = {"source_title", "raw_text", "metadata", "status"}
+    allowed = {"source_title", "raw_text", "enriched_context", "metadata", "status"}
     filtered = {key: value for key, value in updates.items() if key in allowed}
     if not filtered:
         return

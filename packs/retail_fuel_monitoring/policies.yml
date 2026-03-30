@@ -1,0 +1,135 @@
+industry: retail_fuel_monitoring
+version: 2
+
+# ── Data Quality Guardrails ───────────────────────────────────────────────────
+# These protect result accuracy — not chart or metric restrictions.
+# Apply these as defaults; the AI may relax them when the question context warrants it.
+policies:
+  - name: valid_interlock_only
+    applies_to: query
+    table: alerts
+    description: >
+      The interlock_name column distinguishes dry-out alerts from other alert types.
+      The known dry-out interlock is 'Dry Out Each Indent Wise MainFlow'.
+      Without this filter the query returns unrelated alert categories.
+    hint: default_filter
+    filter:
+      column: interlock_name
+      operator: eq
+      values: ["Dry Out Each Indent Wise MainFlow"]
+
+  - name: exclude_invalid_indent_statuses
+    applies_to: query
+    table: alerts
+    description: >
+      These indent_status values represent noise — cancelled events, false alarms,
+      offline readings, or administratively closed records.
+      Excluding them ensures only operationally meaningful dry-out events are counted.
+    hint: default_filter
+    filter:
+      column: indent_status
+      operator: not_in
+      values: [Cancelled, TempClosed, ProductLowLevel, OfflineOrFalseAlarm, NotAvailable]
+
+  - name: confirmed_alerts_mark_as_false
+    applies_to: query
+    table: alerts
+    description: >
+      mark_as_false = 'true' identifies confirmed dry-out alerts (text field, not boolean).
+      The name is counterintuitive — it means "do NOT mark as false alarm", i.e., this IS a real event.
+      Apply for short-term (dry_out_in_days='1') and extended (dry_out_in_days='2') dry-outs.
+      Do NOT apply when querying permanent dry-outs via alert_status = 'Open'.
+    hint: context_dependent
+
+  - name: retail_outlets_scope
+    applies_to: query
+    table: [alerts, location_master]
+    description: >
+      bu = 'RO' restricts scope to retail outlets (petrol stations).
+      Apply on location_master when computing total outlet counts so that
+      depots and other business units are excluded from coverage metrics.
+    hint: apply_when_outlet_count_or_zone_join
+
+  - name: suppress_small_outlet_groups
+    applies_to: aggregation
+    description: Avoid surfacing groups with very few outlets as they produce misleading rates.
+    filter:
+      column: sap_id
+      operator: min_group_size
+      values: [3]
+
+# ── Dry-Out Category Recognition ─────────────────────────────────────────────
+# These help the AI understand what a user means when they ask about different dry-out types.
+# They are not query restrictions — they are semantic classification hints.
+dryout_category_hints:
+  - category: dryout
+    common_names: [dryout, dry out, dry-out, DryOut, stockout, stock out, fuel unavailability,
+                   stock unavailability, fuel outage, RO dry, short term dryout, 1-day dryout]
+    key_signal: "dry_out_in_days = '1'"
+    also_requires: [valid_interlock_only, exclude_invalid_indent_statuses, confirmed_alerts_mark_as_false]
+
+  - category: intra_dryout
+    common_names: [intra dryout, intra dry out, intra dry-out, Intra DryOut, extended dryout,
+                   2-day dryout, two day dryout, extended dry out]
+    key_signal: "dry_out_in_days = '2'"
+    also_requires: [valid_interlock_only, exclude_invalid_indent_statuses, confirmed_alerts_mark_as_false]
+
+  - category: permanent_dryout
+    common_names: [permanent dryout, permanent dry out, Permanent DryOut, long term dryout,
+                   long-term dry out, chronic dryout, unresolved dryout, 5-day dryout,
+                   open dryout, persistent dryout]
+    key_signal: "alert_status = 'Open' AND created_at <= NOW() - INTERVAL '5 days'"
+    note: mark_as_false filter does NOT apply here; group by month for trend analysis
+
+# ── Timezone Awareness ───────────────────────────────────────────────────────
+timezone:
+  storage: UTC
+  display: Asia/Kolkata
+  affected_columns: [dry_out_start_time, dry_out_end_time]
+  conversion_sql: "col AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata'"
+  note: >
+    created_at and stock_date do not need timezone conversion.
+    Only dry_out_start_time and dry_out_end_time are stored in UTC.
+
+# ── Dashboard Preferences ────────────────────────────────────────────────────
+# These are hints to guide what the AI prioritises — not a ceiling on what it can show.
+dashboard_preferences:
+  kpi_priority_hints:
+    dryout_count: 150
+    loss_of_sale: 148
+    permanent_dryout_count: 145
+    dryout_rate_pct: 140
+    outlets_with_dryout: 135
+    intra_dryout_count: 130
+    avg_dryout_duration_days: 110
+  required_trend_metrics:
+    - dryout_count
+    - intra_dryout_count
+    - permanent_dryout_count
+    - loss_of_sale
+  required_time_grains:
+    - day
+    - month
+  time_priority_columns:
+    - created_at
+    - stock_date
+    - dry_out_start_time
+  exclude_identifier_dimensions_from_charts: true
+  max_breakdown_uniqueness_ratio: 0.85
+  breakdown_allowlist:
+    - zone
+    - region
+    - territory
+    - product_name
+    - dryout_category
+  breakdown_denylist:
+    - sap_id
+    - alert_id
+    - interlock_name
+    - indent_status
+  breakdown_priority_tokens:
+    - zone
+    - region
+    - product
+    - fuel
+    - category
