@@ -312,7 +312,7 @@ def get_dashboard_with_charts(
         SELECT dc.entry_id, dc.chart_id, dc.position, dc.title_override, dc.added_by, dc.added_at,
                cr.chart_type, cr.title, cr.chart_source, cr.status,
                cr.chart_payload, cr.rows_json, cr.question,
-               cr.sql, cr.params, cr.query_payload, cr.chart_data
+               cr.sql, cr.params, cr.query_payload, cr.chart_data, cr.insight_text, cr.narrative_text
           FROM public.quantyx_dashboard_charts dc
           LEFT JOIN public.quantyx_chart_requests cr ON cr.chart_id = dc.chart_id
          WHERE dc.dashboard_id = %s
