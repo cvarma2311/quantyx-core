@@ -13,7 +13,7 @@ _REF_PATTERN = re.compile(
 )
 _TABLE_PATTERN = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\b")
 _ALLOWED_OPERATORS = {"=", "!=", ">", ">=", "<", "<=", "IN", "ILIKE"}
-_AGGREGATE_SQL_PATTERN = re.compile(r"^\s*(SUM|AVG|COUNT|MIN|MAX)\s*\(", re.IGNORECASE)
+_AGGREGATE_SQL_PATTERN = re.compile(r"\b(SUM|AVG|COUNT|MIN|MAX)\s*\(", re.IGNORECASE)
 
 
 @dataclass(frozen=True)

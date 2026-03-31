@@ -1,0 +1,28 @@
+#################
+ACTUAL TMT SALES
+
+ SELECT  ROUND(SUM("MOM_DAY_LEVEL_DATA"."NETWEIGHT_TMT")::numeric,2) AS "ACTUAL_TMT_SALES"
+ FROM "MOM_DAY_LEVEL_DATA"  where  "SBU_Name" = 'Lubes'  AND
+ "SBU_Name" != '0' AND  "SBU_Name" not in ('Common','Mumbai Ref','Renewable Energy','Visakh Ref') AND  "DAY_ID" BETWEEN '20250401' AND '20260330'
+
+#################
+
+
+###############################
+ACTUAL_HISTORY_TMT_SALES
+
+ SELECT  ROUND(SUM("MOM_DAY_LEVEL_DATA"."NETWEIGHT_TMT")::numeric,2) AS "ACTUAL_HISTORY_TMT_SALES"
+ FROM "MOM_DAY_LEVEL_DATA"  where  "SBU_Name" = 'Lubes'  AND "SBU_Name" != '0' AND
+ "SBU_Name" not in ('Common','Mumbai Ref','Renewable Energy','Visakh Ref') AND  "DAY_ID" BETWEEN '20240401' AND '20250330'
+
+################################
+
+
+
+###############################
+TARGET_TMT_SALES
+
+SELECT  ROUND(SUM("M60_LEVEL_METADATA"."TARGET_QTY_TMT")::numeric,2) AS "TARGET_TMT_SALES" ,
+month_name FROM "M60_LEVEL_METADATA"  where  "SBU_Name" = 'Lubes'  AND "SBU_Name" != '0' AND
+"SBU_Name" not in ('Common','Mumbai Ref','Renewable Energy','Visakh Ref') AND
+ "year_monthname"::DATE BETWEEN '2025-04-01' AND '2026-03-30'  GROUP BY month_name

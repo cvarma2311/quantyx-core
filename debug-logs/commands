@@ -21,22 +21,69 @@
     --schema public \
     --tables MOM_DAY_LEVEL_DATA M60_LEVEL_METADATA industry_performance \
     --context-text "Tables in scope:
-  - MOM_DAY_LEVEL_DATA: Contains daily sales data for HPCL.
-  - M60_LEVEL_METADATA: Contains monthly targets and pace metadata for HPCL.
-  - industry_performance: Contains industry performance data for comparison.
+    - MOM_DAY_LEVEL_DATA: Daily actual sales data. Key columns: NETWEIGHT_TMT (volume in TMT),
+      DAY_ID (date as YYYYMMDD string, e.g. '20260101'), SBU_Name, Zone, Region, SalesArea,
+      ProductGroup (or equivalent product dimension).
+    - M60_LEVEL_METADATA: Monthly target and pace metadata. Key columns: TARGET_QTY_TMT (target volume),
+      PACE_QTY_TMT (pace/run-rate volume), month_name, year_monthname (DATE-castable, e.g. '2026-01-01'),
+      SBU_Name, Zone, Region, SalesArea.
+    - industry_performance: Industry benchmark data for comparison views.
 
-  Use these business rules:
-  - Apply the mandatory filter WHERE sbu_name IS NOT NULL
-    AND sbu_name != '0'
-    AND sbu_name NOT IN ('Common','Mumbai Ref','Renewable Energy','Visakh Ref') where needed.
-  - Prefer daily analysis from MOM_DAY_LEVEL_DATA.
-  - Prefer monthly target and pace analysis from M60_LEVEL_METADATA.
-  - Use date/day columns from MOM_DAY_LEVEL_DATA as canonical daily time dimensions where available.
-  - Use month/year or year_monthname style columns from M60_LEVEL_METADATA as canonical monthly time dimensions where available.
-  - Use industry_performance for benchmark and comparison views where relevant.
-  - Prefer charts for daily sales, monthly target quantity, monthly pace, and industry comparisons by business-relevant dimensions such as zone, region, and SBU.
-  - Do not use identifier/code fields as chart categories unless no better business dimension exists.
-  - Default sorting should be descending for ranked/tabular outputs. For time-series charts, use ascending chronological order."
+  MANDATORY FILTER (apply to every query on MOM_DAY_LEVEL_DATA and M60_LEVEL_METADATA):
+    WHERE SBU_Name IS NOT NULL
+      AND SBU_Name != '0'
+      AND SBU_Name NOT IN ('Common', 'Mumbai Ref', 'Renewable Energy', 'Visakh Ref')
+
+  FINANCIAL YEAR CONVENTION: April to March.
+    - Current FY actual: DAY_ID BETWEEN TO_CHAR(DATE_TRUNC('year', CURRENT_DATE - INTERVAL '3 months') + INTERVAL '3 months', 'YYYYMMDD') AND
+  TO_CHAR(CURRENT_DATE, 'YYYYMMDD')
+    - Prior FY actual:   same range shifted back 1 year (INTERVAL '1 year')
+    - Monthly target/pace: year_monthname::DATE between April of current FY and current month
+
+  KEY METRICS (all three must appear together as chart series or as side-by-side bars):
+    1. Actual Sales (current FY):  ROUND(SUM(NETWEIGHT_TMT)::numeric, 2) AS actual_tmt
+       Source: MOM_DAY_LEVEL_DATA, filter DAY_ID to current FY range
+    2. Actual Sales (prior FY):    ROUND(SUM(NETWEIGHT_TMT)::numeric, 2) AS history_tmt
+       Source: MOM_DAY_LEVEL_DATA, filter DAY_ID to prior FY range (same month/day window, minus 1 year)
+    3. Target:                     ROUND(SUM(TARGET_QTY_TMT)::numeric, 2) AS target_tmt
+       Source: M60_LEVEL_METADATA, filter year_monthname::DATE to current FY range
+    Prefer showing all three on the same chart as grouped bars or multi-line series.
+
+  KEY DIMENSIONS (use these for chart breakdowns — never use raw ID/code fields):
+    - SBU_Name: business unit (e.g. Lubes, Retail, LPG, Aviation, Direct, B2B). Always include
+      SBU_Name as a breakdown or series dimension unless a single SBU is explicitly selected.
+    - Zone: geographic zone (e.g. North, South, East, West). Use for geographic drill-down.
+    - Region: sub-zone region. Use when drilling below zone.
+    - SalesArea: leaf-level territory. Use when drilling below region.
+    - Month: DATE_TRUNC('month', ...) from MOM_DAY_LEVEL_DATA or year_monthname from M60_LEVEL_METADATA.
+      Use month as the time axis for trend charts.
+
+  ANALYTICAL ANGLES (build charts that answer these questions):
+    - How does actual vs target vs prior-year compare across all SBUs month-wise?
+    - Which zones are over/under target? Broken down by SBU.
+    - Which regions within a zone are lagging? (drill from zone → region → sales area)
+    - What is the monthly sales trend per SBU for the current FY?
+    - Which SBUs are growing vs declining vs prior year?
+
+  DRILL-DOWN ORDER: SBU_Name → Zone → Region → SalesArea → Month
+    Charts should be designed so users can drill into each dimension via conversation.
+
+  Default sort: descending for ranked/volume outputs and time-series.
+"
+POST /workspace/conversations/{conversation_id}/messages
+  {
+    "user_query": "Which SBUs are below target in the last 3 months?",
+    "resume_context": true,
+    "stream": false
+  }
+
+  ---
+  Key points on the conversation drill-down mechanism:
+  - chart_id carries the metric context (actual/target/history) and existing filters forward — the next chart inherits them
+  - selected_category injects a WHERE clause on the current chart's category column (e.g. SBU_Name = 'Lubes')
+  - selected_time_value injects a time filter (e.g. month = '2026-02-01')
+  - resume_context = true means the conversation memory is used — previous SBU/zone selections are remembered without re-stating them
+  - Without chart_id, the message is treated as a fresh question but still within the same conversation memory
 
 
 

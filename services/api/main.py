@@ -7195,7 +7195,10 @@ def _resolve_chart_conversation_context(
     if row_domain and row_domain != str(domain_id or "").strip():
         raise HTTPException(status_code=400, detail="chart_id does not belong to the current domain")
     query_payload = dict(chart_row.get("query_payload") or {})
-    dimensions = query_payload.get("dimensions") if isinstance(query_payload.get("dimensions"), list) else []
+    # Prefer source_dimensions (real SQL columns) over dimensions (may contain chart aliases
+    # like "category" which are not actual column names and will be dropped as non-dimension filters).
+    raw_dims = query_payload.get("source_dimensions") or query_payload.get("dimensions") or []
+    dimensions = raw_dims if isinstance(raw_dims, list) else []
     metrics = query_payload.get("metrics") if isinstance(query_payload.get("metrics"), list) else []
     return {
         "mode": "chart_scoped",
@@ -7636,6 +7639,9 @@ def _persist_workspace_chart_artifact(
             "question": question,
             "metrics": response_payload.get("metrics") or [],
             "dimensions": response_payload.get("dimensions") or [],
+            # Real SQL column names — used to resolve selected_category/selected_series
+            # filters on follow-up, where chart aliases like "category" are not real columns.
+            "source_dimensions": compiled_request.get("dimensions") or [],
             "filters": compiled_request.get("filters") or [],
             "limit": compiled_request.get("limit"),
             "conversation_plan": response_payload.get("conversation_plan"),
