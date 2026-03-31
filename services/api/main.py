@@ -490,7 +490,7 @@ logging.basicConfig(level=getattr(logging, _log_level, logging.INFO))
 logger = logging.getLogger("quantyx.api")
 
 # Bump this manually after each significant edit to confirm the latest code is running.
-BUILD_VERSION = "2026.03.29.005"
+BUILD_VERSION = "2026.03.29.006"
 
 app = FastAPI(
     title="quantyx-core-services API",
