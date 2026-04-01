@@ -48,6 +48,7 @@ from services.ai.agentic_agents import (
     _validate_discovery_sql,
     _enforce_tool_limit,
     _fetch_table_samples,
+    _pick_canonical_time_column,
     TableSample,
 )
 from services.ai.semantic_graph_store import persist_semantic_graph
@@ -3276,8 +3277,10 @@ def _persist_agentic_registry_outputs(
             formula = str(metric.get("formula") or "").strip()
             if not metric_name or not base_table:
                 continue
-            fact_model = f"fact_{base_table}"
-            table_ref = "{{ ref('%s') }}" % fact_model
+            # Use the raw table name directly — no dbt "fact_" prefix.
+            # {{ ref('TABLE') }} is resolved to schema.TABLE at query time
+            # by catalog.resolve_ref, so no dbt run is required.
+            table_ref = "{{ ref('%s') }}" % base_table
             table_profile = profiling_map.get(base_table) or {}
             sql_expr = _qualify_formula(formula, table_ref, table_profile) if formula else ""
             if not sql_expr:
@@ -4515,6 +4518,7 @@ def run_agentic_workflow(
             (
                 cand.get("table"),
                 cand.get("metric"),
+                cand.get("compare_metric"),
                 cand.get("type"),
                 cand.get("intent"),
                 cand.get("category_column"),
@@ -4527,6 +4531,7 @@ def run_agentic_workflow(
             key = (
                 cand.get("table"),
                 cand.get("metric"),
+                cand.get("compare_metric"),
                 cand.get("type"),
                 cand.get("intent"),
                 cand.get("category_column"),
@@ -4556,6 +4561,7 @@ def run_agentic_workflow(
                 (
                     cand.get("table"),
                     cand.get("metric"),
+                    cand.get("compare_metric"),
                     cand.get("type"),
                     cand.get("category_column"),
                     cand.get("time_column"),
@@ -4567,6 +4573,7 @@ def run_agentic_workflow(
                 key = (
                     cand.get("table"),
                     cand.get("metric"),
+                    cand.get("compare_metric"),
                     cand.get("type"),
                     cand.get("category_column"),
                     cand.get("time_column"),
@@ -4576,6 +4583,7 @@ def run_agentic_workflow(
                     (
                         item.get("table"),
                         item.get("metric"),
+                        item.get("compare_metric"),
                         item.get("type"),
                         item.get("category_column"),
                         item.get("time_column"),
@@ -4944,7 +4952,8 @@ def run_agentic_workflow(
                 continue
 
             # Plain time-series trends must stay single-series unless explicitly marked multi_series.
-            if chart_type == "line" and chart_intent != "multi_series":
+            # Comparison intents keep their multi-metric nature — do NOT strip category_col.
+            if chart_type == "line" and chart_intent not in {"multi_series", "comparison", "cross_table_comparison"}:
                 category_col = None
 
             if table_ref and metric_expr:
@@ -5044,6 +5053,111 @@ def run_agentic_workflow(
                             f"LIMIT {limit}"
                         )
                         dimensions = [dim_alias]
+                elif chart_type == "grouped_bar" or chart_intent in {"comparison", "cross_table_comparison"}:
+                    # Multi-metric comparison chart: anchor metric vs compare metric
+                    compare_metric_expr_raw = chart.get("compare_metric_expr") or ""
+                    compare_metric_name = chart.get("compare_metric") or "compare"
+                    compare_table_name = chart.get("compare_table") or table_name
+                    compare_metric_expr_q: str | None = None
+                    if compare_metric_expr_raw:
+                        if compare_table_name != table_name:
+                            # Cross-table: qualify against a different alias
+                            compare_alias = "c"
+                            compare_table_profile = profiling_map.get(compare_table_name) or {}
+                            compare_metric_expr_q = _qualify_formula(
+                                compare_metric_expr_raw, compare_alias, compare_table_profile
+                            )
+                        else:
+                            compare_metric_expr_q = _qualify_formula(
+                                compare_metric_expr_raw, table_alias, profiling_map.get(table_name) or {}
+                            )
+                    if compare_metric_expr_q:
+                        compare_policy = _dashboard_policy_filters(
+                            state.get("domain_id"),
+                            table_alias if compare_table_name == table_name else "c",
+                            profiling_map.get(compare_table_name) or {},
+                            table_name=compare_table_name,
+                            context_text=state.get("context_text"),
+                            all_table_names=list(profiling_map.keys()),
+                        )
+                        if time_col:
+                            # Time-based comparison: both metrics over time (line with two series)
+                            time_grain_cmp = str(chart.get("time_grain") or "month").strip().lower()
+                            dim_expr = f"date_trunc('{time_grain_cmp}', {table_alias}.{_qident(time_col)})"
+                            dim_alias = "period"
+                            if compare_table_name == table_name:
+                                # Same table — both metrics in one pass
+                                all_filters = policy_filters
+                                where_cmp = f" WHERE {' AND '.join(all_filters)} " if all_filters else " "
+                                sql = (
+                                    f"SELECT {dim_expr} AS {dim_alias}, "
+                                    f"{metric_expr} AS \"{metric_name}\", "
+                                    f"{compare_metric_expr_q} AS \"{compare_metric_name}\" "
+                                    f"FROM {sql_from}"
+                                    f"{where_cmp}"
+                                    f"GROUP BY {dim_expr} "
+                                    f"ORDER BY {dim_alias} DESC "
+                                    f"LIMIT {line_single_limit}"
+                                )
+                            else:
+                                # Cross-table — JOIN on time dimension
+                                q_compare_table = f"{q_schema}.{_qident(compare_table_name)}"
+                                compare_time_col = _pick_canonical_time_column(
+                                    profiling_map.get(compare_table_name) or {}, state.get("domain_id")
+                                )
+                                if compare_time_col:
+                                    join_cond = f"date_trunc('{time_grain_cmp}', {table_alias}.{_qident(time_col)}) = date_trunc('{time_grain_cmp}', c.{_qident(compare_time_col)})"
+                                    all_filters = policy_filters + compare_policy
+                                    where_join = f" WHERE {' AND '.join(all_filters)} " if all_filters else " "
+                                    sql = (
+                                        f"SELECT {dim_expr} AS {dim_alias}, "
+                                        f"{metric_expr} AS \"{metric_name}\", "
+                                        f"{compare_metric_expr_q} AS \"{compare_metric_name}\" "
+                                        f"FROM {sql_from} "
+                                        f"LEFT JOIN {q_compare_table} c ON {join_cond}"
+                                        f"{where_join}"
+                                        f"GROUP BY {dim_expr} "
+                                        f"ORDER BY {dim_alias} DESC "
+                                        f"LIMIT {line_single_limit}"
+                                    )
+                            if sql:
+                                chart_type = "line"  # Render as grouped line
+                                dimensions = [dim_alias]
+                        elif category_col:
+                            # Dimension breakdown comparison: grouped_bar by category
+                            dim_alias = "category"
+                            cat_expr = f"{table_alias}.{_qident(category_col)}"
+                            if compare_table_name == table_name:
+                                where_gb = f" WHERE {' AND '.join(policy_filters)} " if policy_filters else " "
+                                sql = (
+                                    f"SELECT {cat_expr} AS {dim_alias}, "
+                                    f"{metric_expr} AS \"{metric_name}\", "
+                                    f"{compare_metric_expr_q} AS \"{compare_metric_name}\" "
+                                    f"FROM {sql_from}"
+                                    f"{where_gb}"
+                                    f"GROUP BY {cat_expr} "
+                                    f"ORDER BY \"{metric_name}\" DESC "
+                                    f"LIMIT {bar_limit}"
+                                )
+                            else:
+                                shared_col = chart.get("shared_join_col") or category_col
+                                q_compare_table = f"{q_schema}.{_qident(compare_table_name)}"
+                                join_cond = f"{table_alias}.{_qident(shared_col)} = c.{_qident(shared_col)}"
+                                all_filters = policy_filters + compare_policy
+                                where_cross = f" WHERE {' AND '.join(all_filters)} " if all_filters else " "
+                                sql = (
+                                    f"SELECT {cat_expr} AS {dim_alias}, "
+                                    f"{metric_expr} AS \"{metric_name}\", "
+                                    f"{compare_metric_expr_q} AS \"{compare_metric_name}\" "
+                                    f"FROM {sql_from} "
+                                    f"LEFT JOIN {q_compare_table} c ON {join_cond}"
+                                    f"{where_cross}"
+                                    f"GROUP BY {cat_expr} "
+                                    f"ORDER BY \"{metric_name}\" DESC "
+                                    f"LIMIT {bar_limit}"
+                                )
+                            if sql:
+                                dimensions = [dim_alias]
                 if not sql:
                     # Fallback for valid metrics when no chart dimension is available.
                     sql = (

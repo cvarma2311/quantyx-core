@@ -136,6 +136,9 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 44. **Phase 47: LLM Chart Discovery — Data-Aware Dashboard Intelligence**
    - Feed real sample rows + distinct column values + business context to an LLM to propose domain-specific chart SQL directly. Fully switchable via `CHART_DISCOVERY_MODE` env var. Produces charts like "Daily DryOut Trend by Product (MS/HSD/E20)" that the formula-first pipeline cannot.
 
+45. **Phase 48: LLM-First SQL Conversation Mode**
+   - Replace the 7-step deterministic pipeline for chart conversation follow-ups with a single LLM call that receives full context (source chart SQL, FY-scoped metric formulas, schema hints, join edges) and returns executable SQL directly. Hard validation gate (EXPLAIN + table scope + mandatory filter check) on every response. Transparent fallback to existing pipeline. Controlled by `CONVERSATION_LLM_SQL_MODE` env flag.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -162,3 +165,4 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 42 depends on Phase 41 (chart conversation protocol) and Phase 24/34 (workspace and user identity).
 - Phase 43 depends on Phases 24/34/35/36/37 and adds statistical intelligence over persisted chart and KPI data.
 - Phase 44 depends on Phases 05/12/23/24/34/42 and is a backward-compatible schema consolidation — no functional change to analytics, only data model unification.
+- Phase 48 depends on Phases 34/39/41/42/47 and replaces the chart conversation follow-up pipeline with an LLM-first SQL path that consumes pre-synthesized FY-scoped metric formulas and deterministic join edges, with a hard validation gate and transparent fallback.

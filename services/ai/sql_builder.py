@@ -12,6 +12,12 @@ _REF_PATTERN = re.compile(
     r"\b([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\b"
 )
 _TABLE_PATTERN = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)\b")
+# Patterns that match quoted identifiers produced by resolve_ref:
+#   schema."TABLE".column  or  schema."TABLE"
+_QUOTED_REF_PATTERN = re.compile(
+    r'\b([a-zA-Z_][a-zA-Z0-9_]*)\."([^"]+)"\."?([a-zA-Z_][a-zA-Z0-9_"]*)"?'
+)
+_QUOTED_TABLE_PATTERN = re.compile(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\."([^"]+)"')
 _ALLOWED_OPERATORS = {"=", "!=", ">", ">=", "<", "<=", "IN", "ILIKE"}
 _AGGREGATE_SQL_PATTERN = re.compile(r"\b(SUM|AVG|COUNT|MIN|MAX)\s*\(", re.IGNORECASE)
 
@@ -30,6 +36,15 @@ class BuiltQuery:
 
 
 def _collect_tables(sql: str) -> set[str]:
+    # Prefer quoted-identifier patterns (produced by resolve_ref) so that the
+    # unquoted internal representation (schema.TABLE) is used for set ops.
+    tables = {f"{m.group(1)}.{m.group(2)}" for m in _QUOTED_REF_PATTERN.finditer(sql)}
+    if tables:
+        return tables
+    tables = {f"{m.group(1)}.{m.group(2)}" for m in _QUOTED_TABLE_PATTERN.finditer(sql)}
+    if tables:
+        return tables
+    # Fallback: unquoted identifiers
     tables = {f"{m.group(1)}.{m.group(2)}" for m in _REF_PATTERN.finditer(sql)}
     if tables:
         return tables
@@ -45,7 +60,7 @@ def _render_metric_sql(metric: Metric, schema: str) -> str:
 
 
 def _is_already_aggregated(metric_sql: str) -> bool:
-    return bool(_AGGREGATE_SQL_PATTERN.match(metric_sql or ""))
+    return bool(_AGGREGATE_SQL_PATTERN.search(metric_sql or ""))
 
 
 def _required_tables_for_metric(metric: Metric, schema: str) -> set[str]:
@@ -157,8 +172,15 @@ def build_query(
         raise ValueError("No tables resolved for query")
     if len(required_tables) == 1:
         table_name = sorted(required_tables)[0]
-        base_sql = f"FROM {table_name}"
-        base_table = table_name
+        # table_name is the unquoted internal form (schema.TABLE).
+        # Build the FROM clause with the table name quoted so PostgreSQL
+        # preserves case for mixed-case table identifiers.
+        _tparts = table_name.split(".", 1)
+        _quoted_for_sql = (
+            f'{_tparts[0]}."{_tparts[1]}"' if len(_tparts) == 2 else f'"{table_name}"'
+        )
+        base_sql = f"FROM {_quoted_for_sql}"
+        base_table = table_name  # unquoted for internal comparisons
         base_alias = None
         alias_map = None
     else:

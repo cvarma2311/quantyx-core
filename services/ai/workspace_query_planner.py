@@ -354,6 +354,61 @@ def bind_metric(metric_candidates: list[str], available_metrics: list[str]) -> t
     return None, warnings
 
 
+def bind_metrics(
+    metric_candidates: list[str],
+    available_metrics: list[str],
+) -> tuple[list[str], list[str]]:
+    """
+    Like bind_metric but returns ALL matched metrics (not just the best one).
+    Each candidate is resolved independently using the same token-overlap logic.
+    Returns (bound_metrics, warnings).
+    """
+    warnings: list[str] = []
+    if not metric_candidates:
+        return [], warnings
+    normalized_lookup = {_normalize_name(name): name for name in available_metrics}
+    available_tokens = {name: set(_normalize_name(name).split()) for name in available_metrics}
+    bound: list[str] = []
+    seen: set[str] = set()
+    for candidate in metric_candidates:
+        normalized_candidate = _normalize_name(candidate)
+        if not normalized_candidate:
+            continue
+        # Exact match
+        if normalized_candidate in normalized_lookup:
+            resolved = normalized_lookup[normalized_candidate]
+            if resolved not in seen:
+                bound.append(resolved)
+                seen.add(resolved)
+            continue
+        # Token-overlap match
+        best_metric: str | None = None
+        best_score = 0.0
+        candidate_tokens = set(normalized_candidate.split())
+        for metric_name, metric_tokens in available_tokens.items():
+            overlap = len(candidate_tokens & metric_tokens)
+            if not overlap:
+                continue
+            score = overlap / max(len(candidate_tokens), 1)
+            if normalized_candidate in _normalize_name(metric_name):
+                score += 0.5
+            if score > best_score:
+                best_score = score
+                best_metric = metric_name
+        if best_metric and best_metric not in seen:
+            bound.append(best_metric)
+            seen.add(best_metric)
+            if best_metric != candidate:
+                warnings.append(f"metric_bound:{candidate}->{best_metric}")
+        elif not available_metrics:
+            # Raw-column passthrough when catalog is empty
+            if candidate not in seen:
+                bound.append(candidate)
+                seen.add(candidate)
+                warnings.append(f"metric_raw_column_passthrough:{candidate}")
+    return bound, warnings
+
+
 def bind_dimensions(
     dimension_candidates: list[str],
     allowed_dimensions: list[str],
@@ -539,7 +594,10 @@ def validate_workspace_query_plan(
     question_clean = question.split(_chart_ctx_sep)[0].strip() if _chart_ctx_sep in question else question
     detail_intent = (raw_plan.get("intent") == "detail_query") or detect_detail_intent(question_clean)
     metric_candidates = list(explicit_metrics or []) + list(raw_plan.get("metric_candidates") or raw_plan.get("metrics") or [])
-    metric_name, metric_warnings = bind_metric(metric_candidates, list(metric_catalog.metrics.keys()))
+    # Resolve ALL requested metrics (multi-metric comparison support)
+    all_metric_names, metric_warnings = bind_metrics(metric_candidates, list(metric_catalog.metrics.keys()))
+    # Primary metric for backward-compatible code paths
+    metric_name = all_metric_names[0] if all_metric_names else None
     dimension_candidates = list(explicit_dimensions or []) + list(raw_plan.get("dimensions") or [])
     if detail_intent:
         allowed_lookup = {_normalize_name(name): name for name in allowed_dimensions}
@@ -624,6 +682,7 @@ def validate_workspace_query_plan(
     validated = {
         "intent": "detail_query" if detail_intent else (raw_plan.get("intent") or "analytic_query"),
         "metric_name": metric_name,
+        "metric_names": all_metric_names,  # full list for multi-metric queries
         "metric_source": "registry_metric" if metric_obj else None,
         "metric_sql": metric_obj.sql if metric_obj else None,
         "base_table": base_table,
@@ -664,22 +723,25 @@ def compile_workspace_query_plan(
     limit: int,
 ) -> dict[str, Any]:
     metric_name = validated_plan.get("metric_name")
+    # Use the full metric_names list when present (multi-metric queries)
+    metric_names = validated_plan.get("metric_names") or ([metric_name] if metric_name else [])
     compiled = {
         "question": None,
         "tenant_id": tenant_id,
         "domain_id": domain_id,
         "run_id": run_id,
-        "metrics": [metric_name] if metric_name else [],
+        "metrics": metric_names,
         "dimensions": validated_plan.get("dimensions") or [],
         "filters": validated_plan.get("filters") or [],
         "limit": limit,
         "explain": False,
     }
     logger.info(
-        "workspace.query_plan.compile.output | tenant=%s domain=%s metric=%s dimensions=%s filters=%s limit=%s",
+        "workspace.query_plan.compile.output | tenant=%s domain=%s metric=%s metrics=%s dimensions=%s filters=%s limit=%s",
         tenant_id,
         domain_id,
         metric_name,
+        metric_names,
         compiled.get("dimensions"),
         compiled.get("filters"),
         limit,
@@ -720,12 +782,23 @@ def build_workspace_chart(
     dimensions: list[str],
     response_mode: str | None = None,
     preferred_chart_type: str | None = None,
+    metric_names: list[str] | None = None,
 ) -> tuple[str | None, dict[str, Any] | None, list[str]]:
+    from services.ai.charts import build_multi_metric_chart_payload
+
     warnings: list[str] = []
     requested = str(preferred_chart_type or "").strip().lower()
     if response_mode == "table_only":
         warnings.append("chart_intent_fallback:table_only->table")
         return "table", None, warnings
+
+    # Multi-metric path: 2+ distinct metrics requested
+    effective_metric_names = metric_names or ([metric_name] if metric_name else [])
+    if len(effective_metric_names) > 1 and rows:
+        payload = build_multi_metric_chart_payload(rows, effective_metric_names, dimensions, chart_type=requested or None)
+        chart_type = payload["chart_type"]
+        return chart_type, payload, warnings
+
     if not rows or not metric_name or not dimensions:
         warnings.append("chart_intent_fallback:insufficient_chart_inputs->table")
         return "table", None, warnings

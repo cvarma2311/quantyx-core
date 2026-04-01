@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 import logging
 import os
 import re
+import urllib.request
 
 from services.ai.config import Settings
 from services.ai.db import run_query
@@ -47,6 +49,19 @@ MEASURE_HINT_TOKENS = {
     "rate",
     "avg",
     "mean",
+    # physical / logistics measure suffixes
+    "weight",
+    "tmt",   # thousand metric tons
+    "kl",    # kilolitres
+    "kg",    # kilograms
+    "mt",    # metric tons
+    "lt",    # litres
+    "revenue",
+    "profit",
+    "cost",
+    "value",
+    "sum",
+    "net",
 }
 IDENTIFIER_CODE_TOKENS = {"code", "sap", "jde", "idx"}
 IDENTIFIER_KEY_TOKENS = {"id", "identifier", "key", "uuid"}
@@ -97,7 +112,7 @@ _ROLE_TARGETS: dict[str, tuple[int, int]] = {
     "executive_trends": (2, 4),
     "breakdowns": (2, 4),
     "target_pace": (1, 3),
-    "benchmark_comparison": (1, 3),
+    "benchmark_comparison": (1, 4),
     "quality_rate": (1, 3),
     "supporting_diagnostics": (1, 4),
 }
@@ -1154,6 +1169,89 @@ def enrich_schema_graph_columns(settings: Settings, schema_graph: dict[str, Any]
     return {"tables": tables}
 
 
+def _generate_table_descriptions(
+    settings: Settings,
+    tables_data: list[dict[str, Any]],
+) -> dict[str, str]:
+    """
+    Call the LLM once with all profiled tables and return a mapping of
+    table_name → one-sentence business description.
+
+    Input per table: name, column names + semantic roles, row_count, sample categorical values.
+    Returns {} on any failure (caller falls back to column-name hints).
+    """
+    logger = logging.getLogger(__name__)
+    if not getattr(settings, "openai_api_key", None):
+        logger.warning("_generate_table_descriptions: skipped — no openai_api_key")
+        return {}
+    if not tables_data:
+        return {}
+
+    # Build a compact payload: only what the LLM needs to write a good description
+    compact: list[dict[str, Any]] = []
+    for tbl in tables_data:
+        col_sem: dict[str, str] = {
+            s["name"]: s.get("semantic_role", "")
+            for s in (tbl.get("column_semantics") or [])
+            if s.get("name")
+        }
+        cols_annotated: dict[str, str] = {}
+        for col in (tbl.get("numeric_columns") or []) + (tbl.get("time_columns") or []) + (tbl.get("categorical_columns") or []):
+            cols_annotated[col] = col_sem.get(col, "")
+        samples = {
+            k: v[:5] for k, v in (tbl.get("sample_values") or {}).items()
+        }
+        compact.append({
+            "name": tbl["name"],
+            "row_count": tbl.get("row_count"),
+            "columns": cols_annotated,
+            "sample_values": samples,
+        })
+
+    system_prompt = (
+        "You are a data dictionary assistant. "
+        "Given database table metadata, write a single concise business sentence (max 20 words) "
+        "describing what each table contains — what business entity it represents, "
+        "what it measures, and its main dimensions. "
+        "Return JSON: {\"descriptions\": {\"TABLE_NAME\": \"description\", ...}}"
+    )
+    body = json.dumps(
+        {
+            "model": getattr(settings, "openai_model", "gpt-4o-mini"),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps({"tables": compact}, default=str)},
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        },
+        default=str,
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        content = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        result = json.loads(content)
+        descriptions: dict[str, str] = result.get("descriptions") or {}
+        logger.info(
+            "profile_tables._generate_table_descriptions: described %d/%d tables",
+            len(descriptions), len(tables_data),
+        )
+        return {k: str(v) for k, v in descriptions.items() if v}
+    except Exception as exc:
+        logger.warning("_generate_table_descriptions failed: %s — %s", type(exc).__name__, exc)
+        return {}
+
+
 def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name: str, scoped_conn=None) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
     profiling: dict[str, Any] = {"tables": []}
@@ -1298,8 +1396,19 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
                 "sample_values": samples,
                 "candidate_keys": candidate_keys,
                 "column_semantics": column_semantics,
+                "description": "",  # filled below by LLM
             }
         )
+
+    # Generate one-sentence business descriptions for all profiled tables in one LLM call
+    logger.info("profile_tables: calling _generate_table_descriptions for %d tables", len(profiling["tables"]))
+    descriptions = _generate_table_descriptions(settings, profiling["tables"])
+    if descriptions:
+        for tbl in profiling["tables"]:
+            tbl_desc = descriptions.get(tbl["name"]) or ""
+            if tbl_desc:
+                tbl["description"] = tbl_desc
+
     return profiling
 
 
@@ -2002,10 +2111,14 @@ def _metric_family(metric_name: str | None, metric_intent: str | None = None) ->
     intent = str(metric_intent or "").strip().lower()
     if "benchmark" in name or "industry" in name or "comparison" in name:
         return "benchmark"
-    if "target" in name:
+    if "target" in name or "budget" in name or "plan" in name:
         return "target"
     if "pace" in name:
         return "pace"
+    if "history" in name or "prior" in name or "last_year" in name or "prev" in name:
+        return "historical"
+    if "actual" in name or "ytd" in name:
+        return "actual"
     if "sales" in name or "revenue" in name:
         return "sales"
     if "production" in name:
@@ -2019,6 +2132,98 @@ def _metric_family(metric_name: str | None, metric_intent: str | None = None) ->
     if intent in {"volume", "backlog"}:
         return intent
     return "performance"
+
+
+# Metric families that form natural comparison pairs — (anchor_family, compare_family)
+_COMPARISON_PAIRS: list[tuple[str, str]] = [
+    ("actual", "target"),
+    ("actual", "historical"),
+    ("actual", "benchmark"),
+    ("sales", "target"),
+    ("production", "target"),
+    ("performance", "target"),
+    ("performance", "benchmark"),
+    ("sales", "historical"),
+    ("production", "historical"),
+]
+
+
+def _detect_comparison_pairs(
+    metrics: list[dict[str, Any]],
+    table_name: str,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """
+    Find ordered pairs of metrics from the same table that form a natural comparison
+    (e.g. actual vs target, current vs prior FY, volume vs benchmark).
+    Returns a deduplicated list of (anchor_metric, compare_metric) tuples.
+    """
+    table_metrics = [m for m in metrics if m.get("base_table") == table_name and m.get("formula")]
+    if len(table_metrics) < 2:
+        return []
+
+    families: dict[str, list[dict[str, Any]]] = {}
+    for m in table_metrics:
+        fam = _metric_family(m.get("metric_name"), m.get("metric_intent"))
+        families.setdefault(fam, []).append(m)
+
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    seen: set[tuple[str, str]] = set()
+    for anchor_fam, compare_fam in _COMPARISON_PAIRS:
+        anchors = families.get(anchor_fam) or []
+        compares = families.get(compare_fam) or []
+        for a in anchors:
+            for c in compares:
+                key = (a.get("metric_name", ""), c.get("metric_name", ""))
+                if key not in seen:
+                    seen.add(key)
+                    pairs.append((a, c))
+    return pairs
+
+
+def _detect_cross_table_comparison_pairs(
+    metrics: list[dict[str, Any]],
+    join_edges: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any], str]]:
+    """
+    Find cross-table metric pairs where the tables are joined.
+    Returns (anchor_metric, compare_metric, shared_dimension_column) triples.
+    """
+    joined_tables: set[tuple[str, str]] = set()
+    shared_cols: dict[tuple[str, str], str] = {}
+    for edge in join_edges:
+        lt = str(edge.get("left_table") or "").strip()
+        rt = str(edge.get("right_table") or "").strip()
+        lk = str(edge.get("left_key") or "").strip()
+        if lt and rt:
+            joined_tables.add((lt, rt))
+            joined_tables.add((rt, lt))
+            shared_cols[(lt, rt)] = lk
+            shared_cols[(rt, lt)] = lk
+
+    pairs: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+    seen: set[tuple[str, str]] = set()
+    for a in metrics:
+        if not a.get("formula"):
+            continue
+        a_fam = _metric_family(a.get("metric_name"), a.get("metric_intent"))
+        for c in metrics:
+            if c is a or not c.get("formula"):
+                continue
+            if a.get("base_table") == c.get("base_table"):
+                continue
+            c_fam = _metric_family(c.get("metric_name"), c.get("metric_intent"))
+            key = (a.get("metric_name", ""), c.get("metric_name", ""))
+            if key in seen:
+                continue
+            if (a.get("base_table"), c.get("base_table")) not in joined_tables:
+                continue
+            for anchor_fam, compare_fam in _COMPARISON_PAIRS:
+                if a_fam == anchor_fam and c_fam == compare_fam:
+                    seen.add(key)
+                    dim_col = shared_cols.get((a.get("base_table"), c.get("base_table")), "")
+                    pairs.append((a, c, dim_col))
+                    break
+    return pairs
 
 
 def _build_dashboard_theme(
@@ -2128,7 +2333,7 @@ def _chart_roles(chart: dict[str, Any]) -> tuple[str, list[str]]:
     if family in {"target", "pace"} or any(token in metric_name.lower() for token in ("target", "pace")):
         primary = "target_pace"
         related.append("executive_trends")
-    elif family == "benchmark" or intent in {"comparison", "benchmark_comparison"}:
+    elif family in {"benchmark", "historical"} or intent in {"comparison", "benchmark_comparison", "cross_table_comparison"}:
         primary = "benchmark_comparison"
         related.append("executive_trends")
     elif family in {"quality", "productivity", "utilization"} or metric_intent in {"quality", "rate", "productivity", "utilization"}:
@@ -2146,6 +2351,8 @@ def _chart_roles(chart: dict[str, Any]) -> tuple[str, list[str]]:
         related.append("breakdowns")
     if intent == "trend" and "executive_trends" not in related and primary != "executive_trends":
         related.append("executive_trends")
+    if intent in {"comparison", "cross_table_comparison"} and "breakdowns" not in related and primary != "breakdowns":
+        related.append("breakdowns")
     return primary, related
 
 
@@ -2161,6 +2368,11 @@ def _selection_reason(chart: dict[str, Any]) -> str:
         return f"Selected to show category contribution for {metric} by {category}."
     if intent in {"multi_series", "join_breakdown"}:
         return f"Selected as supporting diagnostic context for {metric}."
+    if intent in {"comparison", "cross_table_comparison"}:
+        compare = str(chart.get("compare_metric") or "comparison metric").strip()
+        category = str(chart.get("category_column") or "").strip()
+        dimension_part = f" by {category}" if category else ""
+        return f"Selected to compare {metric} against {compare}{dimension_part}."
     return f"Selected to broaden dashboard coverage for {metric}."
 
 
@@ -2212,6 +2424,7 @@ def _contextual_chart_title(
     time_column: str | None,
     table_name: str | None,
     time_grain: str | None = None,
+    compare_metric_name: str | None = None,
 ) -> str:
     metric_label = _pretty_name(metric_name or "Metric")
     category_label = _pretty_name(category_column)
@@ -2236,6 +2449,14 @@ def _contextual_chart_title(
         if category_label:
             return f"{category_label} Share of {metric_label}"
         return f"{metric_label} Contribution Share"
+    if intent == "comparison":
+        compare_label = _pretty_name(compare_metric_name or "Comparison")
+        if category_label:
+            return f"{metric_label} vs {compare_label} by {category_label}"
+        if time_column:
+            grain_label = _time_grain_label(time_grain)
+            return f"{metric_label} vs {compare_label} by {grain_label}"
+        return f"{metric_label} vs {compare_label}"
     if table_label:
         return f"{metric_label} Overview for {table_label}"
     return f"{metric_label} Overview"
@@ -2566,6 +2787,152 @@ def propose_chart_candidates(
                             }
                         )
                         break
+    # ── Comparison chart candidates ──────────────────────────────────────────
+    # Same-table: actual vs target, current vs prior FY, volume vs benchmark
+    _compared_pairs: set[tuple[str, str]] = set()
+    for table in profiling.get("tables", []):
+        table_name = table.get("name")
+        if not table_name:
+            continue
+        time_col = _pick_canonical_time_column(table, domain_id)
+        breakdown_cols = _pick_chart_breakdowns(table, {}, limit=3, domain_id=domain_id)
+        for anchor, compare in _detect_comparison_pairs(metrics, table_name):
+            pair_key = (anchor.get("metric_name", ""), compare.get("metric_name", ""))
+            if pair_key in _compared_pairs:
+                continue
+            _compared_pairs.add(pair_key)
+            anchor_name = anchor.get("metric_name")
+            compare_name = compare.get("metric_name")
+            # Time-series comparison (line chart with two series)
+            if time_col:
+                candidates.append(
+                    {
+                        "type": "line",
+                        "intent": "comparison",
+                        "title": _contextual_chart_title(
+                            intent="comparison",
+                            metric_name=anchor_name,
+                            compare_metric_name=compare_name,
+                            category_column=None,
+                            time_column=time_col,
+                            table_name=table_name,
+                            time_grain="month",
+                        ),
+                        "table": table_name,
+                        "metric": anchor_name,
+                        "compare_metric": compare_name,
+                        "metric_intent": anchor.get("metric_intent") or _derive_metric_intent(anchor_name),
+                        "metric_column": None,
+                        "metric_expr": anchor.get("formula"),
+                        "compare_metric_expr": compare.get("formula"),
+                        "time_column": time_col,
+                        "time_grain": "month",
+                        "category_column": None,
+                        "metrics": [anchor_name, compare_name],
+                        "chart_source": "comparison_detected",
+                    }
+                )
+            # Dimension breakdown comparison (grouped bar)
+            for cat_col in breakdown_cols[:2]:
+                candidates.append(
+                    {
+                        "type": "grouped_bar",
+                        "intent": "comparison",
+                        "title": _contextual_chart_title(
+                            intent="comparison",
+                            metric_name=anchor_name,
+                            compare_metric_name=compare_name,
+                            category_column=cat_col,
+                            time_column=None,
+                            table_name=table_name,
+                        ),
+                        "table": table_name,
+                        "metric": anchor_name,
+                        "compare_metric": compare_name,
+                        "metric_intent": anchor.get("metric_intent") or _derive_metric_intent(anchor_name),
+                        "metric_column": None,
+                        "metric_expr": anchor.get("formula"),
+                        "compare_metric_expr": compare.get("formula"),
+                        "time_column": None,
+                        "category_column": cat_col,
+                        "metrics": [anchor_name, compare_name],
+                        "chart_source": "comparison_detected",
+                    }
+                )
+
+    # Cross-table comparison: e.g., MOM_DAY actual vs M60 target (joined tables)
+    for anchor, compare, shared_col in _detect_cross_table_comparison_pairs(metrics, join_edges):
+        pair_key = (anchor.get("metric_name", ""), compare.get("metric_name", ""))
+        if pair_key in _compared_pairs:
+            continue
+        _compared_pairs.add(pair_key)
+        anchor_table = anchor.get("base_table") or ""
+        anchor_table_info = next(
+            (t for t in profiling.get("tables", []) if t.get("name") == anchor_table), {}
+        )
+        time_col = _pick_canonical_time_column(anchor_table_info, domain_id)
+        anchor_name = anchor.get("metric_name")
+        compare_name = compare.get("metric_name")
+        if time_col:
+            candidates.append(
+                {
+                    "type": "line",
+                    "intent": "cross_table_comparison",
+                    "title": _contextual_chart_title(
+                        intent="comparison",
+                        metric_name=anchor_name,
+                        compare_metric_name=compare_name,
+                        category_column=None,
+                        time_column=time_col,
+                        table_name=anchor_table,
+                        time_grain="month",
+                    ),
+                    "table": anchor_table,
+                    "compare_table": compare.get("base_table"),
+                    "metric": anchor_name,
+                    "compare_metric": compare_name,
+                    "metric_intent": anchor.get("metric_intent") or _derive_metric_intent(anchor_name),
+                    "metric_column": None,
+                    "metric_expr": anchor.get("formula"),
+                    "compare_metric_expr": compare.get("formula"),
+                    "time_column": time_col,
+                    "time_grain": "month",
+                    "category_column": None,
+                    "shared_join_col": shared_col,
+                    "metrics": [anchor_name, compare_name],
+                    "chart_source": "cross_table_comparison_detected",
+                }
+            )
+        if shared_col:
+            candidates.append(
+                {
+                    "type": "grouped_bar",
+                    "intent": "cross_table_comparison",
+                    "title": _contextual_chart_title(
+                        intent="comparison",
+                        metric_name=anchor_name,
+                        compare_metric_name=compare_name,
+                        category_column=shared_col,
+                        time_column=None,
+                        table_name=anchor_table,
+                    ),
+                    "table": anchor_table,
+                    "compare_table": compare.get("base_table"),
+                    "metric": anchor_name,
+                    "compare_metric": compare_name,
+                    "metric_intent": anchor.get("metric_intent") or _derive_metric_intent(anchor_name),
+                    "metric_column": None,
+                    "metric_expr": anchor.get("formula"),
+                    "compare_metric_expr": compare.get("formula"),
+                    "time_column": None,
+                    "category_column": shared_col,
+                    "shared_join_col": shared_col,
+                    "metrics": [anchor_name, compare_name],
+                    "chart_source": "cross_table_comparison_detected",
+                }
+            )
+    # ── end comparison candidates ─────────────────────────────────────────────
+
     # add join-driven candidates (dimension lookups)
     for edge in join_edges:
         if edge.get("relationship") in {"many_to_one", "one_to_many"}:
@@ -2635,6 +3002,7 @@ def select_charts(
         return (
             cand.get("table"),
             cand.get("metric"),
+            cand.get("compare_metric"),
             cand.get("type"),
             cand.get("category_column"),
             cand.get("time_column"),
@@ -2645,6 +3013,7 @@ def select_charts(
         return (
             cand.get("table"),
             cand.get("metric"),
+            cand.get("compare_metric"),
             cand.get("intent"),
             cand.get("time_grain"),
             cand.get("category_column"),
@@ -2660,6 +3029,8 @@ def select_charts(
                 score += 1.5
             elif cand.get("time_grain") == "month":
                 score += 1.5
+        elif intent in {"comparison", "cross_table_comparison"}:
+            score += 3.25  # Comparison charts are high-value; sit just below trend
         elif intent == "multi_series":
             score += 2.75
         elif intent in {"breakdown", "join_breakdown"}:

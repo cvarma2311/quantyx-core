@@ -22,7 +22,43 @@ ACTUAL_HISTORY_TMT_SALES
 ###############################
 TARGET_TMT_SALES
 
-SELECT  ROUND(SUM("M60_LEVEL_METADATA"."TARGET_QTY_TMT")::numeric,2) AS "TARGET_TMT_SALES" ,
-month_name FROM "M60_LEVEL_METADATA"  where  "SBU_Name" = 'Lubes'  AND "SBU_Name" != '0' AND
+SELECT  ROUND(SUM("M60_LEVEL_METADATA"."TARGET_QTY_TMT")::numeric,2) AS "TARGET_TMT_SALES" FROM "M60_LEVEL_METADATA"  where  "SBU_Name" = 'Lubes'  AND "SBU_Name" != '0' AND
 "SBU_Name" not in ('Common','Mumbai Ref','Renewable Energy','Visakh Ref') AND
- "year_monthname"::DATE BETWEEN '2025-04-01' AND '2026-03-30'  GROUP BY month_name
+ "year_monthname"::DATE BETWEEN '2025-04-01' AND '2026-03-30'
+
+ -----
+
+ WITH actual_tmt_sales AS (
+    SELECT
+        ROUND(SUM("MOM_DAY_LEVEL_DATA"."NETWEIGHT_TMT")::numeric, 2) AS actual_tmt_sales
+    FROM "MOM_DAY_LEVEL_DATA"
+    WHERE "SBU_Name" = 'Lubes'
+      AND "SBU_Name" != '0'
+      AND "SBU_Name" NOT IN ('Common', 'Mumbai Ref', 'Renewable Energy', 'Visakh Ref')
+      AND "DAY_ID" BETWEEN '20250401' AND '20260330'
+),
+actual_history_tmt_sales AS (
+    SELECT
+        ROUND(SUM("MOM_DAY_LEVEL_DATA"."NETWEIGHT_TMT")::numeric, 2) AS actual_history_tmt_sales
+    FROM "MOM_DAY_LEVEL_DATA"
+    WHERE "SBU_Name" = 'Lubes'
+      AND "SBU_Name" != '0'
+      AND "SBU_Name" NOT IN ('Common', 'Mumbai Ref', 'Renewable Energy', 'Visakh Ref')
+      AND "DAY_ID" BETWEEN '20240401' AND '20250330'
+),
+target_tmt_sales AS (
+    SELECT
+        ROUND(SUM("M60_LEVEL_METADATA"."TARGET_QTY_TMT")::numeric, 2) AS target_tmt_sales
+    FROM "M60_LEVEL_METADATA"
+    WHERE "SBU_Name" = 'Lubes'
+      AND "SBU_Name" != '0'
+      AND "SBU_Name" NOT IN ('Common', 'Mumbai Ref', 'Renewable Energy', 'Visakh Ref')
+      AND "year_monthname"::DATE BETWEEN '2025-04-01' AND '2026-03-30'
+)
+SELECT
+    a.actual_tmt_sales,
+    h.actual_history_tmt_sales,
+    t.target_tmt_sales
+FROM actual_tmt_sales a
+CROSS JOIN actual_history_tmt_sales h
+CROSS JOIN target_tmt_sales t;

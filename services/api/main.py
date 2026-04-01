@@ -490,7 +490,7 @@ logging.basicConfig(level=getattr(logging, _log_level, logging.INFO))
 logger = logging.getLogger("quantyx.api")
 
 # Bump this manually after each significant edit to confirm the latest code is running.
-BUILD_VERSION = "2026.03.29.006"
+BUILD_VERSION = "2026.03.29.007"
 
 app = FastAPI(
     title="quantyx-core-services API",
@@ -6554,12 +6554,28 @@ def start_agentic_run(payload: dict) -> dict:
         bool(merged_context_text),
         len(resolved_context_ids),
     )
-    merged_context_text, resolved_context_ids = _merge_context_inputs(
-        tenant_id,
-        domain_id,
-        payload.get("context_text"),
-        payload.get("context_ids") or [],
-    )
+    # Activate each resolved context for this scope so subsequent conversation
+    # messages can find it via list_active_context_ids → business_context_text.
+    _run_connection_id = payload.get("connection_id") or connection_id
+    _run_database = payload.get("database") or database
+    _run_schema = payload.get("schema_name") or schema
+    for _ctx_id in resolved_context_ids:
+        try:
+            set_context_active(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                context_id=_ctx_id,
+                connection_id=_run_connection_id,
+                database_name=_run_database,
+                schema_name=_run_schema,
+                is_active=True,
+            )
+        except Exception:
+            logger.exception(
+                "agentic.start.context_activate_failed | tenant_id=%s domain_id=%s context_id=%s",
+                tenant_id, domain_id, _ctx_id,
+            )
     run_id = create_agent_run(settings, tenant_id, domain_id, status="queued")
     append_agent_run_event(
         settings,
@@ -6817,6 +6833,10 @@ def _workspace_query_response(
     run_id: str | None,
     question: str,
     chart_context: dict | None = None,
+    chart_followup_context: dict | None = None,
+    raw_user_query: str | None = None,
+    conversation_memory_text: str | None = None,
+    business_context_text: str | None = None,
     metrics: list[str] | None = None,
     dimensions: list[str] | None = None,
     limit: int = 200,
@@ -6830,6 +6850,145 @@ def _workspace_query_response(
         database_name=database_name,
         schema_name=schema_name,
     )
+    # ── LLM-first SQL agent path ─────────────────────────────────────────────
+    # When CONVERSATION_LLM_SQL_MODE=true the LLM writes complete SQL from
+    # business context + table schemas + source chart SQL.  Falls back silently
+    # to the deterministic pipeline on any failure.
+    from services.ai.llm_sql_direct import is_llm_sql_mode_enabled, llm_direct_sql
+    if is_llm_sql_mode_enabled():
+        _eff_schema = schema_name or settings.db_schema
+        _llm_result = llm_direct_sql(
+            user_query=raw_user_query or question,
+            conversation_memory=conversation_memory_text,
+            business_context=business_context_text,
+            intelligence_bundle=intelligence_bundle or {},
+            chart_context=chart_context,
+            chart_followup_context=chart_followup_context,
+            schema_name=_eff_schema,
+            settings=settings,
+            scoped_conn=_resolve_scoped_conn(tenant_id, domain_id),
+        )
+        if _llm_result:
+            try:
+                _llm_metrics: list[str] = list(_llm_result.get("metrics") or [])
+                _llm_dims: list[str] = list(_llm_result.get("dimensions") or [])
+                from decimal import Decimal as _Decimal
+                import os as _os
+                _sq_timeout_ms = int(_os.getenv("LLM_SQL_QUERY_TIMEOUT_MS", "15000"))
+                _llm_raw_rows = [
+                    {k: float(v) if isinstance(v, _Decimal) else v for k, v in dict(r).items()}
+                    for r in (run_query(
+                        settings,
+                        _llm_result["sql"],
+                        [],
+                        scoped_conn=_resolve_scoped_conn(tenant_id, domain_id),
+                        statement_timeout_ms=_sq_timeout_ms,
+                    ) or [])
+                ]
+                _llm_qr = QueryResult(
+                    metrics=_llm_metrics,
+                    dimensions=_llm_dims,
+                    sql=_llm_result["sql"],
+                    rows=_llm_raw_rows,
+                )
+                _llm_metric_name = _llm_metrics[0] if _llm_metrics else None
+                _llm_chart_type, _llm_chart_payload, _ = build_workspace_chart(
+                    rows=_llm_qr.rows,
+                    metric_name=_llm_metric_name,
+                    metric_names=_llm_metrics,
+                    dimensions=_llm_dims,
+                    preferred_chart_type=_llm_result.get("chart_type"),
+                )
+                _llm_title = str(
+                    _llm_result.get("title")
+                    or workspace_chart_title(_llm_metric_name, _llm_dims)
+                )
+                _llm_dashboard_title = (
+                    f"{str(domain_id).replace('_', ' ').replace('-', ' ').title()} Dashboard"
+                )
+                _llm_conv_plan = {
+                    "sql_mode": "llm_agent",
+                    "reasoning": _llm_result.get("reasoning"),
+                    "model": os.getenv("CONVERSATION_LLM_SQL_MODEL") or settings.openai_model,
+                }
+                _llm_followup: dict | None = None
+                if chart_context:
+                    _llm_followup = {
+                        "source_chart_id": chart_context.get("source_chart_id"),
+                        "follow_up_intent": "llm_agent",
+                        "selected_context": {
+                            k: v for k, v in (chart_followup_context or {}).items()
+                            if k != "chart_id" and v not in (None, "", [])
+                        },
+                    }
+                _llm_response_payload: dict[str, Any] = {
+                    "metrics":          _llm_qr.metrics,
+                    "dimensions":       _llm_qr.dimensions,
+                    "chart_id":         None,
+                    "chart_type":       _llm_chart_type,
+                    "chart_title":      _llm_title,
+                    "dashboard_title":  _llm_dashboard_title,
+                    "chart_payload":    _llm_chart_payload.get("chart_payload") if _llm_chart_payload else None,
+                    "data":             _llm_chart_payload.get("data") if _llm_chart_payload else _llm_qr.rows,
+                    "sql":              _llm_qr.sql,
+                    "rows":             _llm_qr.rows,
+                    "lineage":          None,
+                    "artifact_lineage": None,
+                    "conversation_plan": _llm_conv_plan,
+                    "chart_followup":   _llm_followup,
+                }
+                _persisted_llm_id = _persist_workspace_chart_artifact(
+                    tenant_id=tenant_id,
+                    domain_id=domain_id,
+                    question=question,
+                    compiled_request={"dimensions": _llm_dims, "filters": [], "limit": limit},
+                    response_payload=_llm_response_payload,
+                )
+                if _persisted_llm_id:
+                    _llm_response_payload["chart_id"] = _persisted_llm_id
+                    if isinstance(_llm_followup, dict):
+                        _llm_followup["derived_chart_id"] = _persisted_llm_id
+                        _llm_response_payload["chart_followup"] = _llm_followup
+                _llm_label = ", ".join(_llm_metrics[:2]) if _llm_metrics else "requested metrics"
+                _llm_assistant_text = f"Returned {len(_llm_qr.rows)} rows for {_llm_label}."
+                _llm_summary = {
+                    "text": _llm_assistant_text,
+                    "row_count": len(_llm_qr.rows),
+                    "metrics": _llm_metrics,
+                    "dimensions": _llm_dims,
+                    "lineage": None,
+                    "artifact_lineage": None,
+                    "conversation_plan": _llm_conv_plan,
+                    "chart_followup": _llm_response_payload.get("chart_followup"),
+                }
+                _llm_inference = {
+                    "text": "Use filters or follow-up prompts to drill deeper.",
+                    "confidence": 0.8 if _llm_qr.rows else 0.4,
+                    "artifact_lineage": None,
+                    "conversation_plan": _llm_conv_plan,
+                    "chart_followup": _llm_response_payload.get("chart_followup"),
+                }
+                logger.info(
+                    "[llm_sql] pipeline bypassed | rows=%d metrics=%s dims=%s",
+                    len(_llm_qr.rows), _llm_metrics, _llm_dims,
+                )
+                return _llm_response_payload, _llm_assistant_text, _llm_summary, _llm_inference
+            except Exception as _llm_exc:
+                logger.warning("[llm_sql] execution/build failed, falling back: %s", _llm_exc)
+        else:
+            logger.info("[llm_sql] LLM returned no result — falling back to pipeline")
+            # When LLM mode is enabled and LLM returned None, raise immediately
+            # rather than letting the semantic pipeline attempt cross-table joins
+            # it cannot resolve (e.g. m60_level_metadata has no join definition).
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Could not generate SQL for this question. The query may span multiple tables that cannot be joined automatically.",
+                    "hint": "Try rephrasing the question, or ensure the LLM SQL mode is properly configured (CONVERSATION_LLM_SQL_MODE=true).",
+                },
+            )
+    # ── end LLM-first path ───────────────────────────────────────────────────
+
     scoped_metric_rows = (intelligence_bundle or {}).get("metrics") or []
     metric_catalog = _catalog_from_registry_rows(scoped_metric_rows, catalog.dimensions)
     allowed_dimensions = (intelligence_bundle or {}).get("dimension_candidates") or _dimension_candidates_for_scope(
@@ -6863,6 +7022,31 @@ def _workspace_query_response(
     )
     if chart_followup_plan_patch:
         raw_llm_plan.update(chart_followup_plan_patch)
+
+    # Runtime metric synthesis — if the LLM proposed metric names that are not
+    # in the current catalog (missed during onboarding or not yet certified),
+    # attempt to synthesize them from the profiling artifact and inject into
+    # the catalog before validation runs. Synthesized metrics are persisted as
+    # 'suggested' so future queries find them without re-synthesis.
+    _raw_candidates: list[str] = list(
+        (raw_llm_plan.get("metric_candidates") or [])
+        + (raw_llm_plan.get("metrics") or [])
+        + list(effective_metrics or [])
+    )
+    if _raw_candidates:
+        from services.ai.runtime_metric_synthesis import try_augment_catalog_from_profiling
+        metric_catalog = try_augment_catalog_from_profiling(
+            settings=settings,
+            metric_catalog=metric_catalog,
+            metric_candidates=_raw_candidates,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            connection_id=connection_id or "",
+            database_name=database_name or "",
+            schema_name=schema_name or settings.db_schema,
+            source_run_id=run_id,
+        )
+
     validated_plan = validate_workspace_query_plan(
         question=question,
         raw_plan=raw_llm_plan,
@@ -6937,13 +7121,25 @@ def _workspace_query_response(
             scoped_conn=_resolve_scoped_conn(tenant_id, domain_id),
         )
     else:
-        query_result = query(
-            QueryRequest(**compiled_request)
-        )
+        try:
+            query_result = query(
+                QueryRequest(**compiled_request)
+            )
+        except (ValueError, HTTPException) as _qe:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": str(_qe),
+                    "hint": "The semantic pipeline could not resolve a join path for the requested tables. "
+                            "Try rephrasing your question or ensure tables are connected via join definitions.",
+                    "question": question,
+                },
+            ) from _qe
     metric_name = (query_result.metrics or [None])[0]
     chart_type, chart_payload, chart_warnings = build_workspace_chart(
         rows=query_result.rows,
         metric_name=metric_name,
+        metric_names=query_result.metrics or [],
         dimensions=query_result.dimensions,
         response_mode=validated_plan.get("response_mode"),
         preferred_chart_type=(chart_followup_meta or {}).get("requested_chart_type") or validated_plan.get("chart_type"),
@@ -6959,6 +7155,7 @@ def _workspace_query_response(
         validated_plan=validated_plan,
         compiled_sql_preview=query_result.sql,
     )
+    conversation_plan["sql_mode"] = "pipeline"
     if chart_followup_meta:
         conversation_plan["chart_followup"] = {
             "source_chart_id": chart_followup_meta.get("source_chart_id"),
@@ -7048,6 +7245,34 @@ def _workspace_query_response(
 
 def _workspace_llm_stream_enabled() -> bool:
     return bool(getattr(settings, "openai_api_key", None))
+
+
+def _build_client_response(response_payload: dict) -> dict:
+    """
+    Slim response returned to the UI — only keys the client actually needs.
+    Internal fields (conversation_plan, lineage, summary_json, data duplicate,
+    dashboard_title) are kept in response_payload for persistence but not sent
+    over the wire.
+    """
+    followup = response_payload.get("chart_followup")
+    slim_followup: dict | None = None
+    if isinstance(followup, dict):
+        slim_followup = {
+            k: followup[k]
+            for k in ("source_chart_id", "derived_chart_id", "follow_up_intent", "selected_context")
+            if k in followup
+        }
+    return {
+        "chart_id":      response_payload.get("chart_id"),
+        "chart_type":    response_payload.get("chart_type"),
+        "chart_title":   response_payload.get("chart_title"),
+        "chart_payload": response_payload.get("chart_payload"),
+        "sql":           response_payload.get("sql"),
+        "metrics":       response_payload.get("metrics"),
+        "dimensions":    response_payload.get("dimensions"),
+        "rows":          response_payload.get("rows"),
+        "chart_followup": slim_followup,
+    }
 
 
 def _load_chart_followup_prompt(name: str) -> str:
@@ -7199,6 +7424,34 @@ def _resolve_chart_conversation_context(
     # like "category" which are not actual column names and will be dropped as non-dimension filters).
     raw_dims = query_payload.get("source_dimensions") or query_payload.get("dimensions") or []
     dimensions = raw_dims if isinstance(raw_dims, list) else []
+    # For old charts that only stored generic aliases (e.g. ["category"]), resolve the real
+    # column name from the chart SQL. Two passes:
+    # 1. Explicit alias: `zone AS "category"` → replace "category" with "zone".
+    # 2. GROUP BY columns: if a dimension is still unresolved (generic alias like "category"),
+    #    replace it in order with GROUP BY columns from the SQL.
+    chart_sql = str(chart_row.get("sql") or "")
+    if chart_sql and dimensions:
+        _alias_re = re.compile(
+            r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?',
+            re.IGNORECASE,
+        )
+        sql_alias_map = {alias.lower(): col for col, alias in _alias_re.findall(chart_sql)}
+        dimensions = [sql_alias_map.get(d.lower(), d) for d in dimensions]
+        # Pass 2: still-unresolved generic aliases → replace with GROUP BY columns in order
+        _generic_aliases = {"category", "dimension", "label", "name", "group", "series"}
+        unresolved = [i for i, d in enumerate(dimensions) if d.lower() in _generic_aliases]
+        if unresolved:
+            _groupby_re = re.compile(r'GROUP\s+BY\s+(.*?)(?:ORDER\s+BY|LIMIT|$)', re.IGNORECASE | re.DOTALL)
+            gb_match = _groupby_re.search(chart_sql)
+            if gb_match:
+                gb_cols = [
+                    c.strip().split(".")[-1].strip('"').strip()
+                    for c in gb_match.group(1).split(",")
+                    if c.strip()
+                ]
+                for idx, pos in enumerate(unresolved):
+                    if idx < len(gb_cols):
+                        dimensions[pos] = gb_cols[idx]
     metrics = query_payload.get("metrics") if isinstance(query_payload.get("metrics"), list) else []
     return {
         "mode": "chart_scoped",
@@ -8245,6 +8498,28 @@ def _start_workspace_deployment(payload: dict) -> dict:
         payload.get("context_text"),
         payload.get("context_ids") or [],
     )
+    # Activate each resolved context for this scope so subsequent conversation
+    # messages can find it via list_active_context_ids → business_context_text.
+    _deploy_connection_id = payload.get("connection_id") or connection_id
+    _deploy_database = payload.get("database") or database
+    _deploy_schema = payload.get("schema_name") or schema
+    for _ctx_id in resolved_context_ids:
+        try:
+            set_context_active(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                context_id=_ctx_id,
+                connection_id=_deploy_connection_id,
+                database_name=_deploy_database,
+                schema_name=_deploy_schema,
+                is_active=True,
+            )
+        except Exception:
+            logger.exception(
+                "workspace.deployment.context_activate_failed | tenant_id=%s domain_id=%s context_id=%s",
+                tenant_id, domain_id, _ctx_id,
+            )
     run_id = create_agent_run(settings, tenant_id, domain_id, status="queued")
     version_no = next_run_version(settings, tenant_id, domain_id)
     display_name = payload.get("display_name") or generate_run_display_name(domain_id, version_no)
@@ -9503,11 +9778,36 @@ def workspace_send_message(conversation_id: str, payload: dict):
     )
     memory = get_workspace_memory(settings, conversation_id)
     effective_question = _chart_context_question_suffix(user_query, chart_context, chart_followup_context)
+
+    # Load the active enriched business context for this tenant/domain scope.
+    # This is always injected as baseline domain knowledge so the query planner
+    # has mandatory filters, FY conventions, and metric definitions available.
+    # When resume_context=True the rolling conversation memory is appended on top.
+    _conv_tenant = conversation["tenant_id"]
+    _conv_domain = conversation["domain_id"]
+    _conv_connection_id, _conv_db, _conv_schema, _ = _resolve_scope_values(_conv_tenant, _conv_domain)
+    _active_ctx_ids = list_active_context_ids(
+        settings, _conv_tenant, _conv_domain, _conv_connection_id, _conv_db, _conv_schema
+    )
+    _business_context_text: str | None = None
+    if _active_ctx_ids:
+        _ctx_row = get_context(settings, _active_ctx_ids[0])
+        if _ctx_row:
+            _business_context_text = (
+                _ctx_row.get("enriched_context") or _ctx_row.get("raw_text") or ""
+            ).strip() or None
+
+    if _business_context_text:
+        effective_question = f"{user_query}\n\nBusiness context:\n{_business_context_text}"
+        effective_question = _chart_context_question_suffix(effective_question, chart_context, chart_followup_context)
+
     if resume_context and memory and memory.get("summary_text"):
         effective_question = f"{user_query}\n\nConversation context: {memory.get('summary_text')}"
+        if _business_context_text:
+            effective_question = f"{effective_question}\n\nBusiness context:\n{_business_context_text}"
         effective_question = _chart_context_question_suffix(effective_question, chart_context, chart_followup_context)
     logger.info(
-        "workspace.message.start | conversation_id=%s tenant=%s domain=%s run_id=%s stream=%s resume_context=%s memory_present=%s chart_id=%s user_query=%s",
+        "workspace.message.start | conversation_id=%s tenant=%s domain=%s run_id=%s stream=%s resume_context=%s memory_present=%s business_context_present=%s chart_id=%s user_query=%s",
         conversation_id,
         conversation["tenant_id"],
         conversation["domain_id"],
@@ -9515,6 +9815,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
         bool(stream),
         bool(resume_context),
         bool(memory),
+        bool(_business_context_text),
         (chart_context or {}).get("source_chart_id"),
         user_query,
     )
@@ -9575,6 +9876,10 @@ def workspace_send_message(conversation_id: str, payload: dict):
             run_id=conversation["run_id"],
             question=effective_question,
             chart_context=chart_context,
+            chart_followup_context=chart_followup_context,
+            raw_user_query=user_query,
+            conversation_memory_text=(memory or {}).get("summary_text"),
+            business_context_text=_business_context_text,
             metrics=payload.get("metrics") or [],
             dimensions=payload.get("dimensions") or [],
             limit=int(payload.get("limit") or 200),
@@ -9598,23 +9903,17 @@ def workspace_send_message(conversation_id: str, payload: dict):
             summary_json=summary_json,
             inference_json=inference_json,
         )
-        context_used = {
-            "resume_context": bool(resume_context and memory),
-            "memory_present": bool(memory),
-            "run_id": conversation["run_id"],
-            "streamed_tokens": False,
-            "llm_stream_used": bool(_workspace_llm_stream_enabled()),
-            "chart_followup": chart_context,
-        }
+        _conv_plan = response_payload.get("conversation_plan") or {}
         return {
             "conversation_id": conversation_id,
-            "user_message": user_msg,
-            "assistant_message": persisted.get("assistant_message"),
-            "response": response_payload,
-            "summary_json": summary_json,
-            "inference_json": inference_json,
-            "context_used": context_used,
-            "memory": persisted.get("memory"),
+            "message_id": (persisted.get("assistant_message") or {}).get("message_id"),
+            "response": _build_client_response(response_payload),
+            "context_used": {
+                "resume_context": bool(resume_context and memory),
+                "run_id": conversation["run_id"],
+                "sql_mode": _conv_plan.get("sql_mode", "pipeline"),
+                "llm_sql_fallback": _conv_plan.get("sql_mode") != "llm_agent" and os.getenv("CONVERSATION_LLM_SQL_MODE", "").lower() in ("true", "1", "yes"),
+            },
         }
 
     if not stream:
@@ -9630,6 +9929,10 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 run_id=conversation["run_id"],
                 question=effective_question,
                 chart_context=chart_context,
+                chart_followup_context=chart_followup_context,
+                raw_user_query=user_query,
+                conversation_memory_text=(memory or {}).get("summary_text"),
+                business_context_text=_business_context_text,
                 metrics=payload.get("metrics") or [],
                 dimensions=payload.get("dimensions") or [],
                 limit=int(payload.get("limit") or 200),
@@ -9663,28 +9966,13 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 summary_json=summary_json,
                 inference_json=inference_json,
             )
-            context_used = {
-                "resume_context": bool(resume_context and memory),
-                "memory_present": bool(memory),
-                "run_id": conversation["run_id"],
-                "streamed_tokens": streamed,
-                "llm_stream_used": bool(_workspace_llm_stream_enabled()),
-                "chart_followup": chart_context,
-            }
-            result = {
-                "response": response_payload,
-                "summary_json": summary_json,
-                "inference_json": inference_json,
-                "context_used": context_used,
-            }
-            yield f"data: {json.dumps({'event': 'artifact', 'name': 'response', 'payload': result.get('response')})}\n\n"
-            yield f"data: {json.dumps({'event': 'artifact', 'name': 'conversation_plan', 'payload': (result.get('response') or {}).get('conversation_plan')})}\n\n"
-            yield f"data: {json.dumps({'event': 'artifact', 'name': 'summary', 'payload': result.get('summary_json')})}\n\n"
-            yield f"data: {json.dumps({'event': 'artifact', 'name': 'inference', 'payload': result.get('inference_json')})}\n\n"
-            yield f"data: {json.dumps({'event': 'artifact', 'name': 'context_used', 'payload': result.get('context_used')})}\n\n"
+            _s_conv_plan = response_payload.get("conversation_plan") or {}
+            _s_sql_mode = _s_conv_plan.get("sql_mode", "pipeline")
+            _s_llm_fallback = _s_sql_mode != "llm_agent" and os.getenv("CONVERSATION_LLM_SQL_MODE", "").lower() in ("true", "1", "yes")
+            yield f"data: {json.dumps({'event': 'artifact', 'name': 'response', 'payload': _build_client_response(response_payload)}, default=str)}\n\n"
             yield (
                 f"data: "
-                f"{json.dumps({'event': 'message_end', 'assistant_message_id': (persisted.get('assistant_message') or {}).get('message_id')})}\n\n"
+                f"{json.dumps({'event': 'message_end', 'assistant_message_id': (persisted.get('assistant_message') or {}).get('message_id'), 'sql_mode': _s_sql_mode, 'llm_sql_fallback': _s_llm_fallback})}\n\n"
             )
             yield f"data: {json.dumps({'event': 'done'})}\n\n"
         except Exception as exc:  # noqa: BLE001
@@ -16815,11 +17103,17 @@ def _question_supports_multi_metric(question: str | None) -> bool:
         " vs ",
         " versus ",
         "compare",
+        "comparison",
+        "between",
         "difference",
         "ratio",
         "split by",
         "alongside",
         "required run rate",
+        "achievement",
+        "actual vs",
+        "target vs",
+        "actual and target",
     )
     return any(marker in lowered for marker in markers)
 
@@ -16865,9 +17159,17 @@ def _select_metrics_with_model_intelligence(
             }
         )
 
-    fact_candidates = [item for item in candidates if item.get("model_type") == "fact"]
-    working = fact_candidates or candidates
-    dropped_non_fact = [item for item in candidates if item not in working]
+    # In multi-metric queries, don't discard non-fact table metrics — the user
+    # explicitly asked for them (e.g. TARGET_QTY_TMT from a dimension table).
+    # Only apply the fact-preference filter for single-metric disambiguation.
+    is_multi_metric = _question_supports_multi_metric(question) or len(metrics) > 1
+    if is_multi_metric:
+        working = candidates
+        dropped_non_fact = []
+    else:
+        fact_candidates = [item for item in candidates if item.get("model_type") == "fact"]
+        working = fact_candidates or candidates
+        dropped_non_fact = [item for item in candidates if item not in working]
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for item in working:
@@ -16878,7 +17180,7 @@ def _select_metrics_with_model_intelligence(
         grouped.setdefault(signature, []).append(item)
 
     chosen_signature = None
-    if len(grouped) > 1:
+    if len(grouped) > 1 and not is_multi_metric:
         scored_groups = []
         for signature, items in grouped.items():
             group_score = sum(float(entry.get("score") or 0.0) for entry in items)
@@ -17232,10 +17534,17 @@ def _load_run_scoped_intelligence(
 
 def _missing_required_intelligence(bundle: dict[str, Any]) -> list[str]:
     missing: list[str] = []
+    # In LLM-first SQL mode the LLM generates SQL directly from table schemas —
+    # only the profiling artifact is strictly required; semantic layer artifacts
+    # (metrics, facts, dimensions, models, glossary, joins) are optional.
+    llm_sql_mode = os.getenv("CONVERSATION_LLM_SQL_MODE", "").lower() in ("true", "1", "yes")
     if not (bundle.get("schema_graph_artifact") or (bundle.get("agent_artifacts") or {}).get("SchemaAgent")):
         missing.append("schema_graph")
     if not (bundle.get("table_profile_artifact") or (bundle.get("agent_artifacts") or {}).get("ProfilingAgent")):
         missing.append("table_profiles")
+    if llm_sql_mode:
+        # Table profiles are sufficient for LLM SQL mode — skip semantic layer checks
+        return missing
     if not (bundle.get("glossary") or (bundle.get("agent_artifacts") or {}).get("ContextAgent") or (bundle.get("agent_artifacts") or {}).get("GlossaryAgent") or (bundle.get("agent_artifacts") or {}).get("OntologyAgent")):
         missing.append("glossary_ontology")
     if not (bundle.get("joins") or (bundle.get("agent_artifacts") or {}).get("JoinAgent")):
@@ -17254,15 +17563,22 @@ def _missing_required_intelligence(bundle: dict[str, Any]) -> list[str]:
 def _list_fact_table_columns(schema_name: str, table_name: str, scoped_conn: ScopedConnection | None = None) -> list[str]:
     if not schema_name or not table_name:
         return []
+    # dbt model names are prefixed with "fact_" or "dim_" but the actual PostgreSQL
+    # table has no such prefix. Strip it so the information_schema lookup succeeds.
+    _raw_name = table_name
+    for _prefix in ("fact_", "dim_"):
+        if _raw_name.lower().startswith(_prefix):
+            _raw_name = _raw_name[len(_prefix):]
+            break
     sql = """
         SELECT column_name
           FROM information_schema.columns
          WHERE table_schema = %s
-           AND table_name = %s
+           AND lower(table_name) = lower(%s)
          ORDER BY ordinal_position
     """
     try:
-        rows = run_query(settings, sql, [schema_name, table_name], scoped_conn=scoped_conn)
+        rows = run_query(settings, sql, [schema_name, _raw_name], scoped_conn=scoped_conn)
     except Exception:
         return []
     return [row.get("column_name") for row in rows if row.get("column_name")]
@@ -17758,7 +18074,11 @@ def query(request: QueryRequest) -> QueryResult:
         {key: value for key, value in list(scoped_column_tables.items())[:25]},
     )
     if metric_dimension_set:
-        filtered_dimensions = [dim for dim in dimensions if dim in metric_dimension_set or dim == "process_month"]
+        _metric_dim_lower = {d.lower() for d in metric_dimension_set}
+        filtered_dimensions = [
+            dim for dim in dimensions
+            if dim in metric_dimension_set or dim.lower() in _metric_dim_lower or dim == "process_month"
+        ]
         if filtered_dimensions != dimensions:
             logger.info(
                 "query.dimensions_filtered_to_scope | before=%s after=%s",
@@ -17801,8 +18121,15 @@ def query(request: QueryRequest) -> QueryResult:
                 metric_dims,
             )
             logger.info("query.glossary_coerced | dimensions=%s filters=%s", dimensions, filters)
-            supported_dims = [dim for dim in dimensions if dim in metric_dims or dim == "process_month"]
-            supported_filters = [flt for flt in filters if flt.get("field") in metric_dims]
+            _metric_dims_lower = {d.lower() for d in metric_dims}
+            supported_dims = [
+                dim for dim in dimensions
+                if dim in metric_dims or dim.lower() in _metric_dims_lower or dim == "process_month"
+            ]
+            supported_filters = [
+                flt for flt in filters
+                if flt.get("field") in metric_dims or str(flt.get("field") or "").lower() in _metric_dims_lower
+            ]
             if supported_dims or supported_filters:
                 filtered_metrics.append(metric)
                 # Narrow dims/filters to what this metric supports.

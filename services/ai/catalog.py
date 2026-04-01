@@ -11,6 +11,12 @@ from services.ai.config import Settings
 from services.ai.metrics_registry import fetch_registry_metrics
 
 _REF_PATTERN = re.compile(r"\{\{\s*ref\('(?P<name>[^']+)'\)\s*\}\}")
+# Matches an unquoted column identifier immediately after schema."TABLE".
+# Used to double-quote column names so PostgreSQL preserves their case.
+_UNQUOTED_COL_AFTER_QUOTED_TABLE = re.compile(
+    r'(\b[a-zA-Z_][a-zA-Z0-9_]*\."[^"]+")\.'
+    r'([a-zA-Z_][a-zA-Z0-9_]*)(?!")'
+)
 
 
 @dataclass(frozen=True)
@@ -125,6 +131,23 @@ def load_catalog_with_registry(settings: Settings, path: str) -> MetricCatalog:
 def resolve_ref(sql: str, schema: str) -> str:
     def _replace(match: re.Match) -> str:
         table = match.group("name")
-        return f"{schema}.{table}"
+        # dbt model names are prefixed with "fact_" or "dim_" but the
+        # underlying PostgreSQL table/view may only exist without that
+        # prefix (e.g. when dbt has not been run for this tenant yet).
+        # Strip the prefix so the resolved SQL always targets the raw table.
+        for _prefix in ("fact_", "dim_"):
+            if table.lower().startswith(_prefix):
+                table = table[len(_prefix):]
+                break
+        # Double-quote the table name so PostgreSQL preserves case for
+        # tables that were created with mixed-case identifiers.
+        return f'{schema}."{table}"'
 
-    return _REF_PATTERN.sub(_replace, sql)
+    sql = _REF_PATTERN.sub(_replace, sql)
+    # After ref substitution, quote any unquoted column identifier that
+    # immediately follows a schema."TABLE". pattern so PostgreSQL preserves
+    # the column's original case (e.g. SBU_Name → "SBU_Name").
+    sql = _UNQUOTED_COL_AFTER_QUOTED_TABLE.sub(
+        lambda m: f'{m.group(1)}."{m.group(2)}"', sql
+    )
+    return sql

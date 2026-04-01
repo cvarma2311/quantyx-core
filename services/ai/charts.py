@@ -217,6 +217,99 @@ def build_chart_payload(chart_type: str, rows: list[dict], metric_name: str, dim
     return {"chart_type": None, "chart_payload": None, "data": []}
 
 
+def build_multi_metric_chart_payload(
+    rows: list[dict],
+    metric_names: list[str],
+    dimensions: list[str],
+    chart_type: str | None = None,
+) -> dict:
+    """
+    Build a chart payload for queries that return multiple metrics.
+
+    chart_type is respected when explicitly provided (e.g. "pie" for share/breakdown
+    questions, "stacked_bar" for composition, "bar"/"grouped_bar" for comparison).
+    When not provided, a sensible default is chosen based on data shape.
+
+    - pie / donut: metrics become slices (total share across metrics).
+    - bar (single dim value or no dims): metrics as X-axis categories, values on Y.
+    - grouped_bar / stacked_bar (multiple rows): dim on X, one series per metric.
+    """
+    chart_type = (chart_type or "").strip().lower() or None
+
+    # --- PIE / DONUT: each metric is a slice ---
+    if chart_type in {"pie", "donut"}:
+        # Use the first (or only) row — values across metrics form the pie
+        row = rows[0] if rows else {}
+        data = [
+            {"category": m.replace("_", " ").title(), "value": row.get(m)}
+            for m in metric_names
+        ]
+        cp: dict = {
+            "root": {"useTheme": "Animated"},
+            "chart": {"type": "PieChart"},
+            "series": {"type": "PieSeries", "valueField": "value", "categoryField": "category"},
+            "legend": {"type": "Legend"},
+        }
+        if chart_type == "donut":
+            cp["series"]["innerRadius"] = "55%"
+        return {"chart_type": chart_type, "chart_payload": cp, "data": data}
+
+    # --- BAR variants ---
+    # Single-row (or no dimension filter produces 1 SBU): pivot metrics to X-axis categories
+    if not dimensions or len(rows) <= 1:
+        row = rows[0] if rows else {}
+        data = [
+            {"category": m.replace("_", " ").title(), "value": row.get(m)}
+            for m in metric_names
+        ]
+        resolved_type = chart_type if chart_type in {"bar", "stacked_bar"} else "bar"
+        cp = {
+            "root": {"useTheme": "Animated"},
+            "chart": {"type": "XYChart", "panX": False, "panY": False},
+            "xAxis": {"type": "CategoryAxis", "categoryField": "category"},
+            "yAxis": {"type": "ValueAxis"},
+            "series": [
+                {
+                    "type": "ColumnSeries",
+                    "name": "Value",
+                    "valueYField": "value",
+                    "categoryXField": "category",
+                }
+            ],
+            "legend": {"type": "Legend"},
+        }
+        return {"chart_type": resolved_type, "chart_payload": cp, "data": data}
+
+    # --- Multiple rows: dimension on X, one series per metric ---
+    dim = dimensions[0]
+    data = []
+    for row in rows:
+        entry: dict = {"category": str(row.get(dim, ""))}
+        for m in metric_names:
+            entry[m] = row.get(m)
+        data.append(entry)
+    resolved_type = chart_type if chart_type in {"grouped_bar", "stacked_bar", "bar"} else "grouped_bar"
+    stacked = resolved_type == "stacked_bar"
+    cp = {
+        "root": {"useTheme": "Animated"},
+        "chart": {"type": "XYChart", "panX": False, "panY": False},
+        "xAxis": {"type": "CategoryAxis", "categoryField": "category"},
+        "yAxis": {"type": "ValueAxis"},
+        "series": [
+            {
+                "type": "ColumnSeries",
+                "name": m.replace("_", " ").title(),
+                "valueYField": m,
+                "categoryXField": "category",
+                **({"stacked": True} if stacked else {}),
+            }
+            for m in metric_names
+        ],
+        "legend": {"type": "Legend"},
+    }
+    return {"chart_type": resolved_type, "chart_payload": cp, "data": data}
+
+
 def infer_chart_type_with_llm(
     question: str | None,
     metric_names: list[str],

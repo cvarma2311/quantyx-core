@@ -13,7 +13,7 @@
 
 
   python3 scripts/demo_workspace_deployment_lpg.py \
-    --tenant-id perf_2703 \
+    --tenant-id sales-sbu \
     --api-base http://localhost:8787 \
     --domain-id market_performance_analysis \
     --connection-id 2 \
@@ -68,8 +68,7 @@
   DRILL-DOWN ORDER: SBU_Name → Zone → Region → SalesArea → Month
     Charts should be designed so users can drill into each dimension via conversation.
 
-  Default sort: descending for ranked/volume outputs and time-series.
-"
+  Default sort: descending for ranked/volume outputs and time-series."
 POST /workspace/conversations/{conversation_id}/messages
   {
     "user_query": "Which SBUs are below target in the last 3 months?",

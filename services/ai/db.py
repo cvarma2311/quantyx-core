@@ -72,6 +72,7 @@ def run_query(
     sql: str,
     params: list[object],
     scoped_conn: ScopedConnection | None = None,
+    statement_timeout_ms: int | None = None,
 ) -> list[dict]:
     if scoped_conn:
         host     = scoped_conn.host
@@ -86,12 +87,14 @@ def run_query(
         user     = settings.db_user
         password = settings.db_password
 
+    options = f"-c statement_timeout={statement_timeout_ms}ms" if statement_timeout_ms else None
     conn = psycopg2.connect(
         host=host,
         port=port,
         dbname=dbname,
         user=user,
         password=password,
+        **({"options": options} if options else {}),
     )
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
