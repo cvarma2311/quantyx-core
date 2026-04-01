@@ -124,14 +124,15 @@ def create_job(
     job_id = f"job_{uuid.uuid4().hex[:12]}"
     sql = """
         INSERT INTO public.quantyx_jobs
-          (job_id, tenant_id, scope_id, job_type, status, request_payload, idempotency_key)
+          (job_id, tenant_id, domain_id, scope_id, job_type, status, request_payload, idempotency_key)
         VALUES
-          (%s, %s, %s, %s, 'queued', %s::jsonb, %s)
+          (%s, %s, %s, %s, %s, 'queued', %s::jsonb, %s)
         RETURNING job_id, job_type, status, scope_id, created_at, updated_at
     """
     params = [
         job_id,
         tenant_id,
+        domain_id,
         scope_id,
         job_type,
         _serialize_payload(payload),
@@ -240,7 +241,6 @@ def get_job_result(settings: Settings, job_id: str) -> dict | None:
     finally:
         conn.close()
 
-
 def list_jobs(
     settings: Settings,
     tenant_id: str,
@@ -248,27 +248,47 @@ def list_jobs(
     status: str | None = None,
     cursor: str | None = None,
     limit: int = 50,
+    offset: int | None = None
 ) -> dict:
-    filters = ["tenant_id = %s"]
-    params: list[object] = [tenant_id]
+    filters = []
+    params: list[object] = []
+
+    if tenant_id:
+        filters.append("j.tenant_id = %s")
+        params.append(tenant_id)
     if job_type:
-        filters.append("job_type = %s")
+        filters.append("j.job_type = %s")
         params.append(job_type)
     if status:
-        filters.append("status = %s")
+        filters.append("j.status = %s")
         params.append(status)
     if cursor:
-        filters.append("created_at < %s")
+        filters.append("j.created_at < %s")
         params.append(cursor)
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
     sql = f"""
-        SELECT job_id, job_type, status, scope_id, created_at, updated_at
-          FROM public.quantyx_jobs
-          {where_clause}
-         ORDER BY created_at DESC
-         LIMIT %s
+        SELECT 
+            j.job_id, 
+            j.job_type, 
+            j.status, 
+            j.scope_id, 
+            j.created_at, 
+            j.updated_at,
+            t.display_name AS tenant_name,
+            j.domain_id
+        FROM public.quantyx_jobs j
+        LEFT JOIN public.quantyx_tenants t
+            ON j.tenant_id = t.tenant_id
+        {where_clause}
+        ORDER BY j.created_at DESC
+        LIMIT %s
     """
     params.append(limit)
+
+    if offset is not None:
+        sql += " OFFSET %s"
+        params.append(offset)
+
     conn = psycopg2.connect(
         host=settings.db_host,
         port=settings.db_port,
@@ -282,7 +302,14 @@ def list_jobs(
             rows = cur.fetchall()
         jobs = [dict(row) for row in rows]
         next_cursor = jobs[-1]["created_at"].isoformat() if jobs else None
-        return {"jobs": jobs, "limit": limit, "cursor": cursor, "next_cursor": next_cursor}
+
+        return {
+            "jobs": jobs,
+            "limit": limit,
+            "cursor": cursor,
+            "next_cursor": next_cursor
+        }
+
     except psycopg2.errors.UndefinedTable:
         return {"jobs": [], "limit": limit, "cursor": cursor, "next_cursor": None}
     finally:

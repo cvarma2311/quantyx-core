@@ -1812,8 +1812,10 @@ class JobListItem(BaseModel):
     job_id: str
     job_type: str
     status: JobStatusEnum
-    created_at: str | None = None
-    updated_at: str | None = None
+    tenant_name: str | None = None
+    domain_id: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class JobListResponse(BaseModel):
