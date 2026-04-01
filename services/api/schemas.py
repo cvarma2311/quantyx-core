@@ -183,6 +183,7 @@ class ChartRequest(BaseModel):
 class ChartStatusResponse(BaseModel):
     chart_id: str
     status: str
+    conversation_id: Optional[str] = None
     chart_type: Optional[str] = None
     chart_payload: Optional[dict] = None
     data: Optional[List[dict]] = None

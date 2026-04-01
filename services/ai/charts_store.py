@@ -38,14 +38,15 @@ def create_chart_request(
     chart_source: str | None = None,
     title: str | None = None,
     created_by: str | None = None,
+    conversation_id: str | None = None,
 ) -> dict:
     chart_id = f"chart_{uuid.uuid4().hex[:10]}"
     insert_sql = """
         INSERT INTO public.quantyx_chart_requests
           (chart_id, tenant_id, domain_id, run_id, question, query_payload, sql, params, rows_json,
-           chart_source, title, created_by, status)
+           chart_source, title, created_by, conversation_id, status)
         VALUES
-          (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s, %s, %s, 'queued')
+          (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, 'queued')
         RETURNING chart_id, status, created_at, updated_at
     """
     params = [
@@ -61,6 +62,7 @@ def create_chart_request(
         chart_source,
         title,
         created_by,
+        conversation_id,
     ]
     conn = psycopg2.connect(
         host=settings.db_host,
@@ -83,7 +85,7 @@ def create_chart_request(
 
 def get_chart_request(settings: Settings, chart_id: str) -> dict | None:
     sql = """
-        SELECT chart_id, tenant_id, domain_id, question, query_payload, sql, params,
+        SELECT chart_id, tenant_id, domain_id, conversation_id, question, query_payload, sql, params,
                rows_json, chart_type, chart_payload, chart_data, status, error_message, timing_ms,
                insight_text, narrative_text, stats_json,
                created_at, updated_at

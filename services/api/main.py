@@ -6832,6 +6832,7 @@ def _workspace_query_response(
     domain_id: str,
     run_id: str | None,
     question: str,
+    conversation_id: str | None = None,
     chart_context: dict | None = None,
     chart_followup_context: dict | None = None,
     raw_user_query: str | None = None,
@@ -6943,6 +6944,7 @@ def _workspace_query_response(
                     question=question,
                     compiled_request={"dimensions": _llm_dims, "filters": [], "limit": limit},
                     response_payload=_llm_response_payload,
+                    conversation_id=conversation_id,
                 )
                 if _persisted_llm_id:
                     _llm_response_payload["chart_id"] = _persisted_llm_id
@@ -7214,6 +7216,7 @@ def _workspace_query_response(
         question=question,
         compiled_request=compiled_request,
         response_payload=response_payload,
+        conversation_id=conversation_id,
     )
     if persisted_chart_id:
         response_payload["chart_id"] = persisted_chart_id
@@ -7884,6 +7887,7 @@ def _persist_workspace_chart_artifact(
     question: str,
     compiled_request: dict[str, Any],
     response_payload: dict[str, Any],
+    conversation_id: str | None = None,
 ) -> str | None:
     try:
         query_payload = {
@@ -7914,6 +7918,7 @@ def _persist_workspace_chart_artifact(
             rows_json=response_payload.get("rows"),
             chart_source="workspace",
             title=_clean_title,
+            conversation_id=conversation_id,
         )
         chart_id = chart_row.get("chart_id")
         if not chart_id:
@@ -9875,6 +9880,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
             domain_id=conversation["domain_id"],
             run_id=conversation["run_id"],
             question=effective_question,
+            conversation_id=conversation_id,
             chart_context=chart_context,
             chart_followup_context=chart_followup_context,
             raw_user_query=user_query,
@@ -9928,6 +9934,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 domain_id=conversation["domain_id"],
                 run_id=conversation["run_id"],
                 question=effective_question,
+                conversation_id=conversation_id,
                 chart_context=chart_context,
                 chart_followup_context=chart_followup_context,
                 raw_user_query=user_query,
@@ -19248,6 +19255,7 @@ def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
         insight_text=row.get("insight_text"),
         narrative_text=row.get("narrative_text"),
         stats_json=row.get("stats_json"),
+        conversation_id=row.get("conversation_id"),
     )
 
 
