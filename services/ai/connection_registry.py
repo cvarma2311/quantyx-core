@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import psycopg2
 import time
 from threading import Lock
@@ -8,6 +9,7 @@ from services.ai.config import Settings
 from services.ai.crypto import decrypt_password
 from services.ai.db import ScopedConnection, execute_non_query, run_query
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # In-process credential cache — avoids a DB round-trip on every customer query
@@ -31,24 +33,102 @@ def resolve_database_credentials(
         FROM public.databases
         WHERE id = %s
     """
+    logger.info(
+        "connection_registry.resolve | connection_id=%s schema=%s app_db_host=%s app_db_name=%s",
+        connection_id, schema_name, settings.db_host, settings.db_name,
+    )
     try:
         rows = run_query(settings, sql, [connection_id])
-    except Exception:
+    except Exception as exc:
+        logger.error(
+            "connection_registry.resolve | FAILED querying public.databases | connection_id=%s error=%s",
+            connection_id, exc, exc_info=True,
+        )
         return None
+
     if not rows:
+        logger.warning(
+            "connection_registry.resolve | NO ROW in public.databases | connection_id=%s",
+            connection_id,
+        )
         return None
+
     row = rows[0]
+    logger.info(
+        "connection_registry.resolve | row found | connection_id=%s name=%r host=%r port=%s user_name=%r "
+        "database_name=%r connection_type=%r password_prefix=%r",
+        connection_id,
+        row.get("name"),
+        row.get("host"),
+        row.get("port"),
+        row.get("user_name"),
+        row.get("database_name"),
+        row.get("connection_type"),
+        str(row.get("password") or "")[:10],   # only first 10 chars — never log full password
+    )
+
     raw_password = str(row.get("password") or "")
-    return ScopedConnection(
+    is_encrypted = raw_password.startswith("enc#_")
+    logger.info(
+        "connection_registry.resolve | password_encrypted=%s | connection_id=%s",
+        is_encrypted, connection_id,
+    )
+
+    try:
+        decrypted_password = decrypt_password(raw_password)
+        logger.info(
+            "connection_registry.resolve | password decrypted OK | connection_id=%s",
+            connection_id,
+        )
+    except Exception as exc:
+        logger.error(
+            "connection_registry.resolve | PASSWORD DECRYPTION FAILED | connection_id=%s "
+            "is_encrypted=%s error=%s — check PASSWORD_SALT env var matches the salt used by datafusion",
+            connection_id, is_encrypted, exc, exc_info=True,
+        )
+        return None
+
+    host = str(row.get("host") or "")
+    user = str(row.get("user_name") or "")
+    database_name = str(row.get("database_name") or "")
+
+    if not host:
+        logger.error(
+            "connection_registry.resolve | host is EMPTY in public.databases | connection_id=%s",
+            connection_id,
+        )
+        return None
+
+    if not user:
+        logger.error(
+            "connection_registry.resolve | user_name is EMPTY in public.databases | connection_id=%s",
+            connection_id,
+        )
+        return None
+
+    if not database_name:
+        logger.error(
+            "connection_registry.resolve | database_name is EMPTY in public.databases | connection_id=%s",
+            connection_id,
+        )
+        return None
+
+    sc = ScopedConnection(
         connection_id=connection_id,
-        host=str(row.get("host") or ""),
+        host=host,
         port=int(row.get("port") or 5432),
-        user=str(row.get("user_name") or ""),
-        password=decrypt_password(raw_password),
-        database_name=str(row.get("database_name") or ""),
+        user=user,
+        password=decrypted_password,
+        database_name=database_name,
         schema_name=schema_name,
         connection_type=str(row.get("connection_type") or "postgresql"),
     )
+    logger.info(
+        "connection_registry.resolve | ScopedConnection built | connection_id=%s host=%r port=%s "
+        "user=%r database_name=%r schema=%r",
+        connection_id, sc.host, sc.port, sc.user, sc.database_name, sc.schema_name,
+    )
+    return sc
 
 
 def resolve_database_credentials_cached(
@@ -61,12 +141,36 @@ def resolve_database_credentials_cached(
     with _cred_cache_lock:
         if cache_key in _cred_cache:
             cred, ts = _cred_cache[cache_key]
-            if time.monotonic() - ts < _CRED_CACHE_TTL:
+            age = time.monotonic() - ts
+            if age < _CRED_CACHE_TTL:
+                logger.info(
+                    "connection_registry.cache | HIT | connection_id=%s schema=%s age_sec=%.1f",
+                    connection_id, schema_name, age,
+                )
                 return cred
+            else:
+                logger.info(
+                    "connection_registry.cache | EXPIRED | connection_id=%s schema=%s age_sec=%.1f",
+                    connection_id, schema_name, age,
+                )
+
+    logger.info(
+        "connection_registry.cache | MISS — fetching from public.databases | connection_id=%s schema=%s",
+        connection_id, schema_name,
+    )
     cred = resolve_database_credentials(settings, connection_id, schema_name)
     if cred:
         with _cred_cache_lock:
             _cred_cache[cache_key] = (cred, time.monotonic())
+        logger.info(
+            "connection_registry.cache | STORED | connection_id=%s schema=%s",
+            connection_id, schema_name,
+        )
+    else:
+        logger.warning(
+            "connection_registry.cache | resolve returned None — NOT cached | connection_id=%s schema=%s",
+            connection_id, schema_name,
+        )
     return cred
 
 

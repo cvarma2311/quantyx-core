@@ -1,0 +1,64 @@
+industry: sales_forecast
+version: 1
+
+policies:
+
+  - name: exclude_null_location
+    applies_to: all
+    description: Exclude rows with no location identifier.
+    filter:
+      column: location_id
+      operator: custom_sql
+      values:
+        - "location_id IS NOT NULL"
+        - "location_id != ''"
+
+  - name: exclude_zero_sales
+    applies_to: chart
+    description: >
+      Exclude zero or negative sales_volume rows from charts —
+      these are typically data load artefacts, not genuine nil-sales records.
+    filter:
+      column: sales_volume
+      operator: custom_sql
+      values:
+        - "sales_volume > 0"
+
+  - name: avoid_identifier_breakdowns
+    applies_to: chart
+    description: >
+      Prevent raw identifier columns from being used as chart category axes.
+      Use named dimensions (zone, region, product_grp) instead.
+    filter:
+      column: breakdown_dimension
+      operator: not_in
+      values: ["id", "entity_id", "created_at", "updated_at"]
+
+dashboard_preferences:
+  kpi_priority_hints:
+    sales_volume: 130
+    volume: 120
+    growth: 110
+    contribution: 100
+    mix: 95
+    count: 90
+    average: 85
+
+  time_priority_columns:
+    - transaction_date
+    - sale_date
+    - sales_date
+    - date
+    - business_date
+
+  breakdown_priority_tokens:
+    - zone
+    - region
+    - area
+    - product_grp
+
+  chart_preferences:
+    prefer_time_series_ascending: true
+    prefer_rankings_descending: true
+    avoid_identifier_category_charts: true
+    default_time_grouping: month

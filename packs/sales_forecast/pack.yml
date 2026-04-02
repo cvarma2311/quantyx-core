@@ -1,0 +1,9 @@
+industry: sales_forecast
+version: 1.0.0
+release_date: "2026-04-02"
+notes: >
+  Generic sales forecasting pack for transaction-level retail and outlet sales data.
+  Designed for daily sales by location and product group with trend, growth, ranking,
+  and period-over-period analysis. Works with any transactional sales table that has
+  a date column, a volume/amount measure, a location identifier, and a product dimension.
+  Reference domain: nozzle_sales (fuel retail outlets — HSD, MS, POWER 95).

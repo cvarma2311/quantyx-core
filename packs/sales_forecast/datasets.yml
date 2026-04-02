@@ -1,0 +1,20 @@
+industry: sales_forecast
+version: 1
+
+datasets:
+  - name: daily_sales_transactions
+    source_model: fact_daily_sales
+    description: >
+      Daily transaction-level sales by location and product group.
+      One row per (location × product_grp × date).
+      Primary dataset for all volume, trend, growth, and ranking analysis.
+    grain: location_product_day
+    key_measures:
+      - sales_volume
+    key_dimensions:
+      - location_id
+      - product_grp
+      - zone
+      - region
+      - area
+    date_column: transaction_date

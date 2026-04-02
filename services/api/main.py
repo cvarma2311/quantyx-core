@@ -619,12 +619,23 @@ def _resolve_scoped_conn(tenant_id: str, domain_id: str) -> ScopedConnection | N
         if not connection_id:
             logger.warning("_resolve_scoped_conn: no connection_id for tenant=%s domain=%s", tenant_id, domain_id)
             return None
+        # Get schema/database from quantyx_connection_scopes (populated after schema scan).
+        # Fall back to quantyx_tenant_scopes fields — these are available from the very first
+        # deployment call, before the schema scan agent has run register_connection_scopes.
         scopes = resolve_connection_scope(settings, connection_id)
-        if not scopes:
-            logger.warning("_resolve_scoped_conn: no scopes for connection_id=%s", connection_id)
-            return None
-        schema_name = scopes[0].get("schema_name") or "public"
-        database_name = scopes[0].get("database_name") or ""
+        if scopes:
+            schema_name = scopes[0].get("schema_name") or "public"
+            database_name = scopes[0].get("database_name") or ""
+        else:
+            logger.info(
+                "_resolve_scoped_conn: no connection_scopes for connection_id=%s — "
+                "using tenant_scope fields (schema_name=%s database_name=%s)",
+                connection_id,
+                (registry or {}).get("schema_name"),
+                (registry or {}).get("database_name"),
+            )
+            schema_name = str((registry or {}).get("schema_name") or "public")
+            database_name = str((registry or {}).get("database_name") or "")
 
         # Tier 1: full credentials from public.databases
         cred = resolve_database_credentials_cached(settings, connection_id, schema_name)

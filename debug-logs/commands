@@ -130,3 +130,55 @@ POST /workspace/conversations/{conversation_id}/messages
 
   Default sort: descending for all ranked/volume outputs." \
    2>&1 | tee debug-logs/fuel-run-$(date +%H%M%S).log
+
+
+python3 scripts/demo_workspace_deployment_lpg.py \
+      --tenant-id ns-1 \
+      --api-base http://localhost:8787 \
+      --domain-id sales_forecast \
+      --connection-id 8 \
+      --database iot_rudhra \
+      --schema public \
+      --tables nozzle_sales \
+      --context-text "Domain: Retail nozzle sales forecasting — daily transaction-level fuel sales by outlet location and product group.
+
+  Tables in scope:
+    - nozzle_sales: Daily retail fuel sales. One row per outlet x product group x date.
+      Key columns:
+        transaction_date — Sales date stored as TIMESTAMPTZ (e.g. '2026-02-04 00:00:00+00').
+                           Always cast for filtering: transaction_date::date
+                           Range filter: transaction_date::date BETWEEN '2026-01-01' AND '2026-03-31'
+                           Monthly group: DATE_TRUNC('month', transaction_date)
+        sales_volume     — Sales volume for that day (numeric, in Litres).
+        product_grp      — Product group. Values: HSD (High Speed Diesel), MS (Motor Spirit / Petrol), POWER 95 (premium petrol).
+        sap_id           — SAP outlet code. Use this as the location_id for outlet-level grouping.
+        site_id          — Internal outlet identifier. Secondary to sap_id.
+        location_name    — Outlet display name.
+        zone             — Highest geographic level.
+        region           — Region within zone.
+        sales_area       — Sales area within region.
+        id               — Auto-increment primary key. Not useful for analytics.
+        entity_id        — Usually NULL. Not useful for analytics.
+
+    Table grain:
+      One row = one outlet (sap_id) x one product_grp x one transaction_date.
+      Total outlet sales: SUM(sales_volume) GROUP BY sap_id, transaction_date::date
+      Product mix: SUM(sales_volume) GROUP BY product_grp
+
+    Location hierarchy (broad to narrow):
+      zone > region > sales_area > location_name / sap_id
+
+  Business context and query rules:
+    - Indian Financial Year: April 1 to March 31. Current FY starts 2026-04-01.
+    - FY-to-date filter: transaction_date::date >= '2026-04-01'
+    - Monthly aggregation: DATE_TRUNC('month', transaction_date) AS month
+    - Daily aggregation: transaction_date::date AS sale_date
+    - Total volume: SUM(sales_volume)
+    - Volume by product: SUM(sales_volume) GROUP BY product_grp
+    - Volume by outlet: SUM(sales_volume) GROUP BY sap_id, location_name
+    - Volume by zone: SUM(sales_volume) GROUP BY zone
+    - Growth rate: ROUND((current - prior) / NULLIF(prior, 0) * 100, 2) AS growth_pct
+    - Top performers: ORDER BY SUM(sales_volume) DESC LIMIT N
+    - No target or pace data — all forecasting is trend-based on actuals only.
+    - Do NOT join nozzle_sales to any other table — standalone dataset."\
+   2>&1 | tee debug-logs/nozzle-sales-$(date +%H%M%S).log

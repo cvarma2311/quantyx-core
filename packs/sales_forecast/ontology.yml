@@ -1,0 +1,41 @@
+industry: sales_forecast
+version: 1
+
+title: Sales Forecast Ontology
+
+entity_types:
+  location:
+    examples: [location_id, outlet_id, store_id, site_id, dealer_id, retailer_id]
+    description: Individual sales point — the atomic location unit.
+    join_key: location_id
+
+  product:
+    examples: [product_grp, product_group, product, sku, category, grade, type]
+    description: Product or product group being sold.
+    join_key: product_grp
+
+  geography:
+    examples: [zone, region, area, territory, cluster, district, sales_area]
+    description: Geographic or administrative grouping for rollup reporting.
+    join_key: zone
+
+  time:
+    examples: [transaction_date, sale_date, date, business_date, sales_date]
+    description: >
+      Transaction or sales date. May be stored as DATE or TIMESTAMPTZ.
+      Always cast to date for filtering and grouping.
+
+hierarchies:
+  - name: location_hierarchy
+    levels: [zone, region, area, location_id]
+    description: Geographic rollup from broad zone down to individual sales point
+
+  - name: product_hierarchy
+    levels: [product_grp]
+    description: Product group — the standard product dimension
+
+time_conventions:
+  fiscal_year:
+    start_month: 4
+    start_day: 1
+    description: Indian Financial Year — April 1 to March 31

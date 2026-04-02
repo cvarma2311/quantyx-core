@@ -1,0 +1,93 @@
+industry: sales_forecast
+version: 1
+
+templates:
+
+  # ── Core volume ───────────────────────────────────────────────────────────
+
+  - name: total_sales_volume
+    type: sum
+    description: Total sales volume across all locations and products for a given period.
+    measure_hint: sales_volume
+
+  - name: daily_sales_volume
+    type: sum
+    description: Sales volume aggregated by day.
+    measure_hint: sales_volume
+
+  - name: monthly_sales_volume
+    type: sum
+    description: Sales volume aggregated by calendar month.
+    measure_hint: sales_volume
+
+  # ── Location rollups ──────────────────────────────────────────────────────
+
+  - name: location_sales_volume
+    type: sum
+    description: Total sales volume per individual location.
+    measure_hint: sales_volume
+
+  - name: zone_sales_volume
+    type: sum
+    description: Total sales volume rolled up to zone level.
+    measure_hint: sales_volume
+
+  - name: region_sales_volume
+    type: sum
+    description: Total sales volume rolled up to region level.
+    measure_hint: sales_volume
+
+  # ── Product rollups ───────────────────────────────────────────────────────
+
+  - name: product_sales_volume
+    type: sum
+    description: Sales volume broken down by product group.
+    measure_hint: sales_volume
+
+  - name: product_mix_pct
+    type: ratio
+    description: Each product group's share of total sales volume.
+    measure_hint: mix
+
+  # ── Trend and growth ──────────────────────────────────────────────────────
+
+  - name: period_over_period_growth
+    type: ratio
+    description: >
+      Percentage growth of sales volume in the current period vs the prior
+      equivalent period (month-on-month, year-on-year, etc.).
+    measure_hint: growth
+
+  - name: month_on_month_growth
+    type: ratio
+    description: Month-on-month sales volume growth percentage.
+    measure_hint: growth
+
+  - name: location_contribution_pct
+    type: ratio
+    description: Each location's share of total sales volume in the period.
+    measure_hint: contribution
+
+  # ── Rankings ──────────────────────────────────────────────────────────────
+
+  - name: top_locations_by_volume
+    type: rank
+    description: Locations ranked by total sales volume descending.
+    measure_hint: ranking
+
+  - name: top_zones_by_volume
+    type: rank
+    description: Zones ranked by total sales volume descending.
+    measure_hint: ranking
+
+  # ── Activity ─────────────────────────────────────────────────────────────
+
+  - name: active_location_count
+    type: count_distinct
+    description: Number of distinct locations that recorded sales in the period.
+    measure_hint: count
+
+  - name: avg_daily_volume_per_location
+    type: avg
+    description: Average daily sales volume per active location.
+    measure_hint: average
