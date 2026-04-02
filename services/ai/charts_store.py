@@ -41,12 +41,13 @@ def create_chart_request(
     conversation_id: str | None = None,
 ) -> dict:
     chart_id = f"chart_{uuid.uuid4().hex[:10]}"
+    conversation_ids = [conversation_id] if conversation_id else []
     insert_sql = """
         INSERT INTO public.quantyx_chart_requests
           (chart_id, tenant_id, domain_id, run_id, question, query_payload, sql, params, rows_json,
-           chart_source, title, created_by, conversation_id, status)
+           chart_source, title, created_by, conversation_ids, status)
         VALUES
-          (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, 'queued')
+          (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb, 'queued')
         RETURNING chart_id, status, created_at, updated_at
     """
     params = [
@@ -62,7 +63,7 @@ def create_chart_request(
         chart_source,
         title,
         created_by,
-        conversation_id,
+        _serialize_payload(conversation_ids),
     ]
     conn = psycopg2.connect(
         host=settings.db_host,
@@ -85,7 +86,7 @@ def create_chart_request(
 
 def get_chart_request(settings: Settings, chart_id: str) -> dict | None:
     sql = """
-        SELECT chart_id, tenant_id, domain_id, conversation_id, question, query_payload, sql, params,
+        SELECT chart_id, tenant_id, domain_id, conversation_ids, question, query_payload, sql, params,
                rows_json, chart_type, chart_payload, chart_data, status, error_message, timing_ms,
                insight_text, narrative_text, stats_json,
                created_at, updated_at
@@ -224,6 +225,37 @@ def update_chart_request(
             cur.execute(sql_stmt, values)
         conn.commit()
     except psycopg2.errors.UndefinedTable:
+        return
+    finally:
+        conn.close()
+
+
+def append_chart_conversation_id(
+    settings: Settings,
+    chart_id: str,
+    conversation_id: str,
+) -> None:
+    """Append conversation_id to conversation_ids array if not already present."""
+    sql = """
+        UPDATE public.quantyx_chart_requests
+           SET conversation_ids = COALESCE(conversation_ids, '[]'::jsonb) || %s::jsonb,
+               updated_at = now()
+         WHERE chart_id = %s
+           AND NOT (COALESCE(conversation_ids, '[]'::jsonb) @> %s::jsonb)
+    """
+    value = _serialize_payload([conversation_id])
+    conn = psycopg2.connect(
+        host=settings.db_host,
+        port=settings.db_port,
+        dbname=settings.db_name,
+        user=settings.db_user,
+        password=settings.db_password,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, [value, chart_id, value])
+        conn.commit()
+    except (psycopg2.errors.UndefinedTable, psycopg2.errors.UndefinedColumn):
         return
     finally:
         conn.close()

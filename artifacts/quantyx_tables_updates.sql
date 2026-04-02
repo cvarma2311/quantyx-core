@@ -1176,29 +1176,40 @@ CREATE TABLE IF NOT EXISTS public.quantyx_context_extraction_agents (
 -- Charts: async chart requests
 
 CREATE TABLE IF NOT EXISTS public.quantyx_chart_requests (
-  chart_id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
-  domain_id TEXT,
-  question TEXT,
-  query_payload JSONB,
-  sql TEXT,
-  params JSONB,
-  rows_json JSONB,
-  chart_type TEXT,
-  chart_payload JSONB,
-  chart_data JSONB,
-  status TEXT NOT NULL DEFAULT 'queued',
-  error_message TEXT,
-  timing_ms JSONB,
-  insight_text TEXT,
-  narrative_text TEXT,
-  stats_json JSONB,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  chart_id         TEXT PRIMARY KEY,
+  tenant_id        TEXT NOT NULL,
+  domain_id        TEXT,
+  run_id           TEXT,
+  question         TEXT,
+  query_payload    JSONB,
+  sql              TEXT,
+  params           JSONB,
+  rows_json        JSONB,
+  chart_type       TEXT,
+  chart_payload    JSONB,
+  chart_data       JSONB,
+  chart_source     TEXT,
+  title            TEXT,
+  created_by       TEXT,
+  status           TEXT NOT NULL DEFAULT 'queued',
+  error_message    TEXT,
+  timing_ms        JSONB,
+  insight_text     TEXT,
+  narrative_text   TEXT,
+  stats_json       JSONB,
+  conversation_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+COMMENT ON COLUMN public.quantyx_chart_requests.conversation_ids IS 'JSONB array of conversation_ids associated with this chart: originating conversation, followup-reference conversations, and chart-anchored conversations.';
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_chart_requests_scope
   ON public.quantyx_chart_requests (tenant_id, domain_id, status, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_chart_requests_conversation_ids
+  ON public.quantyx_chart_requests USING gin (conversation_ids)
+  WHERE conversation_ids != '[]'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.quantyx_chart_events (
   event_id TEXT PRIMARY KEY,

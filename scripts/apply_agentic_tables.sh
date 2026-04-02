@@ -398,4 +398,24 @@ ALTER TABLE public.quantyx_chart_requests
 COMMENT ON COLUMN public.quantyx_chart_requests.insight_text   IS 'One-line callout: top dimension value or latest trend delta (LLM-generated, deterministic fallback)';
 COMMENT ON COLUMN public.quantyx_chart_requests.narrative_text IS 'Best/worst dimension comparison sentence (LLM-generated, deterministic fallback)';
 COMMENT ON COLUMN public.quantyx_chart_requests.stats_json     IS 'Descriptive statistics over primary metric: {count, min, max, avg, total}';
+
+-- Phase 47: Chart-conversation linkage
+-- Replace scalar conversation_id (TEXT) with conversation_ids (JSONB array) so a chart
+-- can be associated with multiple conversations (created-in, followup-referenced, anchored-from).
+ALTER TABLE public.quantyx_chart_requests
+  DROP COLUMN IF EXISTS conversation_id;
+
+ALTER TABLE public.quantyx_chart_requests
+  ADD COLUMN IF NOT EXISTS conversation_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+-- Migrate any rows that already have a scalar conversation_id stored (defensive, no-op on fresh DBs)
+-- UPDATE public.quantyx_chart_requests
+--   SET conversation_ids = jsonb_build_array(conversation_id)
+--   WHERE conversation_id IS NOT NULL AND conversation_ids = '[]'::jsonb;
+
+CREATE INDEX IF NOT EXISTS idx_chart_requests_conversation_ids
+  ON public.quantyx_chart_requests USING gin (conversation_ids)
+  WHERE conversation_ids != '[]'::jsonb;
+
+COMMENT ON COLUMN public.quantyx_chart_requests.conversation_ids IS 'JSONB array of conversation_ids associated with this chart: originating conversation, followup-reference conversations, and chart-anchored conversations.';
 SQL

@@ -68,6 +68,7 @@ from services.ai.charts_store import (
     get_chart_request,
     get_latest_chart_request_by_question,
     update_chart_request,
+    append_chart_conversation_id,
 )
 from services.ai.dashboards_store import (
     create_dashboard as _ds_create_dashboard,
@@ -7410,6 +7411,7 @@ def _resolve_chart_conversation_context(
     tenant_id: str,
     domain_id: str,
     chart_id: str | None,
+    conversation_id: str | None = None,
 ) -> dict[str, Any] | None:
     resolved_chart_id = str(chart_id or "").strip()
     if not resolved_chart_id:
@@ -7422,6 +7424,11 @@ def _resolve_chart_conversation_context(
     row_domain = str(chart_row.get("domain_id") or "").strip()
     if row_domain and row_domain != str(domain_id or "").strip():
         raise HTTPException(status_code=400, detail="chart_id does not belong to the current domain")
+    if conversation_id:
+        try:
+            append_chart_conversation_id(settings, resolved_chart_id, conversation_id)
+        except Exception:
+            logger.exception("chart.append_conversation_id_failed | chart_id=%s conversation_id=%s", resolved_chart_id, conversation_id)
     query_payload = dict(chart_row.get("query_payload") or {})
     # Prefer source_dimensions (real SQL columns) over dimensions (may contain chart aliases
     # like "category" which are not actual column names and will be dropped as non-dimension filters).
@@ -8815,20 +8822,68 @@ def workspace_get_anomaly_dashboard(investigation_id: str) -> dict:
     "/workspace/conversations",
     tags=["workspace"],
     summary="Create a new conversation",
-    description="Create conversation metadata. Use `user_query` for initial intent/title generation (aliases accepted: `query`, `message_text`, `first_question`).",
+    description=(
+        "Create a conversation shell. Three usage patterns:\n\n"
+        "1. **Blank** — just `title`, no chart context.\n"
+        "2. **Chart-anchored** — provide `chart_id`; title is auto-derived from the chart's original question and the new `conversation_id` is appended to `quantyx_chart_requests.conversation_ids`.\n"
+        "3. **Chart-anchored with override** — provide both `chart_id` and `title`; explicit title wins but linkage still happens.\n\n"
+        "Use `display_name` for a human-friendly label shown in the UI (defaults to `title`). "
+        "Use `created_by` to track the initiating user."
+    ),
     openapi_extra={
         "requestBody": {
             "content": {
                 "application/json": {
                     "examples": {
-                        "create": {
-                            "summary": "Create conversation",
+                        "blank_minimal": {
+                            "summary": "Blank — minimal",
+                            "description": "Start a new conversation with no chart context. Title is explicit.",
                             "value": {
                                 "tenant_id": "VC_101",
                                 "domain_id": "lpg_production_distribution",
-                                "user_query": "North zone pending trend",
+                                "title": "North zone pending trend analysis",
                             },
-                        }
+                        },
+                        "blank_with_display_name": {
+                            "summary": "Blank — with display name and creator",
+                            "description": "Blank conversation with a separate UI display name and created_by tracking.",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "title": "north_zone_pending_trend",
+                                "display_name": "North Zone — Pending Trend",
+                                "created_by": "user_789",
+                            },
+                        },
+                        "chart_anchored_auto_title": {
+                            "summary": "Chart-anchored — title auto-derived from chart",
+                            "description": "Conversation seeded from an existing chart. Title comes from the chart's original question. conversation_id is appended to chart's conversation_ids.",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "chart_id": "chart_abc123",
+                            },
+                        },
+                        "chart_anchored_explicit_title": {
+                            "summary": "Chart-anchored — explicit title override",
+                            "description": "Chart context is linked but the title is overridden explicitly instead of auto-derived.",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "chart_id": "chart_abc123",
+                                "title": "Deep dive on North zone bottleneck",
+                            },
+                        },
+                        "chart_anchored_with_creator": {
+                            "summary": "Chart-anchored — with creator",
+                            "description": "Chart-anchored conversation with created_by for audit trail.",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "lpg_production_distribution",
+                                "chart_id": "chart_abc123",
+                                "created_by": "user_789",
+                            },
+                        },
                     }
                 }
             }
@@ -8864,7 +8919,16 @@ def workspace_create_conversation(payload: dict) -> dict:
                 "missing_artifacts": missing,
             },
         )
-    title = payload.get("title") or generate_conversation_title(_extract_user_query(payload), domain_id)
+    # Resolve chart_id — accept both `chart_id` (canonical) and legacy `source_chart_id`
+    chart_id = str(payload.get("chart_id") or payload.get("source_chart_id") or "").strip() or None
+    # Derive title: explicit > chart question > domain fallback
+    title = payload.get("title")
+    if not title and chart_id:
+        chart_row = get_chart_request(settings, chart_id)
+        if chart_row:
+            title = chart_row.get("question") or chart_row.get("title")
+    if not title:
+        title = generate_conversation_title(None, domain_id)
     conversation = create_workspace_conversation(
         settings,
         tenant_id=tenant_id,
@@ -8873,8 +8937,14 @@ def workspace_create_conversation(payload: dict) -> dict:
         title=title,
         display_name=payload.get("display_name") or title,
         created_by=payload.get("created_by"),
-        source_chart_id=payload.get("source_chart_id"),
+        source_chart_id=chart_id,
     )
+    # Link this new conversation back to the chart's conversation_ids list
+    if chart_id:
+        try:
+            append_chart_conversation_id(settings, chart_id, conversation["conversation_id"])
+        except Exception:
+            logger.exception("conversation.create.append_chart_conversation_id_failed | chart_id=%s", chart_id)
     return {
         **conversation,
         "run_display_name": deployment.get("display_name"),
@@ -8885,15 +8955,58 @@ def workspace_create_conversation(payload: dict) -> dict:
     "/workspace/tenants/{tenant_id}/domains/{domain_id}/conversations",
     tags=["workspace"],
     summary="Create a new conversation for tenant/domain",
+    description=(
+        "Scoped variant of `POST /workspace/conversations` — `tenant_id` and `domain_id` come from the URL path. "
+        "Same three patterns apply:\n\n"
+        "1. **Blank** — just `title`.\n"
+        "2. **Chart-anchored** — `chart_id` only; title auto-derived from chart question.\n"
+        "3. **Chart-anchored with title override** — both `chart_id` and `title`.\n\n"
+        "The new `conversation_id` is always appended to `quantyx_chart_requests.conversation_ids` when `chart_id` is supplied."
+    ),
     openapi_extra={
         "requestBody": {
             "content": {
                 "application/json": {
                     "examples": {
-                        "create_scope": {
-                            "summary": "Create from scope",
-                            "value": {"user_query": "Show production by plant"},
-                        }
+                        "blank_minimal": {
+                            "summary": "Blank — minimal",
+                            "description": "Start a new conversation with no chart context.",
+                            "value": {
+                                "title": "Show production by plant",
+                            },
+                        },
+                        "blank_with_display_name": {
+                            "summary": "Blank — with display name and creator",
+                            "description": "Blank conversation with a separate UI display name and created_by tracking.",
+                            "value": {
+                                "title": "production_by_plant",
+                                "display_name": "Production by Plant",
+                                "created_by": "user_789",
+                            },
+                        },
+                        "chart_anchored_auto_title": {
+                            "summary": "Chart-anchored — title auto-derived",
+                            "description": "Conversation seeded from an existing chart. Title comes from the chart's original question.",
+                            "value": {
+                                "chart_id": "chart_abc123",
+                            },
+                        },
+                        "chart_anchored_explicit_title": {
+                            "summary": "Chart-anchored — explicit title override",
+                            "description": "Chart context linked but title overridden.",
+                            "value": {
+                                "chart_id": "chart_abc123",
+                                "title": "Deep dive on North zone bottleneck",
+                            },
+                        },
+                        "chart_anchored_with_creator": {
+                            "summary": "Chart-anchored — with creator",
+                            "description": "Chart-anchored conversation with created_by for audit trail.",
+                            "value": {
+                                "chart_id": "chart_abc123",
+                                "created_by": "user_789",
+                            },
+                        },
                     }
                 }
             }
@@ -8908,7 +9021,7 @@ def workspace_create_conversation_for_scope(tenant_id: str, domain_id: str, payl
             "domain_id": domain_id,
             "title": data.get("title"),
             "display_name": data.get("display_name"),
-            "user_query": _extract_user_query(data),
+            "chart_id": data.get("chart_id"),
             "created_by": data.get("created_by"),
         }
     )
@@ -9762,6 +9875,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
         tenant_id=conversation["tenant_id"],
         domain_id=conversation["domain_id"],
         chart_id=chart_followup_context.get("chart_id"),
+        conversation_id=conversation_id,
     )
     if chart_context and chart_followup_context:
         chart_context = {
@@ -19255,7 +19369,7 @@ def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
         insight_text=row.get("insight_text"),
         narrative_text=row.get("narrative_text"),
         stats_json=row.get("stats_json"),
-        conversation_id=row.get("conversation_id"),
+        conversation_ids=row.get("conversation_ids") or [],
     )
 
 
