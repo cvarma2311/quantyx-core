@@ -1812,6 +1812,7 @@ class JobListItem(BaseModel):
     job_id: str
     job_type: str
     status: JobStatusEnum
+    tenant_id: str | None = None
     tenant_name: str | None = None
     domain_id: str | None = None
     created_at: datetime | None = None
