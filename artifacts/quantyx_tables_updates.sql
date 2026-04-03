@@ -427,6 +427,12 @@ CREATE TABLE IF NOT EXISTS public.quantyx_canvas_edges (
 CREATE INDEX IF NOT EXISTS idx_quantyx_canvas_edges_canvas
   ON public.quantyx_canvas_edges (canvas_id, created_at DESC);
 
+ALTER TABLE public.quantyx_jobs
+  ADD COLUMN IF NOT EXISTS domain_id TEXT NULL;
+
+ALTER TABLE public.quantyx_chart_requests
+  ADD COLUMN IF NOT EXISTS conversation_id TEXT NULL;
+
 -- Phase U: Tenant scope resolution compatibility
 ALTER TABLE public.quantyx_job_scopes
   ADD COLUMN IF NOT EXISTS tenant_id TEXT NULL;
