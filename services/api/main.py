@@ -446,6 +446,7 @@ from services.api.schemas import (
     JobListResponse,
     JobResultResponse,
     JobStatusResponse,
+    DeleteJobRequest,
     PackApplyRequest,
     PackApplyResponse,
     PackListResponse,
@@ -2621,11 +2622,15 @@ def cancel_job(job_id: str) -> JobCancelResponse:
                 }
             }
         }
-    })
-
-def delete_job(tenant_id: str, job_id: str) -> dict:
-    purge_job(settings, tenant_id, job_id)
-    return {"ok": True, "tenant_id": tenant_id, "job_id": job_id}
+    }
+)
+def delete_job(job_id: str, request: DeleteJobRequest) -> dict:
+    purge_job(settings, request.tenant_id, job_id)
+    return {
+        "ok": True,
+        "tenant_id": request.tenant_id,
+        "job_id": job_id
+    }
 
 
 @app.post(

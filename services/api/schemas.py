@@ -1826,6 +1826,10 @@ class JobListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class DeleteJobRequest(BaseModel):
+    tenant_id: str
+
+
 class JobCancelResponse(BaseModel):
     job_id: str
     status: JobStatusEnum
