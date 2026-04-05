@@ -391,6 +391,8 @@ def _trigger_correlation_run_async(
                     anomaly_results=result.get("anomaly_results") or [],
                     correlation_pairs=result.get("correlation_pairs") or [],
                     forward_projections=result.get("forward_projections") or [],
+                    snapshot_eligibility_summary=result.get("snapshot_eligibility_summary") or {},
+                    data_quality_warnings=result.get("data_quality_warnings") or [],
                 )
             except Exception:
                 _log.warning("[workspace_store] Correlation chart generation failed", exc_info=True)
@@ -399,10 +401,13 @@ def _trigger_correlation_run_async(
             try:
                 narration = narrate_correlation_results(
                     settings,
+                    kpi_snapshots=result.get("kpi_snapshots") or [],
                     anomaly_results=result.get("anomaly_results") or [],
                     correlation_pairs=result.get("correlation_pairs") or [],
                     forward_projections=result.get("forward_projections") or [],
                     investigation_threads=result.get("investigation_threads") or [],
+                    data_quality_warnings=result.get("data_quality_warnings") or [],
+                    snapshot_eligibility_summary=result.get("snapshot_eligibility_summary") or {},
                 )
             except Exception:
                 _log.warning("[workspace_store] Correlation narration failed", exc_info=True)
@@ -415,6 +420,7 @@ def _trigger_correlation_run_async(
                 run_result=result,
                 summary_text=narration.get("summary_text") or "",
                 summary_html=narration.get("summary_html") or "",
+                insights_json=narration.get("insights") or [],
             )
 
             _log.info(

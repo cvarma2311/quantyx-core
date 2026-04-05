@@ -10,7 +10,6 @@ from psycopg2.extras import RealDictCursor
 
 from services.ai.config import Settings
 
-
 def _json_fallback(value: object) -> str | float:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
@@ -39,15 +38,23 @@ def create_chart_request(
     title: str | None = None,
     created_by: str | None = None,
     conversation_id: str | None = None,
+    interaction_context_json: dict | None = None,
+    lineage_json: dict | None = None,
+    parent_chart_id: str | None = None,
+    root_chart_id: str | None = None,
+    drill_hierarchy_id: str | None = None,
+    drill_level_id: str | None = None,
 ) -> dict:
     chart_id = f"chart_{uuid.uuid4().hex[:10]}"
     conversation_ids = [conversation_id] if conversation_id else []
     insert_sql = """
         INSERT INTO public.quantyx_chart_requests
           (chart_id, tenant_id, domain_id, run_id, question, query_payload, sql, params, rows_json,
-           chart_source, title, created_by, conversation_ids, status)
+           chart_source, title, created_by, conversation_ids, interaction_context_json, lineage_json,
+           parent_chart_id, root_chart_id, drill_hierarchy_id, drill_level_id, status)
         VALUES
-          (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb, 'queued')
+          (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
+           %s, %s, %s, %s, 'queued')
         RETURNING chart_id, status, created_at, updated_at
     """
     params = [
@@ -64,6 +71,12 @@ def create_chart_request(
         title,
         created_by,
         _serialize_payload(conversation_ids),
+        _serialize_payload(interaction_context_json),
+        _serialize_payload(lineage_json),
+        parent_chart_id,
+        root_chart_id,
+        drill_hierarchy_id,
+        drill_level_id,
     ]
     conn = psycopg2.connect(
         host=settings.db_host,
@@ -88,7 +101,8 @@ def get_chart_request(settings: Settings, chart_id: str) -> dict | None:
     sql = """
         SELECT chart_id, tenant_id, domain_id, conversation_ids, question, query_payload, sql, params,
                rows_json, chart_type, chart_payload, chart_data, status, error_message, timing_ms,
-               insight_text, narrative_text, stats_json,
+               insight_text, narrative_text, stats_json, interaction_context_json, lineage_json,
+               parent_chart_id, root_chart_id, drill_hierarchy_id, drill_level_id,
                created_at, updated_at
           FROM public.quantyx_chart_requests
          WHERE chart_id = %s
@@ -160,6 +174,12 @@ def update_chart_request(
     insight_text: str | None = None,
     narrative_text: str | None = None,
     stats_json: dict | None = None,
+    interaction_context_json: dict | None = None,
+    lineage_json: dict | None = None,
+    parent_chart_id: str | None = None,
+    root_chart_id: str | None = None,
+    drill_hierarchy_id: str | None = None,
+    drill_level_id: str | None = None,
 ) -> None:
     updates = []
     values: list[object] = []
@@ -202,6 +222,24 @@ def update_chart_request(
     if stats_json is not None:
         updates.append("stats_json = %s::jsonb")
         values.append(_serialize_payload(stats_json))
+    if interaction_context_json is not None:
+        updates.append("interaction_context_json = %s::jsonb")
+        values.append(_serialize_payload(interaction_context_json))
+    if lineage_json is not None:
+        updates.append("lineage_json = %s::jsonb")
+        values.append(_serialize_payload(lineage_json))
+    if parent_chart_id is not None:
+        updates.append("parent_chart_id = %s")
+        values.append(parent_chart_id)
+    if root_chart_id is not None:
+        updates.append("root_chart_id = %s")
+        values.append(root_chart_id)
+    if drill_hierarchy_id is not None:
+        updates.append("drill_hierarchy_id = %s")
+        values.append(drill_hierarchy_id)
+    if drill_level_id is not None:
+        updates.append("drill_level_id = %s")
+        values.append(drill_level_id)
     updates.append("updated_at = now()")
     if not updates:
         return

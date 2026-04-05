@@ -26,6 +26,10 @@ from services.ai.agentic_store import (
     upsert_agent_event_artifact,
 )
 import logging
+
+AGENTIC_CORRELATION_FLOW_VERSION = "2026-04-03-correlation-debug-v1"
+AGENTIC_ANOMALY_FLOW_VERSION = "2026-04-03-anomaly-fallback-debug-v1"
+
 from services.ai.agentic_agents import (
     build_schema_graph,
     enrich_schema_graph_columns,
@@ -56,7 +60,7 @@ from services.ai.dashboards_store import (
     create_dashboard as _create_dashboard,
     add_chart as _add_chart_to_dashboard,
 )
-from services.ai.anomaly_detection import detect_agentic_anomalies
+from services.ai.anomaly_detection import detect_agentic_anomalies, build_anomaly_fallback_exploration
 from services.ai.anomaly_detection import rank_high_signal_investigative_areas
 from services.ai.anomaly_store import (
     create_anomaly_action,
@@ -74,7 +78,15 @@ from services.ai.correlation_store import create_correlation_run, save_correlati
 from services.ai.correlation_charts import generate_correlation_charts
 from services.ai.views import create_views_from_schema, create_joined_views, extract_schema_table_names
 from services.ai.charts_store import create_chart_request, update_chart_request
+from services.ai.hierarchy_store import ensure_business_hierarchies
+from services.ai.chart_interactions import build_chart_interaction_context_for_creation
 from services.ai.charts import build_chart_payload, infer_chart_type, build_chart_inference, build_discovery_chart_payload
+from services.ai.dashboard_refresh_store import (
+    create_dashboard_refresh_run,
+    update_dashboard_refresh_status,
+    upsert_dashboard_insights_artifact,
+)
+from services.ai.dashboard_insights import render_summary_html, render_inference_html
 from services.ai.db import ScopedConnection, run_query, execute_non_query
 from services.ai.quality_gate import evaluate_quality_report
 from services.ai.metrics_registry import upsert_metric
@@ -546,7 +558,6 @@ def _run_tool_call(sql: str, settings, schema: str, known_tables: list[str] | No
 
 def _parse_discovery_charts(content: str) -> list[dict]:
     """Extract the charts list from LLM response content (JSON or markdown-wrapped)."""
-    logger = logging.getLogger(__name__)
     # Strip markdown code fences if present
     cleaned = re.sub(r"```(?:json)?\s*", "", content).strip().rstrip("`").strip()
     try:
@@ -1341,6 +1352,159 @@ def _llm_summarize_anomaly_investigation(
         model_env_key="AGENTIC_ANOMALY_SYNTHESIS_MODEL",
         timeout_env_key="AGENTIC_ANOMALY_SYNTHESIS_TIMEOUT_SEC",
     )
+
+
+def _llm_summarize_anomaly_fallback_exploration(
+    settings,
+    *,
+    domain_id: str | None,
+    context_text: str | None,
+    dashboard_spec: dict[str, Any],
+    quality_report: dict[str, Any],
+    exploration_payload: dict[str, Any],
+    correlation_context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    system_prompt = (
+        "You are an anomaly exploration analyst. "
+        "A strong anomaly detector found no confirmed candidates, so you must interpret exploratory time-series and group-by evidence "
+        "from business tables and produce a grounded anomaly-readiness briefing. "
+        "Return JSON only with keys: "
+        "summary_text, insights, hypotheses, actions, dashboard_suggestions. "
+        "Rules: "
+        "- Do not claim confirmed anomalies unless the evidence clearly supports it. "
+        "- Distinguish exploratory signals from confirmed anomalies. "
+        "- Explain business implications using the provided context. "
+        "- dashboard_suggestions should be a list of objects with title, section, priority, query_id, chart_title, summary, include. "
+        "- hypotheses and actions may be empty when evidence is weak."
+    )
+    return _llm_json_response(
+        settings,
+        system_prompt=system_prompt,
+        user_payload={
+            "domain_id": domain_id,
+            "context_text": str(context_text or "")[:8000],
+            "dashboard": {
+                "title": dashboard_spec.get("dashboard_title") or dashboard_spec.get("title"),
+                "story": dashboard_spec.get("story") or {},
+                "insights": (dashboard_spec.get("insights") or [])[:10],
+            },
+            "quality_report": quality_report or {},
+            "exploration": exploration_payload,
+            "correlation_context": correlation_context or {},
+        },
+        model_env_key="AGENTIC_ANOMALY_FALLBACK_MODEL",
+        timeout_env_key="AGENTIC_ANOMALY_FALLBACK_TIMEOUT_SEC",
+    )
+
+
+def _fallback_anomaly_exploration_payload(
+    *,
+    exploration_payload: dict[str, Any],
+    quality_report: dict[str, Any] | None = None,
+    correlation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    queries = [item for item in (exploration_payload.get("queries") or []) if isinstance(item, dict)]
+    observations = [item for item in (exploration_payload.get("observations") or []) if isinstance(item, dict)]
+    source_title = str(exploration_payload.get("source_dashboard_title") or "source dashboard").strip()
+    summary_text = (
+        f"No confirmed anomalies crossed the configured threshold, so the system generated an exploratory anomaly dashboard from table-native queries. "
+        f"The analysis uses {len(queries)} exploratory quer{'ies' if len(queries) != 1 else 'y'} over {source_title}."
+    )
+    if observations:
+        first = observations[0]
+        summary_text += f" The strongest exploratory signal comes from {first.get('title') or 'the lead chart'}."
+    warnings = []
+    if quality_report:
+        warnings = [str(v) for v in (((quality_report.get("anomaly_readiness_advisory") or {}).get("warnings") or [])) if str(v).strip()]
+    insights: list[str] = []
+    for obs in observations[:3]:
+        title = str(obs.get("title") or "").strip()
+        detail = obs.get("detail") or {}
+        if title and isinstance(detail, dict):
+            period = detail.get("period")
+            delta = detail.get("deviation") or detail.get("delta_value")
+            if period is not None:
+                insights.append(f"{title} shows a notable change around {period} with deviation {delta}.")
+            elif delta is not None:
+                insights.append(f"{title} highlights a recent category shift with delta {delta}.")
+    insights.extend(warnings[:2])
+    dashboard_suggestions = [
+        {
+            "suggestion_id": f"fallback_{idx}",
+            "title": str(item.get("title") or f"Exploration {idx}"),
+            "section": "chart",
+            "priority": idx,
+            "summary": str(item.get("reason") or "Exploratory anomaly view"),
+            "query_id": item.get("query_id"),
+            "chart_title": item.get("title"),
+            "include": True,
+        }
+        for idx, item in enumerate(queries[:6], start=1)
+    ]
+    if correlation_context and correlation_context.get("summary"):
+        insights.append(str(correlation_context.get("summary")))
+    return {
+        "summary_text": summary_text,
+        "hypotheses": [],
+        "actions": [],
+        "insights": insights[:8],
+        "dashboard_suggestions": dashboard_suggestions,
+        "mode": "table_native_exploration",
+    }
+
+
+def _llm_narrate_contextual_chart(
+    settings,
+    *,
+    chart_title: str,
+    chart_type: str,
+    rows: list[dict[str, Any]],
+    metric_name: str,
+    dimensions: list[str],
+    context_text: str | None,
+    dashboard_title: str | None,
+    investigation_summary: dict[str, Any] | None,
+    quality_report: dict[str, Any] | None,
+    correlation_context: dict[str, Any] | None,
+) -> dict[str, str] | None:
+    system_prompt = (
+        "You are a business analyst writing contextual chart explanations for an anomaly dashboard. "
+        "Use the chart data and business context to explain what the chart shows, what changed, and why it matters. "
+        "Ground the explanation primarily in the displayed chart rows. "
+        "Do not let external correlation or investigation context override the visible series, entities, dates, or grain in the chart. "
+        "If external context is mentioned, label it clearly as related context, not as evidence shown in the chart. "
+        "If the investigation mode is exploratory or no confirmed anomalies crossed threshold, say that explicitly and avoid claiming confirmed anomalies. "
+        "Return JSON only with keys: insight_text, narrative_text. "
+        "insight_text must be one short takeaway sentence. "
+        "narrative_text must be 3 to 5 sentences, grounded in the data, with business-context interpretation and any important caveats. "
+        "Do not invent causes; clearly frame hypotheses as possibilities."
+    )
+    payload = {
+        "dashboard_title": dashboard_title,
+        "chart_title": chart_title,
+        "chart_type": chart_type,
+        "metric_name": metric_name,
+        "dimensions": dimensions,
+        "context_text": str(context_text or "")[:8000],
+        "investigation_summary": investigation_summary or {},
+        "quality_report": quality_report or {},
+        "correlation_context": correlation_context or {},
+        "chart_rows": rows[:150],
+    }
+    result = _llm_json_response(
+        settings,
+        system_prompt=system_prompt,
+        user_payload=payload,
+        model_env_key="AGENTIC_CONTEXTUAL_CHART_MODEL",
+        timeout_env_key="AGENTIC_CONTEXTUAL_CHART_TIMEOUT_SEC",
+    )
+    if not isinstance(result, dict):
+        return None
+    insight_text = str(result.get("insight_text") or "").strip()
+    narrative_text = str(result.get("narrative_text") or "").strip()
+    if not insight_text and not narrative_text:
+        return None
+    return {"insight_text": insight_text, "narrative_text": narrative_text}
 
 
 def _llm_extract_text(
@@ -3427,6 +3591,271 @@ def _persist_agentic_registry_outputs(
     return result
 
 
+_CORR_CHART_TYPES = frozenset({
+    "forecast_band", "anomaly_timeline", "correlation_heatmap",
+    "scatter_regression", "rolling_correlation", "anomaly_density",
+    "category_trend_grouped", "category_forecast_stacked_bar",
+    "metric_overlap_matrix", "temporal_eligibility_warning_card",
+})
+
+
+def _build_correlation_chart_insight(corr_chart: dict) -> dict[str, Any]:
+    """
+    Build insight_text, narrative_text, and stats_json for a correlation chart
+    using the chart type and its embedded spec data.
+
+    Returns a dict with keys: insight_text, narrative_text, stats_json.
+    Falls back to generic title-based text if the spec data is sparse.
+    """
+    chart_type = str(corr_chart.get("chart_type") or "")
+    spec = corr_chart.get("spec") or {}
+    data = corr_chart.get("data") or spec.get("data") or []
+    metric_name = str(corr_chart.get("metric_name") or spec.get("metric_name") or "")
+    pair_id = corr_chart.get("pair_id") or ""
+    subtitle = str(spec.get("subtitle") or "")
+    title = str(spec.get("title") or chart_type.replace("_", " ").title())
+
+    insight_text = ""
+    narrative_text = ""
+    stats_json: dict = {"chart_type": chart_type, "metric_name": metric_name}
+
+    if chart_type == "forecast_band":
+        actuals = [r["actual"] for r in data if r.get("actual") is not None]
+        forecasts = [r["forecast"] for r in data if r.get("forecast") is not None]
+        forecast_rows = [r for r in data if r.get("forecast") is not None]
+        trend = "flat"
+        for part in subtitle.split(","):
+            part = part.strip()
+            if part.startswith("Trend:"):
+                trend = part.replace("Trend:", "").strip()
+                break
+        seasonality = "seasonality detected" in subtitle
+        if actuals and forecasts and forecast_rows:
+            last_actual = actuals[-1]
+            first_forecast = forecasts[0]
+            forecast_end = forecasts[-1]
+            pct_change = ((first_forecast - last_actual) / last_actual * 100) if last_actual else 0
+            horizon_change = ((forecast_end - last_actual) / last_actual * 100) if last_actual else 0
+            direction = "increase" if pct_change > 0 else ("decrease" if pct_change < 0 else "no change")
+            first_period = str(forecast_rows[0].get("period") or "")
+            last_period = str(forecast_rows[-1].get("period") or "")
+            insight_text = (
+                f"{metric_name} forecast shows a {abs(pct_change):.1f}% {direction} "
+                f"from the last actual value. Trend: {trend}."
+            )
+            narrative_text = (
+                f"This chart compares the historical actual series for {metric_name} with its forecast extension. "
+                f"The first projected point at {first_period} is {first_forecast:,.0f} versus the last actual value of {last_actual:,.0f} "
+                f"({pct_change:+.1f}%). By the end of the forecast horizon at {last_period}, the projection reaches {forecast_end:,.0f} "
+                f"({horizon_change:+.1f}% versus the last actual). The overall direction is {trend}"
+                + (", and the model detected seasonality." if seasonality else ".")
+            )
+        else:
+            insight_text = f"{metric_name} forward projection with {trend} trend."
+            narrative_text = subtitle or title
+        stats_json.update({"trend_direction": trend, "seasonality": seasonality,
+                           "actual_count": len(actuals), "forecast_count": len(forecasts)})
+
+    elif chart_type == "anomaly_timeline":
+        scored = [r for r in data if r.get("anomaly_score") is not None]
+        anomaly_classes = {}
+        for r in scored:
+            cls = str(r.get("anomaly_class") or "unknown")
+            anomaly_classes[cls] = anomaly_classes.get(cls, 0) + 1
+        dominant = max(anomaly_classes, key=anomaly_classes.get) if anomaly_classes else None
+        n = len(scored)
+        if n > 0:
+            insight_text = (
+                f"{n} anomaly point{'s' if n != 1 else ''} detected in {metric_name}. "
+                f"Dominant type: {dominant}."
+            )
+            narrative_text = (
+                f"The anomaly timeline for {metric_name} shows {n} flagged period{'s' if n != 1 else ''}. "
+                + (f"The most common anomaly class is '{dominant}', indicating "
+                   + ("a sudden spike." if dominant == "spike" else
+                      "a sudden drop." if dominant == "drop" else
+                      "a sustained upward drift." if dominant == "drift_up" else
+                      "a sustained downward drift." if dominant == "drift_down" else
+                      "a step-level shift." if dominant == "step_change" else
+                      f"anomalies of type '{dominant}'.")
+                   if dominant else "")
+            )
+        else:
+            insight_text = f"No anomaly periods detected for {metric_name}."
+            narrative_text = f"{metric_name} shows no anomalies above the detection threshold."
+        stats_json.update({"anomaly_count": n, "anomaly_classes": anomaly_classes})
+
+    elif chart_type == "correlation_heatmap":
+        if data:
+            non_diagonal = [r for r in data if r.get("metric_a") != r.get("metric_b") and r.get("pearson_r") is not None]
+            if non_diagonal:
+                strongest = max(non_diagonal, key=lambda r: abs(r.get("pearson_r") or 0.0))
+                r_val = strongest.get("pearson_r", 0.0)
+                insight_text = (
+                    f"Strongest correlation: {strongest['metric_a']} × {strongest['metric_b']} "
+                    f"(r = {r_val:.2f})."
+                )
+                high_pairs = [r for r in non_diagonal if abs(r.get("pearson_r") or 0.0) >= 0.7]
+                narrative_text = (
+                    f"The heatmap shows {len(non_diagonal) // 2} unique metric pairs. "
+                    f"{len(high_pairs) // 2} pair{'s' if len(high_pairs) // 2 != 1 else ''} have |r| ≥ 0.70, "
+                    f"indicating strong relationships. "
+                    f"Strongest pair: {strongest['metric_a']} × {strongest['metric_b']} (r = {r_val:.2f})."
+                )
+                stats_json.update({"strongest_r": round(r_val, 4), "high_correlation_pairs": len(high_pairs) // 2})
+
+    elif chart_type == "scatter_regression":
+        # Extract r and lag from subtitle: "Pearson r = 0.95 | lag = 1 periods (leading) | ..."
+        r_val = None
+        lag = None
+        direction = None
+        for part in subtitle.split("|"):
+            part = part.strip()
+            if part.startswith("Pearson r ="):
+                try:
+                    r_val = float(part.split("=")[1].strip())
+                except (ValueError, IndexError):
+                    pass
+            elif part.startswith("lag ="):
+                try:
+                    lag_part = part.replace("lag =", "").strip()
+                    lag = int(lag_part.split()[0])
+                    if "(" in lag_part and ")" in lag_part:
+                        direction = lag_part[lag_part.index("(") + 1: lag_part.index(")")]
+                except (ValueError, IndexError):
+                    pass
+        ma = str(spec.get("metric_a") or "")
+        mb = str(spec.get("metric_b") or "")
+        if r_val is not None:
+            strength = "very strong" if abs(r_val) >= 0.8 else ("strong" if abs(r_val) >= 0.6 else ("moderate" if abs(r_val) >= 0.4 else "weak"))
+            direc_label = "positive" if r_val >= 0 else "negative"
+            insight_text = (
+                f"{ma} and {mb} show a {strength} {direc_label} correlation (r = {r_val:.2f})"
+                + (f" with {direction} relationship (lag {lag})." if lag and direction else ".")
+            )
+            narrative_text = (
+                f"Scatter plot of {ma} vs {mb}: Pearson r = {r_val:.2f}, indicating a {strength} {direc_label} "
+                f"linear relationship. "
+                + (f"The series leads by {lag} period{'s' if lag != 1 else ''} ({direction})." if lag and direction else "")
+            )
+            stats_json.update({"pearson_r": round(r_val, 4), "lag": lag, "direction": direction, "metric_a": ma, "metric_b": mb})
+
+    elif chart_type == "rolling_correlation":
+        rolling_vals = [r.get("rolling_r") for r in data if r.get("rolling_r") is not None]
+        ma = str(spec.get("metric_a") or "")
+        mb = str(spec.get("metric_b") or "")
+        if rolling_vals:
+            r_min = round(min(rolling_vals), 3)
+            r_max = round(max(rolling_vals), 3)
+            r_range = round(r_max - r_min, 3)
+            is_stable = r_range < 0.3
+            insight_text = (
+                f"Rolling correlation between {ma} and {mb} ranges from {r_min:.2f} to {r_max:.2f}. "
+                f"Relationship is {'stable' if is_stable else 'unstable'}."
+            )
+            narrative_text = (
+                f"The rolling correlation for {ma} × {mb} varies between {r_min:.2f} and {r_max:.2f} "
+                f"(spread = {r_range:.2f}). "
+                + ("This narrow range indicates a stable, consistent relationship over time."
+                   if is_stable else
+                   "This wide spread indicates the relationship changes over time and may not be reliable.")
+            )
+            stats_json.update({"r_min": r_min, "r_max": r_max, "r_range": r_range, "is_stable": is_stable, "metric_a": ma, "metric_b": mb})
+
+    elif chart_type == "anomaly_density":
+        total = sum(r.get("count", 0) for r in data)
+        high_severity = sum(r.get("count", 0) for r in data if (r.get("lo") or 0.0) >= 0.6)
+        if total > 0:
+            insight_text = (
+                f"{total} anomaly score{'s' if total != 1 else ''} across all metrics"
+                + (f", {high_severity} with high severity (score ≥ 0.6)" if high_severity else "") + "."
+            )
+            if metric_name:
+                insight_text = insight_text.replace("all metrics", metric_name)
+            narrative_text = (
+                f"Anomaly score distribution{'for ' + metric_name if metric_name else ''}: "
+                f"{total} total anomalies, {high_severity} high-severity (score ≥ 0.6). "
+                + ("Most anomalies are concentrated in high-severity buckets, warranting immediate investigation."
+                   if high_severity > total * 0.4 else
+                   "Most anomalies are low-to-moderate severity.")
+            )
+            stats_json.update({"total_anomalies": total, "high_severity_count": high_severity})
+
+    elif chart_type == "category_trend_grouped":
+        series = spec.get("series") or []
+        n_categories = len(series)
+        category_names = [str(item.get("name") or item.get("id") or "") for item in series if str(item.get("name") or item.get("id") or "").strip()]
+        top_categories = ", ".join(category_names[:3])
+        insight_text = (
+            f"{metric_name} trend across {n_categories} categor{'ies' if n_categories != 1 else 'y'} over time."
+        )
+        narrative_text = (
+            f"This chart shows how {metric_name} changes over time for {n_categories} "
+            f"categor{'ies' if n_categories != 1 else 'y'} on the same timeline. "
+            + (f"The visible categories include {top_categories}. " if top_categories else "")
+            + "Use it to compare relative size, turning points, and whether category trajectories are converging or diverging."
+        )
+        stats_json.update({"category_count": n_categories, "categories": category_names[:10]})
+
+    elif chart_type == "category_forecast_stacked_bar":
+        series = spec.get("series") or []
+        n_categories = len(series)
+        rows = [row for row in data if isinstance(row, dict)]
+        first_row = rows[0] if rows else {}
+        dominant_category = None
+        dominant_value = None
+        for item in series:
+            field = str(item.get("id") or "")
+            val = first_row.get(field)
+            if isinstance(val, (int, float)) and (dominant_value is None or val > dominant_value):
+                dominant_value = float(val)
+                dominant_category = str(item.get("name") or field)
+        insight_text = (
+            f"Stacked forecast for {metric_name} across {n_categories} "
+            f"categor{'ies' if n_categories != 1 else 'y'}."
+        )
+        narrative_text = (
+            f"This stacked forecast shows how projected {metric_name} is distributed across "
+            f"{n_categories} categor{'ies' if n_categories != 1 else 'y'} over the forecast horizon. "
+            + (f"At the first forecast step, {dominant_category} contributes the largest share at {dominant_value:,.0f}. " if dominant_category and dominant_value is not None else "")
+            + "Read it both for total projected volume and for how category mix shifts from one forecast period to the next."
+        )
+        stats_json.update({"category_count": n_categories, "dominant_first_period_category": dominant_category})
+
+    elif chart_type == "metric_overlap_matrix":
+        n_pairs = len(data)
+        insight_text = (
+            f"{n_pairs} near-duplicate metric pair{'s' if n_pairs != 1 else ''} detected (|r| ≥ 0.90). "
+            "Review for semantic overlap."
+        )
+        narrative_text = (
+            f"The overlap matrix flags {n_pairs} metric pair{'s' if n_pairs != 1 else ''} with |r| ≥ 0.90. "
+            "These may represent the same underlying signal measured differently, which can inflate correlation results."
+        )
+        stats_json.update({"overlap_pair_count": n_pairs})
+
+    elif chart_type == "temporal_eligibility_warning_card":
+        body = spec.get("body") or []
+        excluded = int((corr_chart.get("spec") or {}).get("subtitle", "").replace("Excluded snapshots: ", "").split()[0] if "Excluded snapshots:" in str((corr_chart.get("spec") or {}).get("subtitle", "")) else 0)
+        insight_text = (
+            f"Correlation input warnings: {len(body)} issue{'s' if len(body) != 1 else ''}. "
+            + (body[0] if body else "")
+        )
+        narrative_text = (
+            "This warning card explains which correlation inputs were excluded before analysis and why. "
+            + (" ".join(body) if body else "Some data sources were excluded from correlation analysis.")
+        )
+        stats_json.update({"warning_count": len(body), "excluded_snapshot_count": excluded})
+
+    # Final fallback
+    if not insight_text:
+        insight_text = subtitle or title
+    if not narrative_text:
+        narrative_text = subtitle or title
+
+    return {"insight_text": insight_text, "narrative_text": narrative_text, "stats_json": stats_json}
+
+
 def _scoped_conn_from_state(state: dict[str, Any], settings=None) -> ScopedConnection | None:
     """Reconstruct a ScopedConnection from the serialised dict stored in LangGraph state.
 
@@ -3475,8 +3904,9 @@ def run_agentic_workflow(
         raise RuntimeError("LangGraph is not available")
 
     logger = logging.getLogger(__name__)
+    phase52_build_version = "2026-04-04-phase52-v1"
     logger.info(
-        "agentic.workflow.start | run_id=%s tenant=%s domain=%s schema=%s connection_id=%s database=%s anomaly_enabled=%s anomaly_dashboard_enabled=%s anomaly_llm_mode=%s",
+        "agentic.workflow.start | run_id=%s tenant=%s domain=%s schema=%s connection_id=%s database=%s anomaly_enabled=%s anomaly_dashboard_enabled=%s anomaly_llm_mode=%s build_version=%s",
         run_id,
         initial_state.get("tenant_id"),
         initial_state.get("domain_id"),
@@ -3486,6 +3916,7 @@ def run_agentic_workflow(
         _env_bool("AGENTIC_ANOMALY_DETECTION_ENABLED", True),
         _env_bool("AGENTIC_ANOMALY_DASHBOARD_ENABLED", True),
         os.getenv("AGENTIC_ANOMALY_LLM_MODE", "auto"),
+        phase52_build_version,
     )
 
     graph = StateGraph(dict)
@@ -4676,6 +5107,19 @@ def run_agentic_workflow(
     def dashboard_node(state: dict[str, Any]) -> dict[str, Any]:
         logger = logging.getLogger(__name__)
         _emit(settings, run_id, "DashboardAgent", "running", "Dashboard Agent started", event_callback=event_callback)
+        _emit(
+            settings,
+            run_id,
+            "DashboardAgent",
+            "running",
+            "phase52-dashboard-node-entered",
+            {
+                "build_version": phase52_build_version,
+                "tenant_id": state.get("tenant_id"),
+                "domain_id": state.get("domain_id"),
+            },
+            event_callback=event_callback,
+        )
         dashboard_start = time.perf_counter()
         min_charts = _resolve_int_setting(
             state,
@@ -4762,6 +5206,106 @@ def run_agentic_workflow(
         runtime_chart_rejections: list[dict[str, Any]] = []
         profiling_map = {t.get("name"): t for t in (state.get("profiling_stats", {}).get("tables") or [])}
         join_edges = state.get("join_edges") or []
+        logger.info(
+            "agentic.hierarchies.block_entered | run_id=%s tenant_id=%s domain_id=%s build_version=%s join_edge_count=%s profiled_table_count=%s",
+            run_id,
+            state.get("tenant_id"),
+            state.get("domain_id"),
+            phase52_build_version,
+            len(join_edges),
+            len((state.get("profiling_stats", {}).get("tables") or [])),
+        )
+        try:
+            _emit(
+                settings,
+                run_id,
+                "HierarchyBootstrapAgent",
+                "running",
+                "Hierarchy bootstrap started",
+                artifacts={
+                    "build_version": phase52_build_version,
+                    "tenant_id": state.get("tenant_id"),
+                    "domain_id": state.get("domain_id"),
+                    "phase52_chart_interactions_enabled": True,
+                    "hierarchy_bootstrap_enabled": True,
+                    "join_edge_count": len(join_edges),
+                    "profiled_table_count": len((state.get("profiling_stats", {}).get("tables") or [])),
+                },
+                event_callback=event_callback,
+            )
+            logger.info(
+                "agentic.hierarchies.bootstrap_start | run_id=%s tenant_id=%s domain_id=%s build_version=%s phase52_chart_interactions_enabled=%s hierarchy_bootstrap_enabled=%s join_edge_count=%s",
+                run_id,
+                state.get("tenant_id"),
+                state.get("domain_id"),
+                phase52_build_version,
+                True,
+                True,
+                len(join_edges),
+            )
+            ensured_hierarchies = ensure_business_hierarchies(
+                settings,
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or ""),
+                profiling_stats=state.get("profiling_stats") or {},
+                context_text=state.get("context_text"),
+                join_edges=join_edges,
+            )
+            state["business_hierarchies"] = ensured_hierarchies
+            _emit(
+                settings,
+                run_id,
+                "HierarchyBootstrapAgent",
+                "completed",
+                "Hierarchy bootstrap completed",
+                artifacts={
+                    "build_version": phase52_build_version,
+                    "tenant_id": state.get("tenant_id"),
+                    "domain_id": state.get("domain_id"),
+                    "persisted_count": len(ensured_hierarchies),
+                    "hierarchy_ids": [str(item.get("hierarchy_id") or "") for item in ensured_hierarchies[:20]],
+                },
+                event_callback=event_callback,
+            )
+            logger.info(
+                "agentic.hierarchies.ready | run_id=%s tenant_id=%s domain_id=%s build_version=%s hierarchy_count=%s",
+                run_id,
+                state.get("tenant_id"),
+                state.get("domain_id"),
+                phase52_build_version,
+                len(ensured_hierarchies),
+            )
+        except Exception:
+            _tb = traceback.format_exc()
+            logger.error(
+                "agentic.hierarchies.failed | run_id=%s tenant_id=%s domain_id=%s build_version=%s\n%s",
+                run_id,
+                state.get("tenant_id"),
+                state.get("domain_id"),
+                phase52_build_version,
+                _tb,
+            )
+            try:
+                _emit(
+                    settings,
+                    run_id,
+                    "HierarchyBootstrapAgent",
+                    "failed",
+                    "Hierarchy bootstrap failed",
+                    artifacts={
+                        "build_version": phase52_build_version,
+                        "tenant_id": state.get("tenant_id"),
+                        "domain_id": state.get("domain_id"),
+                        "error": _tb,
+                    },
+                    event_callback=event_callback,
+                )
+            except Exception:
+                logger.error(
+                    "agentic.hierarchies.failed_emit_also_failed | run_id=%s\n%s",
+                    run_id,
+                    traceback.format_exc(),
+                )
 
         # ── Phase 47: LLM Chart Discovery ──────────────────────────────────
         discovery_chart_ids: list[str] = []
@@ -5218,9 +5762,15 @@ def run_agentic_workflow(
                             except Exception:
                                 pass
                 except Exception as exc:
+                    _conn_info = (
+                        f"{_dashboard_scoped_conn.host}:{_dashboard_scoped_conn.port}/"
+                        f"{_dashboard_scoped_conn.database_name}"
+                        if _dashboard_scoped_conn else "app_db"
+                    )
                     logger.exception(
-                        "dashboard.chart.sql_failed | title=%s sql=%s params=%s",
+                        "dashboard.chart.sql_failed | title=%s conn=%s sql=%s params=%s",
                         chart_title,
+                        _conn_info,
                         sql,
                         params,
                     )
@@ -5300,6 +5850,28 @@ def run_agentic_workflow(
                 chart_ids.append(chart_id)
                 payload = build_chart_payload(chart_type, rows, metric_name, dimensions or ["category"])
                 dim_key = dimensions[0] if dimensions else None
+                interaction_context = build_chart_interaction_context_for_creation(
+                    settings,
+                    chart_row={
+                        "chart_id": chart_id,
+                        "tenant_id": state.get("tenant_id"),
+                        "domain_id": state.get("domain_id"),
+                        "query_payload": {
+                            "metrics": [metric_name],
+                            "dimensions": dimensions,
+                            "chart": chart_type,
+                            "chart_title": chart_title,
+                            "dashboard_title": dashboard_title,
+                            "metric_intent": chart.get("metric_intent"),
+                            "table": table_name,
+                            "time_grain": chart.get("time_grain"),
+                        },
+                        "rows_json": rows,
+                    },
+                    tenant_id=str(state.get("tenant_id") or ""),
+                    domain_id=str(state.get("domain_id") or "").strip() or None,
+                    hierarchies=state.get("business_hierarchies") if isinstance(state.get("business_hierarchies"), list) else None,
+                )
                 inference = build_chart_inference(
                     settings,
                     chart_type=chart_type,
@@ -5321,6 +5893,8 @@ def run_agentic_workflow(
                     insight_text=inference["insight_text"],
                     narrative_text=inference["narrative_text"],
                     stats_json=inference["stats_json"],
+                    interaction_context_json=interaction_context,
+                    root_chart_id=chart_id,
                 )
                 logger.info(
                     "dashboard.chart.request_updated | run_id=%s chart_id=%s status=ready sql_is_null=%s rows=%s dims=%s",
@@ -5876,6 +6450,9 @@ def run_agentic_workflow(
             "CorrelationAgent",
             "running",
             "Correlation Agent started",
+            {
+                "correlation_flow_version": AGENTIC_CORRELATION_FLOW_VERSION,
+            },
             event_callback=event_callback,
         )
         if not _env_bool("AGENTIC_CORRELATION_ENABLED", True):
@@ -5938,18 +6515,45 @@ def run_agentic_workflow(
             run_id=run_id,
             forecast_periods=forecast_periods,
             analysis_mode=analysis_mode,
+            scoped_conn=_scoped_conn_from_state(state, settings),
+            profiling_stats=state.get("profiling_stats") or {},
         )
         narration: dict[str, Any] = {"summary_text": "", "summary_html": ""}
+        logger.info(
+            "agentic.correlation.narration.request | run_id=%s correlation_run_id=%s "
+            "kpi_snapshots=%d anomalies=%d pairs=%d projections=%d threads=%d warnings=%d",
+            run_id, correlation_run_id,
+            len(result.get("kpi_snapshots") or []),
+            len(result.get("anomaly_results") or []),
+            len(result.get("correlation_pairs") or []),
+            len(result.get("forward_projections") or []),
+            len(result.get("investigation_threads") or []),
+            len(result.get("data_quality_warnings") or []),
+        )
         try:
             narration = narrate_correlation_results(
                 settings,
+                kpi_snapshots=result.get("kpi_snapshots") or [],
                 anomaly_results=result.get("anomaly_results") or [],
                 correlation_pairs=result.get("correlation_pairs") or [],
                 forward_projections=result.get("forward_projections") or [],
                 investigation_threads=result.get("investigation_threads") or [],
+                data_quality_warnings=result.get("data_quality_warnings") or [],
+                snapshot_eligibility_summary=result.get("snapshot_eligibility_summary") or {},
+            )
+            logger.info(
+                "agentic.correlation.narration.response | run_id=%s correlation_run_id=%s "
+                "threads_narrated=%d insights=%d summary_text=%r",
+                run_id, correlation_run_id,
+                narration.get("threads_narrated", 0),
+                len(narration.get("insights") or []),
+                (narration.get("summary_text") or "")[:200],
             )
         except Exception:
-            logger.warning("agentic.correlation.narration_failed | run_id=%s", run_id, exc_info=True)
+            logger.warning(
+                "agentic.correlation.narration.failed | run_id=%s correlation_run_id=%s",
+                run_id, correlation_run_id, exc_info=True,
+            )
         save_correlation_run_results(
             settings,
             correlation_run_id=correlation_run_id,
@@ -5958,6 +6562,7 @@ def run_agentic_workflow(
             run_result=result,
             summary_text=narration.get("summary_text") or "",
             summary_html=narration.get("summary_html") or "",
+            insights_json=narration.get("insights") or [],
         )
         # Generate and persist correlation charts inline so they are available
         # immediately in the same agentic run (no separate background trigger needed).
@@ -5968,12 +6573,51 @@ def run_agentic_workflow(
                 anomaly_results=result.get("anomaly_results") or [],
                 correlation_pairs=result.get("correlation_pairs") or [],
                 forward_projections=result.get("forward_projections") or [],
+                snapshot_eligibility_summary=result.get("snapshot_eligibility_summary") or {},
+                data_quality_warnings=result.get("data_quality_warnings") or [],
+            )
+            _generated_chart_types = [
+                str(chart.get("chart_type") or "").strip()
+                for chart in corr_charts
+                if str(chart.get("chart_type") or "").strip()
+            ]
+            logger.info(
+                "agentic.correlation.generated_charts | run_id=%s version=%s correlation_run_id=%s source_mode=%s selected_source=%s metric_count=%s chart_count=%s chart_types=%s",
+                run_id,
+                AGENTIC_CORRELATION_FLOW_VERSION,
+                correlation_run_id,
+                (result.get("snapshot_eligibility_summary") or {}).get("source_mode"),
+                (result.get("snapshot_eligibility_summary") or {}).get("selected_source_kind"),
+                result.get("metric_count"),
+                len(corr_charts),
+                _generated_chart_types,
+            )
+            _emit(
+                settings,
+                run_id,
+                "CorrelationAgent",
+                "raw_json_ready",
+                "Correlation chart generation summary ready",
+                {
+                    "correlation_flow_version": AGENTIC_CORRELATION_FLOW_VERSION,
+                    "correlation_run_id": correlation_run_id,
+                    "snapshot_eligibility_summary": result.get("snapshot_eligibility_summary") or {},
+                    "data_quality_warnings": result.get("data_quality_warnings") or [],
+                    "generated_chart_count": len(corr_charts),
+                    "generated_chart_types": _generated_chart_types,
+                },
+                event_callback=event_callback,
             )
             _corr_chart_ids: list[str] = []
             for corr_chart in corr_charts:
                 chart_type = str(corr_chart.get("chart_type") or "line")
                 metric_name = str(corr_chart.get("metric_name") or "")
-                title = (
+                # Prefer the human-readable title from the spec (e.g.
+                # "sales_volume — Forward Projection" or
+                # "sales_volume by zone — Category Trends") over the
+                # raw metric_name slug which contains table/column tokens.
+                spec_title = str((corr_chart.get("spec") or {}).get("title") or "").strip()
+                title = spec_title or (
                     f"{chart_type.replace('_', ' ').title()}: {metric_name}"
                     if metric_name
                     else chart_type.replace("_", " ").title()
@@ -6000,31 +6644,98 @@ def run_agentic_workflow(
                 corr_chart_id = (created or {}).get("chart_id")
                 if corr_chart_id:
                     corr_rows = corr_chart.get("data") or []
-                    corr_inference = build_chart_inference(
+                    interaction_context = build_chart_interaction_context_for_creation(
                         settings,
-                        chart_type=chart_type,
-                        rows=corr_rows,
-                        metric_name=metric_name,
-                        dim_key=None,
-                        chart_title=title,
+                        chart_row={
+                            "chart_id": corr_chart_id,
+                            "tenant_id": tenant_id,
+                            "domain_id": domain_id,
+                            "query_payload": {
+                                "metrics": [metric_name] if metric_name else [],
+                                "dimensions": [str(v) for v in ([corr_chart.get("metric_a"), corr_chart.get("metric_b")] if chart_type in {"scatter_regression", "rolling_correlation"} else []) if str(v or "").strip()],
+                                "chart": chart_type,
+                                "chart_title": title,
+                                "correlation_run_id": correlation_run_id,
+                            },
+                            "rows_json": corr_rows,
+                        },
+                        tenant_id=str(tenant_id or ""),
+                        domain_id=str(domain_id or "").strip() or None,
                     )
+                    if chart_type in _CORR_CHART_TYPES:
+                        logger.info(
+                            "agentic.correlation.chart_insight.request | run_id=%s correlation_run_id=%s "
+                            "chart_id=%s chart_type=%s metric_name=%r title=%r data_rows=%d "
+                            "pair_id=%s source=correlation_insight_builder",
+                            run_id, correlation_run_id, corr_chart_id, chart_type,
+                            metric_name, title,
+                            len(corr_chart.get("data") or []),
+                            corr_chart.get("pair_id"),
+                        )
+                        corr_inference = _build_correlation_chart_insight(corr_chart)
+                        logger.info(
+                            "agentic.correlation.chart_insight.response | run_id=%s correlation_run_id=%s "
+                            "chart_id=%s chart_type=%s insight=%r narrative=%r stats=%s",
+                            run_id, correlation_run_id, corr_chart_id, chart_type,
+                            (corr_inference.get("insight_text") or "")[:120],
+                            (corr_inference.get("narrative_text") or "")[:120],
+                            corr_inference.get("stats_json"),
+                        )
+                    else:
+                        logger.info(
+                            "agentic.correlation.chart_insight.request | run_id=%s correlation_run_id=%s "
+                            "chart_id=%s chart_type=%s metric_name=%r title=%r data_rows=%d "
+                            "source=generic_chart_inference",
+                            run_id, correlation_run_id, corr_chart_id, chart_type,
+                            metric_name, title, len(corr_rows),
+                        )
+                        corr_inference = build_chart_inference(
+                            settings,
+                            chart_type=chart_type,
+                            rows=corr_rows,
+                            metric_name=metric_name,
+                            dim_key=None,
+                            chart_title=title,
+                        )
+                        logger.info(
+                            "agentic.correlation.chart_insight.response | run_id=%s correlation_run_id=%s "
+                            "chart_id=%s chart_type=%s insight=%r narrative=%r",
+                            run_id, correlation_run_id, corr_chart_id, chart_type,
+                            (corr_inference.get("insight_text") or "")[:120],
+                            (corr_inference.get("narrative_text") or "")[:120],
+                        )
+                    _insight_text = corr_inference.get("insight_text") or ""
+                    _narrative_text = corr_inference.get("narrative_text") or _insight_text or title
                     update_chart_request(
                         settings,
                         corr_chart_id,
                         status="ready",
                         chart_type=chart_type,
                         chart_payload=corr_chart.get("spec"),
-                        insight_text=corr_inference["insight_text"] or corr_chart.get("description") or "",
-                        narrative_text=corr_inference["narrative_text"],
-                        stats_json=corr_inference["stats_json"],
+                        chart_data=corr_chart.get("data") or [],
+                        insight_text=_insight_text,
+                        narrative_text=_narrative_text,
+                        stats_json=corr_inference.get("stats_json"),
+                        interaction_context_json=interaction_context,
+                        root_chart_id=corr_chart_id,
                     )
+                    if not _insight_text or not _narrative_text:
+                        logger.warning(
+                            "agentic.correlation.chart_annotations_missing | run_id=%s correlation_run_id=%s "
+                            "chart_id=%s chart_type=%s title=%r insight_present=%s narrative_present=%s",
+                            run_id, correlation_run_id, corr_chart_id, chart_type, title,
+                            bool(_insight_text), bool(_narrative_text),
+                        )
                     _corr_chart_ids.append(corr_chart_id)
             state["correlation_chart_ids"] = _corr_chart_ids
+            # Count how many charts ended up with insight/narrative vs empty
+            _charts_with_insight = sum(
+                1 for cid in _corr_chart_ids if cid  # placeholder — actual count tracked below
+            )
             logger.info(
-                "agentic.correlation.charts_persisted | run_id=%s correlation_run_id=%s count=%s",
-                run_id,
-                correlation_run_id,
-                len(corr_charts),
+                "agentic.correlation.charts_persisted | run_id=%s version=%s correlation_run_id=%s "
+                "total_charts=%d persisted_chart_ids=%s",
+                run_id, AGENTIC_CORRELATION_FLOW_VERSION, correlation_run_id, len(corr_charts), _corr_chart_ids,
             )
         except Exception:
             logger.warning(
@@ -6039,6 +6750,7 @@ def run_agentic_workflow(
             **result,
             "summary_text": narration.get("summary_text") or "",
             "summary_html": narration.get("summary_html") or "",
+            "insights": narration.get("insights") or [],
         }
         _emit(
             settings,
@@ -6047,6 +6759,7 @@ def run_agentic_workflow(
             "completed",
             "Correlation Agent completed",
             {
+                "correlation_flow_version": AGENTIC_CORRELATION_FLOW_VERSION,
                 "correlation_run_id": correlation_run_id,
                 "analysis_mode": analysis_mode,
                 "forecast_periods": forecast_periods,
@@ -6054,6 +6767,10 @@ def run_agentic_workflow(
                 "anomaly_count": result.get("anomaly_count"),
                 "correlation_pair_count": result.get("correlation_pair_count"),
                 "thread_count": result.get("thread_count"),
+                "data_quality_warnings": result.get("data_quality_warnings") or [],
+                "snapshot_eligibility_summary": result.get("snapshot_eligibility_summary") or {},
+                "snapshot_exclusions_preview": (result.get("snapshot_exclusions") or [])[:5],
+                "insights_preview": (narration.get("insights") or [])[:3],
                 "summary_text": narration.get("summary_text") or "",
                 "error_message": result.get("error_message"),
             },
@@ -6076,6 +6793,9 @@ def run_agentic_workflow(
             "AnomalyDetectionAgent",
             "running",
             "Anomaly Detection Agent started",
+            {
+                "anomaly_flow_version": AGENTIC_ANOMALY_FLOW_VERSION,
+            },
             event_callback=event_callback,
         )
         correlation_context = _summarize_correlation_context(
@@ -6267,7 +6987,66 @@ def run_agentic_workflow(
             (detection.get("summary") or {}).get("raw_signal_candidate_count"),
         )
         if not candidates:
-            logger.info("agentic.anomaly_detection.skip | run_id=%s reason=no_candidates_above_threshold", run_id)
+            exploration = build_anomaly_fallback_exploration(
+                settings,
+                schema_name=str(state.get("schema_name") or "public"),
+                profiling_stats=state.get("profiling_stats", {}) or {},
+                metric_defs=state.get("metric_defs", []) or [],
+                dashboard_spec=state.get("dashboard_spec") or {},
+                join_edges=state.get("join_edges") or [],
+                scoped_conn=_scoped_conn_from_state(state, settings),
+            )
+            investigation_id = create_anomaly_investigation(
+                settings,
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or ""),
+                run_id=run_id,
+                trigger_source="deployment",
+                title=f"{str(state.get('domain_id') or 'Domain').replace('_', ' ').title()} Anomaly Investigation",
+                dashboard_id=state.get("dashboard_id"),
+                source_dashboard_id=state.get("dashboard_id"),
+                summary_text="No confirmed anomaly candidates crossed threshold; exploratory anomaly analysis was created from table-native queries.",
+                anomaly_summary_json={
+                    **(detection.get("summary") or {}),
+                    "reason": "no_candidates_above_threshold",
+                    "fallback_exploration": exploration,
+                    "correlation_context": correlation_context,
+                },
+                quality_json={
+                    "status": "fallback_exploration",
+                    "runtime_config": runtime_config,
+                    "readiness_advisory": readiness_advisory,
+                },
+            )
+            llm_synthesis = _llm_summarize_anomaly_fallback_exploration(
+                settings,
+                domain_id=state.get("domain_id"),
+                context_text=state.get("context_text"),
+                dashboard_spec=state.get("dashboard_spec") or {},
+                quality_report=quality_report,
+                exploration_payload=exploration,
+                correlation_context=correlation_context,
+            ) or _fallback_anomaly_exploration_payload(
+                exploration_payload=exploration,
+                quality_report=quality_report,
+                correlation_context=correlation_context,
+            )
+            state["anomaly_investigation_id"] = investigation_id
+            state["anomaly_ids"] = []
+            state["anomaly_hypothesis_ids"] = []
+            state["anomaly_action_ids"] = []
+            state["anomaly_executed_queries"] = exploration.get("queries") or []
+            state["anomaly_rejected_queries"] = []
+            state["anomaly_llm_synthesis"] = llm_synthesis
+            state["high_signal_investigative_areas"] = {}
+            logger.info(
+                "agentic.anomaly_detection.fallback_exploration | run_id=%s version=%s investigation_id=%s queries=%s observations=%s",
+                run_id,
+                AGENTIC_ANOMALY_FLOW_VERSION,
+                investigation_id,
+                len(exploration.get("queries") or []),
+                len(exploration.get("observations") or []),
+            )
             _emit(
                 settings,
                 run_id,
@@ -6275,10 +7054,18 @@ def run_agentic_workflow(
                 "completed",
                 "Anomaly Detection Agent completed",
                 {
+                    "anomaly_flow_version": AGENTIC_ANOMALY_FLOW_VERSION,
                     "candidate_count": 0,
                     "summary": detection.get("summary") or {},
                     "runtime_config": runtime_config,
                     "reason": "no_candidates_above_threshold",
+                    "fallback_mode": "table_native_exploration",
+                    "investigation_id": investigation_id,
+                    "fallback_attempted": True,
+                    "investigation_created": bool(investigation_id),
+                    "exploration_query_count": len(exploration.get("queries") or []),
+                    "exploration_observation_count": len(exploration.get("observations") or []),
+                    "summary_text": llm_synthesis.get("summary_text") if isinstance(llm_synthesis, dict) else None,
                 },
                 event_callback=event_callback,
             )
@@ -6620,6 +7407,23 @@ def run_agentic_workflow(
             "AnomalyDashboardAgent",
             "running",
             "Anomaly Dashboard Agent started",
+            {
+                "anomaly_flow_version": AGENTIC_ANOMALY_FLOW_VERSION,
+            },
+            event_callback=event_callback,
+        )
+        _emit(
+            settings,
+            run_id,
+            "AnomalyDashboardAgent",
+            "running",
+            "phase52-anomaly-dashboard-node-entered",
+            {
+                "build_version": phase52_build_version,
+                "anomaly_flow_version": AGENTIC_ANOMALY_FLOW_VERSION,
+                "tenant_id": state.get("tenant_id"),
+                "domain_id": state.get("domain_id"),
+            },
             event_callback=event_callback,
         )
         if not _env_bool("AGENTIC_ANOMALY_DASHBOARD_ENABLED", True):
@@ -6648,10 +7452,11 @@ def run_agentic_workflow(
         investigation_id = str(state.get("anomaly_investigation_id") or "").strip()
         llm_synthesis = state.get("anomaly_llm_synthesis") or {}
         executed_queries = state.get("anomaly_executed_queries") or []
-        if not investigation_id or not llm_synthesis or not executed_queries:
+        if not investigation_id or not llm_synthesis:
             logger.info(
-                "agentic.anomaly_dashboard.skip | run_id=%s reason=insufficient_artifacts investigation_id=%s has_synthesis=%s executed_queries=%s",
+                "agentic.anomaly_dashboard.skip | run_id=%s version=%s reason=insufficient_artifacts investigation_id=%s has_synthesis=%s executed_queries=%s",
                 run_id,
+                AGENTIC_ANOMALY_FLOW_VERSION,
                 investigation_id,
                 bool(llm_synthesis),
                 len(executed_queries),
@@ -6673,7 +7478,13 @@ def run_agentic_workflow(
                 "AnomalyDashboardAgent",
                 "completed",
                 "Anomaly Dashboard Agent skipped",
-                {"reason": "insufficient_artifacts"},
+                {
+                    "reason": "insufficient_artifacts",
+                    "anomaly_flow_version": AGENTIC_ANOMALY_FLOW_VERSION,
+                    "investigation_id": investigation_id or None,
+                    "has_synthesis": bool(llm_synthesis),
+                    "executed_query_count": len(executed_queries),
+                },
                 event_callback=event_callback,
             )
             return state
@@ -6681,6 +7492,7 @@ def run_agentic_workflow(
             item
             for item in (
                 (((state.get("anomaly_detection") or {}).get("summary") or {}).get("candidate_count_after_threshold") or 0) == 0 and "no_candidates_above_threshold" or None,
+                (not executed_queries) and "no_executed_evidence_queries" or None,
                 (state.get("anomaly_rejected_queries") or []) and "evidence_queries_rejected" or None,
                 not (state.get("anomaly_hypothesis_ids") or []) and "no_persisted_hypotheses" or None,
             )
@@ -6739,6 +7551,27 @@ def run_agentic_workflow(
             ).get("chart_id")
             payload = build_chart_payload(chart_type, rows, metric_name, dimensions or ["category"])
             dim_key = dimensions[0] if dimensions else None
+            interaction_context = build_chart_interaction_context_for_creation(
+                settings,
+                chart_row={
+                    "chart_id": chart_id,
+                    "tenant_id": state.get("tenant_id"),
+                    "domain_id": state.get("domain_id"),
+                    "query_payload": {
+                        "metrics": [metric_name],
+                        "dimensions": dimensions,
+                        "chart": chart_type,
+                        "chart_title": chart.get("title"),
+                        "dashboard_title": dashboard_title,
+                        "investigation_id": investigation_id,
+                        "table": (((chart.get("metadata") or {}).get("table")) or (chart.get("table"))),
+                    },
+                    "rows_json": rows,
+                },
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or "").strip() or None,
+                hierarchies=state.get("business_hierarchies") if isinstance(state.get("business_hierarchies"), list) else None,
+            )
             inference = build_chart_inference(
                 settings,
                 chart_type=chart_type,
@@ -6747,6 +7580,28 @@ def run_agentic_workflow(
                 dim_key=dim_key,
                 chart_title=chart.get("title"),
             )
+            contextual_narration = _llm_narrate_contextual_chart(
+                settings,
+                chart_title=str(chart.get("title") or ""),
+                chart_type=str(chart_type),
+                rows=rows,
+                metric_name=metric_name,
+                dimensions=dimensions,
+                context_text=state.get("context_text"),
+                dashboard_title=dashboard_title,
+                investigation_summary={
+                    "summary_text": llm_synthesis.get("summary_text"),
+                    "insights": llm_synthesis.get("insights") or [],
+                    "mode": llm_synthesis.get("mode"),
+                },
+                quality_report=state.get("quality_report") or {},
+                correlation_context=_summarize_correlation_context(
+                    correlation_run_id=str(state.get("correlation_run_id") or "").strip() or None,
+                    correlation_result=state.get("correlation_result") if isinstance(state.get("correlation_result"), dict) else None,
+                ),
+            )
+            insight_text = (contextual_narration or {}).get("insight_text") or inference["insight_text"]
+            narrative_text = (contextual_narration or {}).get("narrative_text") or inference["narrative_text"]
             if chart_id:
                 update_chart_request(
                     settings,
@@ -6758,9 +7613,11 @@ def run_agentic_workflow(
                     chart_type=chart_type,
                     chart_payload=payload.get("chart_payload"),
                     chart_data=payload.get("data"),
-                    insight_text=inference["insight_text"],
-                    narrative_text=inference["narrative_text"],
+                    insight_text=insight_text,
+                    narrative_text=narrative_text,
                     stats_json=inference["stats_json"],
+                    interaction_context_json=interaction_context,
+                    root_chart_id=chart_id,
                 )
                 chart_ids.append(chart_id)
             enriched_charts.append(
@@ -6770,8 +7627,8 @@ def run_agentic_workflow(
                     "chart_type": chart_type,
                     "chart_payload": payload.get("chart_payload"),
                     "chart_data": payload.get("data"),
-                    "insight_text": inference["insight_text"],
-                    "narrative_text": inference["narrative_text"],
+                    "insight_text": insight_text,
+                    "narrative_text": narrative_text,
                     "dashboard_title": dashboard_title,
                 }
             )
@@ -6859,15 +7716,35 @@ def run_agentic_workflow(
             "CorrelationDashboardAgent",
             "running",
             "Correlation Dashboard Agent started",
+            {
+                "correlation_flow_version": AGENTIC_CORRELATION_FLOW_VERSION,
+            },
+            event_callback=event_callback,
+        )
+        _emit(
+            settings,
+            run_id,
+            "CorrelationDashboardAgent",
+            "running",
+            "phase52-correlation-dashboard-node-entered",
+            {
+                "build_version": phase52_build_version,
+                "correlation_flow_version": AGENTIC_CORRELATION_FLOW_VERSION,
+                "tenant_id": state.get("tenant_id"),
+                "domain_id": state.get("domain_id"),
+            },
             event_callback=event_callback,
         )
         correlation_run_id = str(state.get("correlation_run_id") or "").strip()
         chart_ids: list[str] = [str(c) for c in (state.get("correlation_chart_ids") or []) if str(c).strip()]
         if not correlation_run_id or not chart_ids:
             logger.info(
-                "agentic.correlation_dashboard.skip | run_id=%s reason=%s",
+                "agentic.correlation_dashboard.skip | run_id=%s version=%s reason=%s correlation_run_id=%s chart_count=%s",
                 run_id,
+                AGENTIC_CORRELATION_FLOW_VERSION,
                 "no_correlation_run_id" if not correlation_run_id else "no_charts",
+                correlation_run_id or None,
+                len(chart_ids),
             )
             _emit(
                 settings,
@@ -6875,7 +7752,12 @@ def run_agentic_workflow(
                 "CorrelationDashboardAgent",
                 "completed",
                 "Correlation Dashboard Agent skipped",
-                {"reason": "no_correlation_run_id" if not correlation_run_id else "no_charts"},
+                {
+                    "reason": "no_correlation_run_id" if not correlation_run_id else "no_charts",
+                    "correlation_flow_version": AGENTIC_CORRELATION_FLOW_VERSION,
+                    "correlation_run_id": correlation_run_id or None,
+                    "chart_count": len(chart_ids),
+                },
                 event_callback=event_callback,
             )
             return state
@@ -6923,6 +7805,80 @@ def run_agentic_workflow(
             len(chart_ids),
         )
         state["correlation_dashboard_id"] = correlation_dashboard_id
+        correlation_insights = correlation_result.get("insights") or []
+        correlation_quality = {
+            "warnings": correlation_result.get("data_quality_warnings") or [],
+            "snapshot_eligibility_summary": correlation_result.get("snapshot_eligibility_summary") or {},
+        }
+        try:
+            refresh_id = create_dashboard_refresh_run(
+                settings,
+                dashboard_id=correlation_dashboard_id,
+                tenant_id=str(state.get("tenant_id") or ""),
+                domain_id=str(state.get("domain_id") or ""),
+                trigger_source="correlation_dashboard_agent",
+                requested_by="CorrelationDashboardAgent",
+                request_payload={
+                    "correlation_run_id": correlation_run_id,
+                    "chart_count": len(chart_ids),
+                },
+            )
+            update_dashboard_refresh_status(settings, refresh_id, "completed")
+            inference_text = "\n".join(
+                str(item.get("detail") or "").strip()
+                for item in correlation_insights
+                if str(item.get("detail") or "").strip()
+            )
+            if not inference_text:
+                inference_text = (
+                    f"Correlation dashboard generated with {len(chart_ids)} charts for run {correlation_run_id}."
+                )
+            upsert_dashboard_insights_artifact(
+                settings,
+                refresh_id=refresh_id,
+                dashboard_id=correlation_dashboard_id,
+                summary_raw_text=summary_text or None,
+                summary_html=render_summary_html(
+                    summary_text or "Correlation dashboard summary available.",
+                    {
+                        "correlation_run_id": correlation_run_id,
+                        "chart_count": len(chart_ids),
+                        "insight_count": len(correlation_insights),
+                    },
+                ),
+                inference_raw_text=inference_text or None,
+                inference_html=render_inference_html(
+                    inference_text or "Correlation dashboard insights available.",
+                    {
+                        "top_chart_by_total": None,
+                        "correlation_run_id": correlation_run_id,
+                        "insights": correlation_insights[:5],
+                    },
+                ),
+                evidence_json={
+                    "correlation_run_id": correlation_run_id,
+                    "chart_ids": chart_ids,
+                    "insights": correlation_insights,
+                },
+                quality_json=correlation_quality,
+            )
+            logger.info(
+                "agentic.correlation_dashboard.insights_persisted | run_id=%s correlation_run_id=%s dashboard_id=%s summary_present=%s insight_count=%s inference_present=%s",
+                run_id,
+                correlation_run_id,
+                correlation_dashboard_id,
+                bool(summary_text),
+                len(correlation_insights),
+                bool(inference_text),
+            )
+        except Exception:
+            logger.warning(
+                "agentic.correlation_dashboard.insights_persist_failed | run_id=%s correlation_run_id=%s dashboard_id=%s",
+                run_id,
+                correlation_run_id,
+                correlation_dashboard_id,
+                exc_info=True,
+            )
         state["correlation_dashboard_spec"] = {
             "dashboard_id": correlation_dashboard_id,
             "dashboard_title": dashboard_title,
@@ -6930,6 +7886,9 @@ def run_agentic_workflow(
             "chart_ids": chart_ids,
             "chart_count": len(chart_ids),
             "summary_text": summary_text,
+            "summary_html": correlation_result.get("summary_html") or "",
+            "insights": correlation_insights,
+            "quality": correlation_quality,
         }
         _emit(
             settings,
@@ -6943,6 +7902,7 @@ def run_agentic_workflow(
                 "correlation_run_id": correlation_run_id,
                 "chart_ids": chart_ids,
                 "chart_count": len(chart_ids),
+                "insights_preview": correlation_insights[:3],
             },
             event_callback=event_callback,
         )

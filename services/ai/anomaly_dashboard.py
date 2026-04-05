@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 
 def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -165,6 +166,18 @@ def build_anomaly_dashboard_spec(
     story_cards = []
     if summary_text:
         story_cards.append({"title": "Summary", "summary": str(summary_text)})
+    if quality and ((quality.get("warnings") or []) or []):
+        warnings = [str(item).replace("_", " ") for item in (quality.get("warnings") or []) if str(item).strip()]
+        if warnings:
+            story_cards.append(
+                {
+                    "title": "Exploratory Status",
+                    "summary": (
+                        "This dashboard contains exploratory anomaly views from table-native queries. "
+                        f"Current caveats: {', '.join(warnings[:3])}."
+                    )[:280],
+                }
+            )
     if high_signal_areas:
         sample = []
         for anomaly_id, areas in list(high_signal_areas.items())[:2]:
@@ -214,6 +227,7 @@ def build_anomaly_dashboard_spec(
             "chart_data": rows,
             "sql": item.get("sql"),
             "params": [],
+            "reason": item.get("reason"),
             "metadata": {
                 "investigation_id": investigation_id,
                 "anomaly_ids": anomaly_ids,
@@ -221,8 +235,12 @@ def build_anomaly_dashboard_spec(
                 "action_ids": action_ids,
                 "query_id": item.get("query_id"),
                 "reason": item.get("reason"),
+                "exploratory": True,
             },
         }
+        reason = str(item.get("reason") or "").strip().lower()
+        if reason == "recent_movers":
+            chart["type"] = "horizontal_bar"
         matched_suggestion = next(
             (
                 suggestion

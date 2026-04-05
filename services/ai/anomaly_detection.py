@@ -6,6 +6,7 @@ from typing import Any
 from services.ai.anomalies import score_anomalies
 from services.ai.config import Settings
 from services.ai.db import run_query
+from services.ai.join_graph import build_join_from
 
 
 def _qident(name: str) -> str:
@@ -458,4 +459,372 @@ def detect_agentic_anomalies(
     return {
         "summary": summary,
         "candidates": top,
+    }
+
+
+def _preferred_numeric_signal(table_profile: dict[str, Any]) -> str | None:
+    numeric_cols = [str(col) for col in (table_profile.get("eligible_numeric_columns") or []) if str(col or "").strip()]
+    priority_tokens = [
+        "sales",
+        "volume",
+        "amount",
+        "revenue",
+        "count",
+        "qty",
+        "quantity",
+        "throughput",
+        "production",
+    ]
+    for token in priority_tokens:
+        for col in numeric_cols:
+            if token in col.lower():
+                return col
+    return numeric_cols[0] if numeric_cols else None
+
+
+def _preferred_dimensions(table_profile: dict[str, Any], limit: int = 3) -> list[str]:
+    categorical_cols = [str(col) for col in (table_profile.get("categorical_columns") or []) if str(col or "").strip()]
+    blocked = {"id", "created_at", "updated_at", "entity_id"}
+    scored: list[tuple[int, str]] = []
+    for col in categorical_cols:
+        lower = col.lower()
+        if lower in blocked:
+            continue
+        score = 10
+        if any(token in lower for token in ("site", "zone", "region", "sales_area", "area", "product", "group", "location")):
+            score = 0
+        elif lower.endswith("_id"):
+            score = 20
+        scored.append((score, col))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [col for _, col in scored[:limit]]
+
+
+def _timeline_sql(
+    *,
+    schema_name: str,
+    table_name: str,
+    time_col: str,
+    metric_expr: str,
+    grain: str,
+    periods_limit: int,
+) -> str:
+    return (
+        f"SELECT date_trunc('{grain}', t.{_qident(time_col)}) AS period, {metric_expr} AS value "
+        f"FROM {_qident(schema_name)}.{_qident(table_name)} t "
+        f"WHERE t.{_qident(time_col)} IS NOT NULL "
+        "GROUP BY 1 "
+        "ORDER BY 1 ASC "
+        f"LIMIT {int(periods_limit)}"
+    )
+
+
+def _category_timeline_sql(
+    *,
+    schema_name: str,
+    table_name: str,
+    time_col: str,
+    category_col: str,
+    metric_expr: str,
+    grain: str,
+    top_n: int,
+    periods_limit: int,
+) -> str:
+    return (
+        "WITH ranked_categories AS ("
+        f"  SELECT t.{_qident(category_col)} AS category_value, {metric_expr} AS total_value "
+        f"  FROM {_qident(schema_name)}.{_qident(table_name)} t "
+        f"  WHERE t.{_qident(time_col)} IS NOT NULL AND t.{_qident(category_col)} IS NOT NULL "
+        "  GROUP BY 1 "
+        "  ORDER BY total_value DESC NULLS LAST "
+        f"  LIMIT {int(top_n)}"
+        "), series AS ("
+        f"  SELECT date_trunc('{grain}', t.{_qident(time_col)}) AS period, "
+        f"         t.{_qident(category_col)} AS category, "
+        f"         {metric_expr} AS value "
+        f"  FROM {_qident(schema_name)}.{_qident(table_name)} t "
+        "  JOIN ranked_categories rc ON rc.category_value = t."
+        f"{_qident(category_col)} "
+        f"  WHERE t.{_qident(time_col)} IS NOT NULL "
+        "  GROUP BY 1, 2 "
+        ") "
+        "SELECT period, category, value FROM series "
+        "ORDER BY period ASC, value DESC NULLS LAST "
+        f"LIMIT {int(periods_limit) * max(int(top_n), 1)}"
+    )
+
+
+def _movers_sql(
+    *,
+    schema_name: str,
+    table_name: str,
+    time_col: str,
+    category_col: str,
+    metric_expr: str,
+    grain: str,
+    limit: int,
+) -> str:
+    return (
+        "WITH period_values AS ("
+        f"  SELECT date_trunc('{grain}', t.{_qident(time_col)}) AS period, "
+        f"         t.{_qident(category_col)} AS category, "
+        f"         {metric_expr} AS value "
+        f"  FROM {_qident(schema_name)}.{_qident(table_name)} t "
+        f"  WHERE t.{_qident(time_col)} IS NOT NULL AND t.{_qident(category_col)} IS NOT NULL "
+        "  GROUP BY 1, 2"
+        "), ranked_periods AS ("
+        "  SELECT DISTINCT period FROM period_values ORDER BY period DESC LIMIT 2"
+        "), latest_period AS ("
+        "  SELECT MAX(period) AS period FROM ranked_periods"
+        "), previous_period AS ("
+        "  SELECT MIN(period) AS period FROM ranked_periods"
+        ") "
+        "SELECT pv.category, "
+        "       MAX(CASE WHEN pv.period = (SELECT period FROM latest_period) THEN pv.value END) AS latest_value, "
+        "       MAX(CASE WHEN pv.period = (SELECT period FROM previous_period) THEN pv.value END) AS previous_value, "
+        "       COALESCE(MAX(CASE WHEN pv.period = (SELECT period FROM latest_period) THEN pv.value END), 0) "
+        "       - COALESCE(MAX(CASE WHEN pv.period = (SELECT period FROM previous_period) THEN pv.value END), 0) AS delta_value "
+        "FROM period_values pv "
+        "GROUP BY 1 "
+        "ORDER BY ABS(delta_value) DESC NULLS LAST "
+        f"LIMIT {int(limit)}"
+    )
+
+
+def _join_timeline_sql(
+    *,
+    schema_name: str,
+    left_table: str,
+    right_table: str,
+    left_time_col: str,
+    metric_expr: str,
+    join_edges: list[dict[str, Any]],
+    periods_limit: int,
+) -> str | None:
+    try:
+        from_sql, alias_map = build_join_from([left_table, right_table], _qident(schema_name), joins=join_edges)
+    except Exception:
+        return None
+    left_alias = alias_map.get(left_table) or "a"
+    return (
+        f"SELECT date_trunc('month', {left_alias}.{_qident(left_time_col)}) AS period, {metric_expr} AS value "
+        f"{from_sql} "
+        f"WHERE {left_alias}.{_qident(left_time_col)} IS NOT NULL "
+        "GROUP BY 1 "
+        "ORDER BY 1 ASC "
+        f"LIMIT {int(periods_limit)}"
+    )
+
+
+def build_anomaly_fallback_exploration(
+    settings: Settings,
+    *,
+    schema_name: str,
+    profiling_stats: dict[str, Any],
+    metric_defs: list[dict[str, Any]],
+    dashboard_spec: dict[str, Any] | None = None,
+    join_edges: list[dict[str, Any]] | None = None,
+    scoped_conn: Any = None,
+    periods_limit: int = 24,
+    top_n_categories: int = 3,
+) -> dict[str, Any]:
+    profiling_tables = {
+        str(table.get("name") or "").strip(): table
+        for table in (profiling_stats.get("tables") or [])
+        if str(table.get("name") or "").strip()
+    }
+    queries: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    seen_sql: set[str] = set()
+
+    def _run(query_id: str, title: str, reason: str, sql: str) -> None:
+        normalized_sql = " ".join(str(sql or "").split())
+        if not normalized_sql or normalized_sql in seen_sql:
+            return
+        seen_sql.add(normalized_sql)
+        try:
+            rows = run_query(settings, sql, [], scoped_conn=scoped_conn)
+        except Exception:
+            return
+        if not rows:
+            return
+        queries.append(
+            {
+                "query_id": query_id,
+                "title": title,
+                "reason": reason,
+                "sql": sql,
+                "row_count": len(rows),
+                "rows": rows[: min(len(rows), 120)],
+            }
+        )
+
+    prioritized_metrics = [metric for metric in metric_defs if str(metric.get("base_table") or "").strip()]
+    prioritized_metrics = prioritized_metrics[:3]
+
+    for metric in prioritized_metrics:
+        table_name = str(metric.get("base_table") or "").strip()
+        time_col = str(metric.get("preferred_time_column") or "").strip()
+        table_profile = profiling_tables.get(table_name) or {}
+        if not table_name or not time_col or not table_profile:
+            continue
+        grain = _time_grain(metric)
+        metric_expr = _qualify_formula(str(metric.get("formula") or ""), "t", table_profile)
+        metric_name = str(metric.get("metric_name") or metric.get("metric_id") or table_name)
+        if metric_expr:
+            timeline_sql = _timeline_sql(
+                schema_name=schema_name,
+                table_name=table_name,
+                time_col=time_col,
+                metric_expr=metric_expr,
+                grain=grain,
+                periods_limit=periods_limit,
+            )
+            _run(f"fallback_timeline_{metric_name}", f"{metric_name} over time", "timeline_overview", timeline_sql)
+            dims = _preferred_dimensions(table_profile, limit=2)
+            for category_col in dims:
+                category_sql = _category_timeline_sql(
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    time_col=time_col,
+                    category_col=category_col,
+                    metric_expr=metric_expr,
+                    grain=grain,
+                    top_n=top_n_categories,
+                    periods_limit=min(periods_limit, 18),
+                )
+                _run(
+                    f"fallback_category_trend_{metric_name}_{category_col}",
+                    f"{metric_name} by {category_col} over time",
+                    "category_trend",
+                    category_sql,
+                )
+                movers_sql = _movers_sql(
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    time_col=time_col,
+                    category_col=category_col,
+                    metric_expr=metric_expr,
+                    grain=grain,
+                    limit=10,
+                )
+                _run(
+                    f"fallback_movers_{metric_name}_{category_col}",
+                    f"{metric_name} movers by {category_col}",
+                    "recent_movers",
+                    movers_sql,
+                )
+            break
+
+    if not queries:
+        for table_name, table_profile in profiling_tables.items():
+            time_cols = [str(col) for col in (table_profile.get("time_columns") or []) if str(col or "").strip()]
+            signal_col = _preferred_numeric_signal(table_profile)
+            if not time_cols or not signal_col:
+                continue
+            time_col = time_cols[0]
+            metric_expr = f"SUM(t.{_qident(signal_col)})"
+            timeline_sql = _timeline_sql(
+                schema_name=schema_name,
+                table_name=table_name,
+                time_col=time_col,
+                metric_expr=metric_expr,
+                grain="month",
+                periods_limit=periods_limit,
+            )
+            _run(
+                f"fallback_raw_timeline_{table_name}_{signal_col}",
+                f"{signal_col} over time",
+                "timeline_overview",
+                timeline_sql,
+            )
+            for category_col in _preferred_dimensions(table_profile, limit=2):
+                category_sql = _category_timeline_sql(
+                    schema_name=schema_name,
+                    table_name=table_name,
+                    time_col=time_col,
+                    category_col=category_col,
+                    metric_expr=metric_expr,
+                    grain="month",
+                    top_n=top_n_categories,
+                    periods_limit=min(periods_limit, 18),
+                )
+                _run(
+                    f"fallback_raw_category_{table_name}_{signal_col}_{category_col}",
+                    f"{signal_col} by {category_col} over time",
+                    "category_trend",
+                    category_sql,
+                )
+            break
+
+    if join_edges and len(profiling_tables) >= 2:
+        metric = prioritized_metrics[0] if prioritized_metrics else None
+        if metric:
+            left_table = str(metric.get("base_table") or "").strip()
+            left_time_col = str(metric.get("preferred_time_column") or "").strip()
+            for edge in join_edges:
+                left = str(edge.get("left_table") or edge.get("left") or "").split(".")[-1].strip()
+                right = str(edge.get("right_table") or edge.get("right") or "").split(".")[-1].strip()
+                if not left or not right or left_table not in {left, right}:
+                    continue
+                peer_table = right if left == left_table else left
+                table_profile = profiling_tables.get(left_table) or {}
+                metric_expr = _qualify_formula(str(metric.get("formula") or ""), "a", table_profile)
+                if not left_time_col or not metric_expr:
+                    continue
+                join_sql = _join_timeline_sql(
+                    schema_name=schema_name,
+                    left_table=left_table,
+                    right_table=peer_table,
+                    left_time_col=left_time_col,
+                    metric_expr=metric_expr,
+                    join_edges=join_edges,
+                    periods_limit=min(periods_limit, 18),
+                )
+                if join_sql:
+                    _run(
+                        f"fallback_join_{left_table}_{peer_table}",
+                        f"{metric.get('metric_name') or left_table} joined timeline with {peer_table}",
+                        "joined_timeline",
+                        join_sql,
+                    )
+                break
+
+    for item in queries:
+        rows = [row for row in (item.get("rows") or []) if isinstance(row, dict)]
+        if not rows:
+            continue
+        if {"period", "value"} <= set(rows[0].keys()):
+            detected = _detect_series_anomaly(rows, window=5, threshold=1.0, recent_points=6, min_percent_change=0.05)
+            if detected:
+                observations.append(
+                    {
+                        "query_id": item.get("query_id"),
+                        "title": item.get("title"),
+                        "type": "soft_timeline_anomaly",
+                        "detail": {
+                            "period": detected.get("period"),
+                            "actual": detected.get("actual"),
+                            "baseline": detected.get("baseline"),
+                            "deviation": detected.get("deviation"),
+                            "severity_score": detected.get("severity_score"),
+                        },
+                    }
+                )
+        elif {"category", "value"} <= set(rows[0].keys()) or {"category", "latest_value", "delta_value"} & set(rows[0].keys()):
+            top_row = rows[0]
+            observations.append(
+                {
+                    "query_id": item.get("query_id"),
+                    "title": item.get("title"),
+                    "type": "category_shift",
+                    "detail": top_row,
+                }
+            )
+
+    return {
+        "mode": "table_native_exploration",
+        "queries": queries[:6],
+        "observations": observations[:8],
+        "source_dashboard_title": (dashboard_spec or {}).get("dashboard_title") or (dashboard_spec or {}).get("title"),
     }

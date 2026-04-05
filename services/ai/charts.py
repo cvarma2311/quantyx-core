@@ -372,6 +372,76 @@ def _safe_float(val: Any) -> float | None:
         return None
 
 
+def _resolve_inference_fields(
+    rows: list[dict],
+    metric_name: str,
+    dim_key: str | None,
+) -> tuple[str, str | None]:
+    """Best-effort metric/dimension selection for chart inference."""
+    resolved_metric = str(metric_name or "").strip()
+    resolved_dim = str(dim_key).strip() if dim_key else None
+    if not rows:
+        return resolved_metric, resolved_dim
+
+    sample_rows = rows[:30]
+    keys: list[str] = []
+    for row in sample_rows:
+        if isinstance(row, dict):
+            for key in row.keys():
+                key_str = str(key or "").strip()
+                if key_str and key_str not in keys:
+                    keys.append(key_str)
+
+    def _numeric_count(key: str) -> int:
+        return sum(1 for row in sample_rows if _safe_float((row or {}).get(key)) is not None)
+
+    if not resolved_metric or _numeric_count(resolved_metric) == 0:
+        preferred_metric_keys = [
+            "value",
+            "y",
+            "score",
+            "pearson_r",
+            "lagged_r",
+            "forecast_value",
+            "prediction",
+            "predicted_value",
+            "lower",
+            "upper",
+        ]
+        for key in preferred_metric_keys:
+            if key in keys and _numeric_count(key) > 0:
+                resolved_metric = key
+                break
+        if not resolved_metric:
+            numeric_keys = [key for key in keys if _numeric_count(key) > 0]
+            if numeric_keys:
+                resolved_metric = max(numeric_keys, key=_numeric_count)
+
+    if not resolved_dim or resolved_dim == resolved_metric:
+        preferred_dim_keys = [
+            "date",
+            "timestamp",
+            "period",
+            "category",
+            "label",
+            "metric",
+            "metric_a",
+            "metric_b",
+            "category_value",
+            "x",
+        ]
+        for key in preferred_dim_keys:
+            if key in keys and key != resolved_metric:
+                resolved_dim = key
+                break
+        if not resolved_dim:
+            non_metric_keys = [key for key in keys if key != resolved_metric and _numeric_count(key) == 0]
+            if non_metric_keys:
+                resolved_dim = non_metric_keys[0]
+
+    return resolved_metric, resolved_dim
+
+
 def _deterministic_insight(chart_type: str, rows: list[dict], metric_name: str, dim_key: str | None) -> str:
     """One-line callout derived purely from the data."""
     if not rows or not metric_name:
@@ -523,17 +593,18 @@ def build_chart_inference(
         "stats_json":     dict,  # {count, min, max, avg, total}
       }
     """
-    stats = _deterministic_stats(rows, metric_name)
+    resolved_metric_name, resolved_dim_key = _resolve_inference_fields(rows, metric_name, dim_key)
+    stats = _deterministic_stats(rows, resolved_metric_name)
 
     # LLM path — only attempt if there are rows to reason over
-    if rows and metric_name:
+    if rows and resolved_metric_name:
         llm_result = _llm_chart_inference(
             settings,
             chart_type=chart_type,
-            metric_name=metric_name,
-            dim_key=dim_key,
+            metric_name=resolved_metric_name,
+            dim_key=resolved_dim_key,
             rows=rows,
-            chart_title=chart_title,
+            chart_title=chart_title or resolved_metric_name,
             stats=stats,
         )
         if llm_result:
@@ -545,8 +616,8 @@ def build_chart_inference(
 
     # Deterministic fallback
     return {
-        "insight_text":   _deterministic_insight(chart_type, rows, metric_name, dim_key),
-        "narrative_text": _deterministic_narrative(rows, metric_name, dim_key),
+        "insight_text":   _deterministic_insight(chart_type, rows, resolved_metric_name, resolved_dim_key),
+        "narrative_text": _deterministic_narrative(rows, resolved_metric_name, resolved_dim_key),
         "stats_json":     stats,
     }
 

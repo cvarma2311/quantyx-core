@@ -61,6 +61,28 @@ def _serialize_row(row: Any) -> dict:
     return result
 
 
+def _ensure_optional_run_columns(settings: Settings) -> None:
+    c = _conn(settings)
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                ALTER TABLE public.quantyx_correlation_runs
+                  ADD COLUMN IF NOT EXISTS insights_json JSONB,
+                  ADD COLUMN IF NOT EXISTS snapshot_eligibility_summary JSONB,
+                  ADD COLUMN IF NOT EXISTS data_quality_warnings JSONB
+                """
+            )
+        c.commit()
+    except psycopg2.errors.UndefinedTable:
+        c.rollback()
+    except Exception:
+        c.rollback()
+        logger.exception("[correlation.store] Failed ensuring optional correlation run columns")
+    finally:
+        c.close()
+
+
 # ---------------------------------------------------------------------------
 # quantyx_correlation_runs
 # ---------------------------------------------------------------------------
@@ -90,6 +112,9 @@ def _fallback_run_dict(
         "triggered_by": None,
         "summary_text": None,
         "summary_html": None,
+        "insights_json": None,
+        "snapshot_eligibility_summary": None,
+        "data_quality_warnings": None,
         "started_at": None,
         "completed_at": None,
         "created_at": None,
@@ -127,6 +152,7 @@ def create_correlation_run(
               updated_at = now()
         RETURNING *
     """
+    _ensure_optional_run_columns(settings)
     c = _conn(settings)
     try:
         with c.cursor(cursor_factory=RealDictCursor) as cur:
@@ -167,6 +193,9 @@ def update_correlation_run(
     error_message: str | None = None,
     summary_text: str | None = None,
     summary_html: str | None = None,
+    insights_json: list[dict[str, Any]] | None = None,
+    snapshot_eligibility_summary: dict[str, Any] | None = None,
+    data_quality_warnings: list[dict[str, Any]] | None = None,
 ) -> None:
     """Update status + counters on a correlation run (called at completion)."""
     fields = ["status = %s", "updated_at = now()"]
@@ -186,6 +215,12 @@ def update_correlation_run(
         fields.append("summary_text = %s"); values.append(summary_text)
     if summary_html is not None:
         fields.append("summary_html = %s"); values.append(summary_html)
+    if insights_json is not None:
+        fields.append("insights_json = %s::jsonb"); values.append(_j(insights_json))
+    if snapshot_eligibility_summary is not None:
+        fields.append("snapshot_eligibility_summary = %s::jsonb"); values.append(_j(snapshot_eligibility_summary))
+    if data_quality_warnings is not None:
+        fields.append("data_quality_warnings = %s::jsonb"); values.append(_j(data_quality_warnings))
     if status in ("done", "failed"):
         fields.append("completed_at = now()")
 
@@ -195,6 +230,7 @@ def update_correlation_run(
            SET {", ".join(fields)}
          WHERE correlation_run_id = %s
     """
+    _ensure_optional_run_columns(settings)
     c = _conn(settings)
     try:
         with c.cursor() as cur:
@@ -215,6 +251,7 @@ def get_correlation_run(
         SELECT * FROM public.quantyx_correlation_runs
          WHERE correlation_run_id = %s
     """
+    _ensure_optional_run_columns(settings)
     c = _conn(settings)
     try:
         with c.cursor(cursor_factory=RealDictCursor) as cur:
@@ -241,6 +278,7 @@ def list_correlation_runs(
          ORDER BY created_at DESC
          LIMIT %s
     """
+    _ensure_optional_run_columns(settings)
     c = _conn(settings)
     try:
         with c.cursor(cursor_factory=RealDictCursor) as cur:
@@ -261,6 +299,7 @@ def get_latest_correlation_run(
     domain_id: str,
     run_id: str | None = None,
 ) -> dict | None:
+    _ensure_optional_run_columns(settings)
     if run_id:
         sql = """
             SELECT * FROM public.quantyx_correlation_runs
@@ -702,6 +741,7 @@ def save_correlation_run_results(
     run_result: dict,
     summary_text: str = "",
     summary_html: str = "",
+    insights_json: list[dict[str, Any]] | None = None,
 ) -> dict:
     """
     Persist all outputs from run_correlation_intelligence() + narrate step.
@@ -771,6 +811,9 @@ def save_correlation_run_results(
             error_message=error_message,
             summary_text=summary_text or None,
             summary_html=summary_html or None,
+            insights_json=insights_json,
+            snapshot_eligibility_summary=run_result.get("snapshot_eligibility_summary"),
+            data_quality_warnings=run_result.get("data_quality_warnings"),
         )
     except Exception:
         logger.exception("[correlation.store] Failed to update correlation run status")

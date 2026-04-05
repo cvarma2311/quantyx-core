@@ -70,6 +70,15 @@ from services.ai.charts_store import (
     update_chart_request,
     append_chart_conversation_id,
 )
+from services.ai.chart_interactions import (
+    build_chart_interaction_context,
+    build_chart_interaction_context_for_creation,
+    build_chart_interaction_response,
+    create_chart_interaction,
+    execute_chart_compilation,
+    ensure_chart_interaction_metadata,
+)
+from services.ai.hierarchy_store import list_business_hierarchies
 from services.ai.dashboards_store import (
     create_dashboard as _ds_create_dashboard,
     list_dashboards as _ds_list_dashboards,
@@ -414,6 +423,8 @@ from services.api.schemas import (
     ActionDetailResponse,
     ActionCreateResponse,
     ChartRequest,
+    ChartFilterRequest,
+    ChartNavigationRequest,
     ChartStatusResponse,
     RollupCreateRequest,
     RollupResponse,
@@ -489,6 +500,7 @@ load_dotenv()
 _log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, _log_level, logging.INFO))
 logger = logging.getLogger("quantyx.api")
+PHASE52_BUILD_VERSION = "2026-04-04-phase52-v1"
 
 # Bump this manually after each significant edit to confirm the latest code is running.
 BUILD_VERSION = "2026.03.29.007"
@@ -983,6 +995,17 @@ def _execute_chart_job(payload: dict) -> dict:
             chart = build_chart_payload(chart_type, rows, metric_name, dimensions)
             chart_payload = chart.get("chart_payload")
             chart_data = chart.get("data")
+        interaction_context = build_chart_interaction_context_for_creation(
+            settings,
+            chart_row={
+                **chart_row,
+                "query_payload": query_payload,
+                "rows_json": rows,
+                "chart_type": chart_type,
+            },
+            tenant_id=str(chart_row.get("tenant_id") or ""),
+            domain_id=str(chart_row.get("domain_id") or "").strip() or None,
+        )
         inference = build_chart_inference(
             settings,
             chart_type=chart_type or "bar",
@@ -1005,6 +1028,8 @@ def _execute_chart_job(payload: dict) -> dict:
             insight_text=inference["insight_text"],
             narrative_text=inference["narrative_text"],
             stats_json=inference["stats_json"],
+            interaction_context_json=interaction_context,
+            root_chart_id=chart_row.get("root_chart_id") or chart_id,
         )
         create_chart_event(
             settings,
@@ -1605,6 +1630,13 @@ def _job_worker_loop() -> None:
 
 @app.on_event("startup")
 def _start_job_worker() -> None:
+    logger.info(
+        "quantyx.api.build_loaded | build_version=%s phase52_enabled=%s correlation_flow_version=%s anomaly_flow_version=%s",
+        PHASE52_BUILD_VERSION,
+        True,
+        "2026-04-03-correlation-debug-v1",
+        "2026-04-03-anomaly-fallback-debug-v1",
+    )
     enabled = os.getenv("JOB_WORKER_ENABLED", "true").lower() not in {"0", "false", "no"}
     global _job_worker_thread
     if not enabled:
@@ -7959,6 +7991,22 @@ def _persist_workspace_chart_artifact(
             dim_key=_ws_dim_key,
             chart_title=_clean_title or question,
         )
+        interaction_context = build_chart_interaction_context_for_creation(
+            settings,
+            chart_row={
+                "chart_id": chart_id,
+                "tenant_id": tenant_id,
+                "domain_id": domain_id,
+                "query_payload": {
+                    **query_payload,
+                    "table": (compiled_request.get("tables") or [None])[0] if isinstance(compiled_request.get("tables"), list) else compiled_request.get("table"),
+                    "time_grain": compiled_request.get("time_grain"),
+                },
+                "rows_json": _ws_rows,
+            },
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+        )
         update_chart_request(
             settings,
             chart_id,
@@ -7973,6 +8021,8 @@ def _persist_workspace_chart_artifact(
             insight_text=inference["insight_text"],
             narrative_text=inference["narrative_text"],
             stats_json=inference["stats_json"],
+            interaction_context_json=interaction_context,
+            root_chart_id=chart_id,
         )
         create_chart_event(
             settings,
@@ -18522,8 +18572,11 @@ def query(request: QueryRequest) -> QueryResult:
                     "question": request.question,
                     "metrics": [metric.name for metric in metrics],
                     "dimensions": dimensions,
+                    "source_dimensions": dimensions,
                     "filters": [flt.model_dump() if hasattr(flt, "model_dump") else flt for flt in filters],
                     "limit": request.limit,
+                    "table": base_table,
+                    "time_grain": time_grain,
                 }
                 chart_row = create_chart_request(
                     settings,
@@ -18737,8 +18790,11 @@ def query(request: QueryRequest) -> QueryResult:
                 "question": request.question,
                 "metrics": [metric.name for metric in metrics],
                 "dimensions": [dim.name for dim in dim_objects if dim.name != "company_name"],
+                "source_dimensions": dimensions,
                 "filters": [flt.model_dump() if hasattr(flt, "model_dump") else flt for flt in filters],
                 "limit": request.limit,
+                "table": base_table,
+                "time_grain": _infer_time_grain(dimensions),
             }
             chart_row = create_chart_request(
                 settings,
@@ -19316,6 +19372,7 @@ def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
     row = get_chart_request(settings, chart_id)
     if not row:
         raise HTTPException(status_code=404, detail="Chart not found")
+    existing_interaction_context = row.get("interaction_context_json") if isinstance(row, dict) else None
     if refresh:
         if not row.get("sql"):
             raise HTTPException(status_code=400, detail="No SQL stored for chart")
@@ -19367,6 +19424,25 @@ def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
                 error_message=str(exc),
             )
             row = get_chart_request(settings, chart_id)
+    row = ensure_chart_interaction_metadata(settings, row)
+    interaction_response = build_chart_interaction_response(
+        chart_row=row,
+        interaction_context=row.get("interaction_context_json") if isinstance(row, dict) else None,
+    )
+    breadcrumb, lineage_summary = _reconstruct_chart_breadcrumb(row)
+    interaction_response["breadcrumb"] = breadcrumb
+    interaction_response["lineage_summary"] = {
+        **(interaction_response.get("lineage_summary") or {}),
+        **lineage_summary,
+    }
+    if not existing_interaction_context and interaction_response:
+        update_chart_request(
+            settings,
+            chart_id,
+            interaction_context_json=row.get("interaction_context_json") or {},
+            lineage_json=(row.get("lineage_json") or {}),
+            root_chart_id=row.get("root_chart_id") or row.get("chart_id"),
+        )
     return ChartStatusResponse(
         chart_id=row["chart_id"],
         status=row.get("status"),
@@ -19381,7 +19457,561 @@ def get_chart(chart_id: str, refresh: bool = False) -> ChartStatusResponse:
         narrative_text=row.get("narrative_text"),
         stats_json=row.get("stats_json"),
         conversation_ids=row.get("conversation_ids") or [],
+        interaction_context=interaction_response.get("interaction_context"),
+        available_filters=interaction_response.get("available_filters"),
+        available_drilldowns=interaction_response.get("available_drilldowns"),
+        available_dimension_navigation=interaction_response.get("available_dimension_navigation"),
+        suggested_drilldowns=interaction_response.get("suggested_drilldowns"),
+        available_areas=interaction_response.get("available_areas"),
+        breadcrumb=interaction_response.get("breadcrumb"),
+        lineage_summary=interaction_response.get("lineage_summary"),
     )
+
+
+def _reconstruct_chart_breadcrumb(chart_row: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    chain: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    current = chart_row
+    while current and isinstance(current, dict):
+        chart_id = str(current.get("chart_id") or "").strip()
+        if not chart_id or chart_id in seen:
+            break
+        seen.add(chart_id)
+        current = ensure_chart_interaction_metadata(settings, current)
+        interaction_context = current.get("interaction_context_json") or {}
+        lineage = interaction_context.get("lineage") or current.get("lineage_json") or {}
+        chain.append(
+            {
+                "chart_id": chart_id,
+                "title": current.get("title") or current.get("question"),
+                "level_id": interaction_context.get("current_level"),
+                "interaction_type": lineage.get("interaction_type"),
+                "source_level_id": lineage.get("source_level_id"),
+                "target_level_id": lineage.get("target_level_id"),
+                "filters_added": lineage.get("filters_added") or [],
+                "selected_dimension": lineage.get("selected_dimension"),
+                "selected_value": lineage.get("selected_value"),
+                "action_label": lineage.get("action_label"),
+                "hierarchy_id": lineage.get("hierarchy_id"),
+            }
+        )
+        parent_chart_id = str(current.get("parent_chart_id") or "").strip()
+        if not parent_chart_id:
+            break
+        current = get_chart_request(settings, parent_chart_id)
+    chain.reverse()
+    current_chart_id = str(chart_row.get("chart_id") or "").strip()
+    back_chart_id = chain[-2]["chart_id"] if len(chain) >= 2 else None
+    lineage_summary = {
+        "root_chart_id": chain[0]["chart_id"] if chain else (chart_row.get("root_chart_id") or current_chart_id),
+        "parent_chart_id": chart_row.get("parent_chart_id"),
+        "current_chart_id": current_chart_id,
+        "depth": max(len(chain) - 1, 0),
+        "can_go_back": bool(back_chart_id),
+        "back_chart_id": back_chart_id,
+        "lineage_path_chart_ids": [item.get("chart_id") for item in chain],
+    }
+    return chain, lineage_summary
+
+
+def _build_lineage_payload(
+    *,
+    row: dict[str, Any],
+    interaction_type: str,
+    source_level_id: str | None = None,
+    target_level_id: str | None = None,
+    filters_before: list[dict[str, Any]] | None = None,
+    filters_added: list[dict[str, Any]] | None = None,
+    filters_after: list[dict[str, Any]] | None = None,
+    selected_dimension: str | None = None,
+    selected_value: Any = None,
+    hierarchy_id: str | None = None,
+    action_label: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "root_chart_id": row.get("root_chart_id") or row.get("chart_id"),
+        "parent_chart_id": row.get("chart_id"),
+        "interaction_type": interaction_type,
+        "source_level_id": source_level_id,
+        "target_level_id": target_level_id,
+        "filters_before": filters_before or [],
+        "filters_added": filters_added or [],
+        "filters_after": filters_after or [],
+        "selected_dimension": selected_dimension,
+        "selected_value": selected_value,
+        "hierarchy_id": hierarchy_id,
+        "action_label": action_label,
+    }
+
+
+@app.get(
+    "/charts/{chart_id}/actions",
+    tags=["charts"],
+    summary="Get available deterministic chart actions",
+)
+def get_chart_actions(chart_id: str) -> dict:
+    row = get_chart_request(settings, chart_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Chart not found")
+    row = ensure_chart_interaction_metadata(settings, row)
+    interaction_response = build_chart_interaction_response(
+        chart_row=row,
+        interaction_context=row.get("interaction_context_json") if isinstance(row, dict) else None,
+    )
+    breadcrumb, lineage_summary = _reconstruct_chart_breadcrumb(row)
+    interaction_response["breadcrumb"] = breadcrumb
+    interaction_response["lineage_summary"] = {
+        **(interaction_response.get("lineage_summary") or {}),
+        **lineage_summary,
+    }
+    return {
+        "chart_id": chart_id,
+        "available_filters": interaction_response.get("available_filters") or [],
+        "available_drilldowns": interaction_response.get("available_drilldowns") or [],
+        "available_dimension_navigation": interaction_response.get("available_dimension_navigation") or [],
+        "suggested_drilldowns": interaction_response.get("suggested_drilldowns") or [],
+        "available_areas": interaction_response.get("available_areas") or {},
+        "breadcrumb": interaction_response.get("breadcrumb") or [],
+        "lineage_summary": interaction_response.get("lineage_summary") or {},
+    }
+
+
+def _persist_derived_interaction_chart(
+    *,
+    source_row: dict[str, Any],
+    title: str,
+    query_payload: dict[str, Any],
+    compiled: dict[str, Any],
+    interaction_type: str,
+    interaction_context_json: dict[str, Any],
+    lineage_json: dict[str, Any],
+    drill_hierarchy_id: str | None = None,
+    drill_level_id: str | None = None,
+) -> str:
+    tenant_id = str(source_row.get("tenant_id") or "")
+    domain_id = str(source_row.get("domain_id") or "").strip() or None
+    created = create_chart_request(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        question=title,
+        query_payload=query_payload,
+        sql=compiled.get("sql"),
+        params=compiled.get("params") or [],
+        rows_json=compiled.get("rows") or [],
+        run_id=source_row.get("run_id"),
+        chart_source=source_row.get("chart_source") or "chart_interaction",
+        title=title,
+        created_by="ChartInteractionAgent",
+        interaction_context_json=interaction_context_json,
+        lineage_json=lineage_json,
+        parent_chart_id=source_row.get("chart_id"),
+        root_chart_id=source_row.get("root_chart_id") or source_row.get("chart_id"),
+        drill_hierarchy_id=drill_hierarchy_id,
+        drill_level_id=drill_level_id,
+    )
+    chart_id = str((created or {}).get("chart_id") or "").strip()
+    if not chart_id:
+        raise HTTPException(status_code=500, detail="Failed to create derived chart")
+    rebuilt_row = {
+        **source_row,
+        "chart_id": chart_id,
+        "question": title,
+        "title": title,
+        "query_payload": query_payload,
+        "rows_json": compiled.get("rows") or [],
+        "chart_type": compiled.get("chart_type"),
+        "parent_chart_id": source_row.get("chart_id"),
+        "root_chart_id": source_row.get("root_chart_id") or source_row.get("chart_id"),
+        "lineage_json": lineage_json,
+        "drill_hierarchy_id": drill_hierarchy_id,
+        "drill_level_id": drill_level_id,
+    }
+    hierarchies = list_business_hierarchies(settings, tenant_id, domain_id)
+    rebuilt_interaction_context = build_chart_interaction_context(
+        chart_row=rebuilt_row,
+        hierarchies=hierarchies,
+    )
+    inference = compiled.get("inference") or {}
+    update_chart_request(
+        settings,
+        chart_id,
+        status="ready",
+        sql=compiled.get("sql"),
+        params=compiled.get("params") or [],
+        rows_json=compiled.get("rows") or [],
+        chart_type=compiled.get("chart_type"),
+        chart_payload=compiled.get("chart_payload"),
+        chart_data=compiled.get("chart_data"),
+        insight_text=inference.get("insight_text"),
+        narrative_text=inference.get("narrative_text"),
+        stats_json=inference.get("stats_json"),
+        interaction_context_json=rebuilt_interaction_context,
+        lineage_json=lineage_json,
+        parent_chart_id=source_row.get("chart_id"),
+        root_chart_id=source_row.get("root_chart_id") or source_row.get("chart_id"),
+        drill_hierarchy_id=drill_hierarchy_id,
+        drill_level_id=drill_level_id,
+    )
+    create_chart_event(
+        settings,
+        chart_id,
+        "ready",
+        details={"interaction_type": interaction_type, "source_chart_id": source_row.get("chart_id")},
+    )
+    return chart_id
+
+
+@app.post(
+    "/charts/{chart_id}/filter",
+    response_model=ChartStatusResponse,
+    tags=["charts"],
+    summary="Create a deterministically filtered derived chart",
+)
+def filter_chart(chart_id: str, request: ChartFilterRequest) -> ChartStatusResponse:
+    row = get_chart_request(settings, chart_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Chart not found")
+    row = ensure_chart_interaction_metadata(settings, row)
+    interaction_context = row.get("interaction_context_json") or {}
+    allowed_fields = {str(item.get("field") or "") for item in (interaction_context.get("available_filter_fields") or []) if str(item.get("field") or "").strip()}
+    compiled_filters = []
+    for flt in request.filters or []:
+        if str(flt.field or "").strip() not in allowed_fields:
+            raise HTTPException(status_code=400, detail=f"Unsupported chart filter field: {flt.field}")
+        compiled_filters.append({"field": flt.field, "operator": flt.operator, "value": flt.value})
+    tenant_id = str(row.get("tenant_id") or "")
+    domain_id = str(row.get("domain_id") or "")
+    scoped_conn = _resolve_scoped_conn(tenant_id, domain_id) if tenant_id and domain_id else None
+    try:
+        compiled = execute_chart_compilation(
+            settings,
+            chart_row=row,
+            interaction_context=interaction_context,
+            appended_filters=compiled_filters,
+            scoped_conn=scoped_conn,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    filters_before = list(interaction_context.get("filters") or [])
+    filters_after = [*filters_before, *compiled_filters]
+    lineage_json = _build_lineage_payload(
+        row=row,
+        interaction_type="filter",
+        source_level_id=str(interaction_context.get("current_level") or "").strip() or None,
+        target_level_id=str(interaction_context.get("current_level") or "").strip() or None,
+        filters_before=filters_before,
+        filters_added=compiled_filters,
+        filters_after=filters_after,
+        action_label="Apply chart filters",
+    )
+    new_interaction_context = {
+        **interaction_context,
+        "filters": filters_after,
+        "lineage": lineage_json,
+    }
+    title = f"{str(row.get('title') or row.get('question') or 'Chart')} — Filtered"
+    query_payload = {
+        **(row.get("query_payload") or {}),
+        "filters": new_interaction_context.get("filters") or [],
+        "source_chart_id": row.get("chart_id"),
+    }
+    derived_chart_id = _persist_derived_interaction_chart(
+        source_row=row,
+        title=title,
+        query_payload=query_payload,
+        compiled=compiled,
+        interaction_type="filter",
+        interaction_context_json=new_interaction_context,
+        lineage_json=lineage_json,
+    )
+    import uuid
+    create_chart_interaction(
+        settings,
+        interaction_id=f"ci_{uuid.uuid4().hex[:10]}",
+        tenant_id=tenant_id,
+        domain_id=domain_id or None,
+        source_chart_id=str(row.get("chart_id")),
+        result_chart_id=derived_chart_id,
+        interaction_type="filter",
+        source_level_id=str(interaction_context.get("current_level") or "").strip() or None,
+        target_level_id=str(interaction_context.get("current_level") or "").strip() or None,
+        interaction_payload_json=lineage_json,
+    )
+    return get_chart(derived_chart_id, refresh=False)
+
+
+def _resolve_chart_navigation(
+    *,
+    row: dict,
+    request: ChartNavigationRequest,
+    expected_action_type: str | None = None,
+) -> tuple[dict, dict, str, dict]:
+    row = ensure_chart_interaction_metadata(settings, row)
+    interaction_context = row.get("interaction_context_json") or {}
+    navigations = [
+        item for item in (interaction_context.get("available_dimension_navigation") or [])
+        if str(item.get("target_level_id") or item.get("target_level") or "").strip()
+    ]
+    target = str(request.target_level_id or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="Navigation target_level_id is required")
+    chosen = next(
+        (
+            item for item in navigations
+            if str(item.get("target_level_id") or item.get("target_level") or "").strip() == target
+        ),
+        None,
+    )
+    if not chosen:
+        raise HTTPException(status_code=400, detail=f"Unsupported chart navigation target: {target}")
+    actual_action_type = str(chosen.get("action_type") or "switch_level").strip() or "switch_level"
+    if expected_action_type and actual_action_type != expected_action_type:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target '{target}' is '{actual_action_type}', not '{expected_action_type}'",
+        )
+    return row, interaction_context, target, chosen
+
+
+def _nearest_navigation_target(
+    interaction_context: dict,
+    *,
+    action_type: str,
+) -> str | None:
+    candidates = [
+        item for item in (interaction_context.get("available_dimension_navigation") or [])
+        if str(item.get("action_type") or "").strip() == action_type
+        and str(item.get("target_level_id") or item.get("target_level") or "").strip()
+    ]
+    if not candidates:
+        return None
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            int(item.get("distance") or item.get("priority") or 999),
+            str(item.get("target_level_id") or item.get("target_level") or ""),
+        ),
+    )
+    return str(ranked[0].get("target_level_id") or ranked[0].get("target_level") or "").strip() or None
+
+
+@app.post(
+    "/charts/{chart_id}/navigate",
+    response_model=ChartStatusResponse,
+    tags=["charts"],
+    summary="Create a deterministically navigated derived chart",
+)
+def navigate_chart(chart_id: str, request: ChartNavigationRequest) -> ChartStatusResponse:
+    row = get_chart_request(settings, chart_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Chart not found")
+    row, interaction_context, target, chosen = _resolve_chart_navigation(row=row, request=request)
+    current_level = str(interaction_context.get("current_level") or "")
+    appended_filters = list(interaction_context.get("filters") or [])
+    if request.selected_dimension and request.selected_value not in (None, "", []):
+        appended_filters = [
+            *appended_filters,
+            {"field": request.selected_dimension, "operator": "=", "value": request.selected_value},
+        ]
+    tenant_id = str(row.get("tenant_id") or "")
+    domain_id = str(row.get("domain_id") or "")
+    scoped_conn = _resolve_scoped_conn(tenant_id, domain_id) if tenant_id and domain_id else None
+    try:
+        compiled = execute_chart_compilation(
+            settings,
+            chart_row=row,
+            interaction_context=interaction_context,
+            override_dimensions=[target],
+            appended_filters=appended_filters,
+            scoped_conn=scoped_conn,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    action_type = str(chosen.get("action_type") or "switch_level")
+    action_verb = {
+        "drill_down": "Drill to",
+        "drill_up": "Roll up to",
+        "switch_level": "Switch to",
+    }.get(action_type, "View by")
+    lineage_json = _build_lineage_payload(
+        row=row,
+        interaction_type=action_type,
+        source_level_id=current_level or None,
+        target_level_id=target,
+        filters_before=list(interaction_context.get("filters") or []),
+        filters_added=[
+            {"field": request.selected_dimension, "operator": "=", "value": request.selected_value}
+        ] if request.selected_dimension and request.selected_value not in (None, "", []) else [],
+        filters_after=appended_filters,
+        selected_dimension=request.selected_dimension,
+        selected_value=request.selected_value,
+        hierarchy_id=str(chosen.get("hierarchy_id") or "").strip() or None,
+        action_label=f"{action_verb} {target.replace('_', ' ').title()}",
+    )
+    new_interaction_context = {
+        **interaction_context,
+        "query_shape": {
+            **(interaction_context.get("query_shape") or {}),
+            "group_dimensions": [target],
+        },
+        "filters": appended_filters,
+        "current_level": target,
+        "lineage": lineage_json,
+    }
+    title = f"{str(row.get('title') or row.get('question') or 'Chart')} — {action_verb} {target.replace('_', ' ').title()}"
+    query_payload = {
+        **(row.get("query_payload") or {}),
+        "dimensions": [target],
+        "source_dimensions": [target],
+        "filters": appended_filters,
+        "source_chart_id": row.get("chart_id"),
+    }
+    derived_chart_id = _persist_derived_interaction_chart(
+        source_row=row,
+        title=title,
+        query_payload=query_payload,
+        compiled=compiled,
+        interaction_type=action_type,
+        interaction_context_json=new_interaction_context,
+        lineage_json=lineage_json,
+        drill_hierarchy_id=str(chosen.get("hierarchy_id") or "").strip() or None,
+        drill_level_id=target,
+    )
+    import uuid
+    create_chart_interaction(
+        settings,
+        interaction_id=f"ci_{uuid.uuid4().hex[:10]}",
+        tenant_id=tenant_id,
+        domain_id=domain_id or None,
+        source_chart_id=str(row.get("chart_id")),
+        result_chart_id=derived_chart_id,
+        interaction_type=action_type,
+        selected_dimension=request.selected_dimension,
+        selected_value_json=request.selected_value,
+        source_level_id=current_level or None,
+        target_level_id=target,
+        interaction_payload_json=lineage_json,
+    )
+    return get_chart(derived_chart_id, refresh=False)
+
+
+@app.post(
+    "/charts/{chart_id}/back",
+    response_model=ChartStatusResponse,
+    tags=["charts"],
+    summary="Return the previous chart state in the interaction lineage",
+)
+def back_chart(chart_id: str) -> ChartStatusResponse:
+    row = get_chart_request(settings, chart_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Chart not found")
+    parent_chart_id = str(row.get("parent_chart_id") or "").strip()
+    if not parent_chart_id:
+        raise HTTPException(status_code=400, detail="No previous chart state available")
+    return get_chart(parent_chart_id, refresh=False)
+
+
+@app.post(
+    "/charts/{chart_id}/drill-down",
+    response_model=ChartStatusResponse,
+    tags=["charts"],
+    summary="Create a deterministic drill-down derived chart",
+)
+def drill_down_chart(chart_id: str, request: ChartNavigationRequest) -> ChartStatusResponse:
+    row = get_chart_request(settings, chart_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Chart not found")
+    row = ensure_chart_interaction_metadata(settings, row)
+    if not request.target_level_id:
+        target = _nearest_navigation_target(row.get("interaction_context_json") or {}, action_type="drill_down")
+        if not target:
+            raise HTTPException(status_code=400, detail="No drill-down target available for this chart")
+        request = ChartNavigationRequest(
+            target_level_id=target,
+            selected_dimension=request.selected_dimension,
+            selected_value=request.selected_value,
+        )
+    _resolve_chart_navigation(row=row, request=request, expected_action_type="drill_down")
+    return navigate_chart(chart_id, request)
+
+
+@app.post(
+    "/charts/{chart_id}/drill-up",
+    response_model=ChartStatusResponse,
+    tags=["charts"],
+    summary="Create a deterministic drill-up derived chart",
+)
+def drill_up_chart(chart_id: str, request: ChartNavigationRequest) -> ChartStatusResponse:
+    row = get_chart_request(settings, chart_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Chart not found")
+    row = ensure_chart_interaction_metadata(settings, row)
+    if not request.target_level_id:
+        target = _nearest_navigation_target(row.get("interaction_context_json") or {}, action_type="drill_up")
+        if not target:
+            parent_chart_id = str(row.get("parent_chart_id") or "").strip()
+            if parent_chart_id:
+                return get_chart(parent_chart_id, refresh=False)
+            raise HTTPException(status_code=400, detail="No drill-up target available for this chart")
+        request = ChartNavigationRequest(
+            target_level_id=target,
+            selected_dimension=request.selected_dimension,
+            selected_value=request.selected_value,
+        )
+    _resolve_chart_navigation(row=row, request=request, expected_action_type="drill_up")
+    return navigate_chart(chart_id, request)
+
+
+@app.post(
+    "/charts/{chart_id}/switch-level",
+    response_model=ChartStatusResponse,
+    tags=["charts"],
+    summary="Create a deterministic level-switch derived chart",
+)
+def switch_level_chart(chart_id: str, request: ChartNavigationRequest) -> ChartStatusResponse:
+    row = get_chart_request(settings, chart_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Chart not found")
+    row = ensure_chart_interaction_metadata(settings, row)
+    if not request.target_level_id:
+        target = _nearest_navigation_target(row.get("interaction_context_json") or {}, action_type="switch_level")
+        if not target:
+            raise HTTPException(status_code=400, detail="No level-switch target available for this chart")
+        request = ChartNavigationRequest(
+            target_level_id=target,
+            selected_dimension=request.selected_dimension,
+            selected_value=request.selected_value,
+        )
+    _resolve_chart_navigation(row=row, request=request, expected_action_type="switch_level")
+    return navigate_chart(chart_id, request)
+
+
+@app.get(
+    "/charts/{chart_id}/interaction-context",
+    tags=["charts"],
+    summary="Inspect stored chart interaction metadata",
+)
+def get_chart_interaction_context(chart_id: str, refresh: bool = Query(default=False)) -> dict:
+    row = get_chart_request(settings, chart_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Chart not found")
+    if refresh:
+        row = ensure_chart_interaction_metadata(settings, row)
+    interaction_context = row.get("interaction_context_json") or {}
+    tenant_id = str(row.get("tenant_id") or "").strip()
+    domain_id = str(row.get("domain_id") or "").strip() or None
+    hierarchies = list_business_hierarchies(settings, tenant_id, domain_id) if tenant_id else []
+    return {
+        "chart_id": chart_id,
+        "interaction_context": interaction_context,
+        "lineage_json": row.get("lineage_json") or {},
+        "parent_chart_id": row.get("parent_chart_id"),
+        "root_chart_id": row.get("root_chart_id") or row.get("chart_id"),
+        "drill_hierarchy_id": row.get("drill_hierarchy_id"),
+        "drill_level_id": row.get("drill_level_id"),
+        "hierarchies": hierarchies,
+    }
 
 
 @app.get(
@@ -20095,6 +20725,8 @@ def _run_correlation_background(
                 anomaly_results=result.get("anomaly_results") or [],
                 correlation_pairs=result.get("correlation_pairs") or [],
                 forward_projections=result.get("forward_projections") or [],
+                snapshot_eligibility_summary=result.get("snapshot_eligibility_summary") or {},
+                data_quality_warnings=result.get("data_quality_warnings") or [],
             )
             registered_chart_ids: list[str] = []
             for cc in corr_charts:
@@ -20124,16 +20756,34 @@ def _run_correlation_background(
                         dim_key=None,
                         chart_title=chart_title,
                     )
+                    _bg_insight_text = bg_inference["insight_text"] or cc.get("description") or ""
+                    _bg_narrative_text = (
+                        bg_inference["narrative_text"]
+                        or cc.get("description")
+                        or bg_inference["insight_text"]
+                        or chart_title
+                    )
                     update_chart_request(
                         settings,
                         cid,
                         status="completed",
                         chart_type=_bg_chart_type,
                         chart_payload=spec,
-                        insight_text=bg_inference["insight_text"] or cc.get("description") or "",
-                        narrative_text=bg_inference["narrative_text"],
+                        chart_data=_bg_rows,
+                        insight_text=_bg_insight_text,
+                        narrative_text=_bg_narrative_text,
                         stats_json=bg_inference["stats_json"],
                     )
+                    if not _bg_insight_text or not _bg_narrative_text:
+                        _log.warning(
+                            "[correlation] chart_annotations_missing | correlation_run_id=%s chart_id=%s chart_type=%s title=%s insight_present=%s narrative_present=%s",
+                            correlation_run_id,
+                            cid,
+                            _bg_chart_type,
+                            chart_title,
+                            bool(_bg_insight_text),
+                            bool(_bg_narrative_text),
+                        )
                     registered_chart_ids.append(cid)
 
             # Create a correlation dashboard and link all charts
@@ -20162,10 +20812,13 @@ def _run_correlation_background(
         try:
             narration = narrate_correlation_results(
                 settings,
+                kpi_snapshots=result.get("kpi_snapshots") or [],
                 anomaly_results=result.get("anomaly_results") or [],
                 correlation_pairs=result.get("correlation_pairs") or [],
                 forward_projections=result.get("forward_projections") or [],
                 investigation_threads=result.get("investigation_threads") or [],
+                data_quality_warnings=result.get("data_quality_warnings") or [],
+                snapshot_eligibility_summary=result.get("snapshot_eligibility_summary") or {},
             )
         except Exception:
             _log.warning("[correlation] Narration failed", exc_info=True)
@@ -20178,6 +20831,7 @@ def _run_correlation_background(
             run_result=result,
             summary_text=narration.get("summary_text") or "",
             summary_html=narration.get("summary_html") or "",
+            insights_json=narration.get("insights") or [],
         )
     except Exception:
         _log.exception("[correlation] Background run failed for %s", correlation_run_id)

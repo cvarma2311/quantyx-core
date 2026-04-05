@@ -12,9 +12,12 @@ stored during the agentic deployment run.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 import re
+import urllib.request
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -49,6 +52,10 @@ _ANOMALY_IQR_MULTIPLIER = 1.5
 _MIN_SERIES_LEN = 4          # below this, skip anomaly / correlation
 _CORRELATION_MIN_R = 0.20    # prune weak pairs
 _INVESTIGATION_MIN_CONF = 0.35
+_FACT_SOURCE_MIN_SNAPSHOTS = 2
+_DAY_ID_COL_PATTERN = re.compile(r"(?i)^(day[_\s]?id|date[_\s]?id|day|date[_\s]?key)$")
+_SOURCE_RANK_MODEL_ENV = "CORRELATION_SOURCE_RANK_MODEL"
+_SOURCE_RANK_TIMEOUT_ENV = "CORRELATION_SOURCE_RANK_TIMEOUT_SEC"
 
 
 # ---------------------------------------------------------------------------
@@ -100,32 +107,371 @@ def _coerce_numeric(value: Any) -> float | None:
         return None
 
 
-def load_kpi_snapshots(
+def _qident(identifier: str) -> str:
+    return '"' + str(identifier).replace('"', '""') + '"'
+
+
+def _parse_temporal_value(value: Any) -> datetime | None:
+    """Parse a supported temporal value into a datetime, else return None."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "nan"}:
+        return None
+
+    normalized = text.replace("Z", "+00:00")
+    for candidate in (
+        normalized,
+        f"{normalized}-01" if re.fullmatch(r"\d{4}-\d{2}", normalized) else None,
+        f"{normalized}-01-01" if re.fullmatch(r"\d{4}", normalized) else None,
+    ):
+        if not candidate:
+            continue
+        try:
+            return datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+    return None
+
+
+def _temporal_axis_quality(rows_json: list[dict], period_col: str | None) -> dict[str, Any]:
+    """Return quality metadata for whether a snapshot has a real temporal axis."""
+    if not period_col:
+        return {
+            "eligible": False,
+            "reason": "missing_period_column",
+            "period_col": None,
+            "total_rows": len(rows_json),
+            "parseable_rows": 0,
+            "parse_ratio": 0.0,
+            "unique_points": 0,
+        }
+
+    parsed_values: list[datetime] = []
+    non_null_rows = 0
+    for row in rows_json:
+        raw = row.get(period_col)
+        if raw in {None, ""}:
+            continue
+        non_null_rows += 1
+        parsed = _parse_temporal_value(raw)
+        if parsed is not None:
+            parsed_values.append(parsed)
+
+    parse_ratio = round((len(parsed_values) / non_null_rows), 4) if non_null_rows else 0.0
+    unique_points = len({value.isoformat() for value in parsed_values})
+
+    reason = None
+    if not parsed_values:
+        reason = "period_values_not_temporal"
+    elif len(parsed_values) < _MIN_SERIES_LEN:
+        reason = "too_few_temporal_points"
+    elif parse_ratio < 0.8:
+        reason = "insufficient_temporal_parse_ratio"
+    elif unique_points < _MIN_SERIES_LEN:
+        reason = "too_few_unique_temporal_points"
+
+    return {
+        "eligible": reason is None,
+        "reason": reason or "eligible",
+        "period_col": period_col,
+        "total_rows": len(rows_json),
+        "non_null_rows": non_null_rows,
+        "parseable_rows": len(parsed_values),
+        "parse_ratio": parse_ratio,
+        "unique_points": unique_points,
+    }
+
+
+def _snapshot_metric_name(raw: dict[str, Any], fallback: str = "unknown") -> str:
+    qp = raw.get("query_payload") or {}
+    return str(
+        qp.get("metric_name")
+        or qp.get("metric")
+        or raw.get("question")
+        or fallback
+    )
+
+
+def _snapshot_exclusion_entry(
+    raw: dict[str, Any],
+    *,
+    reason: str,
+    period_col: str | None,
+    value_col: str | None = None,
+    parse_ratio: float | None = None,
+    unique_points: int | None = None,
+    total_rows: int | None = None,
+    non_null_rows: int | None = None,
+    parseable_rows: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "chart_id": raw.get("chart_id"),
+        "metric_name": _snapshot_metric_name(raw),
+        "reason": reason,
+        "period_col": period_col,
+        "value_col": value_col,
+        "parse_ratio": parse_ratio,
+        "unique_points": unique_points,
+        "total_rows": total_rows,
+        "non_null_rows": non_null_rows,
+        "parseable_rows": parseable_rows,
+    }
+
+
+def _summarize_snapshot_eligibility(
+    *,
+    source_mode: str,
+    rows_examined: int,
+    snapshots: list[dict],
+    exclusions: list[dict],
+) -> dict[str, Any]:
+    excluded_by_reason: dict[str, int] = defaultdict(int)
+    for item in exclusions:
+        excluded_by_reason[str(item.get("reason") or "unknown")] += 1
+    return {
+        "source_mode": source_mode,
+        "rows_examined": rows_examined,
+        "eligible_snapshot_count": len(snapshots),
+        "excluded_chart_count": len(exclusions),
+        "excluded_by_reason": dict(sorted(excluded_by_reason.items())),
+    }
+
+
+def _build_data_quality_warnings(
+    snapshot_eligibility_summary: dict[str, Any],
+    snapshot_exclusions: list[dict],
+) -> list[dict[str, Any]]:
+    warnings: list[dict[str, Any]] = []
+    excluded_count = int(snapshot_eligibility_summary.get("excluded_chart_count") or 0)
+    if excluded_count:
+        warnings.append(
+            {
+                "code": "non_temporal_or_ineligible_charts_excluded",
+                "severity": "warning",
+                "message": (
+                    f"{excluded_count} chart snapshot(s) were excluded from correlation "
+                    "because they were not eligible time series."
+                ),
+                "details": {
+                    "excluded_by_reason": snapshot_eligibility_summary.get("excluded_by_reason") or {},
+                    "preview": snapshot_exclusions[:5],
+                },
+            }
+        )
+
+    if snapshot_eligibility_summary.get("source_mode") in {"fact_bootstrap", "fact_preferred"}:
+        warnings.append(
+            {
+                "code": "fact_native_sources_used",
+                "severity": "info",
+                "message": (
+                    "Correlation snapshots were sourced from live fact tables using a real "
+                    "temporal axis."
+                ),
+                "details": {
+                    "source_mode": snapshot_eligibility_summary.get("source_mode"),
+                    "bootstrap_snapshot_count": snapshot_eligibility_summary.get("bootstrap_snapshot_count") or 0,
+                    "fact_snapshot_count": snapshot_eligibility_summary.get("fact_snapshot_count") or 0,
+                    "category_snapshot_count": (
+                        (snapshot_eligibility_summary.get("fact_source_summary") or {}).get("category_snapshot_count") or 0
+                    ),
+                },
+            }
+        )
+
+    if int(snapshot_eligibility_summary.get("eligible_snapshot_count") or 0) < 2:
+        warnings.append(
+            {
+                "code": "limited_temporal_coverage",
+                "severity": "warning",
+                "message": (
+                    "Fewer than two eligible temporal series were available, so pairwise "
+                    "correlation coverage is limited."
+                ),
+                "details": snapshot_eligibility_summary,
+            }
+        )
+    return warnings
+
+
+def _find_fact_time_column(table_info: dict[str, Any]) -> tuple[str | None, str | None]:
+    time_cols = [str(col) for col in (table_info.get("time_columns") or []) if str(col or "").strip()]
+    if time_cols:
+        return time_cols[0], "iso_date"
+    for col in (table_info.get("numeric_columns") or []):
+        col_name = str(col or "").strip()
+        if col_name and _DAY_ID_COL_PATTERN.match(col_name):
+            return col_name, "yyyymmdd"
+    return None, None
+
+
+def _fact_time_expr(column_name: str, date_format: str) -> str:
+    q_col = _qident(column_name)
+    if date_format == "yyyymmdd":
+        return f"TO_DATE({q_col}::varchar, 'YYYYMMDD')"
+    return q_col
+
+
+def _fact_table_quality(table_info: dict[str, Any]) -> dict[str, Any]:
+    row_count = int(table_info.get("row_count") or 0)
+    time_col, date_format = _find_fact_time_column(table_info)
+    measure_cols = [
+        str(c)
+        for c in (table_info.get("eligible_numeric_columns") or table_info.get("numeric_columns") or [])
+        if str(c or "").strip()
+    ]
+    category_cols = [
+        str(c)
+        for c in (table_info.get("categorical_columns") or [])
+        if str(c or "").strip()
+    ]
+    score = 0.0
+    if time_col:
+        score += 3.0
+    score += min(len(measure_cols), 5) * 0.6
+    score += min(len(category_cols), 3) * 0.2
+    if row_count > 0:
+        score += min(math.log10(max(row_count, 1)), 4.0)
+    return {
+        "table_name": str(table_info.get("name") or ""),
+        "row_count": row_count,
+        "time_column": time_col,
+        "date_format": date_format,
+        "measure_count": len(measure_cols),
+        "category_count": len(category_cols),
+        "score": round(score, 3),
+    }
+
+
+def _llm_json_call(
+    settings: Settings,
+    *,
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    timeout: int | None = None,
+) -> dict[str, Any] | None:
+    api_key = getattr(settings, "openai_api_key", None)
+    if not api_key:
+        return None
+    model = os.getenv(_SOURCE_RANK_MODEL_ENV, getattr(settings, "openai_model", "gpt-4o-mini"))
+    timeout_sec = timeout or int(os.getenv(_SOURCE_RANK_TIMEOUT_ENV, "45"))
+    body = json.dumps(
+        {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload, default=str)},
+            ],
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        },
+        default=str,
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+        return json.loads(raw["choices"][0]["message"]["content"])
+    except Exception:
+        logger.warning("[correlation.source_rank] LLM call failed", exc_info=True)
+        return None
+
+
+def _llm_rank_fact_sources(
+    settings: Settings,
+    table_quality: list[dict[str, Any]],
+    profiling_stats: dict[str, Any],
+) -> dict[str, Any] | None:
+    candidates = []
+    for quality in table_quality[:8]:
+        table_name = str(quality.get("table_name") or "")
+        table_info = next(
+            (tbl for tbl in (profiling_stats.get("tables") or []) if str(tbl.get("name") or "") == table_name),
+            {},
+        )
+        candidates.append(
+            {
+                "table_name": table_name,
+                "row_count": quality.get("row_count"),
+                "time_column": quality.get("time_column"),
+                "date_format": quality.get("date_format"),
+                "measure_count": quality.get("measure_count"),
+                "category_count": quality.get("category_count"),
+                "score": quality.get("score"),
+                "description": table_info.get("description") or "",
+                "sample_categories": list((table_info.get("categorical_columns") or [])[:3]),
+                "sample_measures": list((table_info.get("eligible_numeric_columns") or table_info.get("numeric_columns") or [])[:5]),
+            }
+        )
+    if not candidates:
+        return None
+    result = _llm_json_call(
+        settings,
+        system_prompt=(
+            "You rank fact tables for correlation analysis. Prefer tables with meaningful temporal coverage, "
+            "business-relevant additive measures, and useful category breakdowns. Return JSON with keys "
+            "\"ranked_tables\" (list of table names best to worst) and \"rationales\" (object mapping table name to short reason)."
+        ),
+        user_payload={"candidates": candidates},
+    )
+    if not result:
+        return None
+    ranked_tables = [str(item).strip() for item in (result.get("ranked_tables") or []) if str(item).strip()]
+    rationales = result.get("rationales") if isinstance(result.get("rationales"), dict) else {}
+    valid_tables = {str(item.get("table_name") or "") for item in table_quality}
+    ranked_tables = [name for name in ranked_tables if name in valid_tables]
+    if not ranked_tables:
+        return None
+    return {
+        "ranked_tables": ranked_tables,
+        "rationales": {str(k): str(v) for k, v in rationales.items() if str(k) in valid_tables},
+    }
+
+
+def _series_period_sort_key(value: Any) -> tuple[int, str]:
+    parsed = _parse_temporal_value(value)
+    return (0, parsed.isoformat()) if parsed else (1, str(value))
+
+
+def _category_label(value: Any) -> str:
+    text = str(value or "").strip()
+    return text if text else "UNKNOWN"
+
+
+def _load_kpi_snapshot_bundle(
     settings: Settings,
     tenant_id: str,
     domain_id: str,
     run_id: str | None = None,
-) -> list[dict]:
+    scoped_conn=None,
+    profiling_stats: dict | None = None,
+) -> dict[str, Any]:
     """
-    Load KPI snapshots from quantyx_chart_requests.
-
-    Scoping strategy:
-    - Primary: WHERE run_id = %s (exact deployment run)
-    - Fallback: WHERE tenant_id = %s AND domain_id = %s (latest 10 charts)
-
-    Returns a list of snapshot dicts, each containing:
-      {
-        "chart_id": str,
-        "question": str,
-        "rows_json": list[dict],      # raw data rows
-        "query_payload": dict | None,
-        "metric_name": str,           # derived from question / query_payload
-        "period_col": str | None,
-        "value_col": str | None,
-        "series": list[float],
-        "timestamps": list[str],
-      }
+    Load KPI snapshots plus eligibility metadata used by the correlation run.
     """
+    bundle = {
+        "kpi_snapshots": [],
+        "snapshot_exclusions": [],
+        "snapshot_eligibility_summary": {
+            "source_mode": "none",
+            "rows_examined": 0,
+            "eligible_snapshot_count": 0,
+            "excluded_chart_count": 0,
+            "excluded_by_reason": {},
+        },
+    }
     conn = psycopg2.connect(
         host=settings.db_host,
         port=settings.db_port,
@@ -151,7 +497,6 @@ def load_kpi_snapshots(
                 rows = cur.fetchall()
 
             if not rows:
-                # Fallback: latest 10 completed charts for this scope
                 cur.execute(
                     """
                     SELECT chart_id, question, query_payload, rows_json
@@ -168,11 +513,109 @@ def load_kpi_snapshots(
                 rows = cur.fetchall()
     except psycopg2.errors.UndefinedTable:
         logger.warning("quantyx_chart_requests table not found — returning empty snapshots")
-        return []
+        return bundle
     finally:
         conn.close()
 
+    chart_snapshots, exclusions = _build_snapshots_from_rows(rows)
+    fact_snapshots: list[dict] = []
+    fact_source_summary: dict[str, Any] = {
+        "candidate_table_count": 0,
+        "qualified_table_count": 0,
+        "snapshot_count": 0,
+        "category_snapshot_count": 0,
+        "llm_ranked": False,
+        "llm_ranked_tables": [],
+        "llm_rationales": {},
+        "top_tables": [],
+    }
+    if scoped_conn and profiling_stats:
+        logger.info(
+            "[correlation] Evaluating fact-native KPI snapshots via scoped_conn host=%s db=%s",
+            scoped_conn.host,
+            scoped_conn.database_name,
+        )
+        fact_snapshots, fact_source_summary = _bootstrap_kpi_snapshots(settings, scoped_conn, profiling_stats)
+        logger.info(
+            "[correlation] Fact-native source evaluation complete | snapshots=%d qualified_tables=%d",
+            len(fact_snapshots),
+            fact_source_summary.get("qualified_table_count"),
+        )
+
+    selected_snapshots = chart_snapshots
+    source_mode = "chart_rows" if chart_snapshots else ("none" if not rows else "chart_rows")
+    if fact_snapshots and len(fact_snapshots) >= _FACT_SOURCE_MIN_SNAPSHOTS:
+        selected_snapshots = fact_snapshots
+        source_mode = "fact_preferred"
+    elif not chart_snapshots and fact_snapshots:
+        selected_snapshots = fact_snapshots
+        source_mode = "fact_bootstrap"
+
+    bundle["kpi_snapshots"] = selected_snapshots
+    bundle["snapshot_exclusions"] = exclusions
+    bundle["snapshot_eligibility_summary"] = {
+        **_summarize_snapshot_eligibility(
+            source_mode=source_mode,
+            rows_examined=len(rows),
+            snapshots=selected_snapshots,
+            exclusions=exclusions,
+        ),
+        "chart_snapshot_count": len(chart_snapshots),
+        "fact_snapshot_count": len(fact_snapshots),
+        "selected_source_kind": "fact_metric" if source_mode.startswith("fact") else ("chart_fallback" if selected_snapshots else "none"),
+        "fact_source_summary": fact_source_summary,
+    }
+    return bundle
+
+
+def load_kpi_snapshots(
+    settings: Settings,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str | None = None,
+    scoped_conn=None,
+    profiling_stats: dict | None = None,
+) -> list[dict]:
+    """
+    Load KPI snapshots from quantyx_chart_requests.
+
+    Scoping strategy:
+    - Primary: WHERE run_id = %s (exact deployment run)
+    - Fallback: WHERE tenant_id = %s AND domain_id = %s (latest 10 charts)
+    - Bootstrap: when no chart rows_json data exists and scoped_conn + profiling_stats
+      are provided, generate fresh time-series snapshots directly from the fact tables
+      on the customer DB. This handles fresh deployments where no charts have been
+      executed yet.
+
+    Returns a list of snapshot dicts, each containing:
+      {
+        "chart_id": str,
+        "question": str,
+        "rows_json": list[dict],      # raw data rows
+        "query_payload": dict | None,
+        "metric_name": str,           # derived from question / query_payload
+        "period_col": str | None,
+        "value_col": str | None,
+        "series": list[float],
+        "timestamps": list[str],
+      }
+    """
+    bundle = _load_kpi_snapshot_bundle(
+        settings,
+        tenant_id,
+        domain_id,
+        run_id=run_id,
+        scoped_conn=scoped_conn,
+        profiling_stats=profiling_stats,
+    )
+    return bundle.get("kpi_snapshots") or []
+
+
+def _build_snapshots_from_rows(rows: list) -> tuple[list[dict], list[dict]]:
+    """Convert raw quantyx_chart_requests rows into snapshot dicts."""
     snapshots: list[dict] = []
+    category_snapshot_count = 0
+    exclusions: list[dict] = []
     for raw in rows:
         rows_json: list[dict] = raw.get("rows_json") or []
         if not rows_json or not isinstance(rows_json, list):
@@ -180,8 +623,31 @@ def load_kpi_snapshots(
 
         first_row = rows_json[0] if rows_json else {}
         period_col = _detect_period_column(first_row)
+        temporal_quality = _temporal_axis_quality(rows_json, period_col)
+        if not temporal_quality.get("eligible"):
+            exclusions.append(
+                _snapshot_exclusion_entry(
+                    raw,
+                    reason=str(temporal_quality.get("reason") or "ineligible_temporal_axis"),
+                    period_col=temporal_quality.get("period_col"),
+                    parse_ratio=temporal_quality.get("parse_ratio"),
+                    unique_points=temporal_quality.get("unique_points"),
+                    total_rows=temporal_quality.get("total_rows"),
+                    non_null_rows=temporal_quality.get("non_null_rows"),
+                    parseable_rows=temporal_quality.get("parseable_rows"),
+                )
+            )
+            logger.info(
+                "[correlation] Skipping chart_id=%s metric=%s reason=%s period_col=%s parse_ratio=%s unique_points=%s",
+                raw.get("chart_id"),
+                _snapshot_metric_name(raw),
+                temporal_quality.get("reason"),
+                temporal_quality.get("period_col"),
+                temporal_quality.get("parse_ratio"),
+                temporal_quality.get("unique_points"),
+            )
+            continue
 
-        # Detect value column: first numeric, non-period column
         value_col: str | None = None
         for key, val in first_row.items():
             if key == period_col:
@@ -191,7 +657,15 @@ def load_kpi_snapshots(
                 break
 
         if value_col is None:
-            continue  # no numeric column found — skip
+            exclusions.append(
+                _snapshot_exclusion_entry(
+                    raw,
+                    reason="missing_numeric_value_column",
+                    period_col=period_col,
+                    total_rows=len(rows_json),
+                )
+            )
+            continue
 
         series: list[float] = []
         timestamps: list[str] = []
@@ -204,9 +678,17 @@ def load_kpi_snapshots(
             timestamps.append(ts)
 
         if len(series) < _MIN_SERIES_LEN:
+            exclusions.append(
+                _snapshot_exclusion_entry(
+                    raw,
+                    reason="too_few_numeric_points",
+                    period_col=period_col,
+                    value_col=value_col,
+                    total_rows=len(rows_json),
+                )
+            )
             continue
 
-        # Derive metric name from question or query_payload
         qp: dict = raw.get("query_payload") or {}
         metric_name: str = (
             qp.get("metric_name")
@@ -225,10 +707,305 @@ def load_kpi_snapshots(
                 "value_col": value_col,
                 "series": series,
                 "timestamps": timestamps,
+                "temporal_quality": temporal_quality,
+                "source_kind": "chart_fallback",
+                "source_quality": {
+                    "source_kind": "chart_fallback",
+                    "chart_id": raw.get("chart_id"),
+                    "period_col": period_col,
+                    "value_col": value_col,
+                    "temporal_quality": temporal_quality,
+                },
             }
         )
+    return snapshots, exclusions
 
-    return snapshots
+
+def _bootstrap_kpi_snapshots(settings: Settings, scoped_conn, profiling_stats: dict) -> tuple[list[dict], dict[str, Any]]:
+    """
+    Generate KPI snapshots by querying fact tables directly on the customer DB.
+
+    This is the fact-native source path for correlation. It evaluates profiled
+    tables, prefers tables with real temporal coverage and numeric measures, and
+    produces monthly time-series snapshots from the live scoped customer DB.
+    """
+    snapshots: list[dict] = []
+    category_snapshot_count: int = 0
+    table_quality: list[dict[str, Any]] = []
+    tables = profiling_stats.get("tables") or []
+    for table_info in tables:
+        quality = _fact_table_quality(table_info)
+        if quality.get("time_column") and quality.get("measure_count"):
+            table_quality.append(quality)
+
+    table_quality.sort(key=lambda item: item.get("score") or 0.0, reverse=True)
+    llm_ranking = _llm_rank_fact_sources(settings, table_quality, profiling_stats)
+    if llm_ranking:
+        rank_index = {
+            table_name: idx
+            for idx, table_name in enumerate(llm_ranking.get("ranked_tables") or [])
+        }
+        table_quality.sort(
+            key=lambda item: (
+                rank_index.get(str(item.get("table_name") or ""), len(rank_index) + 1000),
+                -(float(item.get("score") or 0.0)),
+            )
+        )
+    top_tables = table_quality[:5]
+    if not top_tables:
+        return [], {
+            "candidate_table_count": len(tables),
+            "qualified_table_count": 0,
+            "snapshot_count": 0,
+            "llm_ranked": bool(llm_ranking),
+            "llm_ranked_tables": (llm_ranking or {}).get("ranked_tables") or [],
+            "llm_rationales": (llm_ranking or {}).get("rationales") or {},
+            "top_tables": [],
+        }
+
+    conn = psycopg2.connect(
+        host=scoped_conn.host,
+        port=scoped_conn.port,
+        dbname=scoped_conn.database_name,
+        user=scoped_conn.user,
+        password=scoped_conn.password,
+    )
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            for quality in top_tables:
+                table_name = str(quality.get("table_name") or "").strip()
+                time_col = str(quality.get("time_column") or "").strip()
+                date_format = str(quality.get("date_format") or "iso_date")
+                if not table_name or not time_col:
+                    continue
+
+                table_info = next(
+                    (tbl for tbl in tables if str(tbl.get("name") or "").strip() == table_name),
+                    {},
+                )
+                numeric_cols = [
+                    str(c)
+                    for c in (table_info.get("eligible_numeric_columns") or table_info.get("numeric_columns") or [])
+                    if str(c or "").strip()
+                ]
+                category_cols = [
+                    str(c)
+                    for c in (table_info.get("categorical_columns") or [])
+                    if str(c or "").strip()
+                ]
+                time_expr = _fact_time_expr(time_col, date_format)
+                schema_name = scoped_conn.schema_name or "public"
+                category_col = category_cols[0] if category_cols else None
+
+                for measure_col in numeric_cols[:3]:
+                    q_measure = _qident(measure_col)
+                    sql = (
+                        f"SELECT date_trunc('month', {time_expr}) AS period, "
+                        f"SUM({q_measure}) AS {q_measure} "
+                        f"FROM {_qident(schema_name)}.{_qident(table_name)} "
+                        f"WHERE {time_expr} IS NOT NULL "
+                        f"GROUP BY 1 ORDER BY 1"
+                    )
+                    try:
+                        cur.execute(sql)
+                        result_rows = [dict(r) for r in cur.fetchall()]
+                    except Exception:
+                        logger.warning(
+                            "[correlation.fact] Query failed for %s.%s | sql=%s",
+                            table_name,
+                            measure_col,
+                            sql,
+                            exc_info=True,
+                        )
+                        continue
+
+                    if not result_rows:
+                        logger.info(
+                            "[correlation.fact] No rows from %s.%s time_col=%s measure=%s",
+                            table_name,
+                            scoped_conn.database_name,
+                            time_col,
+                            measure_col,
+                        )
+                        continue
+
+                    series: list[float] = []
+                    timestamps: list[str] = []
+                    for row in result_rows:
+                        v = _coerce_numeric(row.get(measure_col))
+                        if v is None:
+                            continue
+                        series.append(v)
+                        timestamps.append(str(row.get("period", "")))
+
+                    if len(series) < _MIN_SERIES_LEN:
+                        logger.info(
+                            "[correlation.fact] Series too short (%d < %d) for %s.%s",
+                            len(series),
+                            _MIN_SERIES_LEN,
+                            table_name,
+                            measure_col,
+                        )
+                        continue
+
+                    metric_name = f"{measure_col}_by_month_{table_name}"
+                    source_quality = {
+                        **quality,
+                        "measure_column": measure_col,
+                        "source_kind": "fact_metric",
+                    }
+                    logger.info(
+                        "[correlation.fact] OK | table=%s measure=%s points=%d score=%.2f",
+                        table_name,
+                        measure_col,
+                        len(series),
+                        float(quality.get("score") or 0.0),
+                    )
+                    snapshots.append(
+                        {
+                            "chart_id": f"fact_{table_name}_{measure_col}",
+                            "question": f"{measure_col} over time from {table_name}",
+                            "rows_json": result_rows,
+                            "query_payload": {
+                                "metric_name": metric_name,
+                                "table": table_name,
+                                "time_column": time_col,
+                                "date_format": date_format,
+                                "source_kind": "fact_metric",
+                            },
+                            "metric_name": metric_name,
+                            "period_col": "period",
+                            "value_col": measure_col,
+                            "series": series,
+                            "timestamps": timestamps,
+                            "source_kind": "fact_metric",
+                            "source_quality": source_quality,
+                        }
+                    )
+
+                    if not category_col:
+                        continue
+
+                    q_category = _qident(category_col)
+                    top_category_sql = (
+                        f"SELECT {q_category} AS category_value, SUM({q_measure}) AS total_value "
+                        f"FROM {_qident(schema_name)}.{_qident(table_name)} "
+                        f"WHERE {time_expr} IS NOT NULL AND {q_category} IS NOT NULL "
+                        f"GROUP BY 1 ORDER BY 2 DESC NULLS LAST LIMIT 3"
+                    )
+                    try:
+                        cur.execute(top_category_sql)
+                        top_category_rows = [dict(r) for r in cur.fetchall()]
+                    except Exception:
+                        logger.warning(
+                            "[correlation.fact.category] Top category query failed for %s.%s | sql=%s",
+                            table_name,
+                            measure_col,
+                            top_category_sql,
+                            exc_info=True,
+                        )
+                        continue
+
+                    top_categories = [
+                        row.get("category_value")
+                        for row in top_category_rows
+                        if row.get("category_value") not in {None, ""}
+                    ]
+                    if not top_categories:
+                        continue
+
+                    category_series_sql = (
+                        f"SELECT date_trunc('month', {time_expr}) AS period, "
+                        f"{q_category} AS category_value, SUM({q_measure}) AS {q_measure} "
+                        f"FROM {_qident(schema_name)}.{_qident(table_name)} "
+                        f"WHERE {time_expr} IS NOT NULL AND {q_category} = ANY(%s) "
+                        f"GROUP BY 1, 2 ORDER BY 1, 2"
+                    )
+                    try:
+                        cur.execute(category_series_sql, [top_categories])
+                        category_rows = [dict(r) for r in cur.fetchall()]
+                    except Exception:
+                        logger.warning(
+                            "[correlation.fact.category] Category series query failed for %s.%s | sql=%s",
+                            table_name,
+                            measure_col,
+                            category_series_sql,
+                            exc_info=True,
+                        )
+                        continue
+
+                    if not category_rows:
+                        continue
+
+                    periods = sorted(
+                        {
+                            str(row.get("period", ""))
+                            for row in category_rows
+                            if str(row.get("period", "")).strip()
+                        },
+                        key=_series_period_sort_key,
+                    )
+                    category_period_values: dict[str, dict[str, float]] = defaultdict(dict)
+                    for row in category_rows:
+                        period = str(row.get("period", "")).strip()
+                        category_value = _category_label(row.get("category_value"))
+                        value = _coerce_numeric(row.get(measure_col))
+                        if not period or value is None:
+                            continue
+                        category_period_values[category_value][period] = value
+
+                    for category_value, period_map in category_period_values.items():
+                        series = [float(period_map.get(period, 0.0)) for period in periods]
+                        if len(series) < _MIN_SERIES_LEN:
+                            continue
+                        category_metric_name = (
+                            f"{measure_col}_by_month_{table_name}_{category_col}_{category_value}"
+                        )
+                        snapshots.append(
+                            {
+                                "chart_id": f"fact_{table_name}_{measure_col}_{category_col}_{uuid.uuid4().hex[:6]}",
+                                "question": (
+                                    f"{measure_col} over time from {table_name} "
+                                    f"for {category_col}={category_value}"
+                                ),
+                                "rows_json": category_rows,
+                                "query_payload": {
+                                    "metric_name": category_metric_name,
+                                    "table": table_name,
+                                    "time_column": time_col,
+                                    "date_format": date_format,
+                                    "source_kind": "fact_category_metric",
+                                    "category_column": category_col,
+                                    "category_value": category_value,
+                                },
+                                "metric_name": category_metric_name,
+                                "period_col": "period",
+                                "value_col": measure_col,
+                                "series": series,
+                                "timestamps": periods,
+                                "source_kind": "fact_category_metric",
+                                "source_quality": {
+                                    **source_quality,
+                                    "source_kind": "fact_category_metric",
+                                    "category_column": category_col,
+                                    "category_value": category_value,
+                                },
+                            }
+                        )
+                        category_snapshot_count += 1
+    finally:
+        conn.close()
+
+    return snapshots, {
+        "candidate_table_count": len(tables),
+        "qualified_table_count": len(table_quality),
+        "snapshot_count": len(snapshots),
+        "category_snapshot_count": category_snapshot_count,
+        "llm_ranked": bool(llm_ranking),
+        "llm_ranked_tables": (llm_ranking or {}).get("ranked_tables") or [],
+        "llm_rationales": (llm_ranking or {}).get("rationales") or {},
+        "top_tables": top_tables,
+    }
 
 
 def extract_dimension_breakdown(
@@ -827,6 +1604,8 @@ def run_correlation_intelligence(
     run_id: str | None = None,
     forecast_periods: int = 12,
     analysis_mode: str = "full",
+    scoped_conn=None,
+    profiling_stats: dict | None = None,
 ) -> dict:
     """
     Entry point for the Phase 43 correlation intelligence run.
@@ -862,14 +1641,44 @@ def run_correlation_intelligence(
 
     # --- Step 1: Load KPI snapshots ---
     kpi_snapshots: list[dict] = []
+    snapshot_exclusions: list[dict] = []
+    snapshot_eligibility_summary: dict[str, Any] = {
+        "source_mode": "none",
+        "rows_examined": 0,
+        "eligible_snapshot_count": 0,
+        "excluded_chart_count": 0,
+        "excluded_by_reason": {},
+    }
     try:
-        kpi_snapshots = load_kpi_snapshots(
-            settings, tenant_id, domain_id, run_id=run_id
+        snapshot_bundle = _load_kpi_snapshot_bundle(
+            settings,
+            tenant_id,
+            domain_id,
+            run_id=run_id,
+            scoped_conn=scoped_conn, profiling_stats=profiling_stats,
+        )
+        kpi_snapshots = snapshot_bundle.get("kpi_snapshots") or []
+        snapshot_exclusions = snapshot_bundle.get("snapshot_exclusions") or []
+        snapshot_eligibility_summary = (
+            snapshot_bundle.get("snapshot_eligibility_summary") or snapshot_eligibility_summary
         )
         logger.info("[correlation] Loaded %d KPI snapshots", len(kpi_snapshots))
+        logger.info(
+            "[correlation] Snapshot eligibility | source=%s examined=%s eligible=%s excluded=%s reasons=%s",
+            snapshot_eligibility_summary.get("source_mode"),
+            snapshot_eligibility_summary.get("rows_examined"),
+            snapshot_eligibility_summary.get("eligible_snapshot_count"),
+            snapshot_eligibility_summary.get("excluded_chart_count"),
+            snapshot_eligibility_summary.get("excluded_by_reason"),
+        )
     except Exception as exc:
         logger.exception("[correlation] Failed to load KPI snapshots")
         error_message = f"Snapshot load failed: {exc}"
+
+    data_quality_warnings = _build_data_quality_warnings(
+        snapshot_eligibility_summary,
+        snapshot_exclusions,
+    )
 
     if not kpi_snapshots:
         return {
@@ -879,6 +1688,9 @@ def run_correlation_intelligence(
             "correlation_pairs": [],
             "investigation_threads": [],
             "forward_projections": [],
+            "snapshot_exclusions": snapshot_exclusions,
+            "snapshot_eligibility_summary": snapshot_eligibility_summary,
+            "data_quality_warnings": data_quality_warnings,
             "metric_count": 0,
             "anomaly_count": 0,
             "correlation_pair_count": 0,
@@ -976,6 +1788,9 @@ def run_correlation_intelligence(
         "correlation_pairs": correlation_pairs,
         "investigation_threads": investigation_threads,
         "forward_projections": forward_projections,
+        "snapshot_exclusions": snapshot_exclusions,
+        "snapshot_eligibility_summary": snapshot_eligibility_summary,
+        "data_quality_warnings": data_quality_warnings,
         "metric_count": len(kpi_snapshots),
         "anomaly_count": len(anomaly_results),
         "correlation_pair_count": len(correlation_pairs),

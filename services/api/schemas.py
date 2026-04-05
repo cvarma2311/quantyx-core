@@ -194,6 +194,24 @@ class ChartStatusResponse(BaseModel):
     insight_text: Optional[str] = None
     narrative_text: Optional[str] = None
     stats_json: Optional[dict] = None
+    interaction_context: Optional[dict] = None
+    available_filters: Optional[List[dict]] = None
+    available_drilldowns: Optional[List[dict]] = None
+    available_dimension_navigation: Optional[List[dict]] = None
+    suggested_drilldowns: Optional[List[dict]] = None
+    available_areas: Optional[dict] = None
+    breadcrumb: Optional[List[dict]] = None
+    lineage_summary: Optional[dict] = None
+
+
+class ChartFilterRequest(BaseModel):
+    filters: List[QueryFilter] = Field(default_factory=list)
+
+
+class ChartNavigationRequest(BaseModel):
+    target_level_id: Optional[str] = Field(None, description="Target hierarchy level or alternate dimension")
+    selected_dimension: Optional[str] = Field(None, description="Current selected dimension")
+    selected_value: Optional[Any] = Field(None, description="Optional selected parent value to carry as a filter")
 
 
 class RollupCreateRequest(BaseModel):
@@ -2381,6 +2399,9 @@ class CorrelationRunResponse(BaseModel):
     thread_count: Optional[int] = None
     summary_text: Optional[str] = None
     summary_html: Optional[str] = None
+    insights_json: Optional[List[dict]] = None
+    snapshot_eligibility_summary: Optional[dict] = None
+    data_quality_warnings: Optional[List[dict]] = None
     error_message: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None

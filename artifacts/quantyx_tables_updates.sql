@@ -1221,3 +1221,51 @@ CREATE TABLE IF NOT EXISTS public.quantyx_chart_events (
 
 CREATE INDEX IF NOT EXISTS idx_quantyx_chart_events_chart
   ON public.quantyx_chart_events (chart_id, created_at DESC);
+
+-- Phase 52: Deterministic Chart Filtering and Hierarchy Drill-Down
+
+CREATE TABLE IF NOT EXISTS public.quantyx_business_hierarchies (
+    hierarchy_id          TEXT PRIMARY KEY,
+    tenant_id             TEXT NOT NULL,
+    domain_id             TEXT NOT NULL,
+    name                  TEXT NOT NULL,
+    description           TEXT NULL,
+    base_scope_json       JSONB NULL,
+    levels_json           JSONB NOT NULL DEFAULT '[]'::jsonb,
+    join_path_json        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    preferred             BOOLEAN NOT NULL DEFAULT false,
+    confidence_score      DOUBLE PRECISION NULL,
+    provenance_json       JSONB NULL,
+    validation_status     TEXT NOT NULL DEFAULT 'approved',
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_business_hierarchies_tenant_domain
+    ON public.quantyx_business_hierarchies (tenant_id, domain_id);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_chart_interactions (
+    interaction_id            TEXT PRIMARY KEY,
+    tenant_id                 TEXT NOT NULL,
+    domain_id                 TEXT NULL,
+    source_chart_id           TEXT NOT NULL,
+    result_chart_id           TEXT NULL,
+    interaction_type          TEXT NOT NULL,
+    selected_dimension        TEXT NULL,
+    selected_value_json       JSONB NULL,
+    source_level_id           TEXT NULL,
+    target_level_id           TEXT NULL,
+    interaction_payload_json  JSONB NULL,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_chart_interactions_source
+    ON public.quantyx_chart_interactions (source_chart_id, created_at DESC);
+
+-- Phase 52: chart_requests interaction columns (safe to apply after table exists)
+ALTER TABLE public.quantyx_chart_requests ADD COLUMN IF NOT EXISTS interaction_context_json JSONB NULL;
+ALTER TABLE public.quantyx_chart_requests ADD COLUMN IF NOT EXISTS lineage_json JSONB NULL;
+ALTER TABLE public.quantyx_chart_requests ADD COLUMN IF NOT EXISTS parent_chart_id TEXT NULL;
+ALTER TABLE public.quantyx_chart_requests ADD COLUMN IF NOT EXISTS root_chart_id TEXT NULL;
+ALTER TABLE public.quantyx_chart_requests ADD COLUMN IF NOT EXISTS drill_hierarchy_id TEXT NULL;
+ALTER TABLE public.quantyx_chart_requests ADD COLUMN IF NOT EXISTS drill_level_id TEXT NULL;

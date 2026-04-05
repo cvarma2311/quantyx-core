@@ -44,17 +44,36 @@ def _llm_call(
     """
     api_key = getattr(settings, "openai_api_key", None)
     if not api_key:
+        logger.warning("[correlation.narrate.llm] No API key configured — skipping LLM call")
         return None
 
     model = os.getenv(_NARRATE_MODEL_ENV, getattr(settings, "openai_model", "gpt-4o-mini"))
     timeout_sec = timeout or int(os.getenv(_NARRATE_TIMEOUT_ENV, "60"))
+
+    # Determine call context from the user payload shape for log labelling
+    if isinstance(user_payload, dict):
+        call_label = (
+            "thread_narrate" if "trigger_metric" in user_payload
+            else "run_summary" if "total_metrics_analyzed" in user_payload
+            else "llm_call"
+        )
+    else:
+        call_label = "llm_call"
+
+    user_payload_str = json.dumps(user_payload, default=str)
+    logger.info(
+        "[correlation.narrate.llm.request] call=%s model=%s temperature=%s "
+        "payload_chars=%d system_prompt_chars=%d",
+        call_label, model, temperature,
+        len(user_payload_str), len(system_prompt),
+    )
 
     body = json.dumps(
         {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(user_payload, default=str)},
+                {"role": "user", "content": user_payload_str},
             ],
             "temperature": temperature,
             "response_format": {"type": "json_object"},
@@ -74,9 +93,23 @@ def _llm_call(
     try:
         with urllib.request.urlopen(request, timeout=timeout_sec) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
-        return json.loads(raw["choices"][0]["message"]["content"])
+        result = json.loads(raw["choices"][0]["message"]["content"])
+        usage = raw.get("usage") or {}
+        logger.info(
+            "[correlation.narrate.llm.response] call=%s model=%s "
+            "prompt_tokens=%s completion_tokens=%s total_tokens=%s "
+            "response_keys=%s summary_preview=%r",
+            call_label, model,
+            usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens"),
+            list(result.keys()) if isinstance(result, dict) else type(result).__name__,
+            str(result.get("summary_text") or result.get("narrative_text") or "")[:120],
+        )
+        return result
     except Exception:
-        logger.warning("[correlation.narrate] LLM call failed", exc_info=True)
+        logger.warning(
+            "[correlation.narrate.llm.failed] call=%s model=%s error — falling back to template",
+            call_label, model, exc_info=True,
+        )
         return None
 
 
@@ -125,6 +158,9 @@ def _summary_fallback(
     correlation_pairs: list[dict],
     forward_projections: list[dict],
     investigation_threads: list[dict],
+    data_quality_warnings: list[dict] | None = None,
+    category_temporal_summary: list[dict] | None = None,
+    snapshot_eligibility_summary: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Plain-text + HTML overall summary when LLM is unavailable."""
     n_metrics = len({a["metric_name"] for a in anomaly_results})
@@ -160,6 +196,18 @@ def _summary_fallback(
         parts.append(
             f"{n_threads} investigation thread(s) were generated linking anomalies to potential causes."
         )
+    if snapshot_eligibility_summary:
+        source_mode = str(snapshot_eligibility_summary.get("source_mode") or "").strip()
+        if source_mode.startswith("fact"):
+            parts.append("Live fact-native temporal series were used as the primary evidence source.")
+    if category_temporal_summary:
+        top_category = category_temporal_summary[0]
+        parts.append(
+            f"Category-temporal analysis was generated for {top_category.get('measure_name')} by "
+            f"{top_category.get('category_column')}."
+        )
+    if data_quality_warnings:
+        parts.append(str(data_quality_warnings[0].get("message") or "").strip())
 
     text = " ".join(parts)
     html = "".join(f"<p>{escape(p)}</p>" for p in parts)
@@ -250,7 +298,7 @@ _SUMMARY_SYSTEM_PROMPT = """\
 You are an expert operations intelligence analyst. Given a set of statistical \
 findings from a multi-metric correlation run, produce an executive summary \
 that highlights the most important anomalies, key correlations, trend outlook, \
-and recommended actions.
+recommended actions, source quality, and category-temporal behavior.
 
 Respond in JSON with exactly two keys:
   "summary_text"  — 3-5 sentences of plain-text executive summary (no markdown)
@@ -262,18 +310,150 @@ Rules:
 - Mention at most 3 anomalies by name
 - Mention at most 2 strong correlation pairs
 - Include forward-looking trend signal if notable
+- Mention if live fact-native sources were preferred over chart fallbacks
+- Mention category mix / category forecast signals when available
+- Call out weak or limited coverage when the quality payload indicates it
 - End with 1 sentence recommending next action
 - Keep total under 200 words
 """
 
 
+def _build_category_temporal_summary(
+    kpi_snapshots: list[dict],
+    forward_projections: list[dict],
+) -> list[dict[str, Any]]:
+    projection_by_metric = {
+        str(item.get("metric_name") or ""): item
+        for item in forward_projections
+        if str(item.get("metric_name") or "").strip()
+    }
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for snap in kpi_snapshots:
+        qp = snap.get("query_payload") or {}
+        source_kind = str(qp.get("source_kind") or snap.get("source_kind") or "")
+        if source_kind != "fact_category_metric":
+            continue
+        table_name = str(qp.get("table") or "").strip()
+        category_column = str(qp.get("category_column") or "").strip()
+        category_value = str(qp.get("category_value") or "").strip()
+        metric_name = str(snap.get("metric_name") or "").strip()
+        prefix = f"_by_month_{table_name}_{category_column}_"
+        measure_name = metric_name.split(prefix, 1)[0] if table_name and category_column and prefix in metric_name else metric_name
+        grouped.setdefault((table_name, measure_name, category_column), []).append(
+            {
+                "metric_name": metric_name,
+                "category_value": category_value,
+                "projection": projection_by_metric.get(metric_name) or {},
+            }
+        )
+
+    summary: list[dict[str, Any]] = []
+    for (table_name, measure_name, category_column), items in grouped.items():
+        direction_counts: dict[str, int] = {}
+        categories: list[str] = []
+        for item in items:
+            categories.append(item.get("category_value") or "")
+            direction = str((item.get("projection") or {}).get("trend_direction") or "flat")
+            direction_counts[direction] = direction_counts.get(direction, 0) + 1
+        dominant_direction = max(direction_counts, key=direction_counts.get) if direction_counts else "flat"
+        summary.append(
+            {
+                "table_name": table_name,
+                "measure_name": measure_name,
+                "category_column": category_column,
+                "category_count": len(items),
+                "categories": categories[:5],
+                "dominant_direction": dominant_direction,
+                "direction_counts": direction_counts,
+            }
+        )
+    return sorted(summary, key=lambda item: (-int(item.get("category_count") or 0), str(item.get("measure_name") or "")))[:5]
+
+
+def _build_run_insights(
+    *,
+    kpi_snapshots: list[dict],
+    correlation_pairs: list[dict],
+    forward_projections: list[dict],
+    snapshot_eligibility_summary: dict[str, Any] | None = None,
+    data_quality_warnings: list[dict] | None = None,
+) -> list[dict[str, Any]]:
+    insights: list[dict[str, Any]] = []
+    summary = snapshot_eligibility_summary or {}
+    source_mode = str(summary.get("source_mode") or "").strip()
+    if source_mode.startswith("fact"):
+        fact_summary = summary.get("fact_source_summary") or {}
+        llm_ranked = bool(fact_summary.get("llm_ranked"))
+        insights.append(
+            {
+                "type": "source_selection",
+                "title": "Fact-Native Evidence Preferred",
+                "detail": (
+                    "Live fact-based temporal series were selected ahead of reconstructed chart snapshots."
+                    + (" Source ranking was LLM-assisted before deterministic validation." if llm_ranked else "")
+                ),
+                "severity": "info",
+            }
+        )
+
+    category_temporal_summary = _build_category_temporal_summary(kpi_snapshots, forward_projections)
+    for item in category_temporal_summary[:2]:
+        insights.append(
+            {
+                "type": "category_temporal",
+                "title": f"{item.get('measure_name')} by {item.get('category_column')}",
+                "detail": (
+                    f"{item.get('category_count')} categories analyzed; dominant forecast direction is "
+                    f"{item.get('dominant_direction')}."
+                ),
+                "severity": "info",
+            }
+        )
+
+    for pair in [p for p in correlation_pairs if abs(p.get("pearson_r") or 0.0) >= 0.95][:2]:
+        insights.append(
+            {
+                "type": "overlap_warning",
+                "title": f"{pair.get('metric_a')} vs {pair.get('metric_b')}",
+                "detail": "Near-perfect correlation suggests possible duplicate or semantically overlapping signals.",
+                "severity": "warning",
+            }
+        )
+
+    for warning in (data_quality_warnings or [])[:2]:
+        insights.append(
+            {
+                "type": "quality_warning",
+                "title": str(warning.get("code") or "quality_warning"),
+                "detail": str(warning.get("message") or ""),
+                "severity": str(warning.get("severity") or "warning"),
+            }
+        )
+    if not insights:
+        insights.append(
+            {
+                "type": "coverage_summary",
+                "title": "Correlation Coverage Summary",
+                "detail": (
+                    f"Analyzed {len(kpi_snapshots)} temporal series, generated {len(correlation_pairs)} correlation pairs, "
+                    f"and produced {len(forward_projections)} forward projections."
+                ),
+                "severity": "info",
+            }
+        )
+    return insights[:6]
+
+
 def narrate_run_summary(
     settings: Settings,
     *,
+    kpi_snapshots: list[dict],
     anomaly_results: list[dict],
     correlation_pairs: list[dict],
     forward_projections: list[dict],
     investigation_threads: list[dict],
+    data_quality_warnings: list[dict] | None = None,
+    snapshot_eligibility_summary: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """
     Generate an executive summary for the entire correlation run.
@@ -298,6 +478,7 @@ def narrate_run_summary(
         p for p in forward_projections
         if p.get("trend_direction") != "flat" or p.get("inflection_signal")
     ][:5]
+    category_temporal_summary = _build_category_temporal_summary(kpi_snapshots, forward_projections)
 
     payload: dict[str, Any] = {
         "total_metrics_analyzed": len({a["metric_name"] for a in anomaly_results}),
@@ -355,6 +536,9 @@ def narrate_run_summary(
                 reverse=True,
             )[:3]
         ],
+        "category_temporal_summary": category_temporal_summary,
+        "data_quality_warnings": data_quality_warnings or [],
+        "snapshot_eligibility_summary": snapshot_eligibility_summary or {},
     }
 
     result = _llm_call(
@@ -370,7 +554,13 @@ def narrate_run_summary(
         )
 
     return _summary_fallback(
-        anomaly_results, correlation_pairs, forward_projections, investigation_threads
+        anomaly_results,
+        correlation_pairs,
+        forward_projections,
+        investigation_threads,
+        data_quality_warnings,
+        category_temporal_summary,
+        snapshot_eligibility_summary,
     )
 
 
@@ -381,10 +571,13 @@ def narrate_run_summary(
 def narrate_correlation_results(
     settings: Settings,
     *,
+    kpi_snapshots: list[dict],
     anomaly_results: list[dict],
     correlation_pairs: list[dict],
     forward_projections: list[dict],
     investigation_threads: list[dict],
+    data_quality_warnings: list[dict] | None = None,
+    snapshot_eligibility_summary: dict[str, Any] | None = None,
 ) -> dict:
     """
     Enrich investigation threads with narrative text + HTML, then generate
@@ -397,6 +590,7 @@ def narrate_correlation_results(
         "summary_text": str,
         "summary_html": str,
         "threads_narrated": int,
+        "insights": list[dict],
       }
     """
     # Build anomaly lookup for fast access inside thread narration
@@ -425,19 +619,37 @@ def narrate_correlation_results(
     try:
         summary_text, summary_html = narrate_run_summary(
             settings,
+            kpi_snapshots=kpi_snapshots,
             anomaly_results=anomaly_results,
             correlation_pairs=correlation_pairs,
             forward_projections=forward_projections,
             investigation_threads=investigation_threads,
+            data_quality_warnings=data_quality_warnings,
+            snapshot_eligibility_summary=snapshot_eligibility_summary,
         )
     except Exception:
         logger.warning("[correlation.narrate] Run summary narration failed", exc_info=True)
         summary_text, summary_html = _summary_fallback(
-            anomaly_results, correlation_pairs, forward_projections, investigation_threads
+            anomaly_results,
+            correlation_pairs,
+            forward_projections,
+            investigation_threads,
+            data_quality_warnings,
+            _build_category_temporal_summary(kpi_snapshots, forward_projections),
+            snapshot_eligibility_summary,
         )
+
+    insights = _build_run_insights(
+        kpi_snapshots=kpi_snapshots,
+        correlation_pairs=correlation_pairs,
+        forward_projections=forward_projections,
+        snapshot_eligibility_summary=snapshot_eligibility_summary,
+        data_quality_warnings=data_quality_warnings,
+    )
 
     return {
         "summary_text": summary_text,
         "summary_html": summary_html,
         "threads_narrated": narrated,
+        "insights": insights,
     }

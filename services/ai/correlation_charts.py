@@ -17,7 +17,80 @@ No DOM or browser dependency lives here — this is pure Python.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+
+def _to_ms_epoch(ts: Any) -> int | None:
+    """Convert an ISO date/datetime string to milliseconds since epoch for DateAxis."""
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    text = str(ts).strip()
+    if not text:
+        return None
+    for candidate in (
+        text.replace("Z", "+00:00"),
+        f"{text}-01" if len(text) == 7 else None,   # "2025-12" → "2025-12-01"
+        f"{text}-01-01" if len(text) == 4 else None, # "2025" → "2025-01-01"
+    ):
+        if not candidate:
+            continue
+        try:
+            dt = datetime.fromisoformat(candidate)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            continue
+    return None
+
+
+def _infer_time_grain(timestamps: list[str]) -> str:
+    parsed: list[datetime] = []
+    for ts in timestamps:
+        try:
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            parsed.append(dt)
+        except ValueError:
+            continue
+    if len(parsed) < 2:
+        return "day"
+    parsed = sorted(parsed)
+    deltas = [(parsed[i] - parsed[i - 1]).days for i in range(1, len(parsed))]
+    if not deltas:
+        return "day"
+    median_delta = sorted(deltas)[len(deltas) // 2]
+    if median_delta >= 365:
+        return "year"
+    if median_delta >= 80:
+        return "quarter"
+    if median_delta >= 25:
+        return "month"
+    if median_delta >= 6:
+        return "week"
+    return "day"
+
+
+def _base_interval_for_grain(grain: str) -> dict[str, Any]:
+    return {
+        "day": {"timeUnit": "day", "count": 1},
+        "week": {"timeUnit": "day", "count": 7},
+        "month": {"timeUnit": "month", "count": 1},
+        "quarter": {"timeUnit": "month", "count": 3},
+        "year": {"timeUnit": "year", "count": 1},
+    }.get(grain, {"timeUnit": "day", "count": 1})
+
+
+def _add_months(dt: datetime, months: int) -> datetime:
+    month_index = (dt.month - 1) + months
+    year = dt.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(dt.day, 28)
+    return dt.replace(year=year, month=month, day=day)
 
 # ---------------------------------------------------------------------------
 # Colour palette (amCharts 5 hex strings)
@@ -43,6 +116,31 @@ _ANOMALY_CLASS_COLOURS: dict[str, str] = {
     "drift_down":  _PALETTE["muted"],
     "step_change": _PALETTE["forecast"],
 }
+
+
+def _spec_slug(value: str) -> str:
+    text = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(value or ""))
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text.strip("_") or "series"
+
+
+def _chart_entry(
+    *,
+    chart_type: str,
+    correlation_run_id: str,
+    spec: dict,
+    metric_name: str | None = None,
+    pair_id: str | None = None,
+) -> dict:
+    return {
+        "chart_type": chart_type,
+        "metric_name": metric_name,
+        "pair_id": pair_id,
+        "correlation_run_id": correlation_run_id,
+        "spec": spec,
+        "data": spec.get("data") or [],
+    }
 
 
 def _am5_xy_base(title: str, subtitle: str = "") -> dict:
@@ -91,11 +189,13 @@ def forecast_band_spec(
         series = [p[1] for p in paired]
 
     # Build unified data array: historical then forecast
+    # period_ms = ms-epoch timestamp used by DateAxis (no categorical axis on time data)
     data: list[dict] = []
-    for i, (ts, val) in enumerate(zip(timestamps, series)):
+    for ts, val in zip(timestamps, series):
         data.append(
             {
                 "period": ts,
+                "period_ms": _to_ms_epoch(ts),
                 "actual": val,
                 "forecast": None,
                 "lower_1s": None,
@@ -106,25 +206,39 @@ def forecast_band_spec(
             }
         )
 
-    # Compute forecast period labels as real dates when possible,
-    # falling back to offset notation only if parsing fails.
+    grain = _infer_time_grain(timestamps)
+    base_interval = _base_interval_for_grain(grain)
+
+    # Compute forecast period labels as real dates, preserving the historical grain.
     last_ts = timestamps[-1] if timestamps else "T+0"
     try:
-        from datetime import datetime, timedelta, timezone
-        # Strip trailing timezone info variants and parse
         base_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+        if base_dt.tzinfo is None:
+            base_dt = base_dt.replace(tzinfo=timezone.utc)
         def _forecast_label(offset: int) -> str:
-            dt = base_dt + timedelta(days=offset)
+            if grain == "year":
+                dt = base_dt.replace(year=base_dt.year + offset)
+            elif grain == "quarter":
+                dt = _add_months(base_dt, offset * 3)
+            elif grain == "month":
+                dt = _add_months(base_dt, offset)
+            elif grain == "week":
+                dt = base_dt + timedelta(days=offset * 7)
+            else:
+                dt = base_dt + timedelta(days=offset)
             return dt.isoformat()
     except Exception:
+        base_dt = None
         def _forecast_label(offset: int) -> str:  # type: ignore[misc]
             return f"{last_ts}+{offset}"
 
     for pt in projection_json:
         offset = int(pt.get("period_offset") or 0)
+        label = _forecast_label(offset)
         data.append(
             {
-                "period": _forecast_label(offset),
+                "period": label,
+                "period_ms": _to_ms_epoch(label),
                 "actual": None,
                 "forecast": pt["forecast"],
                 "lower_1s": pt["lower_1sigma"],
@@ -150,9 +264,11 @@ def forecast_band_spec(
             "chart_type": "forecast_band",
             "metric_name": metric_name,
             "xAxis": {
-                "type": "CategoryAxis",
-                "categoryField": "period",
+                "type": "DateAxis",
+                "dateField": "period_ms",
                 "label": "Period",
+                "baseInterval": base_interval,
+                "tooltipDateFormat": "MMM yyyy",
             },
             "yAxis": {
                 "type": "ValueAxis",
@@ -163,31 +279,33 @@ def forecast_band_spec(
                     "id": "actual",
                     "name": "Actual",
                     "type": "LineSeries",
-                    "valueXField": "period",
+                    "valueXField": "period_ms",
                     "valueYField": "actual",
                     "stroke": _PALETTE["primary"],
                     "strokeWidth": 2,
                     "fill": "none",
                     "bullets": False,
                     "connect": False,
+                    "tooltipText": "{period}: {actual}",
                 },
                 {
                     "id": "forecast",
                     "name": "Forecast",
                     "type": "LineSeries",
-                    "valueXField": "period",
+                    "valueXField": "period_ms",
                     "valueYField": "forecast",
                     "stroke": _PALETTE["forecast"],
                     "strokeWidth": 2,
                     "strokeDasharray": [6, 3],
                     "fill": "none",
                     "connect": False,
+                    "tooltipText": "{period}: {forecast} (forecast)",
                 },
                 {
                     "id": "band_2s",
                     "name": "±2σ band",
                     "type": "LineSeries",
-                    "valueXField": "period",
+                    "valueXField": "period_ms",
                     "openValueYField": "lower_2s",
                     "valueYField": "upper_2s",
                     "fill": _PALETTE["band_2s"],
@@ -199,7 +317,7 @@ def forecast_band_spec(
                     "id": "band_1s",
                     "name": "±1σ band",
                     "type": "LineSeries",
-                    "valueXField": "period",
+                    "valueXField": "period_ms",
                     "openValueYField": "lower_1s",
                     "valueYField": "upper_1s",
                     "fill": _PALETTE["band_1s"],
@@ -240,12 +358,13 @@ def anomaly_timeline_spec(
         data.append(
             {
                 "period": ts,
+                "period_ms": _to_ms_epoch(ts),
                 "actual": val,
                 "anomaly_score": anom["anomaly_score"] if anom else None,
                 "anomaly_class": anom["anomaly_class"] if anom else None,
                 "z_score": anom["z_score"] if anom else None,
-                "columnSettings": (
-                    {"fill": _ANOMALY_CLASS_COLOURS.get(anom["anomaly_class"], _PALETTE["muted"])}
+                "anomaly_fill": (
+                    _ANOMALY_CLASS_COLOURS.get(anom["anomaly_class"], _PALETTE["muted"])
                     if anom else None
                 ),
             }
@@ -259,7 +378,13 @@ def anomaly_timeline_spec(
         {
             "chart_type": "anomaly_timeline",
             "metric_name": metric_name,
-            "xAxis": {"type": "CategoryAxis", "categoryField": "period", "label": "Period"},
+            "xAxis": {
+                "type": "DateAxis",
+                "dateField": "period_ms",
+                "label": "Period",
+                "baseInterval": {"timeUnit": "month", "count": 1},
+                "tooltipDateFormat": "MMM yyyy",
+            },
             "yAxis": {"type": "ValueAxis", "label": metric_name},
             "y2Axis": {
                 "type": "ValueAxis",
@@ -274,20 +399,21 @@ def anomaly_timeline_spec(
                     "id": "actual",
                     "name": metric_name,
                     "type": "LineSeries",
-                    "valueXField": "period",
+                    "valueXField": "period_ms",
                     "valueYField": "actual",
                     "stroke": _PALETTE["primary"],
                     "strokeWidth": 2,
                     "yAxis": "yAxis",
+                    "tooltipText": "{period}: {actual}",
                 },
                 {
                     "id": "anomaly_score",
                     "name": "Anomaly Score",
                     "type": "ColumnSeries",
-                    "valueXField": "period",
+                    "valueXField": "period_ms",
                     "valueYField": "anomaly_score",
                     "yAxis": "y2Axis",
-                    "fillField": "columnSettings.fill",
+                    "fillField": "anomaly_fill",
                     "fillOpacity": 0.75,
                     "strokeOpacity": 0,
                     "tooltipText": "{period}: score={anomaly_score} ({anomaly_class})",
@@ -554,12 +680,17 @@ def rolling_correlation_spec(
         }
         for i, r in enumerate(rolling)
     ]
+    if rolling:
+        rolling_range = max(rolling) - min(rolling)
+        derived_is_stable = rolling_range < 0.3
+    else:
+        derived_is_stable = bool(pair.get("is_stable", True))
 
     spec = _am5_xy_base(
         title=f"Rolling Correlation: {metric_a} × {metric_b}",
         subtitle=(
             f"Overall Pearson r = {pair.get('pearson_r', 'n/a')} | "
-            f"stable = {pair.get('is_stable', True)}"
+            f"stable = {derived_is_stable}"
         ),
     )
     spec.update(
@@ -714,6 +845,236 @@ def anomaly_density_spec(
     return spec
 
 
+def category_trend_grouped_spec(
+    *,
+    measure_name: str,
+    table_name: str,
+    category_column: str,
+    snapshots: list[dict],
+) -> dict:
+    data_by_period: dict[str, dict[str, Any]] = {}
+    series_defs: list[dict[str, Any]] = []
+    palette = [
+        _PALETTE["primary"],
+        _PALETTE["success"],
+        _PALETTE["forecast"],
+        _PALETTE["warning"],
+        _PALETTE["danger"],
+        _PALETTE["muted"],
+    ]
+
+    ordered_snaps = sorted(
+        snapshots,
+        key=lambda s: str((s.get("query_payload") or {}).get("category_value") or s.get("metric_name") or ""),
+    )
+    for idx, snap in enumerate(ordered_snaps):
+        qp = snap.get("query_payload") or {}
+        category_value = str(qp.get("category_value") or f"Category {idx + 1}")
+        field = _spec_slug(category_value)
+        series_defs.append(
+            {
+                "id": field,
+                "name": category_value,
+                "type": "LineSeries",
+                "valueXField": "period",
+                "valueYField": field,
+                "stroke": palette[idx % len(palette)],
+                "strokeWidth": 2,
+                "fill": "none",
+                "bullets": {"type": "Circle", "radius": 3, "fill": palette[idx % len(palette)]},
+                "connect": False,
+            }
+        )
+        for period, value in zip(snap.get("timestamps") or [], snap.get("series") or []):
+            key = str(period)
+            row = data_by_period.setdefault(key, {"period": key, "period_ms": _to_ms_epoch(key)})
+            row[field] = value
+
+    data = [data_by_period[k] for k in sorted(data_by_period.keys())]
+    # Update series to use period_ms for DateAxis
+    for s in series_defs:
+        s["valueXField"] = "period_ms"
+    spec = _am5_xy_base(
+        title=f"{measure_name} by {category_column} — Category Trends",
+        subtitle=f"Temporal category comparison from {table_name}",
+    )
+    spec.update(
+        {
+            "chart_type": "category_trend_grouped",
+            "metric_name": measure_name,
+            "xAxis": {
+                "type": "DateAxis",
+                "dateField": "period_ms",
+                "label": "Period",
+                "baseInterval": {"timeUnit": "month", "count": 1},
+                "tooltipDateFormat": "MMM yyyy",
+            },
+            "yAxis": {"type": "ValueAxis", "label": measure_name},
+            "series": series_defs,
+            "data": data,
+        }
+    )
+    return spec
+
+
+def category_forecast_stacked_bar_spec(
+    *,
+    measure_name: str,
+    table_name: str,
+    category_column: str,
+    snapshots: list[dict],
+    forward_projections: list[dict],
+) -> dict | None:
+    projection_by_metric = {p.get("metric_name"): p for p in forward_projections if p.get("metric_name")}
+    palette = [
+        _PALETTE["primary"],
+        _PALETTE["success"],
+        _PALETTE["forecast"],
+        _PALETTE["warning"],
+        _PALETTE["danger"],
+        _PALETTE["muted"],
+    ]
+    data_by_period: dict[str, dict[str, Any]] = {}
+    series_defs: list[dict[str, Any]] = []
+    included = 0
+
+    ordered_snaps = sorted(
+        snapshots,
+        key=lambda s: str((s.get("query_payload") or {}).get("category_value") or s.get("metric_name") or ""),
+    )
+    for idx, snap in enumerate(ordered_snaps):
+        qp = snap.get("query_payload") or {}
+        metric_name = snap.get("metric_name")
+        proj = projection_by_metric.get(metric_name)
+        if not proj:
+            continue
+        category_value = str(qp.get("category_value") or f"Category {idx + 1}")
+        field = _spec_slug(category_value)
+        series_defs.append(
+            {
+                "id": field,
+                "name": category_value,
+                "type": "ColumnSeries",
+                "valueXField": "period",
+                "valueYField": field,
+                "stacked": True,
+                "fill": palette[idx % len(palette)],
+                "stroke": "#ffffff",
+                "strokeWidth": 1,
+            }
+        )
+        for point in (proj.get("projection_json") or []):
+            period_offset = int(point.get("period_offset") or 0)
+            period = f"Forecast +{period_offset}"
+            row = data_by_period.setdefault(period, {"period": period, "period_offset": period_offset})
+            row[field] = point.get("forecast")
+        included += 1
+
+    if included < 2 or not data_by_period:
+        return None
+
+    data = sorted(data_by_period.values(), key=lambda row: int(row.get("period_offset") or 0))
+    spec = _am5_xy_base(
+        title=f"{measure_name} by {category_column} — Stacked Forecast",
+        subtitle=f"Forecast contribution by category from {table_name}",
+    )
+    spec.update(
+        {
+            "chart_type": "category_forecast_stacked_bar",
+            "metric_name": measure_name,
+            "xAxis": {"type": "CategoryAxis", "categoryField": "period", "label": "Forecast Period"},
+            "yAxis": {"type": "ValueAxis", "label": measure_name},
+            "series": series_defs,
+            "data": data,
+        }
+    )
+    return spec
+
+
+def temporal_eligibility_warning_card_spec(
+    *,
+    snapshot_eligibility_summary: dict[str, Any],
+    data_quality_warnings: list[dict] | None = None,
+) -> dict | None:
+    excluded_count = int(snapshot_eligibility_summary.get("excluded_chart_count") or 0)
+    if excluded_count <= 0 and not (data_quality_warnings or []):
+        return None
+    excluded_by_reason = snapshot_eligibility_summary.get("excluded_by_reason") or {}
+    data = [
+        {"reason": str(reason), "count": int(count)}
+        for reason, count in sorted(excluded_by_reason.items(), key=lambda item: (-int(item[1]), str(item[0])))
+    ]
+    warning_lines = [str(item.get("message") or "").strip() for item in (data_quality_warnings or []) if str(item.get("message") or "").strip()]
+    return {
+        "type": "StatCard",
+        "chart_type": "temporal_eligibility_warning_card",
+        "title": "Correlation Input Warnings",
+        "subtitle": f"Excluded snapshots: {excluded_count}",
+        "body": warning_lines[:3],
+        "data": data,
+        "summary": snapshot_eligibility_summary,
+    }
+
+
+def metric_overlap_matrix_spec(
+    correlation_pairs: list[dict],
+) -> dict | None:
+    overlap_pairs = [
+        pair for pair in correlation_pairs
+        if abs(pair.get("pearson_r") or 0.0) >= 0.9
+    ]
+    if not overlap_pairs:
+        return None
+    metrics = sorted(
+        {
+            str(pair.get("metric_a") or "")
+            for pair in overlap_pairs
+        } | {
+            str(pair.get("metric_b") or "")
+            for pair in overlap_pairs
+        }
+    )
+    data: list[dict[str, Any]] = []
+    for pair in overlap_pairs:
+        r_value = float(pair.get("pearson_r") or 0.0)
+        data.append(
+            {
+                "metric_a": pair.get("metric_a"),
+                "metric_b": pair.get("metric_b"),
+                "pearson_r": round(r_value, 4),
+                "label": f"{r_value:.2f}",
+                "fill": _PALETTE["danger"] if abs(r_value) >= 0.98 else _PALETTE["warning"],
+            }
+        )
+    spec = _am5_xy_base(
+        title="Metric Overlap Matrix",
+        subtitle="Near-duplicate metric pairs by absolute Pearson correlation",
+    )
+    spec.update(
+        {
+            "chart_type": "metric_overlap_matrix",
+            "xAxis": {"type": "CategoryAxis", "categoryField": "metric_b", "label": ""},
+            "yAxis": {"type": "CategoryAxis", "categoryField": "metric_a", "label": ""},
+            "series": [
+                {
+                    "id": "overlap",
+                    "name": "Overlap",
+                    "type": "ColumnSeries",
+                    "xField": "metric_b",
+                    "yField": "metric_a",
+                    "valueField": "pearson_r",
+                    "fillField": "fill",
+                    "labelField": "label",
+                    "tooltipText": "{metric_a} × {metric_b}: r = {pearson_r}",
+                }
+            ],
+            "metrics": metrics,
+            "data": data,
+        }
+    )
+    return spec
+
+
 # ---------------------------------------------------------------------------
 # Main: generate all chart specs for a correlation run
 # ---------------------------------------------------------------------------
@@ -724,6 +1085,8 @@ def generate_correlation_charts(
     anomaly_results: list[dict],
     correlation_pairs: list[dict],
     forward_projections: list[dict],
+    snapshot_eligibility_summary: dict[str, Any] | None = None,
+    data_quality_warnings: list[dict] | None = None,
     max_scatter_pairs: int = 5,
 ) -> list[dict]:
     """
@@ -746,6 +1109,20 @@ def generate_correlation_charts(
 
     # Snap lookup by metric_name
     snap_by_metric = {s["metric_name"]: s for s in kpi_snapshots}
+    category_groups: dict[tuple[str, str, str], list[dict]] = {}
+    for snap in kpi_snapshots:
+        qp = snap.get("query_payload") or {}
+        if str(qp.get("source_kind") or snap.get("source_kind") or "") != "fact_category_metric":
+            continue
+        table_name = str(qp.get("table") or "").strip()
+        category_column = str(qp.get("category_column") or "").strip()
+        metric_name = str(snap.get("metric_name") or "")
+        measure_name = metric_name
+        prefix = f"_by_month_{table_name}_{category_column}_"
+        if table_name and category_column and prefix in metric_name:
+            measure_name = metric_name.split(prefix, 1)[0]
+        key = (table_name, measure_name, category_column)
+        category_groups.setdefault(key, []).append(snap)
 
     # --- Forecast band: one per metric ---
     for proj in forward_projections:
@@ -764,15 +1141,7 @@ def generate_correlation_charts(
         )
         # Attach chart_spec back to projection for storage
         proj["chart_spec"] = spec
-        charts.append(
-            {
-                "chart_type": "forecast_band",
-                "metric_name": metric,
-                "pair_id": None,
-                "correlation_run_id": correlation_run_id,
-                "spec": spec,
-            }
-        )
+        charts.append(_chart_entry(chart_type="forecast_band", metric_name=metric, pair_id=None, correlation_run_id=correlation_run_id, spec=spec))
 
     # --- Anomaly timeline: one per metric with anomalies ---
     metrics_with_anomalies = {a["metric_name"] for a in anomaly_results}
@@ -787,28 +1156,42 @@ def generate_correlation_charts(
             series=snap["series"],
             anomaly_results=metric_anoms,
         )
-        charts.append(
-            {
-                "chart_type": "anomaly_timeline",
-                "metric_name": metric,
-                "pair_id": None,
-                "correlation_run_id": correlation_run_id,
-                "spec": spec,
-            }
-        )
+        charts.append(_chart_entry(chart_type="anomaly_timeline", metric_name=metric, pair_id=None, correlation_run_id=correlation_run_id, spec=spec))
 
     # --- Correlation heatmap: one for the whole run ---
     if len(correlation_pairs) >= 2:
         spec = correlation_heatmap_spec(correlation_pairs, kpi_snapshots)
-        charts.append(
-            {
-                "chart_type": "correlation_heatmap",
-                "metric_name": None,
-                "pair_id": None,
-                "correlation_run_id": correlation_run_id,
-                "spec": spec,
-            }
+        charts.append(_chart_entry(chart_type="correlation_heatmap", metric_name=None, pair_id=None, correlation_run_id=correlation_run_id, spec=spec))
+    overlap_spec = metric_overlap_matrix_spec(correlation_pairs)
+    if overlap_spec:
+        charts.append(_chart_entry(chart_type="metric_overlap_matrix", metric_name=None, pair_id=None, correlation_run_id=correlation_run_id, spec=overlap_spec))
+    warning_spec = temporal_eligibility_warning_card_spec(
+        snapshot_eligibility_summary=snapshot_eligibility_summary or {},
+        data_quality_warnings=data_quality_warnings or [],
+    )
+    if warning_spec:
+        charts.append(_chart_entry(chart_type="temporal_eligibility_warning_card", metric_name=None, pair_id=None, correlation_run_id=correlation_run_id, spec=warning_spec))
+
+    # --- Category-temporal charts from fact-native series ---
+    for (table_name, measure_name, category_column), group_snaps in category_groups.items():
+        if len(group_snaps) < 2:
+            continue
+        trend_spec = category_trend_grouped_spec(
+            measure_name=measure_name,
+            table_name=table_name,
+            category_column=category_column,
+            snapshots=group_snaps,
         )
+        charts.append(_chart_entry(chart_type="category_trend_grouped", metric_name=measure_name, pair_id=None, correlation_run_id=correlation_run_id, spec=trend_spec))
+        forecast_spec = category_forecast_stacked_bar_spec(
+            measure_name=measure_name,
+            table_name=table_name,
+            category_column=category_column,
+            snapshots=group_snaps,
+            forward_projections=forward_projections,
+        )
+        if forecast_spec:
+            charts.append(_chart_entry(chart_type="category_forecast_stacked_bar", metric_name=measure_name, pair_id=None, correlation_run_id=correlation_run_id, spec=forecast_spec))
 
     # --- Scatter + rolling correlation: top N pairs by |pearson_r| ---
     sorted_pairs = sorted(
@@ -823,40 +1206,16 @@ def generate_correlation_charts(
 
         if snap_a and snap_b:
             scatter_spec = scatter_regression_spec(pair, snap_a, snap_b)
-            charts.append(
-                {
-                    "chart_type": "scatter_regression",
-                    "metric_name": None,
-                    "pair_id": pair["pair_id"],
-                    "correlation_run_id": correlation_run_id,
-                    "spec": scatter_spec,
-                }
-            )
+            charts.append(_chart_entry(chart_type="scatter_regression", metric_name=None, pair_id=pair["pair_id"], correlation_run_id=correlation_run_id, spec=scatter_spec))
 
         if pair.get("rolling_r_json"):
             rolling_spec = rolling_correlation_spec(pair)
-            charts.append(
-                {
-                    "chart_type": "rolling_correlation",
-                    "metric_name": None,
-                    "pair_id": pair["pair_id"],
-                    "correlation_run_id": correlation_run_id,
-                    "spec": rolling_spec,
-                }
-            )
+            charts.append(_chart_entry(chart_type="rolling_correlation", metric_name=None, pair_id=pair["pair_id"], correlation_run_id=correlation_run_id, spec=rolling_spec))
 
     # --- Anomaly density: all-metrics summary ---
     if anomaly_results:
         density_all = anomaly_density_spec(anomaly_results, metric_name=None)
-        charts.append(
-            {
-                "chart_type": "anomaly_density",
-                "metric_name": None,
-                "pair_id": None,
-                "correlation_run_id": correlation_run_id,
-                "spec": density_all,
-            }
-        )
+        charts.append(_chart_entry(chart_type="anomaly_density", metric_name=None, pair_id=None, correlation_run_id=correlation_run_id, spec=density_all))
 
         # Per-metric density for metrics with enough anomalies
         per_metric_counts: dict[str, int] = {}
@@ -866,14 +1225,6 @@ def generate_correlation_charts(
         for metric, count in per_metric_counts.items():
             if count >= 2:
                 density_spec = anomaly_density_spec(anomaly_results, metric_name=metric)
-                charts.append(
-                    {
-                        "chart_type": "anomaly_density",
-                        "metric_name": metric,
-                        "pair_id": None,
-                        "correlation_run_id": correlation_run_id,
-                        "spec": density_spec,
-                    }
-                )
+                charts.append(_chart_entry(chart_type="anomaly_density", metric_name=metric, pair_id=None, correlation_run_id=correlation_run_id, spec=density_spec))
 
     return charts

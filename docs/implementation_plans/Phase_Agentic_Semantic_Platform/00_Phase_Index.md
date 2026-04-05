@@ -139,6 +139,15 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 45. **Phase 48: LLM-First SQL Conversation Mode**
    - Replace the 7-step deterministic pipeline for chart conversation follow-ups with a single LLM call that receives full context (source chart SQL, FY-scoped metric formulas, schema hints, join edges) and returns executable SQL directly. Hard validation gate (EXPLAIN + table scope + mandatory filter check) on every response. Transparent fallback to existing pipeline. Controlled by `CONVERSATION_LLM_SQL_MODE` env flag.
 
+46. **Phase 50: LLM-First Fact-Native Correlation Intelligence and Axis-Safe Forecasting**
+   - Evolve the correlation agent to source live fact-native temporal series instead of relying mainly on existing charts, block category-as-time bugs, add per-category forecasting with stacked/grouped charts, and make correlation intelligence and dashboards LLM-first for narrative, insights, and interpretation.
+
+47. **Phase 51: Table-Native Anomaly Fallback Exploration and LLM-First Contextual Chart Narration**
+   - Prevent anomaly dead-end runs by creating exploratory anomaly investigations and dashboards directly from scoped table data when hard anomaly candidates are zero, and upgrade anomaly chart narration to be LLM-first over complete chart context plus business context.
+
+48. **Phase 52: Deterministic Chart Filtering and Hierarchy Drill-Down**
+   - Separate chart filtering from hierarchy drill-down, persist business hierarchy and interaction metadata, and make runtime chart click actions resolve to deterministic SQL rewrites without LLM-generated SQL.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -166,3 +175,6 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 43 depends on Phases 24/34/35/36/37 and adds statistical intelligence over persisted chart and KPI data.
 - Phase 44 depends on Phases 05/12/23/24/34/42 and is a backward-compatible schema consolidation — no functional change to analytics, only data model unification.
 - Phase 48 depends on Phases 34/39/41/42/47 and replaces the chart conversation follow-up pipeline with an LLM-first SQL path that consumes pre-synthesized FY-scoped metric formulas and deterministic join edges, with a hard validation gate and transparent fallback.
+- Phase 50 depends on Phases 24/34/35/36/37/38/43/45/46/47 and upgrades correlation from chart-row reconstruction to fact-native, axis-safe, LLM-first intelligence and dashboarding.
+- Phase 51 depends on Phases 24/34/38/43/45/46/47/50 and upgrades anomaly detection/dashboarding with table-native fallback exploration, contextual LLM chart narration, and correlation-aware exploratory anomaly storytelling.
+- Phase 52 depends on Phases 02/03/24/31/34/39/41/44 and adds persisted hierarchy semantics, interaction context, and deterministic chart filter/drill SQL generation.

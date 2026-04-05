@@ -1,0 +1,3550 @@
+{
+    "dashboard_id": "db_b3684289df",
+    "tenant_id": "ns-15",
+    "domain_id": "sales_forecast",
+    "title": "Correlation Dashboard — sales_forecast",
+    "name": "Correlation Dashboard — sales_forecast",
+    "dashboard_type": "system",
+    "description": null,
+    "status": "active",
+    "run_id": "run_f666231ae207",
+    "latest_refresh_id": null,
+    "quality_score": null,
+    "quality_gate_passed": null,
+    "created_by": null,
+    "charts": [
+        {
+            "entry_id": "dc_7eb77e7efd",
+            "chart_id": "chart_88c65eb912",
+            "position": 0,
+            "title_override": null,
+            "title": "sales_volume_by_month_nozzle_sales — Forward Projection",
+            "chart_type": "forecast_band",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "This chart compares the historical actual series for sales_volume_by_month_nozzle_sales with its forecast extension. The first projected point at 2026-04-01T00:00:00+00:00 is 2,858,005,282 versus the last actual value of 2,981,285,977 (-4.1%). By the end of the forecast horizon at 2027-03-01T00:00:00+00:00, the projection reaches 3,068,093,665 (+2.9% versus the last actual). The overall direction is flat.",
+            "insight_text": "sales_volume_by_month_nozzle_sales forecast shows a 4.1% decrease from the last actual value. Trend: flat.",
+            "chart_payload": {
+                "data": [
+                    {
+                        "actual": 2630897820.087,
+                        "period": "2025-10-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1759276800000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 2918431276.913,
+                        "period": "2025-11-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1761955200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 2876797993.275,
+                        "period": "2025-12-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1764547200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 2735004166.357,
+                        "period": "2026-01-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1767225600000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 2604536636.57,
+                        "period": "2026-02-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1769904000000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 2981285976.999,
+                        "period": "2026-03-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1772323200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-04-01T00:00:00+00:00",
+                        "forecast": 2858005282.0281,
+                        "lower_1s": 2700941311.1861,
+                        "lower_2s": 2543877340.3441,
+                        "upper_1s": 3015069252.8702,
+                        "upper_2s": 3172133223.7122,
+                        "period_ms": 1775001600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-05-01T00:00:00+00:00",
+                        "forecast": 2877104225.9314,
+                        "lower_1s": 2720040255.0893,
+                        "lower_2s": 2562976284.2473,
+                        "upper_1s": 3034168196.7734,
+                        "upper_2s": 3191232167.6154,
+                        "period_ms": 1777593600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-06-01T00:00:00+00:00",
+                        "forecast": 2896203169.8346,
+                        "lower_1s": 2739139198.9926,
+                        "lower_2s": 2582075228.1505,
+                        "upper_1s": 3053267140.6766,
+                        "upper_2s": 3210331111.5186,
+                        "period_ms": 1780272000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-07-01T00:00:00+00:00",
+                        "forecast": 2915302113.7378,
+                        "lower_1s": 2758238142.8958,
+                        "lower_2s": 2601174172.0538,
+                        "upper_1s": 3072366084.5798,
+                        "upper_2s": 3229430055.4219,
+                        "period_ms": 1782864000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-08-01T00:00:00+00:00",
+                        "forecast": 2934401057.641,
+                        "lower_1s": 2777337086.799,
+                        "lower_2s": 2620273115.957,
+                        "upper_1s": 3091465028.4831,
+                        "upper_2s": 3248528999.3251,
+                        "period_ms": 1785542400000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-09-01T00:00:00+00:00",
+                        "forecast": 2953500001.5443,
+                        "lower_1s": 2796436030.7022,
+                        "lower_2s": 2639372059.8602,
+                        "upper_1s": 3110563972.3863,
+                        "upper_2s": 3267627943.2283,
+                        "period_ms": 1788220800000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-10-01T00:00:00+00:00",
+                        "forecast": 2972598945.4475,
+                        "lower_1s": 2815534974.6055,
+                        "lower_2s": 2658471003.7634,
+                        "upper_1s": 3129662916.2895,
+                        "upper_2s": 3286726887.1316,
+                        "period_ms": 1790812800000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-11-01T00:00:00+00:00",
+                        "forecast": 2991697889.3507,
+                        "lower_1s": 2834633918.5087,
+                        "lower_2s": 2677569947.6667,
+                        "upper_1s": 3148761860.1928,
+                        "upper_2s": 3305825831.0348,
+                        "period_ms": 1793491200000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-12-01T00:00:00+00:00",
+                        "forecast": 3010796833.254,
+                        "lower_1s": 2853732862.4119,
+                        "lower_2s": 2696668891.5699,
+                        "upper_1s": 3167860804.096,
+                        "upper_2s": 3324924774.938,
+                        "period_ms": 1796083200000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-01-01T00:00:00+00:00",
+                        "forecast": 3029895777.1572,
+                        "lower_1s": 2872831806.3152,
+                        "lower_2s": 2715767835.4731,
+                        "upper_1s": 3186959747.9992,
+                        "upper_2s": 3344023718.8412,
+                        "period_ms": 1798761600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-02-01T00:00:00+00:00",
+                        "forecast": 3048994721.0604,
+                        "lower_1s": 2891930750.2184,
+                        "lower_2s": 2734866779.3764,
+                        "upper_1s": 3206058691.9024,
+                        "upper_2s": 3363122662.7445,
+                        "period_ms": 1801440000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-03-01T00:00:00+00:00",
+                        "forecast": 3068093664.9636,
+                        "lower_1s": 2911029694.1216,
+                        "lower_2s": 2753965723.2796,
+                        "upper_1s": 3225157635.8057,
+                        "upper_2s": 3382221606.6477,
+                        "period_ms": 1803859200000,
+                        "is_forecast": true
+                    }
+                ],
+                "type": "XYChart",
+                "title": "sales_volume_by_month_nozzle_sales — Forward Projection",
+                "xAxis": {
+                    "type": "DateAxis",
+                    "label": "Period",
+                    "dateField": "period_ms",
+                    "baseInterval": {
+                        "count": 1,
+                        "timeUnit": "month"
+                    },
+                    "tooltipDateFormat": "MMM yyyy"
+                },
+                "yAxis": {
+                    "type": "ValueAxis",
+                    "label": "sales_volume_by_month_nozzle_sales"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "actual",
+                        "fill": "none",
+                        "name": "Actual",
+                        "type": "LineSeries",
+                        "stroke": "#3b82f6",
+                        "bullets": false,
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "tooltipText": "{period}: {actual}",
+                        "valueXField": "period_ms",
+                        "valueYField": "actual"
+                    },
+                    {
+                        "id": "forecast",
+                        "fill": "none",
+                        "name": "Forecast",
+                        "type": "LineSeries",
+                        "stroke": "#8b5cf6",
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "tooltipText": "{period}: {forecast} (forecast)",
+                        "valueXField": "period_ms",
+                        "valueYField": "forecast",
+                        "strokeDasharray": [
+                            6,
+                            3
+                        ]
+                    },
+                    {
+                        "id": "band_2s",
+                        "fill": "#dbeafe",
+                        "name": "±2σ band",
+                        "type": "LineSeries",
+                        "stroke": "none",
+                        "connect": false,
+                        "fillOpacity": 0.35,
+                        "valueXField": "period_ms",
+                        "valueYField": "upper_2s",
+                        "openValueYField": "lower_2s"
+                    },
+                    {
+                        "id": "band_1s",
+                        "fill": "#bfdbfe",
+                        "name": "±1σ band",
+                        "type": "LineSeries",
+                        "stroke": "none",
+                        "connect": false,
+                        "fillOpacity": 0.55,
+                        "valueXField": "period_ms",
+                        "valueYField": "upper_1s",
+                        "openValueYField": "lower_1s"
+                    }
+                ],
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Trend: flat",
+                "chart_type": "forecast_band",
+                "scrollbarX": {
+                    "visible": true
+                },
+                "metric_name": "sales_volume_by_month_nozzle_sales"
+            },
+            "chart_data": [
+                {
+                    "actual": 2630897820.087,
+                    "period": "2025-10-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1759276800000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 2918431276.913,
+                    "period": "2025-11-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1761955200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 2876797993.275,
+                    "period": "2025-12-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1764547200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 2735004166.357,
+                    "period": "2026-01-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1767225600000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 2604536636.57,
+                    "period": "2026-02-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1769904000000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 2981285976.999,
+                    "period": "2026-03-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1772323200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": null,
+                    "period": "2026-04-01T00:00:00+00:00",
+                    "forecast": 2858005282.0281,
+                    "lower_1s": 2700941311.1861,
+                    "lower_2s": 2543877340.3441,
+                    "upper_1s": 3015069252.8702,
+                    "upper_2s": 3172133223.7122,
+                    "period_ms": 1775001600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-05-01T00:00:00+00:00",
+                    "forecast": 2877104225.9314,
+                    "lower_1s": 2720040255.0893,
+                    "lower_2s": 2562976284.2473,
+                    "upper_1s": 3034168196.7734,
+                    "upper_2s": 3191232167.6154,
+                    "period_ms": 1777593600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-06-01T00:00:00+00:00",
+                    "forecast": 2896203169.8346,
+                    "lower_1s": 2739139198.9926,
+                    "lower_2s": 2582075228.1505,
+                    "upper_1s": 3053267140.6766,
+                    "upper_2s": 3210331111.5186,
+                    "period_ms": 1780272000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-07-01T00:00:00+00:00",
+                    "forecast": 2915302113.7378,
+                    "lower_1s": 2758238142.8958,
+                    "lower_2s": 2601174172.0538,
+                    "upper_1s": 3072366084.5798,
+                    "upper_2s": 3229430055.4219,
+                    "period_ms": 1782864000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-08-01T00:00:00+00:00",
+                    "forecast": 2934401057.641,
+                    "lower_1s": 2777337086.799,
+                    "lower_2s": 2620273115.957,
+                    "upper_1s": 3091465028.4831,
+                    "upper_2s": 3248528999.3251,
+                    "period_ms": 1785542400000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-09-01T00:00:00+00:00",
+                    "forecast": 2953500001.5443,
+                    "lower_1s": 2796436030.7022,
+                    "lower_2s": 2639372059.8602,
+                    "upper_1s": 3110563972.3863,
+                    "upper_2s": 3267627943.2283,
+                    "period_ms": 1788220800000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-10-01T00:00:00+00:00",
+                    "forecast": 2972598945.4475,
+                    "lower_1s": 2815534974.6055,
+                    "lower_2s": 2658471003.7634,
+                    "upper_1s": 3129662916.2895,
+                    "upper_2s": 3286726887.1316,
+                    "period_ms": 1790812800000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-11-01T00:00:00+00:00",
+                    "forecast": 2991697889.3507,
+                    "lower_1s": 2834633918.5087,
+                    "lower_2s": 2677569947.6667,
+                    "upper_1s": 3148761860.1928,
+                    "upper_2s": 3305825831.0348,
+                    "period_ms": 1793491200000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-12-01T00:00:00+00:00",
+                    "forecast": 3010796833.254,
+                    "lower_1s": 2853732862.4119,
+                    "lower_2s": 2696668891.5699,
+                    "upper_1s": 3167860804.096,
+                    "upper_2s": 3324924774.938,
+                    "period_ms": 1796083200000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-01-01T00:00:00+00:00",
+                    "forecast": 3029895777.1572,
+                    "lower_1s": 2872831806.3152,
+                    "lower_2s": 2715767835.4731,
+                    "upper_1s": 3186959747.9992,
+                    "upper_2s": 3344023718.8412,
+                    "period_ms": 1798761600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-02-01T00:00:00+00:00",
+                    "forecast": 3048994721.0604,
+                    "lower_1s": 2891930750.2184,
+                    "lower_2s": 2734866779.3764,
+                    "upper_1s": 3206058691.9024,
+                    "upper_2s": 3363122662.7445,
+                    "period_ms": 1801440000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-03-01T00:00:00+00:00",
+                    "forecast": 3068093664.9636,
+                    "lower_1s": 2911029694.1216,
+                    "lower_2s": 2753965723.2796,
+                    "upper_1s": 3225157635.8057,
+                    "upper_2s": 3382221606.6477,
+                    "period_ms": 1803859200000,
+                    "is_forecast": true
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:12.911427Z"
+        },
+        {
+            "entry_id": "dc_e91a05928c",
+            "chart_id": "chart_47c2f913c6",
+            "position": 1,
+            "title_override": null,
+            "title": "sales_volume_by_month_nozzle_sales_site_id_11320610 — Forward Projection",
+            "chart_type": "forecast_band",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "This chart compares the historical actual series for sales_volume_by_month_nozzle_sales_site_id_11320610 with its forecast extension. The first projected point at 2026-04-01T00:00:00+00:00 is 2,849,466 versus the last actual value of 2,864,916 (-0.5%). By the end of the forecast horizon at 2027-03-01T00:00:00+00:00, the projection reaches 1,866,567 (-34.8% versus the last actual). The overall direction is down.",
+            "insight_text": "sales_volume_by_month_nozzle_sales_site_id_11320610 forecast shows a 0.5% decrease from the last actual value. Trend: down.",
+            "chart_payload": {
+                "data": [
+                    {
+                        "actual": 3217382.62,
+                        "period": "2025-10-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1759276800000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 3326351.58,
+                        "period": "2025-11-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1761955200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 3453276.46,
+                        "period": "2025-12-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1764547200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 3133335.8,
+                        "period": "2026-01-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1767225600000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 2977974.08,
+                        "period": "2026-02-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1769904000000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 2864916.09,
+                        "period": "2026-03-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1772323200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-04-01T00:00:00+00:00",
+                        "forecast": 2849465.524,
+                        "lower_1s": 2631352.5153,
+                        "lower_2s": 2413239.5065,
+                        "upper_1s": 3067578.5327,
+                        "upper_2s": 3285691.5415,
+                        "period_ms": 1775001600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-05-01T00:00:00+00:00",
+                        "forecast": 2760111.0723,
+                        "lower_1s": 2541998.0636,
+                        "lower_2s": 2323885.0548,
+                        "upper_1s": 2978224.081,
+                        "upper_2s": 3196337.0898,
+                        "period_ms": 1777593600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-06-01T00:00:00+00:00",
+                        "forecast": 2670756.6206,
+                        "lower_1s": 2452643.6118,
+                        "lower_2s": 2234530.6031,
+                        "upper_1s": 2888869.6293,
+                        "upper_2s": 3106982.638,
+                        "period_ms": 1780272000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-07-01T00:00:00+00:00",
+                        "forecast": 2581402.1689,
+                        "lower_1s": 2363289.1601,
+                        "lower_2s": 2145176.1514,
+                        "upper_1s": 2799515.1776,
+                        "upper_2s": 3017628.1863,
+                        "period_ms": 1782864000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-08-01T00:00:00+00:00",
+                        "forecast": 2492047.7171,
+                        "lower_1s": 2273934.7084,
+                        "lower_2s": 2055821.6997,
+                        "upper_1s": 2710160.7259,
+                        "upper_2s": 2928273.7346,
+                        "period_ms": 1785542400000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-09-01T00:00:00+00:00",
+                        "forecast": 2402693.2654,
+                        "lower_1s": 2184580.2567,
+                        "lower_2s": 1966467.248,
+                        "upper_1s": 2620806.2742,
+                        "upper_2s": 2838919.2829,
+                        "period_ms": 1788220800000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-10-01T00:00:00+00:00",
+                        "forecast": 2313338.8137,
+                        "lower_1s": 2095225.805,
+                        "lower_2s": 1877112.7962,
+                        "upper_1s": 2531451.8224,
+                        "upper_2s": 2749564.8312,
+                        "period_ms": 1790812800000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-11-01T00:00:00+00:00",
+                        "forecast": 2223984.362,
+                        "lower_1s": 2005871.3533,
+                        "lower_2s": 1787758.3445,
+                        "upper_1s": 2442097.3707,
+                        "upper_2s": 2660210.3795,
+                        "period_ms": 1793491200000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-12-01T00:00:00+00:00",
+                        "forecast": 2134629.9103,
+                        "lower_1s": 1916516.9016,
+                        "lower_2s": 1698403.8928,
+                        "upper_1s": 2352742.919,
+                        "upper_2s": 2570855.9278,
+                        "period_ms": 1796083200000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-01-01T00:00:00+00:00",
+                        "forecast": 2045275.4586,
+                        "lower_1s": 1827162.4498,
+                        "lower_2s": 1609049.4411,
+                        "upper_1s": 2263388.4673,
+                        "upper_2s": 2481501.476,
+                        "period_ms": 1798761600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-02-01T00:00:00+00:00",
+                        "forecast": 1955921.0069,
+                        "lower_1s": 1737807.9981,
+                        "lower_2s": 1519694.9894,
+                        "upper_1s": 2174034.0156,
+                        "upper_2s": 2392147.0243,
+                        "period_ms": 1801440000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-03-01T00:00:00+00:00",
+                        "forecast": 1866566.5551,
+                        "lower_1s": 1648453.5464,
+                        "lower_2s": 1430340.5377,
+                        "upper_1s": 2084679.5639,
+                        "upper_2s": 2302792.5726,
+                        "period_ms": 1803859200000,
+                        "is_forecast": true
+                    }
+                ],
+                "type": "XYChart",
+                "title": "sales_volume_by_month_nozzle_sales_site_id_11320610 — Forward Projection",
+                "xAxis": {
+                    "type": "DateAxis",
+                    "label": "Period",
+                    "dateField": "period_ms",
+                    "baseInterval": {
+                        "count": 1,
+                        "timeUnit": "month"
+                    },
+                    "tooltipDateFormat": "MMM yyyy"
+                },
+                "yAxis": {
+                    "type": "ValueAxis",
+                    "label": "sales_volume_by_month_nozzle_sales_site_id_11320610"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "actual",
+                        "fill": "none",
+                        "name": "Actual",
+                        "type": "LineSeries",
+                        "stroke": "#3b82f6",
+                        "bullets": false,
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "tooltipText": "{period}: {actual}",
+                        "valueXField": "period_ms",
+                        "valueYField": "actual"
+                    },
+                    {
+                        "id": "forecast",
+                        "fill": "none",
+                        "name": "Forecast",
+                        "type": "LineSeries",
+                        "stroke": "#8b5cf6",
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "tooltipText": "{period}: {forecast} (forecast)",
+                        "valueXField": "period_ms",
+                        "valueYField": "forecast",
+                        "strokeDasharray": [
+                            6,
+                            3
+                        ]
+                    },
+                    {
+                        "id": "band_2s",
+                        "fill": "#dbeafe",
+                        "name": "±2σ band",
+                        "type": "LineSeries",
+                        "stroke": "none",
+                        "connect": false,
+                        "fillOpacity": 0.35,
+                        "valueXField": "period_ms",
+                        "valueYField": "upper_2s",
+                        "openValueYField": "lower_2s"
+                    },
+                    {
+                        "id": "band_1s",
+                        "fill": "#bfdbfe",
+                        "name": "±1σ band",
+                        "type": "LineSeries",
+                        "stroke": "none",
+                        "connect": false,
+                        "fillOpacity": 0.55,
+                        "valueXField": "period_ms",
+                        "valueYField": "upper_1s",
+                        "openValueYField": "lower_1s"
+                    }
+                ],
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Trend: down",
+                "chart_type": "forecast_band",
+                "scrollbarX": {
+                    "visible": true
+                },
+                "metric_name": "sales_volume_by_month_nozzle_sales_site_id_11320610"
+            },
+            "chart_data": [
+                {
+                    "actual": 3217382.62,
+                    "period": "2025-10-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1759276800000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 3326351.58,
+                    "period": "2025-11-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1761955200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 3453276.46,
+                    "period": "2025-12-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1764547200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 3133335.8,
+                    "period": "2026-01-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1767225600000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 2977974.08,
+                    "period": "2026-02-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1769904000000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 2864916.09,
+                    "period": "2026-03-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1772323200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": null,
+                    "period": "2026-04-01T00:00:00+00:00",
+                    "forecast": 2849465.524,
+                    "lower_1s": 2631352.5153,
+                    "lower_2s": 2413239.5065,
+                    "upper_1s": 3067578.5327,
+                    "upper_2s": 3285691.5415,
+                    "period_ms": 1775001600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-05-01T00:00:00+00:00",
+                    "forecast": 2760111.0723,
+                    "lower_1s": 2541998.0636,
+                    "lower_2s": 2323885.0548,
+                    "upper_1s": 2978224.081,
+                    "upper_2s": 3196337.0898,
+                    "period_ms": 1777593600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-06-01T00:00:00+00:00",
+                    "forecast": 2670756.6206,
+                    "lower_1s": 2452643.6118,
+                    "lower_2s": 2234530.6031,
+                    "upper_1s": 2888869.6293,
+                    "upper_2s": 3106982.638,
+                    "period_ms": 1780272000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-07-01T00:00:00+00:00",
+                    "forecast": 2581402.1689,
+                    "lower_1s": 2363289.1601,
+                    "lower_2s": 2145176.1514,
+                    "upper_1s": 2799515.1776,
+                    "upper_2s": 3017628.1863,
+                    "period_ms": 1782864000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-08-01T00:00:00+00:00",
+                    "forecast": 2492047.7171,
+                    "lower_1s": 2273934.7084,
+                    "lower_2s": 2055821.6997,
+                    "upper_1s": 2710160.7259,
+                    "upper_2s": 2928273.7346,
+                    "period_ms": 1785542400000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-09-01T00:00:00+00:00",
+                    "forecast": 2402693.2654,
+                    "lower_1s": 2184580.2567,
+                    "lower_2s": 1966467.248,
+                    "upper_1s": 2620806.2742,
+                    "upper_2s": 2838919.2829,
+                    "period_ms": 1788220800000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-10-01T00:00:00+00:00",
+                    "forecast": 2313338.8137,
+                    "lower_1s": 2095225.805,
+                    "lower_2s": 1877112.7962,
+                    "upper_1s": 2531451.8224,
+                    "upper_2s": 2749564.8312,
+                    "period_ms": 1790812800000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-11-01T00:00:00+00:00",
+                    "forecast": 2223984.362,
+                    "lower_1s": 2005871.3533,
+                    "lower_2s": 1787758.3445,
+                    "upper_1s": 2442097.3707,
+                    "upper_2s": 2660210.3795,
+                    "period_ms": 1793491200000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-12-01T00:00:00+00:00",
+                    "forecast": 2134629.9103,
+                    "lower_1s": 1916516.9016,
+                    "lower_2s": 1698403.8928,
+                    "upper_1s": 2352742.919,
+                    "upper_2s": 2570855.9278,
+                    "period_ms": 1796083200000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-01-01T00:00:00+00:00",
+                    "forecast": 2045275.4586,
+                    "lower_1s": 1827162.4498,
+                    "lower_2s": 1609049.4411,
+                    "upper_1s": 2263388.4673,
+                    "upper_2s": 2481501.476,
+                    "period_ms": 1798761600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-02-01T00:00:00+00:00",
+                    "forecast": 1955921.0069,
+                    "lower_1s": 1737807.9981,
+                    "lower_2s": 1519694.9894,
+                    "upper_1s": 2174034.0156,
+                    "upper_2s": 2392147.0243,
+                    "period_ms": 1801440000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-03-01T00:00:00+00:00",
+                    "forecast": 1866566.5551,
+                    "lower_1s": 1648453.5464,
+                    "lower_2s": 1430340.5377,
+                    "upper_1s": 2084679.5639,
+                    "upper_2s": 2302792.5726,
+                    "period_ms": 1803859200000,
+                    "is_forecast": true
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:13.625476Z"
+        },
+        {
+            "entry_id": "dc_2d011a05e4",
+            "chart_id": "chart_e2c53705a4",
+            "position": 2,
+            "title_override": null,
+            "title": "sales_volume_by_month_nozzle_sales_site_id_11642450 — Forward Projection",
+            "chart_type": "forecast_band",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "This chart compares the historical actual series for sales_volume_by_month_nozzle_sales_site_id_11642450 with its forecast extension. The first projected point at 2026-04-01T00:00:00+00:00 is 2,752,059 versus the last actual value of 2,512,643 (+9.5%). By the end of the forecast horizon at 2027-03-01T00:00:00+00:00, the projection reaches 2,199,056 (-12.5% versus the last actual). The overall direction is flat.",
+            "insight_text": "sales_volume_by_month_nozzle_sales_site_id_11642450 forecast shows a 9.5% increase from the last actual value. Trend: flat.",
+            "chart_payload": {
+                "data": [
+                    {
+                        "actual": 2781956.37,
+                        "period": "2025-10-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1759276800000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 2984492.44,
+                        "period": "2025-11-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1761955200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 3272607.85,
+                        "period": "2025-12-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1764547200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 3118033.83,
+                        "period": "2026-01-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1767225600000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 2898353.88,
+                        "period": "2026-02-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1769904000000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 2512643.19,
+                        "period": "2026-03-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1772323200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-04-01T00:00:00+00:00",
+                        "forecast": 2752059.0333,
+                        "lower_1s": 2486432.3271,
+                        "lower_2s": 2220805.6209,
+                        "upper_1s": 3017685.7395,
+                        "upper_2s": 3283312.4457,
+                        "period_ms": 1775001600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-05-01T00:00:00+00:00",
+                        "forecast": 2701786.0162,
+                        "lower_1s": 2436159.31,
+                        "lower_2s": 2170532.6038,
+                        "upper_1s": 2967412.7224,
+                        "upper_2s": 3233039.4286,
+                        "period_ms": 1777593600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-06-01T00:00:00+00:00",
+                        "forecast": 2651512.999,
+                        "lower_1s": 2385886.2928,
+                        "lower_2s": 2120259.5866,
+                        "upper_1s": 2917139.7052,
+                        "upper_2s": 3182766.4114,
+                        "period_ms": 1780272000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-07-01T00:00:00+00:00",
+                        "forecast": 2601239.9819,
+                        "lower_1s": 2335613.2757,
+                        "lower_2s": 2069986.5695,
+                        "upper_1s": 2866866.6881,
+                        "upper_2s": 3132493.3943,
+                        "period_ms": 1782864000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-08-01T00:00:00+00:00",
+                        "forecast": 2550966.9648,
+                        "lower_1s": 2285340.2586,
+                        "lower_2s": 2019713.5524,
+                        "upper_1s": 2816593.671,
+                        "upper_2s": 3082220.3772,
+                        "period_ms": 1785542400000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-09-01T00:00:00+00:00",
+                        "forecast": 2500693.9476,
+                        "lower_1s": 2235067.2414,
+                        "lower_2s": 1969440.5352,
+                        "upper_1s": 2766320.6538,
+                        "upper_2s": 3031947.36,
+                        "period_ms": 1788220800000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-10-01T00:00:00+00:00",
+                        "forecast": 2450420.9305,
+                        "lower_1s": 2184794.2243,
+                        "lower_2s": 1919167.5181,
+                        "upper_1s": 2716047.6367,
+                        "upper_2s": 2981674.3429,
+                        "period_ms": 1790812800000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-11-01T00:00:00+00:00",
+                        "forecast": 2400147.9133,
+                        "lower_1s": 2134521.2071,
+                        "lower_2s": 1868894.5009,
+                        "upper_1s": 2665774.6195,
+                        "upper_2s": 2931401.3257,
+                        "period_ms": 1793491200000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-12-01T00:00:00+00:00",
+                        "forecast": 2349874.8962,
+                        "lower_1s": 2084248.19,
+                        "lower_2s": 1818621.4838,
+                        "upper_1s": 2615501.6024,
+                        "upper_2s": 2881128.3086,
+                        "period_ms": 1796083200000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-01-01T00:00:00+00:00",
+                        "forecast": 2299601.879,
+                        "lower_1s": 2033975.1728,
+                        "lower_2s": 1768348.4666,
+                        "upper_1s": 2565228.5852,
+                        "upper_2s": 2830855.2914,
+                        "period_ms": 1798761600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-02-01T00:00:00+00:00",
+                        "forecast": 2249328.8619,
+                        "lower_1s": 1983702.1557,
+                        "lower_2s": 1718075.4495,
+                        "upper_1s": 2514955.5681,
+                        "upper_2s": 2780582.2743,
+                        "period_ms": 1801440000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-03-01T00:00:00+00:00",
+                        "forecast": 2199055.8448,
+                        "lower_1s": 1933429.1386,
+                        "lower_2s": 1667802.4324,
+                        "upper_1s": 2464682.551,
+                        "upper_2s": 2730309.2572,
+                        "period_ms": 1803859200000,
+                        "is_forecast": true
+                    }
+                ],
+                "type": "XYChart",
+                "title": "sales_volume_by_month_nozzle_sales_site_id_11642450 — Forward Projection",
+                "xAxis": {
+                    "type": "DateAxis",
+                    "label": "Period",
+                    "dateField": "period_ms",
+                    "baseInterval": {
+                        "count": 1,
+                        "timeUnit": "month"
+                    },
+                    "tooltipDateFormat": "MMM yyyy"
+                },
+                "yAxis": {
+                    "type": "ValueAxis",
+                    "label": "sales_volume_by_month_nozzle_sales_site_id_11642450"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "actual",
+                        "fill": "none",
+                        "name": "Actual",
+                        "type": "LineSeries",
+                        "stroke": "#3b82f6",
+                        "bullets": false,
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "tooltipText": "{period}: {actual}",
+                        "valueXField": "period_ms",
+                        "valueYField": "actual"
+                    },
+                    {
+                        "id": "forecast",
+                        "fill": "none",
+                        "name": "Forecast",
+                        "type": "LineSeries",
+                        "stroke": "#8b5cf6",
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "tooltipText": "{period}: {forecast} (forecast)",
+                        "valueXField": "period_ms",
+                        "valueYField": "forecast",
+                        "strokeDasharray": [
+                            6,
+                            3
+                        ]
+                    },
+                    {
+                        "id": "band_2s",
+                        "fill": "#dbeafe",
+                        "name": "±2σ band",
+                        "type": "LineSeries",
+                        "stroke": "none",
+                        "connect": false,
+                        "fillOpacity": 0.35,
+                        "valueXField": "period_ms",
+                        "valueYField": "upper_2s",
+                        "openValueYField": "lower_2s"
+                    },
+                    {
+                        "id": "band_1s",
+                        "fill": "#bfdbfe",
+                        "name": "±1σ band",
+                        "type": "LineSeries",
+                        "stroke": "none",
+                        "connect": false,
+                        "fillOpacity": 0.55,
+                        "valueXField": "period_ms",
+                        "valueYField": "upper_1s",
+                        "openValueYField": "lower_1s"
+                    }
+                ],
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Trend: flat",
+                "chart_type": "forecast_band",
+                "scrollbarX": {
+                    "visible": true
+                },
+                "metric_name": "sales_volume_by_month_nozzle_sales_site_id_11642450"
+            },
+            "chart_data": [
+                {
+                    "actual": 2781956.37,
+                    "period": "2025-10-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1759276800000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 2984492.44,
+                    "period": "2025-11-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1761955200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 3272607.85,
+                    "period": "2025-12-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1764547200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 3118033.83,
+                    "period": "2026-01-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1767225600000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 2898353.88,
+                    "period": "2026-02-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1769904000000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 2512643.19,
+                    "period": "2026-03-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1772323200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": null,
+                    "period": "2026-04-01T00:00:00+00:00",
+                    "forecast": 2752059.0333,
+                    "lower_1s": 2486432.3271,
+                    "lower_2s": 2220805.6209,
+                    "upper_1s": 3017685.7395,
+                    "upper_2s": 3283312.4457,
+                    "period_ms": 1775001600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-05-01T00:00:00+00:00",
+                    "forecast": 2701786.0162,
+                    "lower_1s": 2436159.31,
+                    "lower_2s": 2170532.6038,
+                    "upper_1s": 2967412.7224,
+                    "upper_2s": 3233039.4286,
+                    "period_ms": 1777593600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-06-01T00:00:00+00:00",
+                    "forecast": 2651512.999,
+                    "lower_1s": 2385886.2928,
+                    "lower_2s": 2120259.5866,
+                    "upper_1s": 2917139.7052,
+                    "upper_2s": 3182766.4114,
+                    "period_ms": 1780272000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-07-01T00:00:00+00:00",
+                    "forecast": 2601239.9819,
+                    "lower_1s": 2335613.2757,
+                    "lower_2s": 2069986.5695,
+                    "upper_1s": 2866866.6881,
+                    "upper_2s": 3132493.3943,
+                    "period_ms": 1782864000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-08-01T00:00:00+00:00",
+                    "forecast": 2550966.9648,
+                    "lower_1s": 2285340.2586,
+                    "lower_2s": 2019713.5524,
+                    "upper_1s": 2816593.671,
+                    "upper_2s": 3082220.3772,
+                    "period_ms": 1785542400000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-09-01T00:00:00+00:00",
+                    "forecast": 2500693.9476,
+                    "lower_1s": 2235067.2414,
+                    "lower_2s": 1969440.5352,
+                    "upper_1s": 2766320.6538,
+                    "upper_2s": 3031947.36,
+                    "period_ms": 1788220800000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-10-01T00:00:00+00:00",
+                    "forecast": 2450420.9305,
+                    "lower_1s": 2184794.2243,
+                    "lower_2s": 1919167.5181,
+                    "upper_1s": 2716047.6367,
+                    "upper_2s": 2981674.3429,
+                    "period_ms": 1790812800000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-11-01T00:00:00+00:00",
+                    "forecast": 2400147.9133,
+                    "lower_1s": 2134521.2071,
+                    "lower_2s": 1868894.5009,
+                    "upper_1s": 2665774.6195,
+                    "upper_2s": 2931401.3257,
+                    "period_ms": 1793491200000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-12-01T00:00:00+00:00",
+                    "forecast": 2349874.8962,
+                    "lower_1s": 2084248.19,
+                    "lower_2s": 1818621.4838,
+                    "upper_1s": 2615501.6024,
+                    "upper_2s": 2881128.3086,
+                    "period_ms": 1796083200000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-01-01T00:00:00+00:00",
+                    "forecast": 2299601.879,
+                    "lower_1s": 2033975.1728,
+                    "lower_2s": 1768348.4666,
+                    "upper_1s": 2565228.5852,
+                    "upper_2s": 2830855.2914,
+                    "period_ms": 1798761600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-02-01T00:00:00+00:00",
+                    "forecast": 2249328.8619,
+                    "lower_1s": 1983702.1557,
+                    "lower_2s": 1718075.4495,
+                    "upper_1s": 2514955.5681,
+                    "upper_2s": 2780582.2743,
+                    "period_ms": 1801440000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-03-01T00:00:00+00:00",
+                    "forecast": 2199055.8448,
+                    "lower_1s": 1933429.1386,
+                    "lower_2s": 1667802.4324,
+                    "upper_1s": 2464682.551,
+                    "upper_2s": 2730309.2572,
+                    "period_ms": 1803859200000,
+                    "is_forecast": true
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:14.349030Z"
+        },
+        {
+            "entry_id": "dc_0eac8f13bd",
+            "chart_id": "chart_890252e4c5",
+            "position": 3,
+            "title_override": null,
+            "title": "sales_volume_by_month_nozzle_sales_site_id_41069929 — Forward Projection",
+            "chart_type": "forecast_band",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "This chart compares the historical actual series for sales_volume_by_month_nozzle_sales_site_id_41069929 with its forecast extension. The first projected point at 2026-04-01T00:00:00+00:00 is 11,928,984 versus the last actual value of 8,432,464 (+41.5%). By the end of the forecast horizon at 2027-03-01T00:00:00+00:00, the projection reaches 17,706,991 (+110.0% versus the last actual). The overall direction is up.",
+            "insight_text": "sales_volume_by_month_nozzle_sales_site_id_41069929 forecast shows a 41.5% increase from the last actual value. Trend: up.",
+            "chart_payload": {
+                "data": [
+                    {
+                        "actual": 6660212.94,
+                        "period": "2025-10-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1759276800000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 8583278.04,
+                        "period": "2025-11-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1761955200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 12908827.6,
+                        "period": "2025-12-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1764547200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 11846580.15,
+                        "period": "2026-01-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1767225600000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 12111798.2,
+                        "period": "2026-02-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1769904000000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": 8432464.1,
+                        "period": "2026-03-01 00:00:00+00:00",
+                        "forecast": null,
+                        "lower_1s": null,
+                        "lower_2s": null,
+                        "upper_1s": null,
+                        "upper_2s": null,
+                        "period_ms": 1772323200000,
+                        "is_forecast": false
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-04-01T00:00:00+00:00",
+                        "forecast": 11928983.7213,
+                        "lower_1s": 9403113.3858,
+                        "lower_2s": 6877243.0503,
+                        "upper_1s": 14454854.0569,
+                        "upper_2s": 16980724.3924,
+                        "period_ms": 1775001600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-05-01T00:00:00+00:00",
+                        "forecast": 12454257.1165,
+                        "lower_1s": 9928386.7809,
+                        "lower_2s": 7402516.4454,
+                        "upper_1s": 14980127.452,
+                        "upper_2s": 17505997.7875,
+                        "period_ms": 1777593600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-06-01T00:00:00+00:00",
+                        "forecast": 12979530.5116,
+                        "lower_1s": 10453660.1761,
+                        "lower_2s": 7927789.8406,
+                        "upper_1s": 15505400.8471,
+                        "upper_2s": 18031271.1827,
+                        "period_ms": 1780272000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-07-01T00:00:00+00:00",
+                        "forecast": 13504803.9068,
+                        "lower_1s": 10978933.5712,
+                        "lower_2s": 8453063.2357,
+                        "upper_1s": 16030674.2423,
+                        "upper_2s": 18556544.5778,
+                        "period_ms": 1782864000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-08-01T00:00:00+00:00",
+                        "forecast": 14030077.3019,
+                        "lower_1s": 11504206.9664,
+                        "lower_2s": 8978336.6308,
+                        "upper_1s": 16555947.6374,
+                        "upper_2s": 19081817.973,
+                        "period_ms": 1785542400000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-09-01T00:00:00+00:00",
+                        "forecast": 14555350.697,
+                        "lower_1s": 12029480.3615,
+                        "lower_2s": 9503610.026,
+                        "upper_1s": 17081221.0326,
+                        "upper_2s": 19607091.3681,
+                        "period_ms": 1788220800000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-10-01T00:00:00+00:00",
+                        "forecast": 15080624.0922,
+                        "lower_1s": 12554753.7567,
+                        "lower_2s": 10028883.4211,
+                        "upper_1s": 17606494.4277,
+                        "upper_2s": 20132364.7632,
+                        "period_ms": 1790812800000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-11-01T00:00:00+00:00",
+                        "forecast": 15605897.4873,
+                        "lower_1s": 13080027.1518,
+                        "lower_2s": 10554156.8163,
+                        "upper_1s": 18131767.8229,
+                        "upper_2s": 20657638.1584,
+                        "period_ms": 1793491200000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2026-12-01T00:00:00+00:00",
+                        "forecast": 16131170.8825,
+                        "lower_1s": 13605300.5469,
+                        "lower_2s": 11079430.2114,
+                        "upper_1s": 18657041.218,
+                        "upper_2s": 21182911.5535,
+                        "period_ms": 1796083200000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-01-01T00:00:00+00:00",
+                        "forecast": 16656444.2776,
+                        "lower_1s": 14130573.9421,
+                        "lower_2s": 11604703.6066,
+                        "upper_1s": 19182314.6131,
+                        "upper_2s": 21708184.9487,
+                        "period_ms": 1798761600000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-02-01T00:00:00+00:00",
+                        "forecast": 17181717.6728,
+                        "lower_1s": 14655847.3372,
+                        "lower_2s": 12129977.0017,
+                        "upper_1s": 19707588.0083,
+                        "upper_2s": 22233458.3438,
+                        "period_ms": 1801440000000,
+                        "is_forecast": true
+                    },
+                    {
+                        "actual": null,
+                        "period": "2027-03-01T00:00:00+00:00",
+                        "forecast": 17706991.0679,
+                        "lower_1s": 15181120.7324,
+                        "lower_2s": 12655250.3968,
+                        "upper_1s": 20232861.4034,
+                        "upper_2s": 22758731.739,
+                        "period_ms": 1803859200000,
+                        "is_forecast": true
+                    }
+                ],
+                "type": "XYChart",
+                "title": "sales_volume_by_month_nozzle_sales_site_id_41069929 — Forward Projection",
+                "xAxis": {
+                    "type": "DateAxis",
+                    "label": "Period",
+                    "dateField": "period_ms",
+                    "baseInterval": {
+                        "count": 1,
+                        "timeUnit": "month"
+                    },
+                    "tooltipDateFormat": "MMM yyyy"
+                },
+                "yAxis": {
+                    "type": "ValueAxis",
+                    "label": "sales_volume_by_month_nozzle_sales_site_id_41069929"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "actual",
+                        "fill": "none",
+                        "name": "Actual",
+                        "type": "LineSeries",
+                        "stroke": "#3b82f6",
+                        "bullets": false,
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "tooltipText": "{period}: {actual}",
+                        "valueXField": "period_ms",
+                        "valueYField": "actual"
+                    },
+                    {
+                        "id": "forecast",
+                        "fill": "none",
+                        "name": "Forecast",
+                        "type": "LineSeries",
+                        "stroke": "#8b5cf6",
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "tooltipText": "{period}: {forecast} (forecast)",
+                        "valueXField": "period_ms",
+                        "valueYField": "forecast",
+                        "strokeDasharray": [
+                            6,
+                            3
+                        ]
+                    },
+                    {
+                        "id": "band_2s",
+                        "fill": "#dbeafe",
+                        "name": "±2σ band",
+                        "type": "LineSeries",
+                        "stroke": "none",
+                        "connect": false,
+                        "fillOpacity": 0.35,
+                        "valueXField": "period_ms",
+                        "valueYField": "upper_2s",
+                        "openValueYField": "lower_2s"
+                    },
+                    {
+                        "id": "band_1s",
+                        "fill": "#bfdbfe",
+                        "name": "±1σ band",
+                        "type": "LineSeries",
+                        "stroke": "none",
+                        "connect": false,
+                        "fillOpacity": 0.55,
+                        "valueXField": "period_ms",
+                        "valueYField": "upper_1s",
+                        "openValueYField": "lower_1s"
+                    }
+                ],
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Trend: up",
+                "chart_type": "forecast_band",
+                "scrollbarX": {
+                    "visible": true
+                },
+                "metric_name": "sales_volume_by_month_nozzle_sales_site_id_41069929"
+            },
+            "chart_data": [
+                {
+                    "actual": 6660212.94,
+                    "period": "2025-10-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1759276800000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 8583278.04,
+                    "period": "2025-11-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1761955200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 12908827.6,
+                    "period": "2025-12-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1764547200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 11846580.15,
+                    "period": "2026-01-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1767225600000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 12111798.2,
+                    "period": "2026-02-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1769904000000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": 8432464.1,
+                    "period": "2026-03-01 00:00:00+00:00",
+                    "forecast": null,
+                    "lower_1s": null,
+                    "lower_2s": null,
+                    "upper_1s": null,
+                    "upper_2s": null,
+                    "period_ms": 1772323200000,
+                    "is_forecast": false
+                },
+                {
+                    "actual": null,
+                    "period": "2026-04-01T00:00:00+00:00",
+                    "forecast": 11928983.7213,
+                    "lower_1s": 9403113.3858,
+                    "lower_2s": 6877243.0503,
+                    "upper_1s": 14454854.0569,
+                    "upper_2s": 16980724.3924,
+                    "period_ms": 1775001600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-05-01T00:00:00+00:00",
+                    "forecast": 12454257.1165,
+                    "lower_1s": 9928386.7809,
+                    "lower_2s": 7402516.4454,
+                    "upper_1s": 14980127.452,
+                    "upper_2s": 17505997.7875,
+                    "period_ms": 1777593600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-06-01T00:00:00+00:00",
+                    "forecast": 12979530.5116,
+                    "lower_1s": 10453660.1761,
+                    "lower_2s": 7927789.8406,
+                    "upper_1s": 15505400.8471,
+                    "upper_2s": 18031271.1827,
+                    "period_ms": 1780272000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-07-01T00:00:00+00:00",
+                    "forecast": 13504803.9068,
+                    "lower_1s": 10978933.5712,
+                    "lower_2s": 8453063.2357,
+                    "upper_1s": 16030674.2423,
+                    "upper_2s": 18556544.5778,
+                    "period_ms": 1782864000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-08-01T00:00:00+00:00",
+                    "forecast": 14030077.3019,
+                    "lower_1s": 11504206.9664,
+                    "lower_2s": 8978336.6308,
+                    "upper_1s": 16555947.6374,
+                    "upper_2s": 19081817.973,
+                    "period_ms": 1785542400000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-09-01T00:00:00+00:00",
+                    "forecast": 14555350.697,
+                    "lower_1s": 12029480.3615,
+                    "lower_2s": 9503610.026,
+                    "upper_1s": 17081221.0326,
+                    "upper_2s": 19607091.3681,
+                    "period_ms": 1788220800000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-10-01T00:00:00+00:00",
+                    "forecast": 15080624.0922,
+                    "lower_1s": 12554753.7567,
+                    "lower_2s": 10028883.4211,
+                    "upper_1s": 17606494.4277,
+                    "upper_2s": 20132364.7632,
+                    "period_ms": 1790812800000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-11-01T00:00:00+00:00",
+                    "forecast": 15605897.4873,
+                    "lower_1s": 13080027.1518,
+                    "lower_2s": 10554156.8163,
+                    "upper_1s": 18131767.8229,
+                    "upper_2s": 20657638.1584,
+                    "period_ms": 1793491200000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2026-12-01T00:00:00+00:00",
+                    "forecast": 16131170.8825,
+                    "lower_1s": 13605300.5469,
+                    "lower_2s": 11079430.2114,
+                    "upper_1s": 18657041.218,
+                    "upper_2s": 21182911.5535,
+                    "period_ms": 1796083200000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-01-01T00:00:00+00:00",
+                    "forecast": 16656444.2776,
+                    "lower_1s": 14130573.9421,
+                    "lower_2s": 11604703.6066,
+                    "upper_1s": 19182314.6131,
+                    "upper_2s": 21708184.9487,
+                    "period_ms": 1798761600000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-02-01T00:00:00+00:00",
+                    "forecast": 17181717.6728,
+                    "lower_1s": 14655847.3372,
+                    "lower_2s": 12129977.0017,
+                    "upper_1s": 19707588.0083,
+                    "upper_2s": 22233458.3438,
+                    "period_ms": 1801440000000,
+                    "is_forecast": true
+                },
+                {
+                    "actual": null,
+                    "period": "2027-03-01T00:00:00+00:00",
+                    "forecast": 17706991.0679,
+                    "lower_1s": 15181120.7324,
+                    "lower_2s": 12655250.3968,
+                    "upper_1s": 20232861.4034,
+                    "upper_2s": 22758731.739,
+                    "period_ms": 1803859200000,
+                    "is_forecast": true
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:15.066287Z"
+        },
+        {
+            "entry_id": "dc_c644fd9dba",
+            "chart_id": "chart_ec31bec822",
+            "position": 4,
+            "title_override": null,
+            "title": "Metric Correlation Heatmap",
+            "chart_type": "correlation_heatmap",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "The heatmap shows 2 unique metric pairs. 2 pairs have |r| ≥ 0.70, indicating strong relationships. Strongest pair: sales_volume_by_month_nozzle_sales_site_id_11320610 × sales_volume_by_month_nozzle_sales_site_id_11642450 (r = 0.78).",
+            "insight_text": "Strongest correlation: sales_volume_by_month_nozzle_sales_site_id_11320610 × sales_volume_by_month_nozzle_sales_site_id_11642450 (r = 0.78).",
+            "chart_payload": {
+                "data": [
+                    {
+                        "fill": "#10b981",
+                        "label": "1.00",
+                        "metric_a": "sales_volume_by_month_nozzle_sales",
+                        "metric_b": "sales_volume_by_month_nozzle_sales",
+                        "pearson_r": 1.0
+                    },
+                    {
+                        "fill": "#94a3b8",
+                        "label": "–",
+                        "metric_a": "sales_volume_by_month_nozzle_sales",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                        "pearson_r": null
+                    },
+                    {
+                        "fill": "#94a3b8",
+                        "label": "–",
+                        "metric_a": "sales_volume_by_month_nozzle_sales",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                        "pearson_r": null
+                    },
+                    {
+                        "fill": "#94a3b8",
+                        "label": "–",
+                        "metric_a": "sales_volume_by_month_nozzle_sales",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                        "pearson_r": null
+                    },
+                    {
+                        "fill": "#94a3b8",
+                        "label": "–",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                        "metric_b": "sales_volume_by_month_nozzle_sales",
+                        "pearson_r": null
+                    },
+                    {
+                        "fill": "#10b981",
+                        "label": "1.00",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                        "pearson_r": 1.0
+                    },
+                    {
+                        "fill": "#10b981",
+                        "label": "0.78",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                        "pearson_r": 0.7766
+                    },
+                    {
+                        "fill": "#94a3b8",
+                        "label": "–",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                        "pearson_r": null
+                    },
+                    {
+                        "fill": "#94a3b8",
+                        "label": "–",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                        "metric_b": "sales_volume_by_month_nozzle_sales",
+                        "pearson_r": null
+                    },
+                    {
+                        "fill": "#10b981",
+                        "label": "0.78",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                        "pearson_r": 0.7766
+                    },
+                    {
+                        "fill": "#10b981",
+                        "label": "1.00",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                        "pearson_r": 1.0
+                    },
+                    {
+                        "fill": "#10b981",
+                        "label": "0.70",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                        "pearson_r": 0.7004
+                    },
+                    {
+                        "fill": "#94a3b8",
+                        "label": "–",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                        "metric_b": "sales_volume_by_month_nozzle_sales",
+                        "pearson_r": null
+                    },
+                    {
+                        "fill": "#94a3b8",
+                        "label": "–",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                        "pearson_r": null
+                    },
+                    {
+                        "fill": "#10b981",
+                        "label": "0.70",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                        "pearson_r": 0.7004
+                    },
+                    {
+                        "fill": "#10b981",
+                        "label": "1.00",
+                        "metric_a": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                        "metric_b": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                        "pearson_r": 1.0
+                    }
+                ],
+                "type": "XYChart",
+                "title": "Metric Correlation Heatmap",
+                "xAxis": {
+                    "type": "CategoryAxis",
+                    "label": "",
+                    "labels": {
+                        "rotation": -45,
+                        "truncate": 18
+                    },
+                    "categoryField": "metric_b"
+                },
+                "yAxis": {
+                    "type": "CategoryAxis",
+                    "label": "",
+                    "categoryField": "metric_a"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "heatmap",
+                        "name": "Pearson r",
+                        "type": "ColumnSeries",
+                        "stroke": "#ffffff",
+                        "xField": "metric_b",
+                        "yField": "metric_a",
+                        "fillField": "fill",
+                        "labelField": "label",
+                        "valueField": "pearson_r",
+                        "fillOpacity": 1.0,
+                        "strokeWidth": 1,
+                        "tooltipText": "{metric_a} × {metric_b}: r = {pearson_r}",
+                        "labelFontSize": 11
+                    }
+                ],
+                "metrics": [
+                    "sales_volume_by_month_nozzle_sales",
+                    "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                    "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                    "sales_volume_by_month_nozzle_sales_site_id_41069929"
+                ],
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Pearson r — darker = stronger correlation",
+                "chart_type": "correlation_heatmap",
+                "colorScale": {
+                    "max": 1.0,
+                    "min": -1.0,
+                    "maxColor": "#10b981",
+                    "midColor": "#f8fafc",
+                    "minColor": "#f43f5e"
+                },
+                "scrollbarX": {
+                    "visible": true
+                }
+            },
+            "chart_data": [
+                {
+                    "fill": "#10b981",
+                    "label": "1.00",
+                    "metric_a": "sales_volume_by_month_nozzle_sales",
+                    "metric_b": "sales_volume_by_month_nozzle_sales",
+                    "pearson_r": 1.0
+                },
+                {
+                    "fill": "#94a3b8",
+                    "label": "–",
+                    "metric_a": "sales_volume_by_month_nozzle_sales",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                    "pearson_r": null
+                },
+                {
+                    "fill": "#94a3b8",
+                    "label": "–",
+                    "metric_a": "sales_volume_by_month_nozzle_sales",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                    "pearson_r": null
+                },
+                {
+                    "fill": "#94a3b8",
+                    "label": "–",
+                    "metric_a": "sales_volume_by_month_nozzle_sales",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                    "pearson_r": null
+                },
+                {
+                    "fill": "#94a3b8",
+                    "label": "–",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                    "metric_b": "sales_volume_by_month_nozzle_sales",
+                    "pearson_r": null
+                },
+                {
+                    "fill": "#10b981",
+                    "label": "1.00",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                    "pearson_r": 1.0
+                },
+                {
+                    "fill": "#10b981",
+                    "label": "0.78",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                    "pearson_r": 0.7766
+                },
+                {
+                    "fill": "#94a3b8",
+                    "label": "–",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                    "pearson_r": null
+                },
+                {
+                    "fill": "#94a3b8",
+                    "label": "–",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                    "metric_b": "sales_volume_by_month_nozzle_sales",
+                    "pearson_r": null
+                },
+                {
+                    "fill": "#10b981",
+                    "label": "0.78",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                    "pearson_r": 0.7766
+                },
+                {
+                    "fill": "#10b981",
+                    "label": "1.00",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                    "pearson_r": 1.0
+                },
+                {
+                    "fill": "#10b981",
+                    "label": "0.70",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                    "pearson_r": 0.7004
+                },
+                {
+                    "fill": "#94a3b8",
+                    "label": "–",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                    "metric_b": "sales_volume_by_month_nozzle_sales",
+                    "pearson_r": null
+                },
+                {
+                    "fill": "#94a3b8",
+                    "label": "–",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                    "pearson_r": null
+                },
+                {
+                    "fill": "#10b981",
+                    "label": "0.70",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                    "pearson_r": 0.7004
+                },
+                {
+                    "fill": "#10b981",
+                    "label": "1.00",
+                    "metric_a": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                    "metric_b": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                    "pearson_r": 1.0
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:15.786951Z"
+        },
+        {
+            "entry_id": "dc_d8e028d622",
+            "chart_id": "chart_465cca84b5",
+            "position": 5,
+            "title_override": null,
+            "title": "Correlation Input Warnings",
+            "chart_type": "temporal_eligibility_warning_card",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "This warning card explains which correlation inputs were excluded before analysis and why. 3 chart snapshot(s) were excluded from correlation because they were not eligible time series. Correlation snapshots were sourced from live fact tables using a real temporal axis.",
+            "insight_text": "Correlation input warnings: 2 issues. 3 chart snapshot(s) were excluded from correlation because they were not eligible time series.",
+            "chart_payload": {
+                "body": [
+                    "3 chart snapshot(s) were excluded from correlation because they were not eligible time series.",
+                    "Correlation snapshots were sourced from live fact tables using a real temporal axis."
+                ],
+                "data": [
+                    {
+                        "count": 3,
+                        "reason": "period_values_not_temporal"
+                    }
+                ],
+                "type": "StatCard",
+                "title": "Correlation Input Warnings",
+                "summary": {
+                    "source_mode": "fact_preferred",
+                    "rows_examined": 7,
+                    "excluded_by_reason": {
+                        "period_values_not_temporal": 3
+                    },
+                    "fact_snapshot_count": 4,
+                    "fact_source_summary": {
+                        "llm_ranked": true,
+                        "top_tables": [
+                            {
+                                "score": 8.2,
+                                "row_count": 8482801,
+                                "table_name": "nozzle_sales",
+                                "date_format": "iso_date",
+                                "time_column": "transaction_date",
+                                "measure_count": 1,
+                                "category_count": 8
+                            }
+                        ],
+                        "llm_rationales": {
+                            "nozzle_sales": "Has meaningful daily temporal coverage, a relevant additive measure (sales_volume), and multiple useful category breakdowns for business analysis."
+                        },
+                        "snapshot_count": 4,
+                        "llm_ranked_tables": [
+                            "nozzle_sales"
+                        ],
+                        "candidate_table_count": 1,
+                        "qualified_table_count": 1,
+                        "category_snapshot_count": 3
+                    },
+                    "chart_snapshot_count": 4,
+                    "excluded_chart_count": 3,
+                    "selected_source_kind": "fact_metric",
+                    "eligible_snapshot_count": 4
+                },
+                "subtitle": "Excluded snapshots: 3",
+                "chart_type": "temporal_eligibility_warning_card"
+            },
+            "chart_data": [
+                {
+                    "count": 3,
+                    "reason": "period_values_not_temporal"
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:16.508349Z"
+        },
+        {
+            "entry_id": "dc_5c911e8c81",
+            "chart_id": "chart_cfa7ce8449",
+            "position": 6,
+            "title_override": null,
+            "title": "sales_volume by site_id — Category Trends",
+            "chart_type": "category_trend_grouped",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "This chart shows how sales_volume changes over time for 3 categories on the same timeline. The visible categories include 11320610, 11642450, 41069929. Use it to compare relative size, turning points, and whether category trajectories are converging or diverging.",
+            "insight_text": "sales_volume trend across 3 categories over time.",
+            "chart_payload": {
+                "data": [
+                    {
+                        "period": "2025-10-01 00:00:00+00:00",
+                        "11320610": 3217382.62,
+                        "11642450": 2781956.37,
+                        "41069929": 6660212.94,
+                        "period_ms": 1759276800000
+                    },
+                    {
+                        "period": "2025-11-01 00:00:00+00:00",
+                        "11320610": 3326351.58,
+                        "11642450": 2984492.44,
+                        "41069929": 8583278.04,
+                        "period_ms": 1761955200000
+                    },
+                    {
+                        "period": "2025-12-01 00:00:00+00:00",
+                        "11320610": 3453276.46,
+                        "11642450": 3272607.85,
+                        "41069929": 12908827.6,
+                        "period_ms": 1764547200000
+                    },
+                    {
+                        "period": "2026-01-01 00:00:00+00:00",
+                        "11320610": 3133335.8,
+                        "11642450": 3118033.83,
+                        "41069929": 11846580.15,
+                        "period_ms": 1767225600000
+                    },
+                    {
+                        "period": "2026-02-01 00:00:00+00:00",
+                        "11320610": 2977974.08,
+                        "11642450": 2898353.88,
+                        "41069929": 12111798.2,
+                        "period_ms": 1769904000000
+                    },
+                    {
+                        "period": "2026-03-01 00:00:00+00:00",
+                        "11320610": 2864916.09,
+                        "11642450": 2512643.19,
+                        "41069929": 8432464.1,
+                        "period_ms": 1772323200000
+                    }
+                ],
+                "type": "XYChart",
+                "title": "sales_volume by site_id — Category Trends",
+                "xAxis": {
+                    "type": "DateAxis",
+                    "label": "Period",
+                    "dateField": "period_ms",
+                    "baseInterval": {
+                        "count": 1,
+                        "timeUnit": "month"
+                    },
+                    "tooltipDateFormat": "MMM yyyy"
+                },
+                "yAxis": {
+                    "type": "ValueAxis",
+                    "label": "sales_volume"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "11320610",
+                        "fill": "none",
+                        "name": "11320610",
+                        "type": "LineSeries",
+                        "stroke": "#3b82f6",
+                        "bullets": {
+                            "fill": "#3b82f6",
+                            "type": "Circle",
+                            "radius": 3
+                        },
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "valueXField": "period_ms",
+                        "valueYField": "11320610"
+                    },
+                    {
+                        "id": "11642450",
+                        "fill": "none",
+                        "name": "11642450",
+                        "type": "LineSeries",
+                        "stroke": "#22c55e",
+                        "bullets": {
+                            "fill": "#22c55e",
+                            "type": "Circle",
+                            "radius": 3
+                        },
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "valueXField": "period_ms",
+                        "valueYField": "11642450"
+                    },
+                    {
+                        "id": "41069929",
+                        "fill": "none",
+                        "name": "41069929",
+                        "type": "LineSeries",
+                        "stroke": "#8b5cf6",
+                        "bullets": {
+                            "fill": "#8b5cf6",
+                            "type": "Circle",
+                            "radius": 3
+                        },
+                        "connect": false,
+                        "strokeWidth": 2,
+                        "valueXField": "period_ms",
+                        "valueYField": "41069929"
+                    }
+                ],
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Temporal category comparison from nozzle_sales",
+                "chart_type": "category_trend_grouped",
+                "scrollbarX": {
+                    "visible": true
+                },
+                "metric_name": "sales_volume"
+            },
+            "chart_data": [
+                {
+                    "period": "2025-10-01 00:00:00+00:00",
+                    "11320610": 3217382.62,
+                    "11642450": 2781956.37,
+                    "41069929": 6660212.94,
+                    "period_ms": 1759276800000
+                },
+                {
+                    "period": "2025-11-01 00:00:00+00:00",
+                    "11320610": 3326351.58,
+                    "11642450": 2984492.44,
+                    "41069929": 8583278.04,
+                    "period_ms": 1761955200000
+                },
+                {
+                    "period": "2025-12-01 00:00:00+00:00",
+                    "11320610": 3453276.46,
+                    "11642450": 3272607.85,
+                    "41069929": 12908827.6,
+                    "period_ms": 1764547200000
+                },
+                {
+                    "period": "2026-01-01 00:00:00+00:00",
+                    "11320610": 3133335.8,
+                    "11642450": 3118033.83,
+                    "41069929": 11846580.15,
+                    "period_ms": 1767225600000
+                },
+                {
+                    "period": "2026-02-01 00:00:00+00:00",
+                    "11320610": 2977974.08,
+                    "11642450": 2898353.88,
+                    "41069929": 12111798.2,
+                    "period_ms": 1769904000000
+                },
+                {
+                    "period": "2026-03-01 00:00:00+00:00",
+                    "11320610": 2864916.09,
+                    "11642450": 2512643.19,
+                    "41069929": 8432464.1,
+                    "period_ms": 1772323200000
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:17.237844Z"
+        },
+        {
+            "entry_id": "dc_3e7e795053",
+            "chart_id": "chart_bd6d85708b",
+            "position": 7,
+            "title_override": null,
+            "title": "sales_volume by site_id — Stacked Forecast",
+            "chart_type": "category_forecast_stacked_bar",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "This stacked forecast shows how projected sales_volume is distributed across 3 categories over the forecast horizon. At the first forecast step, 41069929 contributes the largest share at 11,928,984. Read it both for total projected volume and for how category mix shifts from one forecast period to the next.",
+            "insight_text": "Stacked forecast for sales_volume across 3 categories.",
+            "chart_payload": {
+                "data": [
+                    {
+                        "period": "Forecast +1",
+                        "11320610": 2849465.524,
+                        "11642450": 2752059.0333,
+                        "41069929": 11928983.7213,
+                        "period_offset": 1
+                    },
+                    {
+                        "period": "Forecast +2",
+                        "11320610": 2760111.0723,
+                        "11642450": 2701786.0162,
+                        "41069929": 12454257.1165,
+                        "period_offset": 2
+                    },
+                    {
+                        "period": "Forecast +3",
+                        "11320610": 2670756.6206,
+                        "11642450": 2651512.999,
+                        "41069929": 12979530.5116,
+                        "period_offset": 3
+                    },
+                    {
+                        "period": "Forecast +4",
+                        "11320610": 2581402.1689,
+                        "11642450": 2601239.9819,
+                        "41069929": 13504803.9068,
+                        "period_offset": 4
+                    },
+                    {
+                        "period": "Forecast +5",
+                        "11320610": 2492047.7171,
+                        "11642450": 2550966.9648,
+                        "41069929": 14030077.3019,
+                        "period_offset": 5
+                    },
+                    {
+                        "period": "Forecast +6",
+                        "11320610": 2402693.2654,
+                        "11642450": 2500693.9476,
+                        "41069929": 14555350.697,
+                        "period_offset": 6
+                    },
+                    {
+                        "period": "Forecast +7",
+                        "11320610": 2313338.8137,
+                        "11642450": 2450420.9305,
+                        "41069929": 15080624.0922,
+                        "period_offset": 7
+                    },
+                    {
+                        "period": "Forecast +8",
+                        "11320610": 2223984.362,
+                        "11642450": 2400147.9133,
+                        "41069929": 15605897.4873,
+                        "period_offset": 8
+                    },
+                    {
+                        "period": "Forecast +9",
+                        "11320610": 2134629.9103,
+                        "11642450": 2349874.8962,
+                        "41069929": 16131170.8825,
+                        "period_offset": 9
+                    },
+                    {
+                        "period": "Forecast +10",
+                        "11320610": 2045275.4586,
+                        "11642450": 2299601.879,
+                        "41069929": 16656444.2776,
+                        "period_offset": 10
+                    },
+                    {
+                        "period": "Forecast +11",
+                        "11320610": 1955921.0069,
+                        "11642450": 2249328.8619,
+                        "41069929": 17181717.6728,
+                        "period_offset": 11
+                    },
+                    {
+                        "period": "Forecast +12",
+                        "11320610": 1866566.5551,
+                        "11642450": 2199055.8448,
+                        "41069929": 17706991.0679,
+                        "period_offset": 12
+                    }
+                ],
+                "type": "XYChart",
+                "title": "sales_volume by site_id — Stacked Forecast",
+                "xAxis": {
+                    "type": "CategoryAxis",
+                    "label": "Forecast Period",
+                    "categoryField": "period"
+                },
+                "yAxis": {
+                    "type": "ValueAxis",
+                    "label": "sales_volume"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "11320610",
+                        "fill": "#3b82f6",
+                        "name": "11320610",
+                        "type": "ColumnSeries",
+                        "stroke": "#ffffff",
+                        "stacked": true,
+                        "strokeWidth": 1,
+                        "valueXField": "period",
+                        "valueYField": "11320610"
+                    },
+                    {
+                        "id": "11642450",
+                        "fill": "#22c55e",
+                        "name": "11642450",
+                        "type": "ColumnSeries",
+                        "stroke": "#ffffff",
+                        "stacked": true,
+                        "strokeWidth": 1,
+                        "valueXField": "period",
+                        "valueYField": "11642450"
+                    },
+                    {
+                        "id": "41069929",
+                        "fill": "#8b5cf6",
+                        "name": "41069929",
+                        "type": "ColumnSeries",
+                        "stroke": "#ffffff",
+                        "stacked": true,
+                        "strokeWidth": 1,
+                        "valueXField": "period",
+                        "valueYField": "41069929"
+                    }
+                ],
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Forecast contribution by category from nozzle_sales",
+                "chart_type": "category_forecast_stacked_bar",
+                "scrollbarX": {
+                    "visible": true
+                },
+                "metric_name": "sales_volume"
+            },
+            "chart_data": [
+                {
+                    "period": "Forecast +1",
+                    "11320610": 2849465.524,
+                    "11642450": 2752059.0333,
+                    "41069929": 11928983.7213,
+                    "period_offset": 1
+                },
+                {
+                    "period": "Forecast +2",
+                    "11320610": 2760111.0723,
+                    "11642450": 2701786.0162,
+                    "41069929": 12454257.1165,
+                    "period_offset": 2
+                },
+                {
+                    "period": "Forecast +3",
+                    "11320610": 2670756.6206,
+                    "11642450": 2651512.999,
+                    "41069929": 12979530.5116,
+                    "period_offset": 3
+                },
+                {
+                    "period": "Forecast +4",
+                    "11320610": 2581402.1689,
+                    "11642450": 2601239.9819,
+                    "41069929": 13504803.9068,
+                    "period_offset": 4
+                },
+                {
+                    "period": "Forecast +5",
+                    "11320610": 2492047.7171,
+                    "11642450": 2550966.9648,
+                    "41069929": 14030077.3019,
+                    "period_offset": 5
+                },
+                {
+                    "period": "Forecast +6",
+                    "11320610": 2402693.2654,
+                    "11642450": 2500693.9476,
+                    "41069929": 14555350.697,
+                    "period_offset": 6
+                },
+                {
+                    "period": "Forecast +7",
+                    "11320610": 2313338.8137,
+                    "11642450": 2450420.9305,
+                    "41069929": 15080624.0922,
+                    "period_offset": 7
+                },
+                {
+                    "period": "Forecast +8",
+                    "11320610": 2223984.362,
+                    "11642450": 2400147.9133,
+                    "41069929": 15605897.4873,
+                    "period_offset": 8
+                },
+                {
+                    "period": "Forecast +9",
+                    "11320610": 2134629.9103,
+                    "11642450": 2349874.8962,
+                    "41069929": 16131170.8825,
+                    "period_offset": 9
+                },
+                {
+                    "period": "Forecast +10",
+                    "11320610": 2045275.4586,
+                    "11642450": 2299601.879,
+                    "41069929": 16656444.2776,
+                    "period_offset": 10
+                },
+                {
+                    "period": "Forecast +11",
+                    "11320610": 1955921.0069,
+                    "11642450": 2249328.8619,
+                    "41069929": 17181717.6728,
+                    "period_offset": 11
+                },
+                {
+                    "period": "Forecast +12",
+                    "11320610": 1866566.5551,
+                    "11642450": 2199055.8448,
+                    "41069929": 17706991.0679,
+                    "period_offset": 12
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:17.972385Z"
+        },
+        {
+            "entry_id": "dc_e1d67e5a75",
+            "chart_id": "chart_256c709c72",
+            "position": 8,
+            "title_override": null,
+            "title": "sales_volume_by_month_nozzle_sales_site_id_11320610 vs sales_volume_by_month_nozzle_sales_site_id_11642450",
+            "chart_type": "scatter_regression",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "Scatter plot of sales_volume_by_month_nozzle_sales_site_id_11320610 vs sales_volume_by_month_nozzle_sales_site_id_11642450: Pearson r = 0.78, indicating a strong positive linear relationship. The series leads by 1 period (a_leads_b).",
+            "insight_text": "sales_volume_by_month_nozzle_sales_site_id_11320610 and sales_volume_by_month_nozzle_sales_site_id_11642450 show a strong positive correlation (r = 0.78) with a_leads_b relationship (lag 1).",
+            "chart_payload": {
+                "data": [
+                    {
+                        "x": 3217382.62,
+                        "y": 2781956.37,
+                        "period": "2025-10-01 00:00:00+00:00",
+                        "tooltipText": "2025-10-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3217382.62, sales_volume_by_month_nozzle_sales_site_id_11642450=2781956.37"
+                    },
+                    {
+                        "x": 3326351.58,
+                        "y": 2984492.44,
+                        "period": "2025-11-01 00:00:00+00:00",
+                        "tooltipText": "2025-11-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3326351.58, sales_volume_by_month_nozzle_sales_site_id_11642450=2984492.44"
+                    },
+                    {
+                        "x": 3453276.46,
+                        "y": 3272607.85,
+                        "period": "2025-12-01 00:00:00+00:00",
+                        "tooltipText": "2025-12-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3453276.46, sales_volume_by_month_nozzle_sales_site_id_11642450=3272607.85"
+                    },
+                    {
+                        "x": 3133335.8,
+                        "y": 3118033.83,
+                        "period": "2026-01-01 00:00:00+00:00",
+                        "tooltipText": "2026-01-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3133335.80, sales_volume_by_month_nozzle_sales_site_id_11642450=3118033.83"
+                    },
+                    {
+                        "x": 2977974.08,
+                        "y": 2898353.88,
+                        "period": "2026-02-01 00:00:00+00:00",
+                        "tooltipText": "2026-02-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=2977974.08, sales_volume_by_month_nozzle_sales_site_id_11642450=2898353.88"
+                    },
+                    {
+                        "x": 2864916.09,
+                        "y": 2512643.19,
+                        "period": "2026-03-01 00:00:00+00:00",
+                        "tooltipText": "2026-03-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=2864916.09, sales_volume_by_month_nozzle_sales_site_id_11642450=2512643.19"
+                    }
+                ],
+                "type": "XYChart",
+                "title": "sales_volume_by_month_nozzle_sales_site_id_11320610 vs sales_volume_by_month_nozzle_sales_site_id_11642450",
+                "xAxis": {
+                    "type": "ValueAxis",
+                    "label": "sales_volume_by_month_nozzle_sales_site_id_11320610"
+                },
+                "yAxis": {
+                    "type": "ValueAxis",
+                    "label": "sales_volume_by_month_nozzle_sales_site_id_11642450"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "scatter",
+                        "fill": "#3b82f6",
+                        "name": "Observations",
+                        "type": "LineSeries",
+                        "stroke": "none",
+                        "bullets": {
+                            "fill": "#3b82f6",
+                            "type": "Circle",
+                            "radius": 5,
+                            "fillOpacity": 0.7
+                        },
+                        "connect": false,
+                        "valueXField": "x",
+                        "valueYField": "y",
+                        "tooltipTextKey": "tooltipText"
+                    },
+                    {
+                        "id": "regression",
+                        "fill": "none",
+                        "name": "Regression Line",
+                        "type": "LineSeries",
+                        "stroke": "#ef4444",
+                        "bullets": false,
+                        "strokeWidth": 2,
+                        "valueXField": "rx",
+                        "valueYField": "ry",
+                        "strokeDasharray": [
+                            6,
+                            3
+                        ]
+                    }
+                ],
+                "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Pearson r = 0.78 | lag = 1 periods (a_leads_b) | strong positive correlation",
+                "chart_type": "scatter_regression",
+                "scrollbarX": {
+                    "visible": true
+                },
+                "scatter_data": [
+                    {
+                        "x": 3217382.62,
+                        "y": 2781956.37,
+                        "period": "2025-10-01 00:00:00+00:00",
+                        "tooltipText": "2025-10-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3217382.62, sales_volume_by_month_nozzle_sales_site_id_11642450=2781956.37"
+                    },
+                    {
+                        "x": 3326351.58,
+                        "y": 2984492.44,
+                        "period": "2025-11-01 00:00:00+00:00",
+                        "tooltipText": "2025-11-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3326351.58, sales_volume_by_month_nozzle_sales_site_id_11642450=2984492.44"
+                    },
+                    {
+                        "x": 3453276.46,
+                        "y": 3272607.85,
+                        "period": "2025-12-01 00:00:00+00:00",
+                        "tooltipText": "2025-12-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3453276.46, sales_volume_by_month_nozzle_sales_site_id_11642450=3272607.85"
+                    },
+                    {
+                        "x": 3133335.8,
+                        "y": 3118033.83,
+                        "period": "2026-01-01 00:00:00+00:00",
+                        "tooltipText": "2026-01-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3133335.80, sales_volume_by_month_nozzle_sales_site_id_11642450=3118033.83"
+                    },
+                    {
+                        "x": 2977974.08,
+                        "y": 2898353.88,
+                        "period": "2026-02-01 00:00:00+00:00",
+                        "tooltipText": "2026-02-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=2977974.08, sales_volume_by_month_nozzle_sales_site_id_11642450=2898353.88"
+                    },
+                    {
+                        "x": 2864916.09,
+                        "y": 2512643.19,
+                        "period": "2026-03-01 00:00:00+00:00",
+                        "tooltipText": "2026-03-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=2864916.09, sales_volume_by_month_nozzle_sales_site_id_11642450=2512643.19"
+                    }
+                ],
+                "regression_data": [
+                    {
+                        "rx": 2864916.09,
+                        "ry": 2646834.2868
+                    },
+                    {
+                        "rx": 3453276.46,
+                        "ry": 3203312.2741
+                    }
+                ],
+                "regression_series_data": [
+                    {
+                        "rx": 2864916.09,
+                        "ry": 2646834.2868
+                    },
+                    {
+                        "rx": 3453276.46,
+                        "ry": 3203312.2741
+                    }
+                ]
+            },
+            "chart_data": [
+                {
+                    "x": 3217382.62,
+                    "y": 2781956.37,
+                    "period": "2025-10-01 00:00:00+00:00",
+                    "tooltipText": "2025-10-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3217382.62, sales_volume_by_month_nozzle_sales_site_id_11642450=2781956.37"
+                },
+                {
+                    "x": 3326351.58,
+                    "y": 2984492.44,
+                    "period": "2025-11-01 00:00:00+00:00",
+                    "tooltipText": "2025-11-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3326351.58, sales_volume_by_month_nozzle_sales_site_id_11642450=2984492.44"
+                },
+                {
+                    "x": 3453276.46,
+                    "y": 3272607.85,
+                    "period": "2025-12-01 00:00:00+00:00",
+                    "tooltipText": "2025-12-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3453276.46, sales_volume_by_month_nozzle_sales_site_id_11642450=3272607.85"
+                },
+                {
+                    "x": 3133335.8,
+                    "y": 3118033.83,
+                    "period": "2026-01-01 00:00:00+00:00",
+                    "tooltipText": "2026-01-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=3133335.80, sales_volume_by_month_nozzle_sales_site_id_11642450=3118033.83"
+                },
+                {
+                    "x": 2977974.08,
+                    "y": 2898353.88,
+                    "period": "2026-02-01 00:00:00+00:00",
+                    "tooltipText": "2026-02-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=2977974.08, sales_volume_by_month_nozzle_sales_site_id_11642450=2898353.88"
+                },
+                {
+                    "x": 2864916.09,
+                    "y": 2512643.19,
+                    "period": "2026-03-01 00:00:00+00:00",
+                    "tooltipText": "2026-03-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11320610=2864916.09, sales_volume_by_month_nozzle_sales_site_id_11642450=2512643.19"
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:18.695917Z"
+        },
+        {
+            "entry_id": "dc_daa092e1d1",
+            "chart_id": "chart_8ca303e264",
+            "position": 9,
+            "title_override": null,
+            "title": "Rolling Correlation: sales_volume_by_month_nozzle_sales_site_id_11320610 × sales_volume_by_month_nozzle_sales_site_id_11642450",
+            "chart_type": "rolling_correlation",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "The rolling correlation for sales_volume_by_month_nozzle_sales_site_id_11320610 × sales_volume_by_month_nozzle_sales_site_id_11642450 varies between 0.49 and 0.73 (spread = 0.24). This narrow range indicates a stable, consistent relationship over time.",
+            "insight_text": "Rolling correlation between sales_volume_by_month_nozzle_sales_site_id_11320610 and sales_volume_by_month_nozzle_sales_site_id_11642450 ranges from 0.49 to 0.73. Relationship is stable.",
+            "chart_payload": {
+                "data": [
+                    {
+                        "fill": "#10b981",
+                        "index": 1,
+                        "rolling_r": 0.491
+                    },
+                    {
+                        "fill": "#10b981",
+                        "index": 2,
+                        "rolling_r": 0.7354
+                    }
+                ],
+                "type": "XYChart",
+                "title": "Rolling Correlation: sales_volume_by_month_nozzle_sales_site_id_11320610 × sales_volume_by_month_nozzle_sales_site_id_11642450",
+                "xAxis": {
+                    "type": "ValueAxis",
+                    "label": "Window"
+                },
+                "yAxis": {
+                    "max": 1.0,
+                    "min": -1.0,
+                    "type": "ValueAxis",
+                    "label": "Pearson r"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "rolling_r",
+                        "fill": "#bfdbfe",
+                        "name": "Rolling r",
+                        "type": "LineSeries",
+                        "stroke": "#3b82f6",
+                        "bullets": {
+                            "fill": "#3b82f6",
+                            "type": "Circle",
+                            "radius": 4
+                        },
+                        "fillOpacity": 0.25,
+                        "strokeWidth": 2,
+                        "tooltipText": "Window {index}: r = {rolling_r}",
+                        "valueXField": "index",
+                        "valueYField": "rolling_r"
+                    }
+                ],
+                "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11320610",
+                "metric_b": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Overall Pearson r = 0.7766 | stable = True",
+                "chart_type": "rolling_correlation",
+                "scrollbarX": {
+                    "visible": true
+                },
+                "annotations": [
+                    {
+                        "type": "HorizontalLine",
+                        "value": 0,
+                        "stroke": "#94a3b8",
+                        "strokeDasharray": [
+                            4,
+                            2
+                        ]
+                    },
+                    {
+                        "type": "HorizontalLine",
+                        "label": "+0.4",
+                        "value": 0.4,
+                        "stroke": "#10b981",
+                        "strokeDasharray": [
+                            3,
+                            3
+                        ]
+                    },
+                    {
+                        "type": "HorizontalLine",
+                        "label": "−0.4",
+                        "value": -0.4,
+                        "stroke": "#f43f5e",
+                        "strokeDasharray": [
+                            3,
+                            3
+                        ]
+                    }
+                ]
+            },
+            "chart_data": [
+                {
+                    "fill": "#10b981",
+                    "index": 1,
+                    "rolling_r": 0.491
+                },
+                {
+                    "fill": "#10b981",
+                    "index": 2,
+                    "rolling_r": 0.7354
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:19.424492Z"
+        },
+        {
+            "entry_id": "dc_4eb2490149",
+            "chart_id": "chart_8cbc18ea02",
+            "position": 10,
+            "title_override": null,
+            "title": "sales_volume_by_month_nozzle_sales_site_id_11642450 vs sales_volume_by_month_nozzle_sales_site_id_41069929",
+            "chart_type": "scatter_regression",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "Scatter plot of sales_volume_by_month_nozzle_sales_site_id_11642450 vs sales_volume_by_month_nozzle_sales_site_id_41069929: Pearson r = 0.70, indicating a strong positive linear relationship. The series leads by 2 periods (b_leads_a).",
+            "insight_text": "sales_volume_by_month_nozzle_sales_site_id_11642450 and sales_volume_by_month_nozzle_sales_site_id_41069929 show a strong positive correlation (r = 0.70) with b_leads_a relationship (lag 2).",
+            "chart_payload": {
+                "data": [
+                    {
+                        "x": 2781956.37,
+                        "y": 6660212.94,
+                        "period": "2025-10-01 00:00:00+00:00",
+                        "tooltipText": "2025-10-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2781956.37, sales_volume_by_month_nozzle_sales_site_id_41069929=6660212.94"
+                    },
+                    {
+                        "x": 2984492.44,
+                        "y": 8583278.04,
+                        "period": "2025-11-01 00:00:00+00:00",
+                        "tooltipText": "2025-11-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2984492.44, sales_volume_by_month_nozzle_sales_site_id_41069929=8583278.04"
+                    },
+                    {
+                        "x": 3272607.85,
+                        "y": 12908827.6,
+                        "period": "2025-12-01 00:00:00+00:00",
+                        "tooltipText": "2025-12-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=3272607.85, sales_volume_by_month_nozzle_sales_site_id_41069929=12908827.60"
+                    },
+                    {
+                        "x": 3118033.83,
+                        "y": 11846580.15,
+                        "period": "2026-01-01 00:00:00+00:00",
+                        "tooltipText": "2026-01-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=3118033.83, sales_volume_by_month_nozzle_sales_site_id_41069929=11846580.15"
+                    },
+                    {
+                        "x": 2898353.88,
+                        "y": 12111798.2,
+                        "period": "2026-02-01 00:00:00+00:00",
+                        "tooltipText": "2026-02-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2898353.88, sales_volume_by_month_nozzle_sales_site_id_41069929=12111798.20"
+                    },
+                    {
+                        "x": 2512643.19,
+                        "y": 8432464.1,
+                        "period": "2026-03-01 00:00:00+00:00",
+                        "tooltipText": "2026-03-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2512643.19, sales_volume_by_month_nozzle_sales_site_id_41069929=8432464.10"
+                    }
+                ],
+                "type": "XYChart",
+                "title": "sales_volume_by_month_nozzle_sales_site_id_11642450 vs sales_volume_by_month_nozzle_sales_site_id_41069929",
+                "xAxis": {
+                    "type": "ValueAxis",
+                    "label": "sales_volume_by_month_nozzle_sales_site_id_11642450"
+                },
+                "yAxis": {
+                    "type": "ValueAxis",
+                    "label": "sales_volume_by_month_nozzle_sales_site_id_41069929"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "scatter",
+                        "fill": "#3b82f6",
+                        "name": "Observations",
+                        "type": "LineSeries",
+                        "stroke": "none",
+                        "bullets": {
+                            "fill": "#3b82f6",
+                            "type": "Circle",
+                            "radius": 5,
+                            "fillOpacity": 0.7
+                        },
+                        "connect": false,
+                        "valueXField": "x",
+                        "valueYField": "y",
+                        "tooltipTextKey": "tooltipText"
+                    },
+                    {
+                        "id": "regression",
+                        "fill": "none",
+                        "name": "Regression Line",
+                        "type": "LineSeries",
+                        "stroke": "#ef4444",
+                        "bullets": false,
+                        "strokeWidth": 2,
+                        "valueXField": "rx",
+                        "valueYField": "ry",
+                        "strokeDasharray": [
+                            6,
+                            3
+                        ]
+                    }
+                ],
+                "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                "metric_b": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Pearson r = 0.70 | lag = 2 periods (b_leads_a) | strong positive correlation",
+                "chart_type": "scatter_regression",
+                "scrollbarX": {
+                    "visible": true
+                },
+                "scatter_data": [
+                    {
+                        "x": 2781956.37,
+                        "y": 6660212.94,
+                        "period": "2025-10-01 00:00:00+00:00",
+                        "tooltipText": "2025-10-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2781956.37, sales_volume_by_month_nozzle_sales_site_id_41069929=6660212.94"
+                    },
+                    {
+                        "x": 2984492.44,
+                        "y": 8583278.04,
+                        "period": "2025-11-01 00:00:00+00:00",
+                        "tooltipText": "2025-11-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2984492.44, sales_volume_by_month_nozzle_sales_site_id_41069929=8583278.04"
+                    },
+                    {
+                        "x": 3272607.85,
+                        "y": 12908827.6,
+                        "period": "2025-12-01 00:00:00+00:00",
+                        "tooltipText": "2025-12-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=3272607.85, sales_volume_by_month_nozzle_sales_site_id_41069929=12908827.60"
+                    },
+                    {
+                        "x": 3118033.83,
+                        "y": 11846580.15,
+                        "period": "2026-01-01 00:00:00+00:00",
+                        "tooltipText": "2026-01-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=3118033.83, sales_volume_by_month_nozzle_sales_site_id_41069929=11846580.15"
+                    },
+                    {
+                        "x": 2898353.88,
+                        "y": 12111798.2,
+                        "period": "2026-02-01 00:00:00+00:00",
+                        "tooltipText": "2026-02-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2898353.88, sales_volume_by_month_nozzle_sales_site_id_41069929=12111798.20"
+                    },
+                    {
+                        "x": 2512643.19,
+                        "y": 8432464.1,
+                        "period": "2026-03-01 00:00:00+00:00",
+                        "tooltipText": "2026-03-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2512643.19, sales_volume_by_month_nozzle_sales_site_id_41069929=8432464.10"
+                    }
+                ],
+                "regression_data": [
+                    {
+                        "rx": 2512643.19,
+                        "ry": 7324219.3278
+                    },
+                    {
+                        "rx": 3272607.85,
+                        "ry": 12385463.1443
+                    }
+                ],
+                "regression_series_data": [
+                    {
+                        "rx": 2512643.19,
+                        "ry": 7324219.3278
+                    },
+                    {
+                        "rx": 3272607.85,
+                        "ry": 12385463.1443
+                    }
+                ]
+            },
+            "chart_data": [
+                {
+                    "x": 2781956.37,
+                    "y": 6660212.94,
+                    "period": "2025-10-01 00:00:00+00:00",
+                    "tooltipText": "2025-10-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2781956.37, sales_volume_by_month_nozzle_sales_site_id_41069929=6660212.94"
+                },
+                {
+                    "x": 2984492.44,
+                    "y": 8583278.04,
+                    "period": "2025-11-01 00:00:00+00:00",
+                    "tooltipText": "2025-11-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2984492.44, sales_volume_by_month_nozzle_sales_site_id_41069929=8583278.04"
+                },
+                {
+                    "x": 3272607.85,
+                    "y": 12908827.6,
+                    "period": "2025-12-01 00:00:00+00:00",
+                    "tooltipText": "2025-12-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=3272607.85, sales_volume_by_month_nozzle_sales_site_id_41069929=12908827.60"
+                },
+                {
+                    "x": 3118033.83,
+                    "y": 11846580.15,
+                    "period": "2026-01-01 00:00:00+00:00",
+                    "tooltipText": "2026-01-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=3118033.83, sales_volume_by_month_nozzle_sales_site_id_41069929=11846580.15"
+                },
+                {
+                    "x": 2898353.88,
+                    "y": 12111798.2,
+                    "period": "2026-02-01 00:00:00+00:00",
+                    "tooltipText": "2026-02-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2898353.88, sales_volume_by_month_nozzle_sales_site_id_41069929=12111798.20"
+                },
+                {
+                    "x": 2512643.19,
+                    "y": 8432464.1,
+                    "period": "2026-03-01 00:00:00+00:00",
+                    "tooltipText": "2026-03-01 00:00:00+00:00: sales_volume_by_month_nozzle_sales_site_id_11642450=2512643.19, sales_volume_by_month_nozzle_sales_site_id_41069929=8432464.10"
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:20.147899Z"
+        },
+        {
+            "entry_id": "dc_ef3f522df5",
+            "chart_id": "chart_af2e8ca9d6",
+            "position": 11,
+            "title_override": null,
+            "title": "Rolling Correlation: sales_volume_by_month_nozzle_sales_site_id_11642450 × sales_volume_by_month_nozzle_sales_site_id_41069929",
+            "chart_type": "rolling_correlation",
+            "chart_source": "correlation_agent",
+            "status": "ready",
+            "sql": null,
+            "conversation_ids": [],
+            "narrative_text": "The rolling correlation for sales_volume_by_month_nozzle_sales_site_id_11642450 × sales_volume_by_month_nozzle_sales_site_id_41069929 varies between 0.48 and 0.98 (spread = 0.50). This wide spread indicates the relationship changes over time and may not be reliable.",
+            "insight_text": "Rolling correlation between sales_volume_by_month_nozzle_sales_site_id_11642450 and sales_volume_by_month_nozzle_sales_site_id_41069929 ranges from 0.48 to 0.98. Relationship is unstable.",
+            "chart_payload": {
+                "data": [
+                    {
+                        "fill": "#10b981",
+                        "index": 1,
+                        "rolling_r": 0.9768
+                    },
+                    {
+                        "fill": "#10b981",
+                        "index": 2,
+                        "rolling_r": 0.4766
+                    }
+                ],
+                "type": "XYChart",
+                "title": "Rolling Correlation: sales_volume_by_month_nozzle_sales_site_id_11642450 × sales_volume_by_month_nozzle_sales_site_id_41069929",
+                "xAxis": {
+                    "type": "ValueAxis",
+                    "label": "Window"
+                },
+                "yAxis": {
+                    "max": 1.0,
+                    "min": -1.0,
+                    "type": "ValueAxis",
+                    "label": "Pearson r"
+                },
+                "cursor": {
+                    "behavior": "zoomX"
+                },
+                "legend": {
+                    "visible": true
+                },
+                "series": [
+                    {
+                        "id": "rolling_r",
+                        "fill": "#bfdbfe",
+                        "name": "Rolling r",
+                        "type": "LineSeries",
+                        "stroke": "#3b82f6",
+                        "bullets": {
+                            "fill": "#3b82f6",
+                            "type": "Circle",
+                            "radius": 4
+                        },
+                        "fillOpacity": 0.25,
+                        "strokeWidth": 2,
+                        "tooltipText": "Window {index}: r = {rolling_r}",
+                        "valueXField": "index",
+                        "valueYField": "rolling_r"
+                    }
+                ],
+                "metric_a": "sales_volume_by_month_nozzle_sales_site_id_11642450",
+                "metric_b": "sales_volume_by_month_nozzle_sales_site_id_41069929",
+                "settings": {
+                    "panX": true,
+                    "panY": false,
+                    "wheelX": "panX",
+                    "wheelY": "zoomX"
+                },
+                "subtitle": "Overall Pearson r = 0.7004 | stable = False",
+                "chart_type": "rolling_correlation",
+                "scrollbarX": {
+                    "visible": true
+                },
+                "annotations": [
+                    {
+                        "type": "HorizontalLine",
+                        "value": 0,
+                        "stroke": "#94a3b8",
+                        "strokeDasharray": [
+                            4,
+                            2
+                        ]
+                    },
+                    {
+                        "type": "HorizontalLine",
+                        "label": "+0.4",
+                        "value": 0.4,
+                        "stroke": "#10b981",
+                        "strokeDasharray": [
+                            3,
+                            3
+                        ]
+                    },
+                    {
+                        "type": "HorizontalLine",
+                        "label": "−0.4",
+                        "value": -0.4,
+                        "stroke": "#f43f5e",
+                        "strokeDasharray": [
+                            3,
+                            3
+                        ]
+                    }
+                ]
+            },
+            "chart_data": [
+                {
+                    "fill": "#10b981",
+                    "index": 1,
+                    "rolling_r": 0.9768
+                },
+                {
+                    "fill": "#10b981",
+                    "index": 2,
+                    "rolling_r": 0.4766
+                }
+            ],
+            "added_by": "CorrelationDashboardAgent",
+            "added_at": "2026-04-03T05:16:20.870379Z"
+        }
+    ],
+    "created_at": "2026-04-03T05:16:12.192295Z",
+    "updated_at": "2026-04-03T05:16:12.192295Z"
+}
