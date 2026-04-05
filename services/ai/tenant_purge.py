@@ -74,6 +74,7 @@ def purge_tenant_data(
                 "quantyx_anomaly_hypotheses",
                 "quantyx_anomaly_dashboard_links",
                 "quantyx_anomaly_records",
+                "quantyx_anomaly_results",
                 "quantyx_anomaly_investigations",
                 "quantyx_workspace_conversation_memory",
                 "quantyx_workspace_messages",
@@ -514,6 +515,90 @@ def purge_tenant_data(
                         USING public.quantyx_dashboard_refresh_runs r
                         WHERE r.refresh_id = e.refresh_id
                           AND r.tenant_id = %s
+                        """,
+                        [tenant_id],
+                    )
+                    results.append({"table": table, "rows": cur.rowcount})
+                    continue
+                if table == "quantyx_anomaly_hypotheses":
+                    if dry_run:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS count
+                              FROM public.quantyx_anomaly_hypotheses h
+                              JOIN public.quantyx_anomaly_investigations i
+                                ON i.investigation_id = h.investigation_id
+                             WHERE i.tenant_id = %s
+                            """,
+                            [tenant_id],
+                        )
+                        count = cur.fetchone()["count"]
+                        results.append({"table": table, "rows": int(count)})
+                        continue
+                    cur.execute(
+                        """
+                        DELETE FROM public.quantyx_anomaly_hypotheses h
+                        USING public.quantyx_anomaly_investigations i
+                        WHERE i.investigation_id = h.investigation_id
+                          AND i.tenant_id = %s
+                        """,
+                        [tenant_id],
+                    )
+                    results.append({"table": table, "rows": cur.rowcount})
+                    continue
+
+                if table == "quantyx_anomaly_dashboard_links":
+                    if dry_run:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS count
+                              FROM public.quantyx_anomaly_dashboard_links l
+                              JOIN public.quantyx_anomaly_investigations i
+                                ON i.investigation_id = l.investigation_id
+                             WHERE i.tenant_id = %s
+                            """,
+                            [tenant_id],
+                        )
+                        count = cur.fetchone()["count"]
+                        results.append({"table": table, "rows": int(count)})
+                        continue
+                    cur.execute(
+                        """
+                        DELETE FROM public.quantyx_anomaly_dashboard_links l
+                        USING public.quantyx_anomaly_investigations i
+                        WHERE i.investigation_id = l.investigation_id
+                          AND i.tenant_id = %s
+                        """,
+                        [tenant_id],
+                    )
+                    results.append({"table": table, "rows": cur.rowcount})
+                    continue
+
+                if table == "quantyx_anomaly_actions":
+                    if dry_run:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*) AS count
+                              FROM public.quantyx_anomaly_actions a
+                              JOIN public.quantyx_anomaly_hypotheses h
+                                ON h.hypothesis_id = a.hypothesis_id
+                              JOIN public.quantyx_anomaly_investigations i
+                                ON i.investigation_id = h.investigation_id
+                             WHERE i.tenant_id = %s
+                            """,
+                            [tenant_id],
+                        )
+                        count = cur.fetchone()["count"]
+                        results.append({"table": table, "rows": int(count)})
+                        continue
+                    cur.execute(
+                        """
+                        DELETE FROM public.quantyx_anomaly_actions a
+                        USING public.quantyx_anomaly_hypotheses h
+                        JOIN public.quantyx_anomaly_investigations i
+                          ON i.investigation_id = h.investigation_id
+                        WHERE h.hypothesis_id = a.hypothesis_id
+                          AND i.tenant_id = %s
                         """,
                         [tenant_id],
                     )

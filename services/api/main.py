@@ -2586,6 +2586,7 @@ def list_jobs(
     status: str | None = None,
     limit: int = 50,
     cursor: str | None = None,
+    offset: int | None = None,
 ) -> JobListResponse:
     payload = fetch_jobs(
         settings,
@@ -2594,6 +2595,7 @@ def list_jobs(
         status=status,
         limit=limit,
         cursor=cursor,
+        offset=offset
     )
     for item in payload.get("jobs", []):
         item.pop("scope_id", None)
