@@ -31,6 +31,33 @@ def _is_numeric(value: Any) -> bool:
     return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
 
 
+def _sql_metric_expressions(sql: str) -> dict[str, str]:
+    """Parse SELECT clause to extract aggregate expressions.
+
+    Returns {alias_lower: full_expression} for aggregate items (those with parentheses).
+    e.g. "SUM(t.\"qty_in_kg\") AS value" → {"value": "SUM(t.\"qty_in_kg\")"}
+    """
+    mapping: dict[str, str] = {}
+    if not sql:
+        return mapping
+    select_match = re.search(r"(?i)\bSELECT\b(.+?)\bFROM\b", sql, re.DOTALL)
+    if not select_match:
+        return mapping
+    select_clause = select_match.group(1)
+    for item in select_clause.split(","):
+        item = item.strip()
+        if "(" not in item:
+            continue
+        # Match: EXPR AS alias  (alias at the end)
+        alias_match = re.search(r'(.+)\s+AS\s+["\']?(\w+)["\']?\s*$', item, re.IGNORECASE)
+        if alias_match:
+            expression = alias_match.group(1).strip()
+            alias = alias_match.group(2).strip().strip('"').strip("'")
+            if expression and alias:
+                mapping[alias.lower()] = expression
+    return mapping
+
+
 def _sql_alias_to_column(sql: str) -> dict[str, str]:
     """Parse SELECT clause to build alias→real_column mapping.
 
@@ -497,6 +524,58 @@ def _compile_where(filters: list[dict[str, Any]], alias: str) -> tuple[list[str]
     return clauses, params
 
 
+def _sql_select_output_columns(sql: str) -> list[str]:
+    """Return the ordered output column names from a SELECT clause (using AS alias when present)."""
+    columns: list[str] = []
+    select_match = re.search(r"(?i)\bSELECT\b(.+?)\bFROM\b", sql, re.DOTALL)
+    if not select_match:
+        return columns
+    for item in select_match.group(1).split(","):
+        item = item.strip()
+        alias_match = re.search(r'\s+AS\s+["\']?(\w+)["\']?\s*$', item, re.IGNORECASE)
+        if alias_match:
+            columns.append(alias_match.group(1).strip().strip('"').strip("'"))
+        else:
+            ident_match = re.search(r'["\']?(\w+)["\']?\s*$', item)
+            if ident_match:
+                columns.append(ident_match.group(1).strip().strip('"').strip("'"))
+    return columns
+
+
+def _inject_where_into_sql(
+    original_sql: str,
+    extra_filters: list[dict[str, Any]],
+    alias: str = "t",
+) -> tuple[str, list[Any]]:
+    """Append extra WHERE conditions to an existing SQL string without rebuilding it.
+
+    If the SQL already has a WHERE clause, the new conditions are ANDed in.
+    If not, a WHERE clause is inserted before GROUP BY / ORDER BY / LIMIT.
+    Returns (modified_sql, params).
+    """
+    if not extra_filters:
+        return original_sql, []
+    clauses, params = _compile_where(_normalize_filters(extra_filters), alias)
+    if not clauses:
+        return original_sql, []
+    extra_sql = " AND ".join(clauses)
+    where_match = re.search(r'(?i)\bWHERE\b', original_sql)
+    keyword_match = re.search(r'(?i)\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', original_sql)
+    if where_match:
+        if keyword_match:
+            pos = keyword_match.start()
+            modified = original_sql[:pos].rstrip() + f" AND {extra_sql} " + original_sql[pos:]
+        else:
+            modified = original_sql.rstrip() + f" AND {extra_sql}"
+    else:
+        if keyword_match:
+            pos = keyword_match.start()
+            modified = original_sql[:pos].rstrip() + f" WHERE {extra_sql} " + original_sql[pos:]
+        else:
+            modified = original_sql.rstrip() + f" WHERE {extra_sql}"
+    return modified, params
+
+
 def compile_chart_query(
     *,
     chart_row: dict[str, Any],
@@ -505,6 +584,7 @@ def compile_chart_query(
     appended_filters: list[dict[str, Any]] | None = None,
     limit: int = 200,
 ) -> tuple[str, list[Any], list[str], str]:
+    """Rebuild SQL from scratch — used when dimensions change (drill-down/up/switch)."""
     query_shape = interaction_context.get("query_shape") or {}
     source_scope = interaction_context.get("source_scope") or {}
     table_name = str(source_scope.get("base_table") or "").strip()
@@ -518,8 +598,15 @@ def compile_chart_query(
     if not expression:
         if not metric_id:
             raise ValueError("chart interaction metric_unavailable")
-        expression = f"SUM(t.{_qident(metric_id)})"
-    dims = [str(v) for v in ((override_dimensions if override_dimensions is not None else query_shape.get("group_dimensions")) or []) if str(v).strip()]
+        original_sql = str(chart_row.get("sql") or "")
+        sql_exprs = _sql_metric_expressions(original_sql) if original_sql else {}
+        expression = (
+            sql_exprs.get(metric_id.lower())
+            or sql_exprs.get("value")
+            or next(iter(sql_exprs.values()), None)
+            or f"SUM(t.{_qident(metric_id)})"
+        )
+    dims = [str(v) for v in (override_dimensions if override_dimensions is not None else (query_shape.get("group_dimensions") or [])) if str(v).strip()]
     time_dimension = str(query_shape.get("time_dimension") or "").strip()
     query_grain = str(query_shape.get("query_grain") or "day").strip().lower()
     select_parts: list[str] = []
@@ -552,8 +639,7 @@ def compile_chart_query(
         f"ORDER BY {', '.join(order_parts)} "
         f"LIMIT {int(limit)}"
     )
-    metric_name = metric_id or "value"
-    return sql, sql_params, output_dims, metric_name
+    return sql, sql_params, output_dims, metric_id or "value"
 
 
 def execute_chart_compilation(
@@ -566,22 +652,34 @@ def execute_chart_compilation(
     scoped_conn: ScopedConnection | None = None,
     limit: int = 200,
 ) -> dict[str, Any]:
-    sql, sql_params, output_dims, metric_name = compile_chart_query(
-        chart_row=chart_row,
-        interaction_context=interaction_context,
-        override_dimensions=override_dimensions,
-        appended_filters=appended_filters,
-        limit=limit,
-    )
+    original_sql = str(chart_row.get("sql") or "").strip()
+
+    # Filter-only: inject conditions directly into the original SQL — no rebuild
+    if override_dimensions is None and original_sql and appended_filters:
+        sql, sql_params = _inject_where_into_sql(original_sql, appended_filters)
+        # Output column names come from the original SELECT clause
+        out_cols = _sql_select_output_columns(original_sql)
+        # Last column is the metric; the rest are dimensions
+        output_dims = out_cols[:-1] if len(out_cols) > 1 else out_cols
+        metric_name = out_cols[-1] if out_cols else "value"
+    else:
+        sql, sql_params, output_dims, metric_name = compile_chart_query(
+            chart_row=chart_row,
+            interaction_context=interaction_context,
+            override_dimensions=override_dimensions,
+            appended_filters=appended_filters,
+            limit=limit,
+        )
+
     rows = run_query(settings, sql, sql_params, scoped_conn=scoped_conn)
     chart_type = "line" if (interaction_context.get("query_shape") or {}).get("time_dimension") else "bar"
-    payload = build_chart_payload(chart_type, rows, "value", output_dims or ["category"])
+    payload = build_chart_payload(chart_type, rows, metric_name, output_dims or ["category"])
     dim_key = output_dims[0] if output_dims else None
     inference = build_chart_inference(
         settings,
         chart_type=chart_type,
         rows=rows,
-        metric_name="value",
+        metric_name=metric_name,
         dim_key=dim_key,
         chart_title=str(chart_row.get("title") or chart_row.get("question") or "Derived Chart"),
     )
