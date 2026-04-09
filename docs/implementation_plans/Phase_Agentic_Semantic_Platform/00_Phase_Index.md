@@ -148,6 +148,9 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 48. **Phase 52: Deterministic Chart Filtering and Hierarchy Drill-Down**
    - Separate chart filtering from hierarchy drill-down, persist business hierarchy and interaction metadata, and make runtime chart click actions resolve to deterministic SQL rewrites without LLM-generated SQL.
 
+49. **Phase 53: Continuous Domain Knowledge Refinement and Semantic Learning**
+   - Let users add business context, hierarchy corrections, column descriptions, metric meaning, and domain rules after deployment; validate and version those refinements; and selectively propagate them into the approved semantic state and downstream analytics behavior.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -178,3 +181,4 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 50 depends on Phases 24/34/35/36/37/38/43/45/46/47 and upgrades correlation from chart-row reconstruction to fact-native, axis-safe, LLM-first intelligence and dashboarding.
 - Phase 51 depends on Phases 24/34/38/43/45/46/47/50 and upgrades anomaly detection/dashboarding with table-native fallback exploration, contextual LLM chart narration, and correlation-aware exploratory anomaly storytelling.
 - Phase 52 depends on Phases 02/03/24/31/34/39/41/44 and adds persisted hierarchy semantics, interaction context, and deterministic chart filter/drill SQL generation.
+- Phase 53 depends on Phases 24/34/36/41/42/52 and turns deployment-time semantics into a continuously refined, versioned domain knowledge layer with selective downstream propagation.

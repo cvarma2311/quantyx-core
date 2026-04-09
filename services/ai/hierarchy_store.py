@@ -748,4 +748,14 @@ def ensure_business_hierarchies(
         "hierarchy_store.ensure.complete | tenant_id=%s domain_id=%s final_count=%s",
         tenant_id, domain_id, len(final),
     )
+    if final:
+        return final
+    if derived:
+        _hs_logger.warning(
+            "hierarchy_store.ensure.final_empty_after_upsert | tenant_id=%s domain_id=%s derived_count=%s — using in-memory derived hierarchies for current run",
+            tenant_id,
+            domain_id,
+            len(derived),
+        )
+        return derived
     return final
