@@ -1,0 +1,34 @@
+industry: data_quality_observability
+version: 1
+
+title: Data Quality and Profiling Ontology
+
+entity_types:
+  table:
+    examples: [table_name, dataset_name, source_table]
+    description: A profiled relational table or dataset.
+    join_key: table_name
+
+  column:
+    examples: [column_name, field_name, attribute_name]
+    description: A profiled column within a table.
+    join_key: column_name
+
+  quality_metric:
+    examples: [null_pct, duplicate_pct, completeness_score, trust_score]
+    description: A computed quality indicator derived from profiling.
+    join_key: metric_name
+
+  time:
+    examples: [profiled_at, observed_at, updated_at, created_at, event_date]
+    description: Timestamp or date used to evaluate freshness or track profiling snapshots.
+    join_key: profiled_at
+
+hierarchies:
+  - name: data_asset_hierarchy
+    levels: [schema_name, table_name, column_name]
+    description: Navigate from schema to table to column when analyzing data quality.
+
+  - name: quality_metric_hierarchy
+    levels: [quality_family, metric_name]
+    description: Navigate from quality family to individual quality metric.

@@ -1074,3 +1074,105 @@ COMMENT ON COLUMN public.quantyx_flow_node_data_registry.created_by IS 'Creator 
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.updated_by IS 'Updater principal.';
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.created_at IS 'Creation timestamp.';
 COMMENT ON COLUMN public.quantyx_flow_node_data_registry.updated_at IS 'Last update timestamp.';
+
+-- Phase 53: Continuous Domain Knowledge Refinement and Semantic Learning
+
+CREATE TABLE IF NOT EXISTS public.quantyx_domain_refinement_inputs (
+  refinement_input_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NULL,
+  database_name TEXT NULL,
+  schema_name TEXT NULL,
+  source_run_id TEXT NULL,
+  source_type TEXT NOT NULL,
+  refinement_kind TEXT NOT NULL,
+  source_text TEXT NULL,
+  source_payload_json JSONB NULL,
+  source_context_id TEXT NULL,
+  source_file_id TEXT NULL,
+  conversation_id TEXT NULL,
+  submitted_by TEXT NULL,
+  status TEXT NOT NULL DEFAULT 'submitted',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_domain_refinement_inputs_scope
+  ON public.quantyx_domain_refinement_inputs
+  (tenant_id, domain_id, connection_id, database_name, schema_name, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_domain_refinement_inputs_status
+  ON public.quantyx_domain_refinement_inputs
+  (tenant_id, domain_id, status, refinement_kind, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_domain_refinement_artifacts (
+  artifact_id TEXT PRIMARY KEY,
+  refinement_input_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NULL,
+  database_name TEXT NULL,
+  schema_name TEXT NULL,
+  artifact_type TEXT NOT NULL,
+  artifact_json JSONB NOT NULL,
+  validation_status TEXT NOT NULL DEFAULT 'pending',
+  validation_errors_json JSONB NULL,
+  approval_status TEXT NOT NULL DEFAULT 'pending',
+  approved_by TEXT NULL,
+  approved_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (refinement_input_id)
+    REFERENCES public.quantyx_domain_refinement_inputs(refinement_input_id)
+    ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_domain_refinement_artifacts_input
+  ON public.quantyx_domain_refinement_artifacts (refinement_input_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_domain_refinement_artifacts_scope
+  ON public.quantyx_domain_refinement_artifacts
+  (tenant_id, domain_id, connection_id, database_name, schema_name, approval_status, validation_status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.quantyx_domain_semantic_state (
+  semantic_state_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NULL,
+  database_name TEXT NULL,
+  schema_name TEXT NULL,
+  version_no INTEGER NOT NULL,
+  state_json JSONB NOT NULL,
+  created_from_artifact_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  trigger_type TEXT NOT NULL DEFAULT 'manual',
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_domain_semantic_state_scope
+  ON public.quantyx_domain_semantic_state
+  (tenant_id, domain_id, connection_id, database_name, schema_name, is_active, version_no DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quantyx_domain_semantic_state_active
+  ON public.quantyx_domain_semantic_state
+  (tenant_id, domain_id, connection_id, database_name, schema_name)
+  WHERE is_active = true;
+
+CREATE TABLE IF NOT EXISTS public.quantyx_semantic_propagation_jobs (
+  job_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  domain_id TEXT NOT NULL,
+  connection_id TEXT NULL,
+  database_name TEXT NULL,
+  schema_name TEXT NULL,
+  trigger_type TEXT NOT NULL,
+  affected_scope_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL DEFAULT 'queued',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_quantyx_semantic_propagation_jobs_scope
+  ON public.quantyx_semantic_propagation_jobs
+  (tenant_id, domain_id, connection_id, database_name, schema_name, status, created_at DESC);

@@ -253,6 +253,35 @@ from services.ai.semantic_feedback_store import (
     list_semantic_feedback,
     apply_semantic_feedback,
 )
+from services.ai.domain_refinement_extractor import (
+    validate_refinement_input_payload,
+    process_refinement_input,
+)
+from services.ai.domain_refinement_store import (
+    create_refinement_input,
+    get_current_semantic_state,
+    get_refinement_input,
+    list_refinement_artifacts,
+    list_refinement_inputs,
+)
+from services.ai.domain_semantic_state_builder import rebuild_semantic_state
+from services.ai.semantic_propagation_store import (
+    create_semantic_propagation_job,
+    enqueue_semantic_propagation_for_artifacts,
+    list_semantic_propagation_jobs,
+)
+from services.ai.semantic_propagation_runner import run_semantic_propagation_job
+from services.ai.semantic_runtime import (
+    apply_join_constraints_to_edges,
+    load_active_semantic_state,
+    merge_semantic_glossary,
+    semantic_interpretation_context,
+    semantic_join_constraints,
+)
+from services.ai.semantic_conversation_refinement import (
+    infer_refinement_kind,
+    maybe_writeback_conversation_refinement,
+)
 from services.ai.semantic_graph_store import list_dashboard_specs, get_dashboard_spec, update_dashboard_spec  # noqa: F401 — delegating shims kept for call sites below during Phase 44 cutover
 from services.ai.dashboard_refresh_store import (
     create_dashboard_refresh_run,
@@ -431,6 +460,17 @@ from services.api.schemas import (
     RollupRefreshResponse,
     SemanticFeedbackRequest,
     SemanticFeedbackResponse,
+    SemanticRefinementCreateRequest,
+    SemanticRefinementResponse,
+    SemanticRefinementListResponse,
+    SemanticRefinementProcessResponse,
+    SemanticRefinementArtifactResponse,
+    SemanticStateRebuildRequest,
+    SemanticStateResponse,
+    SemanticPropagationRequest,
+    SemanticPropagationJobResponse,
+    SemanticPropagationListResponse,
+    ContextQuestionsResponse,
     ViewListResponse,
     ViewSchemaResponse,
     ViewQueryRequest,
@@ -5370,6 +5410,107 @@ def domains() -> dict:
     return {"domains": [{"domain_id": name, "display_name": name} for name in packs]}
 
 
+def _default_context_questions(domain_id: str) -> list[dict]:
+    return [
+        {
+            "group_id": "dashboard_objectives",
+            "title": "Dashboard Objectives",
+            "questions": [
+                {
+                    "question_id": "primary_kpis",
+                    "prompt": "What are the most important KPIs this dashboard should track?",
+                    "answer_type": "text",
+                    "required": True,
+                    "maps_to": ["metric_refinement", "chart_guidance"],
+                },
+                {
+                    "question_id": "dashboard_audience",
+                    "prompt": "Who is the main audience for this dashboard?",
+                    "answer_type": "single_select",
+                    "options": ["operations", "management", "finance", "planning", "quality"],
+                    "required": False,
+                    "maps_to": ["chart_guidance"],
+                },
+            ],
+        },
+        {
+            "group_id": "hierarchy_and_grain",
+            "title": "Hierarchy and Grain",
+            "questions": [
+                {
+                    "question_id": "preferred_drill_path",
+                    "prompt": "What is the preferred business drill path from broad to detailed levels?",
+                    "answer_type": "text",
+                    "required": False,
+                    "maps_to": ["hierarchy_override"],
+                },
+                {
+                    "question_id": "preferred_time_grain",
+                    "prompt": "Which time grain is most important for decision-making?",
+                    "answer_type": "single_select",
+                    "options": ["day", "week", "month", "quarter"],
+                    "required": False,
+                    "maps_to": ["chart_guidance", "metric_refinement"],
+                },
+            ],
+        },
+        {
+            "group_id": "rules_and_trust",
+            "title": "Rules and Data Trust",
+            "questions": [
+                {
+                    "question_id": "mandatory_exclusions",
+                    "prompt": "Which records should always be excluded?",
+                    "answer_type": "text",
+                    "required": False,
+                    "maps_to": ["metric_refinement", "join_rule"],
+                },
+                {
+                    "question_id": "unreliable_fields",
+                    "prompt": "Which fields or tables are known to be unreliable?",
+                    "answer_type": "text",
+                    "required": False,
+                    "maps_to": ["business_context", "interpretation_rule"],
+                },
+            ],
+        },
+    ]
+
+
+def _load_context_questions_for_domain(domain_id: str) -> list[dict]:
+    pack = load_pack(f"packs/{domain_id}")
+    groups = ((pack.get("context_questions") or {}).get("question_groups") or [])
+    return groups if groups else _default_context_questions(domain_id)
+
+
+@app.get(
+    "/packs/{pack_id}/context-questions",
+    response_model=ContextQuestionsResponse,
+    tags=["context"],
+    summary="Get pack context questions",
+    description="Return pack-defined semantic discovery questions, with a generic fallback when the pack has no context_questions.yml.",
+)
+def get_pack_context_questions(pack_id: str) -> ContextQuestionsResponse:
+    if pack_id not in list_packs():
+        raise HTTPException(status_code=404, detail="Pack not found")
+    return ContextQuestionsResponse(domain_id=pack_id, question_groups=_load_context_questions_for_domain(pack_id))
+
+
+@app.get(
+    "/semantic/context-questions",
+    response_model=ContextQuestionsResponse,
+    tags=["semantic"],
+    summary="Get semantic context questions",
+    description="Return semantic discovery questions for the selected tenant/domain.",
+)
+def get_semantic_context_questions(tenant_id: str, domain_id: str | None = None) -> ContextQuestionsResponse:
+    resolved_domain_id = _resolve_domain_id(tenant_id, domain_id)
+    return ContextQuestionsResponse(
+        domain_id=resolved_domain_id,
+        question_groups=_load_context_questions_for_domain(resolved_domain_id),
+    )
+
+
 @app.post(
     "/context/ingest",
     response_model=ContextIngestResponse,
@@ -7061,6 +7202,28 @@ def _workspace_query_response(
             explicit_metrics=metrics,
             explicit_dimensions=dimensions,
         )
+    active_semantic_state = load_active_semantic_state(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    if active_semantic_state:
+        glossary = merge_semantic_glossary(glossary, active_semantic_state)
+        join_constraints = semantic_join_constraints(active_semantic_state)
+        constrained_joins, removed_joins = apply_join_constraints_to_edges(
+            (intelligence_bundle or {}).get("joins") or [],
+            join_constraints,
+        )
+        if removed_joins and intelligence_bundle is not None:
+            intelligence_bundle["joins"] = constrained_joins
+            logger.info(
+                "workspace.semantic_constraints | removed_joins=%s constraints=%s",
+                len(removed_joins),
+                join_constraints,
+            )
     raw_llm_plan = interpret_workspace_query(
         question=question,
         metric_catalog=metric_catalog,
@@ -9968,6 +10131,28 @@ def workspace_send_message(conversation_id: str, payload: dict):
     _conv_tenant = conversation["tenant_id"]
     _conv_domain = conversation["domain_id"]
     _conv_connection_id, _conv_db, _conv_schema, _ = _resolve_scope_values(_conv_tenant, _conv_domain)
+    try:
+        writeback = maybe_writeback_conversation_refinement(
+            settings,
+            tenant_id=_conv_tenant,
+            domain_id=_conv_domain,
+            connection_id=_conv_connection_id,
+            database_name=_conv_db,
+            schema_name=_conv_schema,
+            source_run_id=conversation.get("run_id"),
+            conversation_id=conversation_id,
+            source_text=user_query,
+        )
+        if writeback:
+            logger.info(
+                "workspace.message.semantic_writeback | conversation_id=%s refinement_input_id=%s kind=%s valid_artifacts=%s",
+                conversation_id,
+                writeback.get("refinement_input_id"),
+                writeback.get("refinement_kind"),
+                writeback.get("valid_artifact_count"),
+            )
+    except Exception:
+        logger.warning("workspace.message.semantic_writeback_failed | conversation_id=%s", conversation_id, exc_info=True)
     _active_ctx_ids = list_active_context_ids(
         settings, _conv_tenant, _conv_domain, _conv_connection_id, _conv_db, _conv_schema
     )
@@ -18009,6 +18194,23 @@ def query(request: QueryRequest) -> QueryResult:
             list(model_intelligence_map.values())[:10],
         )
         scoped_join_edges = [dict(item) for item in ((intelligence_bundle or {}).get("joins") or []) if isinstance(item, dict)]
+        active_semantic_state = load_active_semantic_state(
+            settings,
+            tenant_id=request.tenant_id,
+            domain_id=domain_id,
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
+        if active_semantic_state:
+            join_constraints = semantic_join_constraints(active_semantic_state)
+            scoped_join_edges, removed_join_edges = apply_join_constraints_to_edges(scoped_join_edges, join_constraints)
+            if removed_join_edges:
+                logger.info(
+                    "query.semantic_constraints | removed_joins=%s constraints=%s",
+                    len(removed_join_edges),
+                    join_constraints,
+                )
         missing_artifacts = _missing_required_intelligence(intelligence_bundle or {})
         if missing_artifacts:
             logger.error(
@@ -18084,6 +18286,8 @@ def query(request: QueryRequest) -> QueryResult:
         logger.info("query.fact_dim_candidates | count=%s dims=%s", len(dimension_candidates), dimension_candidates)
         _log_step("dimension_candidates")
         glossary = (intelligence_bundle or {}).get("glossary") or fetch_glossary_terms(settings, request.tenant_id, domain_id)
+        if active_semantic_state:
+            glossary = merge_semantic_glossary(glossary, active_semantic_state)
         logger.info("query.glossary | loaded=%s", len(glossary or []))
         contract = get_active_semantic_contract(settings, request.tenant_id, domain_id)
         _log_step("glossary_contract")
@@ -19262,43 +19466,449 @@ def chat_stream(chat_id: str):
     return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
 
+def _refinement_artifact_response(row: dict) -> SemanticRefinementArtifactResponse:
+    return SemanticRefinementArtifactResponse(
+        artifact_id=row.get("artifact_id"),
+        refinement_input_id=row.get("refinement_input_id"),
+        tenant_id=row.get("tenant_id"),
+        domain_id=row.get("domain_id"),
+        artifact_type=row.get("artifact_type"),
+        artifact_json=row.get("artifact_json") or {},
+        validation_status=row.get("validation_status") or "pending",
+        validation_errors_json=row.get("validation_errors_json") or [],
+        approval_status=row.get("approval_status") or "pending",
+        approved_by=row.get("approved_by"),
+        approved_at=row.get("approved_at"),
+        created_at=row.get("created_at"),
+    )
+
+
+def _refinement_response(row: dict, artifacts: list[dict] | None = None, semantic_state_id: str | None = None) -> SemanticRefinementResponse:
+    return SemanticRefinementResponse(
+        refinement_input_id=row.get("refinement_input_id"),
+        tenant_id=row.get("tenant_id"),
+        domain_id=row.get("domain_id"),
+        source_type=row.get("source_type"),
+        refinement_kind=row.get("refinement_kind"),
+        status=row.get("status"),
+        source_text=row.get("source_text"),
+        source_payload_json=row.get("source_payload_json"),
+        source_run_id=row.get("source_run_id"),
+        source_context_id=row.get("source_context_id"),
+        conversation_id=row.get("conversation_id"),
+        submitted_by=row.get("submitted_by"),
+        connection_id=row.get("connection_id"),
+        database_name=row.get("database_name"),
+        schema_name=row.get("schema_name"),
+        artifacts=[_refinement_artifact_response(item) for item in (artifacts or [])],
+        semantic_state_id=semantic_state_id,
+        created_at=row.get("created_at"),
+        updated_at=row.get("updated_at"),
+    )
+
+
+def _semantic_state_response(row: dict, tenant_id: str, domain_id: str) -> SemanticStateResponse:
+    return SemanticStateResponse(
+        semantic_state_id=row.get("semantic_state_id"),
+        tenant_id=row.get("tenant_id") or tenant_id,
+        domain_id=row.get("domain_id") or domain_id,
+        connection_id=row.get("connection_id"),
+        database_name=row.get("database_name"),
+        schema_name=row.get("schema_name"),
+        version_no=row.get("version_no"),
+        state_json=row.get("state_json") or {},
+        created_from_artifact_ids=row.get("created_from_artifact_ids") or [],
+        trigger_type=row.get("trigger_type"),
+        is_active=row.get("is_active"),
+        created_at=row.get("created_at"),
+    )
+
+
+def _semantic_propagation_response(row: dict, tenant_id: str, domain_id: str) -> SemanticPropagationJobResponse:
+    return SemanticPropagationJobResponse(
+        job_id=row.get("job_id"),
+        tenant_id=row.get("tenant_id") or tenant_id,
+        domain_id=row.get("domain_id") or domain_id,
+        connection_id=row.get("connection_id"),
+        database_name=row.get("database_name"),
+        schema_name=row.get("schema_name"),
+        trigger_type=row.get("trigger_type") or "manual",
+        affected_scope_json=row.get("affected_scope_json") or {},
+        status=row.get("status") or "queued",
+        created_at=row.get("created_at"),
+        completed_at=row.get("completed_at"),
+    )
+
+
+@app.post(
+    "/semantic/refinements",
+    response_model=SemanticRefinementResponse,
+    tags=["semantic"],
+    summary="Submit a semantic refinement",
+    description=(
+        "Create a post-deployment semantic refinement. Current backend behavior auto-processes "
+        "and auto-approves valid artifacts by default; manual approval is intentionally deferred."
+    ),
+)
+def create_semantic_refinement(payload: SemanticRefinementCreateRequest) -> SemanticRefinementResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    refinement_kind = str(payload.refinement_kind or "auto").strip()
+    if refinement_kind == "auto":
+        refinement_kind = infer_refinement_kind(payload.text, payload.payload)
+    errors = validate_refinement_input_payload(
+        source_type=payload.source_type,
+        refinement_kind=refinement_kind,
+        source_text=payload.text,
+        source_payload_json=payload.payload,
+    )
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+
+    connection_id = payload.connection_id
+    database_name = payload.database_name
+    schema_name = payload.schema_name
+    if not (connection_id and database_name and schema_name):
+        resolved_connection, resolved_database, resolved_schema, _ = _resolve_scope_values(payload.tenant_id, domain_id)
+        connection_id = connection_id or resolved_connection
+        database_name = database_name or resolved_database
+        schema_name = schema_name or resolved_schema
+
+    refinement_input_id = create_refinement_input(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        source_run_id=payload.source_run_id,
+        source_type=payload.source_type,
+        refinement_kind=refinement_kind,
+        source_text=payload.text,
+        source_payload_json=payload.payload,
+        source_context_id=payload.source_context_id,
+        source_file_id=payload.source_file_id,
+        conversation_id=payload.conversation_id,
+        submitted_by=payload.submitted_by,
+    )
+    row = get_refinement_input(settings, refinement_input_id)
+    artifacts: list[dict] = []
+    semantic_state_id: str | None = None
+    if row and payload.auto_process:
+        artifacts = process_refinement_input(
+            settings,
+            row,
+            auto_approve=True,
+            approved_by=payload.submitted_by or "system:auto_approve",
+        )
+        row = get_refinement_input(settings, refinement_input_id) or row
+        if payload.rebuild_state:
+            state_result = rebuild_semantic_state(
+                settings,
+                tenant_id=payload.tenant_id,
+                domain_id=domain_id,
+                connection_id=connection_id,
+                database_name=database_name,
+                schema_name=schema_name,
+                trigger_type="refinement_auto_approved",
+            )
+            semantic_state_id = state_result.get("semantic_state_id")
+        enqueue_semantic_propagation_for_artifacts(
+            settings,
+            tenant_id=payload.tenant_id,
+            domain_id=domain_id,
+            connection_id=connection_id,
+            database_name=database_name,
+            schema_name=schema_name,
+            artifacts=artifacts,
+            trigger_type="refinement_auto_approved",
+            semantic_state_id=semantic_state_id,
+        )
+    return _refinement_response(row or {"refinement_input_id": refinement_input_id}, artifacts, semantic_state_id)
+
+
+@app.get(
+    "/semantic/refinements",
+    response_model=SemanticRefinementListResponse,
+    tags=["semantic"],
+    summary="List semantic refinements",
+)
+def list_semantic_refinements(
+    tenant_id: str,
+    domain_id: str | None = None,
+    status: str | None = None,
+    refinement_kind: str | None = None,
+    submitted_by: str | None = None,
+    include_artifacts: bool = True,
+    limit: int = 100,
+) -> SemanticRefinementListResponse:
+    resolved_domain_id = _resolve_domain_id(tenant_id, domain_id)
+    rows = list_refinement_inputs(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=resolved_domain_id,
+        status=status,
+        refinement_kind=refinement_kind,
+        submitted_by=submitted_by,
+        limit=limit,
+    )
+    responses: list[SemanticRefinementResponse] = []
+    for row in rows:
+        artifacts = []
+        if include_artifacts:
+            artifacts = list_refinement_artifacts(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=resolved_domain_id,
+                refinement_input_id=row.get("refinement_input_id"),
+                limit=100,
+            )
+        responses.append(_refinement_response(row, artifacts))
+    return SemanticRefinementListResponse(refinements=responses)
+
+
+@app.get(
+    "/semantic/refinements/{refinement_input_id}",
+    response_model=SemanticRefinementResponse,
+    tags=["semantic"],
+    summary="Get a semantic refinement",
+)
+def get_semantic_refinement(refinement_input_id: str, tenant_id: str) -> SemanticRefinementResponse:
+    row = get_refinement_input(settings, refinement_input_id)
+    if not row or row.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=404, detail="Refinement not found")
+    artifacts = list_refinement_artifacts(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=row.get("domain_id"),
+        refinement_input_id=refinement_input_id,
+        limit=100,
+    )
+    return _refinement_response(row, artifacts)
+
+
+@app.post(
+    "/semantic/refinements/{refinement_input_id}/process",
+    response_model=SemanticRefinementProcessResponse,
+    tags=["semantic"],
+    summary="Process a semantic refinement",
+    description="Extract structured artifacts and auto-approve valid artifacts. Manual approval is deferred.",
+)
+def process_semantic_refinement(
+    refinement_input_id: str,
+    tenant_id: str,
+    rebuild_state: bool = True,
+) -> SemanticRefinementProcessResponse:
+    row = get_refinement_input(settings, refinement_input_id)
+    if not row or row.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=404, detail="Refinement not found")
+    artifacts = process_refinement_input(settings, row, auto_approve=True, approved_by="system:auto_approve")
+    semantic_state_id = None
+    if rebuild_state:
+        state_result = rebuild_semantic_state(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=row.get("domain_id"),
+            connection_id=row.get("connection_id"),
+            database_name=row.get("database_name"),
+            schema_name=row.get("schema_name"),
+            trigger_type="refinement_process_auto_approved",
+        )
+        semantic_state_id = state_result.get("semantic_state_id")
+    enqueue_semantic_propagation_for_artifacts(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=row.get("domain_id"),
+        connection_id=row.get("connection_id"),
+        database_name=row.get("database_name"),
+        schema_name=row.get("schema_name"),
+        artifacts=artifacts,
+        trigger_type="refinement_process_auto_approved",
+        semantic_state_id=semantic_state_id,
+    )
+    return SemanticRefinementProcessResponse(
+        refinement_input_id=refinement_input_id,
+        artifacts=[_refinement_artifact_response(item) for item in artifacts],
+        semantic_state_id=semantic_state_id,
+    )
+
+
+@app.get(
+    "/semantic/state",
+    response_model=SemanticStateResponse,
+    tags=["semantic"],
+    summary="Get current semantic state",
+)
+def get_semantic_state_endpoint(
+    tenant_id: str,
+    domain_id: str | None = None,
+    connection_id: str | None = None,
+    database_name: str | None = None,
+    schema_name: str | None = None,
+) -> SemanticStateResponse:
+    resolved_domain_id = _resolve_domain_id(tenant_id, domain_id)
+    if not (connection_id and database_name and schema_name):
+        resolved_connection, resolved_database, resolved_schema, _ = _resolve_scope_values(tenant_id, resolved_domain_id)
+        connection_id = connection_id or resolved_connection
+        database_name = database_name or resolved_database
+        schema_name = schema_name or resolved_schema
+    row = get_current_semantic_state(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=resolved_domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Semantic state not found")
+    return _semantic_state_response(row, tenant_id, resolved_domain_id)
+
+
+@app.post(
+    "/semantic/state/rebuild",
+    response_model=SemanticStateResponse,
+    tags=["semantic"],
+    summary="Rebuild semantic state",
+    description="Build a new active semantic state snapshot from auto-approved/approved refinement artifacts and existing overrides.",
+)
+def rebuild_semantic_state_endpoint(payload: SemanticStateRebuildRequest) -> SemanticStateResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id = payload.connection_id
+    database_name = payload.database_name
+    schema_name = payload.schema_name
+    if not (connection_id and database_name and schema_name):
+        resolved_connection, resolved_database, resolved_schema, _ = _resolve_scope_values(payload.tenant_id, domain_id)
+        connection_id = connection_id or resolved_connection
+        database_name = database_name or resolved_database
+        schema_name = schema_name or resolved_schema
+    result = rebuild_semantic_state(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        trigger_type=payload.trigger_type,
+    )
+    row = get_current_semantic_state(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    return _semantic_state_response(row or {"semantic_state_id": result.get("semantic_state_id"), "state_json": result.get("state_json")}, payload.tenant_id, domain_id)
+
+
+@app.post(
+    "/semantic/propagation",
+    response_model=SemanticPropagationJobResponse,
+    tags=["semantic"],
+    summary="Queue semantic propagation",
+    description="Queue a selective propagation job for downstream semantic consumers. The runner is intentionally deferred.",
+)
+def create_semantic_propagation(payload: SemanticPropagationRequest) -> SemanticPropagationJobResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id = payload.connection_id
+    database_name = payload.database_name
+    schema_name = payload.schema_name
+    if not (connection_id and database_name and schema_name):
+        resolved_connection, resolved_database, resolved_schema, _ = _resolve_scope_values(payload.tenant_id, domain_id)
+        connection_id = connection_id or resolved_connection
+        database_name = database_name or resolved_database
+        schema_name = schema_name or resolved_schema
+    affected_scope = payload.affected_scope or {
+        "artifact_ids": [],
+        "artifact_types": [],
+        "refresh_actions": ["refresh_semantic_state"],
+        "affected_tables": [],
+        "affected_columns": [],
+        "affected_metrics": [],
+        "impact_level": "manual",
+    }
+    job_id = create_semantic_propagation_job(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        trigger_type=payload.trigger_type,
+        affected_scope_json=affected_scope,
+    )
+    return _semantic_propagation_response(
+        {
+            "job_id": job_id,
+            "tenant_id": payload.tenant_id,
+            "domain_id": domain_id,
+            "connection_id": connection_id,
+            "database_name": database_name,
+            "schema_name": schema_name,
+            "trigger_type": payload.trigger_type,
+            "affected_scope_json": affected_scope,
+            "status": "queued",
+        },
+        payload.tenant_id,
+        domain_id,
+    )
+
+
+@app.get(
+    "/semantic/propagation",
+    response_model=SemanticPropagationListResponse,
+    tags=["semantic"],
+    summary="List semantic propagation jobs",
+)
+def list_semantic_propagation(
+    tenant_id: str,
+    domain_id: str | None = None,
+    status: str | None = None,
+    connection_id: str | None = None,
+    database_name: str | None = None,
+    schema_name: str | None = None,
+    limit: int = 100,
+) -> SemanticPropagationListResponse:
+    resolved_domain_id = _resolve_domain_id(tenant_id, domain_id)
+    rows = list_semantic_propagation_jobs(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=resolved_domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        status=status,
+        limit=limit,
+    )
+    return SemanticPropagationListResponse(
+        jobs=[_semantic_propagation_response(row, tenant_id, resolved_domain_id) for row in rows]
+    )
+
+
+@app.post(
+    "/semantic/propagation/{job_id}/run",
+    response_model=SemanticPropagationJobResponse,
+    tags=["semantic"],
+    summary="Run a semantic propagation job",
+    description=(
+        "Run queued semantic propagation actions best-effort. Currently this rebuilds semantic state, "
+        "recomputes chart interaction metadata, and queues dashboard refresh jobs where possible."
+    ),
+)
+def run_semantic_propagation(job_id: str, tenant_id: str) -> SemanticPropagationJobResponse:
+    try:
+        row = run_semantic_propagation_job(settings, job_id, tenant_id=tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Semantic propagation job not found")
+    return _semantic_propagation_response(row, tenant_id, row.get("domain_id") or "")
+
+
 @app.post(
     "/semantic/feedback",
     response_model=SemanticFeedbackResponse,
     tags=["governance"],
     summary="Submit semantic feedback",
-    openapi_extra={
-        "requestBody": {
-            "content": {
-                "application/json": {
-                    "examples": {
-                        "confirm": {
-                            "summary": "Confirm edge",
-                            "value": {
-                                "tenant_id": "VC_101",
-                                "domain_id": "lpg_production_distribution",
-                                "edge_id": "edge_123",
-                                "action": "confirm",
-                                "delta_confidence": 0.1,
-                                "notes": "Correct mapping for plant -> sap_id",
-                            },
-                        },
-                        "reject": {
-                            "summary": "Reject edge",
-                            "value": {
-                                "tenant_id": "VC_101",
-                                "domain_id": "lpg_production_distribution",
-                                "edge_id": "edge_456",
-                                "action": "reject",
-                                "delta_confidence": -0.3,
-                                "notes": "Incorrect synonym mapping",
-                            },
-                        },
-                    }
-                }
-            }
-        }
-    },
+    description="Legacy semantic edge feedback endpoint.",
 )
 def semantic_feedback(payload: SemanticFeedbackRequest) -> SemanticFeedbackResponse:
     domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
@@ -20709,6 +21319,13 @@ def _run_correlation_background(
     """Background thread: run full correlation intelligence and persist results."""
     _log = logging.getLogger(__name__)
     try:
+        semantic_context = semantic_interpretation_context(
+            load_active_semantic_state(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+            )
+        )
         result = run_correlation_intelligence(
             settings,
             correlation_run_id=correlation_run_id,
@@ -20717,6 +21334,7 @@ def _run_correlation_background(
             run_id=run_id,
             forecast_periods=forecast_periods,
             analysis_mode=analysis_mode,
+            semantic_context=semantic_context,
         )
 
         # Generate chart specs and register each one in quantyx_chart_requests
@@ -20821,6 +21439,7 @@ def _run_correlation_background(
                 investigation_threads=result.get("investigation_threads") or [],
                 data_quality_warnings=result.get("data_quality_warnings") or [],
                 snapshot_eligibility_summary=result.get("snapshot_eligibility_summary") or {},
+                semantic_context=result.get("semantic_context") or {},
             )
         except Exception:
             _log.warning("[correlation] Narration failed", exc_info=True)

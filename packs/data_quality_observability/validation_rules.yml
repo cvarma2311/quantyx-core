@@ -1,0 +1,13 @@
+industry: data_quality_observability
+version: 1
+
+validation_rules:
+  completeness:
+    sparse_column_threshold_pct: 25.0
+    severe_sparse_column_threshold_pct: 50.0
+  uniqueness:
+    duplicate_warning_threshold_pct: 1.0
+    duplicate_critical_threshold_pct: 5.0
+  freshness:
+    stale_warning_days: 2
+    stale_critical_days: 7

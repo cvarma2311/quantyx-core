@@ -1,0 +1,41 @@
+industry: data_quality_observability
+version: 1
+
+policies:
+  - name: prefer_profiled_columns
+    applies_to: all
+    description: Prefer charting profiled quality metrics over raw record-level fields.
+    filter:
+      column: semantic_role
+      operator: not_in
+      values: ["raw_identifier_noise"]
+
+dashboard_preferences:
+  kpi_priority_hints:
+    trust: 130
+    completeness: 125
+    null: 120
+    duplicate: 118
+    freshness: 116
+    validity: 114
+    uniqueness: 110
+    quality: 108
+
+  time_priority_columns:
+    - profiled_at
+    - observed_at
+    - updated_at
+    - created_at
+    - event_date
+
+  breakdown_priority_tokens:
+    - table
+    - column
+    - dataset
+    - source
+    - domain
+
+  chart_preferences:
+    prefer_time_series_ascending: true
+    prefer_rankings_descending: true
+    default_time_grouping: day

@@ -151,6 +151,9 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 49. **Phase 53: Continuous Domain Knowledge Refinement and Semantic Learning**
    - Let users add business context, hierarchy corrections, column descriptions, metric meaning, and domain rules after deployment; validate and version those refinements; and selectively propagate them into the approved semantic state and downstream analytics behavior.
 
+50. **Phase 54: Data Quality, Validity, and Profiling Pack**
+   - Add a dedicated pack for data completeness, missingness, duplication, fuzzy duplication, freshness, validity, trust scoring, and profiling dashboards so the platform can analyze data health and reliability as a first-class product.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -182,3 +185,4 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 51 depends on Phases 24/34/38/43/45/46/47/50 and upgrades anomaly detection/dashboarding with table-native fallback exploration, contextual LLM chart narration, and correlation-aware exploratory anomaly storytelling.
 - Phase 52 depends on Phases 02/03/24/31/34/39/41/44 and adds persisted hierarchy semantics, interaction context, and deterministic chart filter/drill SQL generation.
 - Phase 53 depends on Phases 24/34/36/41/42/52 and turns deployment-time semantics into a continuously refined, versioned domain knowledge layer with selective downstream propagation.
+- Phase 54 depends on Phases 15/29/34/35/46 and turns persisted profiling evidence into a reusable data quality pack with quality metrics, trust scoring, and dedicated dashboards.

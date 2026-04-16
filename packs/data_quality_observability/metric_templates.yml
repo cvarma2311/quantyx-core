@@ -1,0 +1,58 @@
+industry: data_quality_observability
+version: 1
+
+templates:
+  - name: table_row_count
+    type: count
+    description: Total row count for a profiled table.
+    measure_hint: count
+
+  - name: table_completeness_score
+    type: ratio
+    description: Average non-null coverage across profiled columns in a table.
+    measure_hint: quality
+
+  - name: rows_with_any_null_pct
+    type: ratio
+    description: Share of rows where at least one profiled column is null.
+    measure_hint: quality
+
+  - name: column_null_pct
+    type: ratio
+    description: Percentage of rows where a given column is null.
+    measure_hint: quality
+
+  - name: column_non_null_pct
+    type: ratio
+    description: Percentage of rows where a given column is populated.
+    measure_hint: quality
+
+  - name: column_blank_pct
+    type: ratio
+    description: Percentage of rows where a text-like column is blank after trimming.
+    measure_hint: quality
+
+  - name: duplicate_key_pct
+    type: ratio
+    description: Duplicate percentage for identifier-like columns that should be unique.
+    measure_hint: quality
+
+  - name: uniqueness_ratio
+    type: ratio
+    description: Distinct-to-row ratio for a candidate key or profiled column.
+    measure_hint: quality
+
+  - name: freshness_lag_days
+    type: ratio
+    description: Number of days since the most recent value in the primary time column.
+    measure_hint: freshness
+
+  - name: table_trust_score
+    type: ratio
+    description: Composite trust score derived from completeness, duplication, and freshness.
+    measure_hint: quality
+
+  - name: fuzzy_duplicate_risk
+    type: ratio
+    description: Risk indicator that near-duplicate text values may represent the same entity.
+    measure_hint: quality

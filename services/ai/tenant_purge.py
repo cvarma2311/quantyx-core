@@ -67,9 +67,17 @@ def purge_tenant_data(
                 "quantyx_anomaly_hypotheses",
                 "quantyx_anomaly_actions",
                 "quantyx_anomaly_dashboard_links",
+                "quantyx_domain_refinement_artifacts",
+                "quantyx_domain_refinement_inputs",
+                "quantyx_domain_semantic_state",
+                "quantyx_semantic_propagation_jobs",
             ]
             # Delete children before parents to avoid FK violations.
             deletion_order = [
+                "quantyx_domain_refinement_artifacts",
+                "quantyx_semantic_propagation_jobs",
+                "quantyx_domain_semantic_state",
+                "quantyx_domain_refinement_inputs",
                 "quantyx_anomaly_actions",
                 "quantyx_anomaly_hypotheses",
                 "quantyx_anomaly_dashboard_links",

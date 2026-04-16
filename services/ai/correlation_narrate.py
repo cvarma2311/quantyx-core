@@ -161,6 +161,7 @@ def _summary_fallback(
     data_quality_warnings: list[dict] | None = None,
     category_temporal_summary: list[dict] | None = None,
     snapshot_eligibility_summary: dict[str, Any] | None = None,
+    semantic_context: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Plain-text + HTML overall summary when LLM is unavailable."""
     n_metrics = len({a["metric_name"] for a in anomaly_results})
@@ -208,6 +209,9 @@ def _summary_fallback(
         )
     if data_quality_warnings:
         parts.append(str(data_quality_warnings[0].get("message") or "").strip())
+    if semantic_context and semantic_context.get("interpretation_rules"):
+        rule = semantic_context["interpretation_rules"][0]
+        parts.append(str(rule.get("rule") or rule.get("text") or "Domain interpretation guidance was applied."))
 
     text = " ".join(parts)
     html = "".join(f"<p>{escape(p)}</p>" for p in parts)
@@ -454,6 +458,7 @@ def narrate_run_summary(
     investigation_threads: list[dict],
     data_quality_warnings: list[dict] | None = None,
     snapshot_eligibility_summary: dict[str, Any] | None = None,
+    semantic_context: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """
     Generate an executive summary for the entire correlation run.
@@ -539,6 +544,7 @@ def narrate_run_summary(
         "category_temporal_summary": category_temporal_summary,
         "data_quality_warnings": data_quality_warnings or [],
         "snapshot_eligibility_summary": snapshot_eligibility_summary or {},
+        "semantic_context": semantic_context or {},
     }
 
     result = _llm_call(
@@ -561,6 +567,7 @@ def narrate_run_summary(
         data_quality_warnings,
         category_temporal_summary,
         snapshot_eligibility_summary,
+        semantic_context,
     )
 
 
@@ -578,6 +585,7 @@ def narrate_correlation_results(
     investigation_threads: list[dict],
     data_quality_warnings: list[dict] | None = None,
     snapshot_eligibility_summary: dict[str, Any] | None = None,
+    semantic_context: dict[str, Any] | None = None,
 ) -> dict:
     """
     Enrich investigation threads with narrative text + HTML, then generate
@@ -626,6 +634,7 @@ def narrate_correlation_results(
             investigation_threads=investigation_threads,
             data_quality_warnings=data_quality_warnings,
             snapshot_eligibility_summary=snapshot_eligibility_summary,
+            semantic_context=semantic_context,
         )
     except Exception:
         logger.warning("[correlation.narrate] Run summary narration failed", exc_info=True)
@@ -637,6 +646,7 @@ def narrate_correlation_results(
             data_quality_warnings,
             _build_category_temporal_summary(kpi_snapshots, forward_projections),
             snapshot_eligibility_summary,
+            semantic_context,
         )
 
     insights = _build_run_insights(
@@ -652,4 +662,5 @@ def narrate_correlation_results(
         "summary_html": summary_html,
         "threads_narrated": narrated,
         "insights": insights,
+        "semantic_context": semantic_context or {},
     }

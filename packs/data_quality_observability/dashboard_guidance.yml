@@ -1,0 +1,13 @@
+industry: data_quality_observability
+version: 1
+
+dashboard_guidance:
+  default_dashboards:
+    - name: Data Trust Scorecard
+      description: High-level trust, completeness, and freshness summary by table.
+    - name: Missingness and Completeness Dashboard
+      description: Null-rate and sparse-column analysis by table and column.
+    - name: Duplicate and Uniqueness Risk Dashboard
+      description: Duplicate-risk and candidate-key health dashboard.
+    - name: Freshness and Stability Dashboard
+      description: Freshness lag and time-based data health trends.

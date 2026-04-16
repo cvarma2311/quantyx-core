@@ -1,0 +1,69 @@
+industry: lpg_production_distribution
+version: 1
+
+question_groups:
+  - group_id: dashboard_objectives
+    title: Dashboard Objectives
+    questions:
+      - question_id: primary_kpis
+        prompt: What are the most important LPG KPIs this dashboard should track?
+        answer_type: text
+        required: true
+        maps_to:
+          - metric_refinement
+          - chart_guidance
+
+      - question_id: dashboard_audience
+        prompt: Who is the main audience for this dashboard?
+        answer_type: single_select
+        options:
+          - operations
+          - management
+          - planning
+          - quality
+        required: false
+        maps_to:
+          - chart_guidance
+
+  - group_id: hierarchy_and_grain
+    title: Hierarchy and Grain
+    questions:
+      - question_id: preferred_drill_path
+        prompt: What is the preferred LPG drill path from broad to detailed levels?
+        answer_type: text
+        required: false
+        suggested_default: zone > region > sales_area > distributor
+        maps_to:
+          - hierarchy_override
+
+      - question_id: preferred_time_grain
+        prompt: Which time grain is most important for LPG operational decisions?
+        answer_type: single_select
+        options:
+          - day
+          - week
+          - month
+          - quarter
+        required: false
+        maps_to:
+          - chart_guidance
+          - metric_refinement
+
+  - group_id: rules_and_trust
+    title: Rules and Data Trust
+    questions:
+      - question_id: mandatory_exclusions
+        prompt: Which records should always be excluded from KPI calculations?
+        answer_type: text
+        required: false
+        maps_to:
+          - join_rule
+          - metric_refinement
+
+      - question_id: unreliable_fields
+        prompt: Which fields or tables are known to be unreliable for LPG reporting?
+        answer_type: text
+        required: false
+        maps_to:
+          - business_context
+          - interpretation_rule

@@ -1,0 +1,8 @@
+industry: data_quality_observability
+version: 1.0.0
+release_date: "2026-04-09"
+notes: >
+  Generic data quality and profiling pack focused on completeness, validity,
+  uniqueness, freshness, duplication risk, and trust scoring across arbitrary
+  relational tables. This pack is domain-agnostic and is intended to surface
+  data-health KPIs and dashboards alongside business analytics.

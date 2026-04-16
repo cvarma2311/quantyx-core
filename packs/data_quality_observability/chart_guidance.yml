@@ -1,0 +1,19 @@
+industry: data_quality_observability
+version: 1
+
+chart_guidance:
+  preferred_charts:
+    - leaderboard
+    - line
+    - grouped_bar
+    - heatmap
+    - scorecard
+  recommended_breakdowns:
+    - table_name
+    - column_name
+    - quality_family
+  recommended_trends:
+    - null_pct
+    - duplicate_pct
+    - freshness_lag_days
+    - trust_score

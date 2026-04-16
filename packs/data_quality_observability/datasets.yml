@@ -1,0 +1,36 @@
+industry: data_quality_observability
+version: 1
+
+datasets:
+  - name: profiled_table_quality
+    source_model: profiled_table
+    description: >
+      Table-level quality and trust indicators derived from generic profiling.
+    grain: table_snapshot
+    key_measures:
+      - row_count
+      - table_completeness_score
+      - rows_with_any_null_pct
+      - table_trust_score
+    key_dimensions:
+      - table_name
+      - schema_name
+      - source_system
+    date_column: profiled_at
+
+  - name: profiled_column_quality
+    source_model: profiled_column
+    description: >
+      Column-level completeness, uniqueness, and blankness metrics derived from generic profiling.
+    grain: table_column_snapshot
+    key_measures:
+      - null_pct
+      - non_null_pct
+      - blank_pct
+      - distinct_ratio
+    key_dimensions:
+      - table_name
+      - column_name
+      - data_type
+      - semantic_role
+    date_column: profiled_at

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
@@ -141,6 +142,93 @@ _SQL_IDENTIFIER_IGNORE = {
 def _qident(name: str) -> str:
     # Defensive quoting for mixed-case/special-character identifiers.
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def _safe_ratio(numerator: Any, denominator: Any) -> float | None:
+    try:
+        num = float(numerator)
+        den = float(denominator)
+    except Exception:
+        return None
+    if den <= 0:
+        return None
+    return num / den
+
+
+def _profile_json_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def _normalized_text_key(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    raw = re.sub(r"[^a-z0-9]+", " ", raw)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _estimate_fuzzy_duplicate_risk(samples: list[Any]) -> dict[str, Any] | None:
+    cleaned = [str(item).strip() for item in (samples or []) if str(item or "").strip()]
+    if len(cleaned) < 4:
+        return None
+    normalized = [_normalized_text_key(item) for item in cleaned]
+    normalized = [item for item in normalized if item]
+    if len(normalized) < 4:
+        return None
+    raw_unique = len(set(cleaned))
+    normalized_unique = len(set(normalized))
+    if raw_unique <= 0 or normalized_unique >= raw_unique:
+        return None
+    duplicate_pressure = 1.0 - (normalized_unique / raw_unique)
+    risk_level = "high" if duplicate_pressure >= 0.2 else "medium" if duplicate_pressure >= 0.1 else "low"
+    return {
+        "raw_unique_sample_count": raw_unique,
+        "normalized_unique_sample_count": normalized_unique,
+        "duplicate_pressure": round(duplicate_pressure, 4),
+        "risk_level": risk_level,
+    }
+
+
+def _build_table_profile_aggregate_query(schema_name: str, table_name: str, columns: list[dict[str, Any]]) -> tuple[str, dict[str, str]]:
+    select_parts = ["COUNT(*) AS row_count"]
+    alias_map: dict[str, str] = {}
+    column_names = [str(col.get("name")) for col in columns if col.get("name")]
+    for idx, col_name in enumerate(column_names):
+        alias_map[f"null__{col_name}"] = f"n{idx}"
+        select_parts.append(
+            f"SUM(CASE WHEN {_qident(col_name)} IS NULL THEN 1 ELSE 0 END) AS n{idx}"
+        )
+        alias_map[f"distinct__{col_name}"] = f"d{idx}"
+        select_parts.append(f"COUNT(DISTINCT {_qident(col_name)}) AS d{idx}")
+    for idx, col in enumerate(columns):
+        col_name = str(col.get("name") or "")
+        data_type = str(col.get("data_type") or "").lower()
+        if not col_name or data_type in NUMERIC_TYPES | TIME_TYPES | BOOLEAN_TYPES:
+            continue
+        alias_map[f"blank__{col_name}"] = f"b{idx}"
+        select_parts.append(
+            f"SUM(CASE WHEN {_qident(col_name)} IS NOT NULL AND BTRIM(CAST({_qident(col_name)} AS text)) = '' THEN 1 ELSE 0 END) AS b{idx}"
+        )
+    null_predicates = [f"{_qident(col_name)} IS NULL" for col_name in column_names]
+    if null_predicates:
+        alias_map["rows_with_any_null"] = "ran"
+        select_parts.append(
+            f"SUM(CASE WHEN {' OR '.join(null_predicates)} THEN 1 ELSE 0 END) AS ran"
+        )
+    for idx, col_name in enumerate([str(col.get("name")) for col in columns if str(col.get("data_type") or '').lower() in TIME_TYPES and col.get("name")]):
+        alias_map[f"max__{col_name}"] = f"tmax{idx}"
+        alias_map[f"min__{col_name}"] = f"tmin{idx}"
+        select_parts.append(f"MAX({_qident(col_name)}) AS tmax{idx}")
+        select_parts.append(f"MIN({_qident(col_name)}) AS tmin{idx}")
+    sql = (
+        f"SELECT {', '.join(select_parts)} "
+        f"FROM {_qident(schema_name)}.{_qident(table_name)}"
+    )
+    return sql, alias_map
 
 
 def _split_tokens(name: str | None) -> list[str]:
@@ -1254,7 +1342,8 @@ def _generate_table_descriptions(
 
 def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name: str, scoped_conn=None) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
-    profiling: dict[str, Any] = {"tables": []}
+    profiled_at = datetime.now(timezone.utc).isoformat()
+    profiling: dict[str, Any] = {"profiled_at": profiled_at, "tables": []}
     for table in schema_graph.get("tables", []):
         name = table.get("name")
         if not name:
@@ -1291,16 +1380,17 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
         candidate_keys: list[dict[str, Any]] = []
         key_profile_map: dict[str, dict[str, Any]] = {}
         column_semantics: list[dict[str, Any]] = []
+        column_profile_map: dict[str, dict[str, Any]] = {}
         row_count = None
+        aggregate_row: dict[str, Any] = {}
+        aggregate_aliases: dict[str, str] = {}
         try:
-            rows = run_query(
-                settings,
-                f"SELECT COUNT(*) AS cnt FROM {_qident(schema_name)}.{_qident(name)}",
-                [],
-                scoped_conn=scoped_conn,
-            )
-            row_count = rows[0]["cnt"] if rows else None
+            aggregate_sql, aggregate_aliases = _build_table_profile_aggregate_query(schema_name, name, columns)
+            rows = run_query(settings, aggregate_sql, [], scoped_conn=scoped_conn)
+            aggregate_row = rows[0] if rows else {}
+            row_count = aggregate_row.get("row_count")
         except Exception:
+            logger.exception("profile_tables: failed aggregate profile %s.%s scoped_conn=%r", schema_name, name, scoped_conn)
             row_count = None
         logger.info(
             "profile_tables | table=%s row_count=%s numeric=%s time=%s categorical=%s",
@@ -1336,22 +1426,17 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
         ]
         for col in key_cols:
             try:
-                distinct_rows = run_query(
-                    settings,
-                    (
-                        f"SELECT COUNT(DISTINCT {_qident(col)}) AS distinct_cnt "
-                        f"FROM {_qident(schema_name)}.{_qident(name)}"
-                    ),
-                    [],
-                    scoped_conn=scoped_conn,
-                )
-                distinct_cnt = distinct_rows[0]["distinct_cnt"] if distinct_rows else None
+                distinct_cnt = aggregate_row.get(aggregate_aliases.get(f"distinct__{col}", ""))
+                uniqueness_ratio = _safe_ratio(distinct_cnt, row_count)
+                duplicate_count = (row_count - distinct_cnt) if row_count is not None and distinct_cnt is not None else None
                 candidate_keys.append(
                     {
                         "column": col,
                         "distinct_count": distinct_cnt,
                         "row_count": row_count,
-                        "uniqueness_ratio": (distinct_cnt / row_count) if row_count and distinct_cnt is not None else None,
+                        "duplicate_count": duplicate_count,
+                        "duplicate_pct": (_safe_ratio(duplicate_count, row_count) * 100.0) if duplicate_count is not None else None,
+                        "uniqueness_ratio": uniqueness_ratio,
                     }
                 )
                 key_profile_map[col] = candidate_keys[-1]
@@ -1362,6 +1447,13 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
             if not col_name:
                 continue
             data_type = str(col.get("data_type") or "").lower()
+            null_count = aggregate_row.get(aggregate_aliases.get(f"null__{col_name}", ""))
+            blank_count = aggregate_row.get(aggregate_aliases.get(f"blank__{col_name}", "")) if data_type not in NUMERIC_TYPES | TIME_TYPES | BOOLEAN_TYPES else 0
+            distinct_count = aggregate_row.get(aggregate_aliases.get(f"distinct__{col_name}", ""))
+            null_pct = (_safe_ratio(null_count, row_count) * 100.0) if null_count is not None else None
+            blank_pct = (_safe_ratio(blank_count, row_count) * 100.0) if blank_count is not None else None
+            distinct_ratio = _safe_ratio(distinct_count, row_count)
+            non_null_pct = (100.0 - null_pct) if null_pct is not None else None
             semantic_role = _classify_column_semantic_role(str(col_name), data_type)
             uniqueness_ratio = (key_profile_map.get(col_name) or {}).get("uniqueness_ratio")
             eligible_measure, eligibility_reason = _is_measure_eligible(
@@ -1377,17 +1469,105 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
                     "semantic_role": semantic_role,
                     "eligible_measure": eligible_measure,
                     "eligibility_reason": eligibility_reason,
-                    "uniqueness_ratio": uniqueness_ratio,
+                    "uniqueness_ratio": uniqueness_ratio if uniqueness_ratio is not None else distinct_ratio,
+                    "null_count": null_count,
+                    "null_pct": null_pct,
+                    "blank_count": blank_count,
+                    "blank_pct": blank_pct,
+                    "distinct_count": distinct_count,
+                    "distinct_ratio": distinct_ratio,
                 }
             )
+            column_profile_map[col_name] = {
+                "name": col_name,
+                "data_type": data_type,
+                "semantic_role": semantic_role,
+                "null_count": null_count,
+                "null_pct": null_pct,
+                "non_null_pct": non_null_pct,
+                "blank_count": blank_count,
+                "blank_pct": blank_pct,
+                "distinct_count": distinct_count,
+                "distinct_ratio": distinct_ratio,
+                "completeness_score": non_null_pct,
+                "is_sparse": bool(null_pct is not None and null_pct >= 25.0),
+                "is_very_sparse": bool(null_pct is not None and null_pct >= 50.0),
+            }
         eligible_numeric_columns = [
             c.get("name")
             for c in column_semantics
             if c.get("eligible_measure") and c.get("data_type") in NUMERIC_TYPES
         ]
+        rows_with_any_null = aggregate_row.get(aggregate_aliases.get("rows_with_any_null", ""))
+        rows_with_any_null_pct = (_safe_ratio(rows_with_any_null, row_count) * 100.0) if rows_with_any_null is not None else None
+        primary_time_column = time_cols[0] if time_cols else None
+        latest_timestamp = None
+        earliest_timestamp = None
+        freshness_lag_days = None
+        if primary_time_column:
+            latest_raw = aggregate_row.get(aggregate_aliases.get(f"max__{primary_time_column}", ""))
+            earliest_raw = aggregate_row.get(aggregate_aliases.get(f"min__{primary_time_column}", ""))
+            latest_timestamp = _profile_json_value(latest_raw)
+            earliest_timestamp = _profile_json_value(earliest_raw)
+            latest_dt = latest_raw
+            if isinstance(latest_dt, date) and not isinstance(latest_dt, datetime):
+                latest_dt = datetime.combine(latest_dt, datetime.min.time(), tzinfo=timezone.utc)
+            elif isinstance(latest_dt, datetime) and latest_dt.tzinfo is None:
+                latest_dt = latest_dt.replace(tzinfo=timezone.utc)
+            if isinstance(latest_dt, datetime):
+                freshness_lag_days = round((datetime.now(timezone.utc) - latest_dt).total_seconds() / 86400.0, 2)
+        fuzzy_duplicate_signals: list[dict[str, Any]] = []
+        for col in categorical[:5]:
+            signal = _estimate_fuzzy_duplicate_risk(samples.get(col) or [])
+            if signal:
+                fuzzy_duplicate_signals.append({"column": col, **signal})
+        completeness_scores = [
+            float(profile["completeness_score"])
+            for profile in column_profile_map.values()
+            if profile.get("completeness_score") is not None
+        ]
+        table_completeness_score = round(sum(completeness_scores) / len(completeness_scores), 2) if completeness_scores else None
+        duplicate_risk_columns = [
+            {
+                "column": key.get("column"),
+                "duplicate_count": key.get("duplicate_count"),
+                "duplicate_pct": key.get("duplicate_pct"),
+                "uniqueness_ratio": key.get("uniqueness_ratio"),
+            }
+            for key in candidate_keys
+            if (key.get("duplicate_count") or 0) > 0
+        ]
+        quality_summary = {
+            "row_count": row_count,
+            "columns_with_nulls_count": sum(1 for profile in column_profile_map.values() if (profile.get("null_count") or 0) > 0),
+            "sparse_columns_count": sum(1 for profile in column_profile_map.values() if profile.get("is_sparse")),
+            "very_sparse_columns_count": sum(1 for profile in column_profile_map.values() if profile.get("is_very_sparse")),
+            "rows_with_any_null": rows_with_any_null,
+            "rows_with_any_null_pct": rows_with_any_null_pct,
+            "table_completeness_score": table_completeness_score,
+            "primary_time_column": primary_time_column,
+            "latest_timestamp": latest_timestamp,
+            "earliest_timestamp": earliest_timestamp,
+            "freshness_lag_days": freshness_lag_days,
+            "duplicate_risk_columns_count": len(duplicate_risk_columns),
+            "fuzzy_duplicate_signals_count": len(fuzzy_duplicate_signals),
+        }
+        trust_components = [
+            max(0.0, min(100.0, float(table_completeness_score)))
+            for table_completeness_score in [table_completeness_score]
+            if table_completeness_score is not None
+        ]
+        if duplicate_risk_columns:
+            max_duplicate_pct = max(float(item.get("duplicate_pct") or 0.0) for item in duplicate_risk_columns)
+            trust_components.append(max(0.0, 100.0 - min(max_duplicate_pct, 100.0)))
+        if freshness_lag_days is not None:
+            freshness_penalty = min(max(float(freshness_lag_days), 0.0) * 5.0, 100.0)
+            trust_components.append(max(0.0, 100.0 - freshness_penalty))
+        quality_summary["table_trust_score"] = round(sum(trust_components) / len(trust_components), 2) if trust_components else None
         profiling["tables"].append(
             {
                 "name": name,
+                "profiled_at": profiled_at,
                 "row_count": row_count,
                 "numeric_columns": numeric,
                 "eligible_numeric_columns": eligible_numeric_columns,
@@ -1396,6 +1576,9 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
                 "sample_values": samples,
                 "candidate_keys": candidate_keys,
                 "column_semantics": column_semantics,
+                "column_profiles": list(column_profile_map.values()),
+                "quality_summary": quality_summary,
+                "fuzzy_duplicate_signals": fuzzy_duplicate_signals,
                 "description": "",  # filled below by LLM
             }
         )
@@ -1408,6 +1591,18 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
             tbl_desc = descriptions.get(tbl["name"]) or ""
             if tbl_desc:
                 tbl["description"] = tbl_desc
+
+    table_quality = [tbl.get("quality_summary") or {} for tbl in (profiling.get("tables") or [])]
+    trust_scores = [float(item["table_trust_score"]) for item in table_quality if item.get("table_trust_score") is not None]
+    profiling["quality_overview"] = {
+        "profiled_at": profiled_at,
+        "table_count": len(profiling.get("tables") or []),
+        "tables_with_nulls_count": sum(1 for item in table_quality if (item.get("columns_with_nulls_count") or 0) > 0),
+        "tables_with_duplicate_risk_count": sum(1 for item in table_quality if (item.get("duplicate_risk_columns_count") or 0) > 0),
+        "tables_with_fuzzy_duplicate_signals_count": sum(1 for item in table_quality if (item.get("fuzzy_duplicate_signals_count") or 0) > 0),
+        "average_table_trust_score": round(sum(trust_scores) / len(trust_scores), 2) if trust_scores else None,
+        "low_trust_tables_count": sum(1 for item in table_quality if float(item.get("table_trust_score") or 0.0) < 70.0),
+    }
 
     return profiling
 

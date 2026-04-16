@@ -1606,6 +1606,7 @@ def run_correlation_intelligence(
     analysis_mode: str = "full",
     scoped_conn=None,
     profiling_stats: dict | None = None,
+    semantic_context: dict | None = None,
 ) -> dict:
     """
     Entry point for the Phase 43 correlation intelligence run.
@@ -1691,6 +1692,7 @@ def run_correlation_intelligence(
             "snapshot_exclusions": snapshot_exclusions,
             "snapshot_eligibility_summary": snapshot_eligibility_summary,
             "data_quality_warnings": data_quality_warnings,
+            "semantic_context": semantic_context or {},
             "metric_count": 0,
             "anomaly_count": 0,
             "correlation_pair_count": 0,
@@ -1791,6 +1793,7 @@ def run_correlation_intelligence(
         "snapshot_exclusions": snapshot_exclusions,
         "snapshot_eligibility_summary": snapshot_eligibility_summary,
         "data_quality_warnings": data_quality_warnings,
+        "semantic_context": semantic_context or {},
         "metric_count": len(kpi_snapshots),
         "anomaly_count": len(anomaly_results),
         "correlation_pair_count": len(correlation_pairs),

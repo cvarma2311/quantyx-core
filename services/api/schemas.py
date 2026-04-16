@@ -270,6 +270,135 @@ class SemanticFeedbackResponse(BaseModel):
     notes: Optional[str] = None
 
 
+class SemanticRefinementCreateRequest(BaseModel):
+    tenant_id: str = Field(..., description="Tenant identifier")
+    domain_id: Optional[str] = Field(None, description="Domain identifier")
+    source_type: str = Field("text", description="text|structured|conversation|file")
+    refinement_kind: str = Field(
+        "auto",
+        description="auto|business_context|hierarchy|column_annotation|metric_refinement|join_rule|chart_guidance|interpretation_rule|context_question_answer",
+    )
+    text: Optional[str] = Field(None, description="Free-form refinement text")
+    payload: Optional[dict] = Field(None, description="Structured refinement payload")
+    source_run_id: Optional[str] = Field(None, description="Deployment run that this refinement is improving")
+    source_context_id: Optional[str] = Field(None, description="Related business context id, if any")
+    source_file_id: Optional[str] = Field(None, description="Related context file id, if any")
+    conversation_id: Optional[str] = Field(None, description="Conversation id when refinement came from chat")
+    submitted_by: Optional[str] = Field(None, description="User or service principal that submitted the refinement")
+    connection_id: Optional[str] = Field(None, description="Optional explicit connection scope")
+    database_name: Optional[str] = Field(None, description="Optional explicit database scope")
+    schema_name: Optional[str] = Field(None, description="Optional explicit schema scope")
+    auto_process: bool = Field(True, description="Process and auto-approve valid artifacts immediately")
+    rebuild_state: bool = Field(True, description="Rebuild semantic state after auto-processing")
+
+
+class SemanticRefinementArtifactResponse(BaseModel):
+    artifact_id: str
+    refinement_input_id: str
+    tenant_id: str
+    domain_id: str
+    artifact_type: str
+    artifact_json: dict
+    validation_status: str
+    validation_errors_json: Optional[List[dict]] = None
+    approval_status: str
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+
+class SemanticRefinementResponse(BaseModel):
+    refinement_input_id: str
+    tenant_id: str
+    domain_id: str
+    source_type: str
+    refinement_kind: str
+    status: str
+    source_text: Optional[str] = None
+    source_payload_json: Optional[dict] = None
+    source_run_id: Optional[str] = None
+    source_context_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    submitted_by: Optional[str] = None
+    connection_id: Optional[str] = None
+    database_name: Optional[str] = None
+    schema_name: Optional[str] = None
+    artifacts: List[SemanticRefinementArtifactResponse] = Field(default_factory=list)
+    semantic_state_id: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class SemanticRefinementListResponse(BaseModel):
+    refinements: List[SemanticRefinementResponse]
+
+
+class SemanticRefinementProcessResponse(BaseModel):
+    refinement_input_id: str
+    artifacts: List[SemanticRefinementArtifactResponse] = Field(default_factory=list)
+    semantic_state_id: Optional[str] = None
+
+
+class SemanticStateRebuildRequest(BaseModel):
+    tenant_id: str
+    domain_id: Optional[str] = None
+    connection_id: Optional[str] = None
+    database_name: Optional[str] = None
+    schema_name: Optional[str] = None
+    trigger_type: str = "manual"
+
+
+class SemanticStateResponse(BaseModel):
+    semantic_state_id: Optional[str] = None
+    tenant_id: str
+    domain_id: str
+    connection_id: Optional[str] = None
+    database_name: Optional[str] = None
+    schema_name: Optional[str] = None
+    version_no: Optional[int] = None
+    state_json: dict = Field(default_factory=dict)
+    created_from_artifact_ids: List[str] = Field(default_factory=list)
+    trigger_type: Optional[str] = None
+    is_active: Optional[bool] = None
+    created_at: Optional[datetime] = None
+
+
+class SemanticPropagationRequest(BaseModel):
+    tenant_id: str
+    domain_id: Optional[str] = None
+    connection_id: Optional[str] = None
+    database_name: Optional[str] = None
+    schema_name: Optional[str] = None
+    trigger_type: str = "manual"
+    affected_scope: Optional[dict] = Field(
+        None,
+        description="Optional precomputed propagation scope. If omitted, a semantic-state refresh job is queued.",
+    )
+
+
+class SemanticPropagationJobResponse(BaseModel):
+    job_id: str
+    tenant_id: str
+    domain_id: str
+    connection_id: Optional[str] = None
+    database_name: Optional[str] = None
+    schema_name: Optional[str] = None
+    trigger_type: str
+    affected_scope_json: dict = Field(default_factory=dict)
+    status: str
+    created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class SemanticPropagationListResponse(BaseModel):
+    jobs: List[SemanticPropagationJobResponse]
+
+
+class ContextQuestionsResponse(BaseModel):
+    domain_id: str
+    question_groups: List[dict] = Field(default_factory=list)
+
+
 class ViewListResponse(BaseModel):
     views: List[dict]
 

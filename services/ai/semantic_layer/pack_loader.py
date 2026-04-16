@@ -12,6 +12,10 @@ PACK_FILES = {
     "datasets": "datasets.yml",
     "metric_templates": "metric_templates.yml",
     "policies": "policies.yml",
+    "chart_guidance": "chart_guidance.yml",
+    "dashboard_guidance": "dashboard_guidance.yml",
+    "validation_rules": "validation_rules.yml",
+    "context_questions": "context_questions.yml",
 }
 
 
