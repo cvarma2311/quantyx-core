@@ -218,6 +218,36 @@ def get_agent_event_artifact(settings: Settings, run_id: str, event_id: str) -> 
     return rows[0] if rows else None
 
 
+def get_agent_event_artifact_by_logical_event_id(
+    settings: Settings,
+    run_id: str,
+    logical_event_id: str,
+    *,
+    stage_name: str | None = None,
+) -> dict[str, Any] | None:
+    params: list[Any] = [run_id, logical_event_id]
+    stage_filter = ""
+    if stage_name:
+        stage_filter = " AND stage_name = %s"
+        params.append(stage_name)
+    rows = run_query(
+        settings,
+        f"""
+        SELECT artifact_id, event_id, logical_event_id, run_id, agent_name, stage_name,
+               raw_json, summary_raw_text, summary_html, inference_raw_text, inference_html, truncation,
+               created_at, updated_at
+          FROM public.quantyx_agent_event_artifacts
+         WHERE run_id = %s
+           AND logical_event_id = %s
+           {stage_filter}
+         ORDER BY updated_at DESC
+         LIMIT 1
+        """,
+        params,
+    )
+    return rows[0] if rows else None
+
+
 def list_agent_event_artifacts_by_event_ids(
     settings: Settings,
     run_id: str,

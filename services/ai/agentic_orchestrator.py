@@ -100,6 +100,7 @@ from services.ai.agentic_artifacts_registry import (
     replace_join_registry,
     replace_model_registry,
 )
+from services.ai.data_quality_orchestrator import is_data_quality_workflow, run_data_quality_agentic_workflow
 from psycopg2.extras import Json
 
 
@@ -3904,6 +3905,15 @@ def run_agentic_workflow(
         raise RuntimeError("LangGraph is not available")
 
     logger = logging.getLogger(__name__)
+    if is_data_quality_workflow(initial_state.get("domain_id"), initial_state):
+        logger.info(
+            "agentic.workflow.route | run_id=%s tenant=%s domain=%s workflow_kind=data_quality",
+            run_id,
+            initial_state.get("tenant_id"),
+            initial_state.get("domain_id"),
+        )
+        return run_data_quality_agentic_workflow(settings, run_id, initial_state, event_callback=event_callback)
+
     phase52_build_version = "2026-04-04-phase52-v1"
     logger.info(
         "agentic.workflow.start | run_id=%s tenant=%s domain=%s schema=%s connection_id=%s database=%s anomaly_enabled=%s anomaly_dashboard_enabled=%s anomaly_llm_mode=%s build_version=%s",

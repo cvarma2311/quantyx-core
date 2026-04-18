@@ -154,6 +154,9 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 50. **Phase 54: Data Quality, Validity, and Profiling Pack**
    - Add a dedicated pack for data completeness, missingness, duplication, fuzzy duplication, freshness, validity, trust scoring, and profiling dashboards so the platform can analyze data health and reliability as a first-class product.
 
+51. **Phase 55: Data Quality Agentic Workflow, Validation, and Enrichment**
+   - Add a data-quality-specific agentic workflow that reuses existing deployment APIs but branches into specialized profiling, validation, referential integrity, reporting, dashboarding, and governed enrichment agents when the selected domain pack is data quality.
+
 ## Dependencies
 - Phases 01–03 required for baseline NL queries.
 - Phase 04 required for performance parity with Cube‑style rollups.
@@ -186,3 +189,4 @@ Goal: Use multiple agents to extract semantics from schemas, build a determinist
 - Phase 52 depends on Phases 02/03/24/31/34/39/41/44 and adds persisted hierarchy semantics, interaction context, and deterministic chart filter/drill SQL generation.
 - Phase 53 depends on Phases 24/34/36/41/42/52 and turns deployment-time semantics into a continuously refined, versioned domain knowledge layer with selective downstream propagation.
 - Phase 54 depends on Phases 15/29/34/35/46 and turns persisted profiling evidence into a reusable data quality pack with quality metrics, trust scoring, and dedicated dashboards.
+- Phase 55 depends on Phases 20/24/34/45/46/54 and turns the data quality pack into a dedicated agentic deployment workflow with validation execution, referential integrity checks, Excel reporting, data quality dashboards, and governed enrichment.

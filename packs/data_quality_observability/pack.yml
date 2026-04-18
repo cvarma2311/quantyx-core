@@ -1,6 +1,15 @@
 industry: data_quality_observability
+pack_id: data_quality_observability
+pack_type: data_quality
 version: 1.0.0
 release_date: "2026-04-09"
+capabilities:
+  - profiling
+  - validation
+  - referential_integrity
+  - data_observability
+  - quality_dashboard
+  - enrichment_recommendations
 notes: >
   Generic data quality and profiling pack focused on completeness, validity,
   uniqueness, freshness, duplication risk, and trust scoring across arbitrary

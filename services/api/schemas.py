@@ -339,6 +339,119 @@ class SemanticRefinementProcessResponse(BaseModel):
     semantic_state_id: Optional[str] = None
 
 
+class SemanticIntakeRequest(BaseModel):
+    tenant_id: str = Field(..., description="Tenant identifier")
+    domain_id: Optional[str] = Field(None, description="Optional domain identifier; resolved from tenant when omitted")
+    type: str = Field("semantics", description="UI-facing intake type. Currently only 'semantics' is supported.")
+    text: str = Field(..., description="Raw user-provided semantic context or correction text")
+    conversation_id: Optional[str] = Field(None, description="Conversation id when intake came from workspace chat")
+    source_run_id: Optional[str] = Field(None, description="Deployment run that this intake is improving")
+    submitted_by: Optional[str] = Field(None, description="User or service principal that submitted the intake")
+    connection_id: Optional[str] = Field(None, description="Optional explicit connection scope")
+    database_name: Optional[str] = Field(None, description="Optional explicit database scope")
+    schema_name: Optional[str] = Field(None, description="Optional explicit schema scope")
+
+
+class SemanticIntakeArtifactSummary(BaseModel):
+    artifact_id: str
+    artifact_type: str
+    validation_status: str
+    approval_status: str
+    artifact_json: dict = Field(default_factory=dict)
+    validation_errors_json: List[dict] = Field(default_factory=list)
+    summary: Optional[str] = None
+
+
+class SemanticIntakePropagationSummary(BaseModel):
+    job_id: str
+    status: str
+    refresh_actions: List[str] = Field(default_factory=list)
+    affected_scope_json: dict = Field(default_factory=dict)
+
+
+class SemanticIntakeResponse(BaseModel):
+    status: str
+    type: str
+    tenant_id: str
+    domain_id: str
+    inferred_refinement_kind: str
+    refinement_input_id: str
+    semantic_state_id: Optional[str] = None
+    artifacts: List[SemanticIntakeArtifactSummary] = Field(default_factory=list)
+    propagation_jobs: List[SemanticIntakePropagationSummary] = Field(default_factory=list)
+
+
+class SemanticImpactPreviewRequest(BaseModel):
+    tenant_id: str
+    domain_id: Optional[str] = None
+    refinement_input_id: Optional[str] = None
+    text: Optional[str] = None
+    payload: Optional[dict] = None
+    refinement_kind: str = Field("auto", description="auto or an explicit semantic refinement kind")
+    connection_id: Optional[str] = None
+    database_name: Optional[str] = None
+    schema_name: Optional[str] = None
+
+
+class SemanticImpactDiffItem(BaseModel):
+    artifact_id: Optional[str] = None
+    artifact_type: str
+    change_type: str
+    target: str
+    summary: str
+    current_artifact_id: Optional[str] = None
+    artifact_json: dict = Field(default_factory=dict)
+
+
+class SemanticImpactPreviewResponse(BaseModel):
+    tenant_id: str
+    domain_id: str
+    refinement_input_id: Optional[str] = None
+    inferred_refinement_kind: Optional[str] = None
+    impact_level: str
+    diff_summary: List[SemanticImpactDiffItem] = Field(default_factory=list)
+    affected_scope: dict = Field(default_factory=dict)
+    artifact_count: int = 0
+    active_semantic_state_id: Optional[str] = None
+
+
+class SemanticAuditTimelineEvent(BaseModel):
+    event_type: str
+    event_id: Optional[str] = None
+    created_at: Optional[datetime | str] = None
+    summary: str
+    details: dict = Field(default_factory=dict)
+
+
+class SemanticAuditResponse(BaseModel):
+    tenant_id: str
+    domain_id: str
+    refinements: List[dict] = Field(default_factory=list)
+    semantic_states: List[dict] = Field(default_factory=list)
+    propagation_jobs: List[dict] = Field(default_factory=list)
+    timeline: List[SemanticAuditTimelineEvent] = Field(default_factory=list)
+
+
+class SemanticConflictResponse(BaseModel):
+    tenant_id: str
+    domain_id: str
+    conflicts: List[dict] = Field(default_factory=list)
+    conflict_count: int = 0
+
+
+class SemanticStateActivateRequest(BaseModel):
+    tenant_id: str
+    reason: Optional[str] = None
+    activated_by: Optional[str] = None
+
+
+class SemanticRefinementApprovalRequest(BaseModel):
+    tenant_id: str
+    approved_by: Optional[str] = None
+    reason: Optional[str] = None
+    rebuild_state: bool = True
+
+
 class SemanticStateRebuildRequest(BaseModel):
     tenant_id: str
     domain_id: Optional[str] = None
@@ -491,6 +604,7 @@ class DashboardResponse(BaseModel):
     quality_score: Optional[float] = None
     quality_gate_passed: Optional[bool] = None
     created_by: Optional[str] = None
+    chart_plan: Optional[List[dict]] = None
     charts: Optional[List[dict]] = None     # populated by GET /dashboards/{id}
     created_at: Optional[Any] = None
     updated_at: Optional[Any] = None

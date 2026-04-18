@@ -170,8 +170,10 @@ from services.ai.agentic_store import (
     get_agent_run,
     list_agent_chat_log,
     get_agent_event_artifact,
+    get_agent_event_artifact_by_logical_event_id,
     list_agent_event_artifacts_by_event_ids,
     append_plan_summary,
+    upsert_agent_event_artifact,
 )
 from services.ai.agentic_orchestrator import run_agentic_workflow
 from services.ai.agentic_artifacts_registry import (
@@ -180,6 +182,51 @@ from services.ai.agentic_artifacts_registry import (
     list_join_registry,
     list_model_registry,
 )
+from services.ai.data_quality_enrichment import (
+    build_staged_enrichment_overlay_artifact,
+    build_enrichment_proposal,
+    canonical_column_alias,
+    canonical_column_aliases,
+    select_enrichment_rows_for_application,
+    summarize_enrichment_proposal,
+)
+from services.ai.data_quality_enrichment_questions import build_enrichment_question_queue
+from services.ai.data_quality_api_payloads import (
+    build_data_quality_run_hydration_payload,
+    build_data_quality_run_summary_payload,
+)
+from services.ai.data_quality_orchestrator import resume_data_quality_agentic_workflow_after_rule_review
+from services.ai.data_quality_evidence import (
+    fetch_duplicate_evidence,
+    fetch_enrichment_evidence,
+    fetch_freshness_evidence,
+    fetch_missingness_evidence,
+    fetch_rule_evidence,
+    load_quality_run,
+)
+from services.ai.data_quality_rule_review import (
+    apply_quality_rule_review_action,
+    get_quality_rule_for_review,
+    get_quality_rule_review_queue,
+)
+from services.ai.data_quality_remediation import build_data_quality_remediation_plan
+from services.ai.data_quality_store import (
+    get_quality_rule,
+    create_quality_enrichment_proposal,
+    list_quality_duplicate_candidates,
+    get_quality_enrichment_opportunity,
+    get_quality_enrichment_proposal,
+    get_latest_quality_enrichment_proposal_for_opportunity,
+    list_quality_enrichment_opportunities,
+    get_quality_run_by_run_id,
+    get_quality_table_detail,
+    list_quality_rules,
+    list_quality_tables,
+    update_quality_enrichment_opportunity_status,
+    update_quality_enrichment_proposal,
+)
+from services.ai.data_quality_report import EXCEL_MIME_TYPE, build_data_quality_excel_report
+from services.ai.data_quality_workspace import build_data_quality_workspace_response
 from services.ai.langsmith_forwarder import LangSmithEventForwarder
 from services.ai.ontology_mapper import llm_map_entities
 from services.ai.onboarding.metrics_registry import persist_suggested_metrics
@@ -256,13 +303,19 @@ from services.ai.semantic_feedback_store import (
 from services.ai.domain_refinement_extractor import (
     validate_refinement_input_payload,
     process_refinement_input,
+    extract_refinement_artifacts_with_llm,
 )
 from services.ai.domain_refinement_store import (
+    activate_semantic_state,
     create_refinement_input,
+    get_refinement_artifact,
     get_current_semantic_state,
     get_refinement_input,
+    get_semantic_state,
     list_refinement_artifacts,
     list_refinement_inputs,
+    list_semantic_states,
+    update_refinement_artifact_approval,
 )
 from services.ai.domain_semantic_state_builder import rebuild_semantic_state
 from services.ai.semantic_propagation_store import (
@@ -282,6 +335,9 @@ from services.ai.semantic_conversation_refinement import (
     infer_refinement_kind,
     maybe_writeback_conversation_refinement,
 )
+from services.ai.semantic_impact_preview import build_semantic_impact_preview
+from services.ai.semantic_audit import build_semantic_audit
+from services.ai.semantic_conflicts import detect_semantic_conflicts
 from services.ai.semantic_graph_store import list_dashboard_specs, get_dashboard_spec, update_dashboard_spec  # noqa: F401 — delegating shims kept for call sites below during Phase 44 cutover
 from services.ai.dashboard_refresh_store import (
     create_dashboard_refresh_run,
@@ -465,6 +521,16 @@ from services.api.schemas import (
     SemanticRefinementListResponse,
     SemanticRefinementProcessResponse,
     SemanticRefinementArtifactResponse,
+    SemanticIntakeRequest,
+    SemanticIntakeResponse,
+    SemanticIntakeArtifactSummary,
+    SemanticIntakePropagationSummary,
+    SemanticImpactPreviewRequest,
+    SemanticImpactPreviewResponse,
+    SemanticAuditResponse,
+    SemanticConflictResponse,
+    SemanticStateActivateRequest,
+    SemanticRefinementApprovalRequest,
     SemanticStateRebuildRequest,
     SemanticStateResponse,
     SemanticPropagationRequest,
@@ -1578,12 +1644,13 @@ def _execute_job(job: dict) -> dict:
         with _langsmith_project_context(tenant_id):
             forwarder = LangSmithEventForwarder(run_id, tenant_id=tenant_id)
             try:
-                run_agentic_workflow(settings, run_id, initial_state, event_callback=forwarder.on_event)
-                mark_run_status(settings, run_id, "completed")
-                if canonicalize_on_success:
+                result = run_agentic_workflow(settings, run_id, initial_state, event_callback=forwarder.on_event)
+                final_status = str(result.get("run_status") or "completed")
+                mark_run_status(settings, run_id, final_status)
+                if canonicalize_on_success and final_status == "completed":
                     finalize_canonical_deployment(settings, run_id)
-                forwarder.close(status="completed")
-                return {"run_id": run_id, "status": "completed"}
+                forwarder.close(status=final_status)
+                return {"run_id": run_id, "status": final_status}
             except Exception as exc:  # noqa: BLE001
                 mark_run_status(settings, run_id, "failed")
                 error_artifacts = {
@@ -1624,6 +1691,31 @@ def _execute_job(job: dict) -> dict:
                         "Agentic workflow failed",
                         error_artifacts,
                     )
+                forwarder.close(status="failed", error=str(exc))
+                raise
+    if job_type == "data_quality_resume_after_rule_review":
+        run_id = payload.get("run_id")
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id is required")
+        run = get_quality_run_by_run_id(settings, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Data quality run not found")
+        mark_run_status(settings, run_id, "running")
+        tenant_id = str(run.get("tenant_id") or "").strip() or None
+        with _langsmith_project_context(tenant_id):
+            forwarder = LangSmithEventForwarder(run_id, tenant_id=tenant_id)
+            try:
+                result = resume_data_quality_agentic_workflow_after_rule_review(
+                    settings,
+                    run_id,
+                    event_callback=forwarder.on_event,
+                )
+                final_status = str(result.get("run_status") or "completed")
+                mark_run_status(settings, run_id, final_status)
+                forwarder.close(status=final_status)
+                return {"run_id": run_id, "status": final_status}
+            except Exception as exc:  # noqa: BLE001
+                mark_run_status(settings, run_id, "failed")
                 forwarder.close(status="failed", error=str(exc))
                 raise
     raise ValueError(f"Unsupported job_type: {job_type}")
@@ -6780,6 +6872,7 @@ def start_agentic_run(payload: dict) -> dict:
     initial_state = {
         "tenant_id": tenant_id,
         "domain_id": domain_id,
+        "workflow_mode": payload.get("workflow_mode"),
         "schema_ids": payload.get("schema_ids") or [],
         "context_text": merged_context_text,
         "context_ids": resolved_context_ids,
@@ -7484,6 +7577,7 @@ def _build_client_response(response_payload: dict) -> dict:
         "dimensions":    response_payload.get("dimensions"),
         "rows":          response_payload.get("rows"),
         "chart_followup": slim_followup,
+        "data_quality":  response_payload.get("data_quality"),
     }
 
 
@@ -8790,6 +8884,7 @@ def _start_workspace_deployment(payload: dict) -> dict:
         "connection_id": payload.get("connection_id") or connection_id,
         "database_name": payload.get("database") or database,
         "runtime_tuning": payload.get("runtime_tuning") or {},
+        "pause_for_rule_review": bool(payload.get("pause_for_rule_review", True)),
         "scoped_conn": (_sc2 := _resolve_scoped_conn(tenant_id, domain_id)) and _sc2.to_dict(),
     }
     job = create_job(
@@ -8812,7 +8907,1131 @@ def _start_workspace_deployment(payload: dict) -> dict:
         "display_name": display_name,
         "version_no": version_no,
         "status": "queued",
+        "workflow_kind": "data_quality"
+        if str(domain_id or "").strip().lower() == "data_quality_observability"
+        or str(payload.get("workflow_mode") or "").strip().lower() == "data_quality"
+        else "standard",
         "job_id": job.get("job_id"),
+    }
+
+
+@app.get(
+    "/data-quality/runs/{run_id}",
+    tags=["data-quality"],
+    summary="Get data quality run summary",
+    description="Return the data-quality workflow summary produced by a data_quality_observability deployment run.",
+)
+def get_data_quality_run_summary(run_id: str) -> dict:
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    try:
+        remediation_plan = build_data_quality_remediation_plan(
+            settings,
+            tenant_id=str(row.get("tenant_id") or ""),
+            domain_id=str(row.get("domain_id") or "data_quality_observability"),
+            run_id=run_id,
+            limit=5,
+        )
+    except Exception:
+        remediation_plan = {"summary": {}, "actions": []}
+    return build_data_quality_run_summary_payload(row=row, remediation_plan=remediation_plan)
+
+
+@app.get(
+    "/data-quality/runs/{run_id}/hydration",
+    tags=["data-quality"],
+    summary="Get data quality run hydration payload",
+    description="Return the consolidated data-quality state needed to rehydrate a deployment run UI, including summary, pending rule review, enrichment questions, and remediation.",
+)
+def get_data_quality_run_hydration(run_id: str) -> dict:
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    tenant_id = str(row.get("tenant_id") or "")
+    domain_id = str(row.get("domain_id") or "data_quality_observability")
+    try:
+        remediation_plan = build_data_quality_remediation_plan(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            limit=5,
+        )
+    except Exception:
+        remediation_plan = {"summary": {}, "actions": []}
+    try:
+        rule_review_queue = get_quality_rule_review_queue(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+        )
+    except Exception:
+        rule_review_queue = {"summary": {}, "rules": []}
+    try:
+        enrichment_question_queue = build_enrichment_question_queue(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            limit=10,
+        )
+    except Exception:
+        enrichment_question_queue = {"summary": {}, "questions": []}
+    return build_data_quality_run_hydration_payload(
+        row=row,
+        remediation_plan=remediation_plan,
+        rule_review_queue=rule_review_queue,
+        enrichment_question_queue=enrichment_question_queue,
+    )
+
+
+@app.post(
+    "/data-quality/runs/{run_id}/resume-after-rule-review",
+    tags=["data-quality"],
+    summary="Resume a paused data quality run after rule review",
+    description="Queue continuation of a data-quality run that is waiting for rule review so approved rules execute and the workflow can finish.",
+)
+def resume_data_quality_run_after_rule_review(run_id: str, payload: dict | None = None) -> dict:
+    run = get_quality_run_by_run_id(settings, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    pending = list_quality_rules(
+        settings,
+        tenant_id=str(run.get("tenant_id") or ""),
+        domain_id=str(run.get("domain_id") or "data_quality_observability"),
+        run_id=run_id,
+        limit=500,
+    )
+    unresolved = [row for row in pending if str(row.get("status") or "").strip().lower() in {"needs_review", "unsupported"}]
+    if unresolved:
+        raise HTTPException(status_code=409, detail="Rule review is still pending for this run")
+    if str(run.get("status") or "").strip().lower() == "completed":
+        raise HTTPException(status_code=409, detail="Data quality run is already completed")
+    job = create_job(
+        settings,
+        tenant_id=str(run.get("tenant_id") or ""),
+        domain_id=str(run.get("domain_id") or "data_quality_observability"),
+        job_type="data_quality_resume_after_rule_review",
+        payload={"run_id": run_id, **(payload or {})},
+        idempotency_key=None,
+    )
+    mark_run_status(settings, run_id, "queued")
+    return {
+        "run_id": run_id,
+        "status": "queued",
+        "job_id": job.get("job_id"),
+        "resume_mode": "after_rule_review",
+    }
+
+
+@app.get(
+    "/data-quality/tables",
+    tags=["data-quality"],
+    summary="List data quality table summaries",
+    description="Return table-level quality artifacts for a data quality deployment run.",
+)
+def list_data_quality_table_summaries(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    limit: int = 100,
+) -> dict:
+    duplicate_candidates = list_quality_duplicate_candidates(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=500,
+    )
+    enrichment_opportunities = list_quality_enrichment_opportunities(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=500,
+    )
+    duplicate_counts: dict[str, int] = {}
+    for item in duplicate_candidates:
+        table_name = str(item.get("table_name") or "").strip()
+        if table_name:
+            duplicate_counts[table_name] = duplicate_counts.get(table_name, 0) + 1
+    enrichment_counts: dict[str, int] = {}
+    for item in enrichment_opportunities:
+        table_name = str(item.get("table_name") or "").strip()
+        if table_name:
+            enrichment_counts[table_name] = enrichment_counts.get(table_name, 0) + 1
+    rows = list_quality_tables(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=limit,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "tables": [
+            {
+                "quality_run_id": row.get("quality_run_id"),
+                "run_id": row.get("run_id"),
+                "table_name": row.get("table_name"),
+                "row_count": row.get("row_count"),
+                "trust_score": row.get("trust_score"),
+                "completeness_score": row.get("completeness_score"),
+                "freshness_score": row.get("freshness_score"),
+                "duplicate_risk_score": row.get("duplicate_risk_score"),
+                "severity": row.get("severity"),
+                "duplicate_candidate_count": duplicate_counts.get(str(row.get("table_name") or ""), 0),
+                "enrichment_opportunity_count": enrichment_counts.get(str(row.get("table_name") or ""), 0),
+                "summary": row.get("summary_json") or {},
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.get(
+    "/data-quality/rules",
+    tags=["data-quality"],
+    summary="List data quality rules and latest results",
+    description="Return validation rules extracted for a data quality deployment run with latest execution status.",
+)
+def list_data_quality_rules(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    status: str | None = None,
+    rule_status: str | None = None,
+    limit: int = 100,
+) -> dict:
+    rows = list_quality_rules(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        status=status,
+        rule_status=rule_status,
+        limit=limit,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "rules": [
+            {
+                "rule_id": row.get("rule_id"),
+                "quality_run_id": row.get("quality_run_id"),
+                "run_id": row.get("run_id"),
+                "rule_type": row.get("rule_type"),
+                "severity": row.get("severity"),
+                "table_name": row.get("table_name"),
+                "column_name": row.get("column_name"),
+                "reference_table": row.get("reference_table"),
+                "reference_column": row.get("reference_column"),
+                "source_text": row.get("source_text") or (row.get("condition_json") or {}).get("source_text"),
+                "executor_kind": row.get("executor_kind"),
+                "execution_plan": row.get("execution_plan_json") or {},
+                "sql_preview": (row.get("execution_plan_json") or {}).get("sql_preview") or {},
+                "sql_preview_status": (row.get("execution_plan_json") or {}).get("sql_preview_status"),
+                "sql_preview_source": (row.get("execution_plan_json") or {}).get("sql_preview_source"),
+                "condition_json": row.get("condition_json") or {},
+                "source": row.get("source"),
+                "confidence": row.get("confidence"),
+                "rule_status": row.get("status"),
+                "reviewed_by": row.get("reviewed_by"),
+                "reviewed_at": row.get("reviewed_at"),
+                "review_notes": row.get("review_notes"),
+                "result": {
+                    "result_id": row.get("result_id"),
+                    "status": row.get("result_status"),
+                    "checked_row_count": row.get("checked_row_count"),
+                    "violation_count": row.get("violation_count"),
+                    "violation_pct": row.get("violation_pct"),
+                    "sample_rows_json": row.get("sample_rows_json") or [],
+                    "error_message": row.get("error_message"),
+                    "executed_at": row.get("executed_at"),
+                }
+                if row.get("result_id")
+                else None,
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.get(
+    "/data-quality/rules/review-queue",
+    tags=["data-quality"],
+    summary="Get data quality rule review queue",
+    description="Return reviewable low-confidence or unsupported rules before they are approved for execution.",
+)
+def get_data_quality_rule_review_queue(
+    tenant_id: str,
+    run_id: str,
+    domain_id: str = "data_quality_observability",
+) -> dict:
+    return get_quality_rule_review_queue(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+    )
+
+
+@app.get(
+    "/data-quality/rules/{rule_id}/review",
+    tags=["data-quality"],
+    summary="Get one data quality rule for review",
+    description="Return the stored interpretation, SQL preview, and latest result metadata for one rule review item.",
+)
+def get_data_quality_rule_review_detail(
+    rule_id: str,
+    tenant_id: str | None = None,
+) -> dict:
+    row = get_quality_rule_for_review(
+        settings,
+        rule_id=rule_id,
+        tenant_id=tenant_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality rule not found")
+    return {
+        "rule_id": row.get("rule_id"),
+        "quality_run_id": row.get("quality_run_id"),
+        "run_id": row.get("run_id"),
+        "tenant_id": row.get("tenant_id"),
+        "domain_id": row.get("domain_id"),
+        "rule_type": row.get("rule_type"),
+        "severity": row.get("severity"),
+        "table_name": row.get("table_name"),
+        "column_name": row.get("column_name"),
+        "reference_table": row.get("reference_table"),
+        "reference_column": row.get("reference_column"),
+        "source_text": row.get("source_text") or (row.get("condition_json") or {}).get("source_text"),
+        "condition_json": row.get("condition_json") or {},
+        "executor_kind": row.get("executor_kind"),
+        "execution_plan": row.get("execution_plan_json") or {},
+        "sql_preview": (row.get("execution_plan_json") or {}).get("sql_preview") or {},
+        "sql_preview_status": (row.get("execution_plan_json") or {}).get("sql_preview_status"),
+        "sql_preview_source": (row.get("execution_plan_json") or {}).get("sql_preview_source"),
+        "confidence": row.get("confidence"),
+        "rule_status": row.get("status"),
+        "reviewed_by": row.get("reviewed_by"),
+        "reviewed_at": row.get("reviewed_at"),
+        "review_notes": row.get("review_notes"),
+        "result": {
+            "result_id": row.get("result_id"),
+            "status": row.get("result_status"),
+            "checked_row_count": row.get("checked_row_count"),
+            "violation_count": row.get("violation_count"),
+            "violation_pct": row.get("violation_pct"),
+            "sample_rows_json": row.get("sample_rows_json") or [],
+            "error_message": row.get("error_message"),
+            "executed_at": row.get("executed_at"),
+        }
+        if row.get("result_id")
+        else None,
+    }
+
+
+@app.post(
+    "/data-quality/rules/{rule_id}/review",
+    tags=["data-quality"],
+    summary="Review and optionally execute one data quality rule",
+    description="Approve, reject, or edit a reviewable data quality rule and optionally execute it after approval.",
+)
+def review_data_quality_rule(rule_id: str, payload: dict) -> dict:
+    tenant_id = str(payload.get("tenant_id") or "").strip() or None
+    row = get_quality_rule(settings, rule_id, tenant_id=tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality rule not found")
+    run_row = get_quality_run_by_run_id(settings, str(row.get("run_id") or ""))
+    reviewed_by = str(payload.get("reviewed_by") or "").strip() or "system:manual_review"
+    action = str(payload.get("action") or "").strip().lower()
+    rule_patch = {
+        key: payload.get(key)
+        for key in ["source_text", "severity", "table_name", "column_name", "reference_table", "reference_column", "condition_json"]
+        if key in payload
+    }
+    try:
+        execute_default = str((run_row or {}).get("status") or "").strip().lower() not in {"awaiting_rule_review"}
+        result = apply_quality_rule_review_action(
+            settings,
+            rule_row=row,
+            action=action,
+            reviewed_by=reviewed_by,
+            review_notes=str(payload.get("review_notes") or "").strip() or None,
+            rule_patch=rule_patch or None,
+            execute_after_approval=bool(payload.get("execute_after_approval", execute_default)),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "rule_id": result.get("rule_id"),
+        "status": result.get("status"),
+        "stored_rule": result.get("stored_rule"),
+        "execution": result.get("execution"),
+    }
+
+
+@app.get(
+    "/data-quality/tables/{table_name}",
+    tags=["data-quality"],
+    summary="Get data quality table detail",
+    description="Return table and column quality artifacts for one table.",
+)
+def get_data_quality_table_summary(
+    table_name: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+) -> dict:
+    failed_rules = [
+        item
+        for item in list_quality_rules(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            status="failed",
+            limit=200,
+        )
+        if str(item.get("table_name") or "") == str(table_name)
+    ]
+    duplicate_candidates = list_quality_duplicate_candidates(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        table_name=table_name,
+        limit=100,
+    )
+    enrichment_opportunities = [
+        item
+        for item in list_quality_enrichment_opportunities(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            limit=100,
+        )
+        if str(item.get("table_name") or "") == str(table_name)
+    ]
+    row = get_quality_table_detail(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        table_name=table_name,
+        run_id=run_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality table not found")
+    return {
+        "quality_run_id": row.get("quality_run_id"),
+        "run_id": row.get("run_id"),
+        "tenant_id": row.get("tenant_id"),
+        "domain_id": row.get("domain_id"),
+        "table_name": row.get("table_name"),
+        "row_count": row.get("row_count"),
+        "trust_score": row.get("trust_score"),
+        "completeness_score": row.get("completeness_score"),
+        "freshness_score": row.get("freshness_score"),
+        "duplicate_risk_score": row.get("duplicate_risk_score"),
+        "severity": row.get("severity"),
+        "components": {
+            **(((row.get("summary_json") or {}).get("trust_components") or {})),
+            **{
+                "completeness": ((row.get("summary_json") or {}).get("trust_components") or {}).get("completeness", row.get("completeness_score")),
+                "validity": ((row.get("summary_json") or {}).get("trust_components") or {}).get("validity", row.get("validity_score")),
+                "referential_integrity": ((row.get("summary_json") or {}).get("trust_components") or {}).get("referential_integrity", row.get("referential_integrity_score")),
+                "duplicate_risk": ((row.get("summary_json") or {}).get("trust_components") or {}).get("duplicate_risk", row.get("duplicate_risk_score")),
+                "freshness": ((row.get("summary_json") or {}).get("trust_components") or {}).get("freshness", row.get("freshness_score")),
+            },
+        },
+        "trust_component_explanations": (row.get("summary_json") or {}).get("trust_component_explanations") or {},
+        "summary": row.get("summary_json") or {},
+        "columns": row.get("columns") or [],
+        "failed_rules": failed_rules,
+        "duplicate_candidates": duplicate_candidates,
+        "enrichment_opportunities": enrichment_opportunities,
+    }
+
+
+@app.get(
+    "/data-quality/freshness",
+    tags=["data-quality"],
+    summary="List freshness and stability results",
+    description="Return freshness and stability rows derived for a data quality deployment run.",
+)
+def list_data_quality_freshness_results(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    limit: int = 100,
+) -> dict:
+    tables = list_quality_tables(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=limit,
+    )
+    rows = []
+    for table in tables:
+        summary = table.get("summary_json") or {}
+        freshness = summary.get("freshness_analysis") or {}
+        stability = summary.get("stability_analysis") or {}
+        rows.append(
+            {
+                "table_name": table.get("table_name"),
+                "freshness_column": freshness.get("freshness_column"),
+                "latest_timestamp": freshness.get("latest_timestamp"),
+                "freshness_lag_days": freshness.get("freshness_lag_days"),
+                "freshness_score": freshness.get("freshness_score") or table.get("freshness_score"),
+                "freshness_status": freshness.get("freshness_status"),
+                "baseline_quality_run_id": stability.get("baseline_quality_run_id"),
+                "baseline_row_count": stability.get("baseline_row_count"),
+                "row_count_change_pct": stability.get("row_count_change_pct"),
+                "baseline_completeness_score": stability.get("baseline_completeness_score"),
+                "completeness_score_change": stability.get("completeness_score_change"),
+                "stability_status": stability.get("stability_status"),
+                "stability_issues": stability.get("stability_issues") or [],
+            }
+        )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "freshness": rows,
+    }
+
+
+@app.get(
+    "/data-quality/duplicates",
+    tags=["data-quality"],
+    summary="List duplicate candidates",
+    description="Return persisted duplicate candidates for a data quality deployment run.",
+)
+def list_data_quality_duplicate_candidates(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    table_name: str | None = None,
+    review_status: str | None = None,
+    limit: int = 100,
+) -> dict:
+    rows = list_quality_duplicate_candidates(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        table_name=table_name,
+        review_status=review_status,
+        limit=limit,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "table_name": table_name,
+        "review_status": review_status,
+        "duplicates": rows,
+    }
+
+
+@app.get(
+    "/data-quality/remediation",
+    tags=["data-quality"],
+    summary="Get recommended remediation actions",
+    description="Return prioritized remediation actions derived from persisted trust, rule, duplicate, freshness, and enrichment artifacts.",
+)
+def get_data_quality_remediation(
+    tenant_id: str,
+    run_id: str,
+    domain_id: str = "data_quality_observability",
+    limit: int = 25,
+) -> dict:
+    plan = build_data_quality_remediation_plan(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=limit,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "summary": plan.get("summary") or {},
+        "actions": plan.get("actions") or [],
+    }
+
+
+@app.get(
+    "/data-quality/evidence/missingness",
+    tags=["data-quality"],
+    summary="Get missingness evidence rows",
+    description="Return underlying source rows for a missing/null/blank column issue.",
+)
+def get_data_quality_missingness_evidence(
+    tenant_id: str,
+    run_id: str,
+    table_name: str,
+    column_name: str,
+    domain_id: str = "data_quality_observability",
+    include_blank: bool = True,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    run_row = load_quality_run(settings, run_id=run_id, tenant_id=tenant_id, domain_id=domain_id)
+    return fetch_missingness_evidence(
+        settings,
+        run_row=run_row,
+        table_name=table_name,
+        column_name=column_name,
+        include_blank=include_blank,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/data-quality/evidence/rules/{rule_id}",
+    tags=["data-quality"],
+    summary="Get rule evidence rows",
+    description="Return persisted and, when possible, source evidence rows for a data quality rule.",
+)
+def get_data_quality_rule_evidence(
+    rule_id: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    limit: int = 100,
+) -> dict:
+    return fetch_rule_evidence(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        rule_id=rule_id,
+        limit=limit,
+    )
+
+
+@app.get(
+    "/data-quality/evidence/duplicates/{candidate_id}",
+    tags=["data-quality"],
+    summary="Get duplicate evidence rows",
+    description="Return backing rows for a duplicate candidate or cluster.",
+)
+def get_data_quality_duplicate_evidence(
+    candidate_id: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    limit: int = 100,
+) -> dict:
+    return fetch_duplicate_evidence(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        candidate_id=candidate_id,
+        limit=limit,
+    )
+
+
+@app.get(
+    "/data-quality/evidence/freshness/{table_name}",
+    tags=["data-quality"],
+    summary="Get freshness and stability evidence",
+    description="Return baseline/current comparison details for freshness and stability of a table.",
+)
+def get_data_quality_freshness_evidence(
+    table_name: str,
+    tenant_id: str,
+    run_id: str,
+    domain_id: str = "data_quality_observability",
+) -> dict:
+    return fetch_freshness_evidence(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        table_name=table_name,
+    )
+
+
+@app.get(
+    "/data-quality/evidence/enrichment/{proposal_id}",
+    tags=["data-quality"],
+    summary="Get enrichment proposal evidence",
+    description="Return proposed enrichment rows and source references for a proposal.",
+)
+def get_data_quality_enrichment_evidence(
+    proposal_id: str,
+    tenant_id: str,
+    limit: int = 100,
+) -> dict:
+    return fetch_enrichment_evidence(
+        settings,
+        proposal_id=proposal_id,
+        tenant_id=tenant_id,
+        limit=limit,
+    )
+
+
+@app.get(
+    "/data-quality/reports/{run_id}/excel",
+    tags=["data-quality"],
+    summary="Download data quality Excel report",
+    description="Generate an Excel workbook from persisted data-quality artifacts for a completed deployment run.",
+)
+def download_data_quality_excel_report(
+    run_id: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+) -> Response:
+    try:
+        workbook, file_name, _summary = build_data_quality_excel_report(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=workbook,
+        media_type=EXCEL_MIME_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+    )
+
+
+@app.get(
+    "/data-quality/runs/{run_id}/dashboard",
+    tags=["data-quality"],
+    summary="Get data quality dashboard for a run",
+    description="Resolve the generated data quality dashboard for a deployment run and return its persisted dashboard metadata.",
+)
+def get_data_quality_dashboard(run_id: str) -> dict:
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    summary = row.get("summary_json") or {}
+    dashboard_id = summary.get("dashboard_id")
+    if not dashboard_id:
+        raise HTTPException(status_code=404, detail="Data quality dashboard not found")
+    dashboard = get_dashboard_spec(settings, dashboard_id)
+    if not dashboard:
+        raise HTTPException(status_code=404, detail="Data quality dashboard not found")
+    return {
+        "run_id": run_id,
+        "dashboard_id": dashboard.get("dashboard_id"),
+        "dashboard_type": dashboard.get("dashboard_type"),
+        "title": dashboard.get("title") or dashboard.get("name"),
+        "name": dashboard.get("name"),
+        "description": dashboard.get("description"),
+        "status": dashboard.get("status"),
+        "quality_score": dashboard.get("quality_score"),
+        "quality_gate_passed": dashboard.get("quality_gate_passed"),
+        "chart_plan": dashboard.get("chart_plan") or [],
+        "charts": dashboard.get("charts") or [],
+    }
+
+
+@app.get(
+    "/data-quality/enrichment/opportunities",
+    tags=["data-quality"],
+    summary="List data quality enrichment opportunities",
+    description="Return user-reviewable enrichment opportunities discovered from data quality profiling artifacts.",
+)
+def list_data_quality_enrichment_opportunities(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> dict:
+    rows = list_quality_enrichment_opportunities(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        status=status,
+        limit=limit,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "opportunities": [
+            {
+                "opportunity_id": row.get("opportunity_id"),
+                "quality_run_id": row.get("quality_run_id"),
+                "run_id": row.get("run_id"),
+                "table_name": row.get("table_name"),
+                "target_column": row.get("target_column"),
+                "target_column_alias": canonical_column_alias(row.get("target_column")),
+                "source_columns_json": row.get("source_columns_json") or [],
+                "source_column_aliases_json": canonical_column_aliases(row.get("source_columns_json") or []),
+                "missing_count": row.get("missing_count"),
+                "candidate_method": row.get("candidate_method"),
+                "requires_external_lookup": row.get("requires_external_lookup"),
+                "requires_user_approval": row.get("requires_user_approval"),
+                "confidence": row.get("confidence"),
+                "question": row.get("question"),
+                "status": row.get("status"),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.get(
+    "/data-quality/enrichment/questions",
+    tags=["data-quality"],
+    summary="List question-centric enrichment review items",
+    description="Return enrichment opportunities as user-facing questions with answer actions and proposal links.",
+)
+def list_data_quality_enrichment_questions(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> dict:
+    return build_enrichment_question_queue(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        status=status,
+        limit=limit,
+    )
+
+
+@app.post(
+    "/data-quality/enrichment/questions/{opportunity_id}/answer",
+    tags=["data-quality"],
+    summary="Answer an enrichment review question",
+    description="Approve, defer, reject, or reopen a question-centric enrichment item. Approval generates a proposal using the existing staged enrichment flow.",
+)
+def answer_data_quality_enrichment_question(opportunity_id: str, payload: dict) -> dict:
+    tenant_id = str(payload.get("tenant_id") or "").strip()
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    answer = str(payload.get("answer") or "").strip().lower()
+    if answer not in {"approve", "defer", "reject", "reopen"}:
+        raise HTTPException(status_code=400, detail="answer must be one of approve, defer, reject, reopen")
+    opportunity = get_quality_enrichment_opportunity(settings, opportunity_id, tenant_id=tenant_id)
+    if not opportunity:
+        raise HTTPException(status_code=404, detail="Enrichment opportunity not found")
+    if answer == "defer":
+        updated = update_quality_enrichment_opportunity_status(
+            settings,
+            opportunity_id,
+            tenant_id=tenant_id,
+            status="deferred_by_user",
+        )
+        queue_item = build_enrichment_question_queue(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=str(updated.get("domain_id") or opportunity.get("domain_id") or "data_quality_observability"),
+            run_id=str(updated.get("run_id") or opportunity.get("run_id") or ""),
+            limit=500,
+        )
+        question = next((item for item in (queue_item.get("questions") or []) if item.get("opportunity_id") == opportunity_id), None)
+        return {"opportunity_id": opportunity_id, "status": "deferred", "question": question}
+    if answer == "reject":
+        updated = update_quality_enrichment_opportunity_status(
+            settings,
+            opportunity_id,
+            tenant_id=tenant_id,
+            status="rejected_by_user",
+        )
+        queue_item = build_enrichment_question_queue(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=str(updated.get("domain_id") or opportunity.get("domain_id") or "data_quality_observability"),
+            run_id=str(updated.get("run_id") or opportunity.get("run_id") or ""),
+            limit=500,
+        )
+        question = next((item for item in (queue_item.get("questions") or []) if item.get("opportunity_id") == opportunity_id), None)
+        return {"opportunity_id": opportunity_id, "status": "rejected", "question": question}
+    if answer == "reopen":
+        updated = update_quality_enrichment_opportunity_status(
+            settings,
+            opportunity_id,
+            tenant_id=tenant_id,
+            status="needs_user_approval",
+        )
+        queue_item = build_enrichment_question_queue(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=str(updated.get("domain_id") or opportunity.get("domain_id") or "data_quality_observability"),
+            run_id=str(updated.get("run_id") or opportunity.get("run_id") or ""),
+            limit=500,
+        )
+        question = next((item for item in (queue_item.get("questions") or []) if item.get("opportunity_id") == opportunity_id), None)
+        return {"opportunity_id": opportunity_id, "status": "pending_answer", "question": question}
+    tenant_payload = dict(payload)
+    tenant_payload["tenant_id"] = tenant_id
+    result = approve_data_quality_enrichment_research(opportunity_id, tenant_payload)
+    proposal = get_latest_quality_enrichment_proposal_for_opportunity(settings, opportunity_id, tenant_id=tenant_id)
+    queue_item = build_enrichment_question_queue(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=str(opportunity.get("domain_id") or "data_quality_observability"),
+        run_id=str(opportunity.get("run_id") or ""),
+        limit=500,
+    )
+    question = next((item for item in (queue_item.get("questions") or []) if item.get("opportunity_id") == opportunity_id), None)
+    return {
+        "opportunity_id": opportunity_id,
+        "status": "proposal_generated",
+        "proposal_id": (proposal or {}).get("proposal_id") or result.get("proposal_id"),
+        "question": question,
+        "matched_count": result.get("matched_count"),
+        "unmatched_count": result.get("unmatched_count"),
+    }
+
+
+@app.post(
+    "/data-quality/enrichment/opportunities/{opportunity_id}/approve-research",
+    tags=["data-quality"],
+    summary="Approve enrichment research",
+    description="Approve a discovered enrichment opportunity for research/proposal generation.",
+)
+def approve_data_quality_enrichment_research(opportunity_id: str, payload: dict) -> dict:
+    tenant_id = str(payload.get("tenant_id") or "").strip()
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    opportunity = get_quality_enrichment_opportunity(settings, opportunity_id, tenant_id=tenant_id)
+    if not opportunity:
+        raise HTTPException(status_code=404, detail="Enrichment opportunity not found")
+    run_row = get_quality_run_by_run_id(settings, str(opportunity.get("run_id") or ""))
+    if not run_row:
+        raise HTTPException(status_code=404, detail="Data quality run not found for enrichment opportunity")
+    connection_id = str(run_row.get("connection_id") or "").strip()
+    schema_name = str(run_row.get("schema_name") or "public").strip() or "public"
+    scoped_conn = None
+    if connection_id:
+        scoped_conn = resolve_database_credentials_cached(settings, connection_id, schema_name)
+    if connection_id and not scoped_conn:
+        raise HTTPException(status_code=500, detail="Failed to resolve source connection for enrichment proposal generation")
+    max_records = payload.get("max_records")
+    proposal = build_enrichment_proposal(
+        settings,
+        opportunity,
+        scoped_conn=scoped_conn,
+        schema_name=schema_name,
+        max_records=max_records,
+    )
+    created = create_quality_enrichment_proposal(settings, proposal=proposal)
+    if not created:
+        raise HTTPException(status_code=500, detail="Failed to create enrichment proposal")
+    update_quality_enrichment_opportunity_status(
+        settings,
+        opportunity_id,
+        tenant_id=tenant_id,
+        status="proposal_generated",
+    )
+    return {
+        "opportunity_id": opportunity_id,
+        "status": "proposal_generated",
+        "proposal_id": created.get("proposal_id"),
+        "target_column": proposal.get("target_column"),
+        "target_column_alias": proposal.get("target_column_alias"),
+        "source_columns_json": proposal.get("source_columns_json") or [],
+        "source_column_aliases_json": proposal.get("source_column_aliases_json") or [],
+        "matched_count": created.get("matched_count"),
+        "unmatched_count": created.get("unmatched_count"),
+    }
+
+
+@app.get(
+    "/data-quality/enrichment/proposals/{proposal_id}",
+    tags=["data-quality"],
+    summary="Get enrichment proposal",
+    description="Return a persisted enrichment proposal for UI review.",
+)
+def get_data_quality_enrichment_proposal(proposal_id: str, tenant_id: str | None = None) -> dict:
+    proposal = get_quality_enrichment_proposal(settings, proposal_id, tenant_id=tenant_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Enrichment proposal not found")
+    opportunity = get_quality_enrichment_opportunity(
+        settings,
+        str(proposal.get("opportunity_id") or ""),
+        tenant_id=tenant_id,
+    ) or {}
+    target_column = proposal.get("target_column") or opportunity.get("target_column")
+    source_columns = proposal.get("source_columns_json") or opportunity.get("source_columns_json") or []
+    summary = summarize_enrichment_proposal(proposal)
+    return {
+        "proposal_id": proposal.get("proposal_id"),
+        "opportunity_id": proposal.get("opportunity_id"),
+        "quality_run_id": proposal.get("quality_run_id"),
+        "run_id": proposal.get("run_id"),
+        "tenant_id": proposal.get("tenant_id"),
+        "domain_id": proposal.get("domain_id"),
+        "status": proposal.get("status"),
+        "table_name": proposal.get("table_name") or opportunity.get("table_name"),
+        "target_column": target_column,
+        "target_column_alias": proposal.get("target_column_alias") or canonical_column_alias(target_column),
+        "source_columns_json": source_columns,
+        "source_column_aliases_json": proposal.get("source_column_aliases_json") or canonical_column_aliases(source_columns),
+        "candidate_method": proposal.get("candidate_method") or opportunity.get("candidate_method"),
+        "matched_count": proposal.get("matched_count"),
+        "unmatched_count": proposal.get("unmatched_count"),
+        "source_references": proposal.get("source_references_json") or [],
+        "sample_proposed_values": summary.get("sample_proposed_values") or [],
+        "summary": {
+            "total_candidate_rows": summary.get("total_candidate_rows"),
+            "confidence_buckets": summary.get("confidence_buckets") or {},
+            "method_counts": summary.get("method_counts") or {},
+            "grouped_values": summary.get("grouped_values") or [],
+        },
+        "approved_by": proposal.get("approved_by"),
+        "approved_at": proposal.get("approved_at"),
+        "created_at": proposal.get("created_at"),
+        "updated_at": proposal.get("updated_at"),
+    }
+
+
+@app.post(
+    "/data-quality/enrichment/proposals/{proposal_id}/approve-application",
+    tags=["data-quality"],
+    summary="Approve enrichment proposal application",
+    description="Approve a proposal for non-destructive staging. This does not write back to source tables.",
+)
+def approve_data_quality_enrichment_application(proposal_id: str, payload: dict) -> dict:
+    tenant_id = str(payload.get("tenant_id") or "").strip()
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id is required")
+    approved_by = str(payload.get("approved_by") or "").strip() or "system"
+    application_mode = str(payload.get("application_mode") or "staged_overlay").strip() or "staged_overlay"
+    approval_scope = str(payload.get("approval_scope") or "high_confidence").strip() or "high_confidence"
+    min_confidence = payload.get("min_confidence")
+    proposal = get_quality_enrichment_proposal(settings, proposal_id, tenant_id=tenant_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Enrichment proposal not found")
+    opportunity = get_quality_enrichment_opportunity(
+        settings,
+        str(proposal.get("opportunity_id") or ""),
+        tenant_id=tenant_id,
+    ) or {}
+    proposal_with_context = dict(proposal)
+    if opportunity:
+        proposal_with_context.setdefault("table_name", opportunity.get("table_name"))
+        proposal_with_context.setdefault("target_column", opportunity.get("target_column"))
+    selection = select_enrichment_rows_for_application(
+        proposal_with_context,
+        approval_scope=approval_scope,
+        min_confidence=min_confidence,
+    )
+    updated = update_quality_enrichment_proposal(
+        settings,
+        proposal_id,
+        tenant_id=tenant_id,
+        status="approved_for_staging",
+        approved_by=approved_by,
+    )
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to update enrichment proposal")
+    run_id = str(proposal.get("run_id") or "")
+    event_id = append_agent_run_event(
+        settings,
+        run_id,
+        "DataEnrichmentApplicationAgent",
+        "completed",
+        "Staged enrichment overlay artifact created",
+        {
+            "proposal_id": proposal_id,
+            "approved_row_count": len(selection.get("approved_rows") or []),
+            "deferred_row_count": len(selection.get("deferred_rows") or []),
+            "approval_scope": selection.get("approval_scope"),
+        },
+    )
+    staged_artifact = build_staged_enrichment_overlay_artifact(
+        proposal_with_context,
+        selection=selection,
+        approved_by=approved_by,
+        application_mode=application_mode,
+        reason=str(payload.get("reason") or "").strip() or None,
+    )
+    staged_artifact_id = upsert_agent_event_artifact(
+        settings,
+        event_id=event_id,
+        run_id=run_id,
+        agent_name="DataEnrichmentApplicationAgent",
+        stage_name="staged_overlay",
+        logical_event_id=f"dq_stage::{proposal_id}",
+        raw_json=staged_artifact,
+        summary_raw_text=(
+            f"Approved {len(selection.get('approved_rows') or [])} rows for staged overlay; "
+            f"deferred {len(selection.get('deferred_rows') or [])} rows."
+        ),
+        inference_raw_text=json.dumps(
+            {
+                "approval_scope": selection.get("approval_scope"),
+                "confidence_threshold": selection.get("confidence_threshold"),
+                "approved_row_count": len(selection.get("approved_rows") or []),
+                "deferred_row_count": len(selection.get("deferred_rows") or []),
+            }
+        ),
+    )
+    return {
+        "proposal_id": proposal_id,
+        "status": "approved_for_staging",
+        "application_mode": application_mode,
+        "approval_scope": selection.get("approval_scope"),
+        "confidence_threshold": selection.get("confidence_threshold"),
+        "approved_row_count": len(selection.get("approved_rows") or []),
+        "deferred_row_count": len(selection.get("deferred_rows") or []),
+        "sample_approved_values": (selection.get("approved_rows") or [])[:20],
+        "event_id": event_id,
+        "staged_artifact_id": staged_artifact_id,
+    }
+
+
+@app.get(
+    "/data-quality/enrichment/proposals/{proposal_id}/staged-artifact",
+    tags=["data-quality"],
+    summary="Get staged enrichment overlay artifact",
+    description="Return the persisted staged overlay artifact created when an enrichment proposal was approved for staging.",
+)
+def get_data_quality_enrichment_staged_artifact(proposal_id: str, tenant_id: str | None = None) -> dict:
+    proposal = get_quality_enrichment_proposal(settings, proposal_id, tenant_id=tenant_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Enrichment proposal not found")
+    run_id = str(proposal.get("run_id") or "").strip()
+    artifact = get_agent_event_artifact_by_logical_event_id(
+        settings,
+        run_id,
+        f"dq_stage::{proposal_id}",
+        stage_name="staged_overlay",
+    )
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Staged enrichment artifact not found")
+    raw = artifact.get("raw_json") or {}
+    return {
+        "artifact_id": artifact.get("artifact_id"),
+        "event_id": artifact.get("event_id"),
+        "logical_event_id": artifact.get("logical_event_id"),
+        "run_id": artifact.get("run_id"),
+        "proposal_id": proposal_id,
+        "status": proposal.get("status"),
+        "summary_raw_text": artifact.get("summary_raw_text"),
+        "inference_raw_text": artifact.get("inference_raw_text"),
+        "raw_json": raw,
+        "approved_row_count": raw.get("approved_row_count"),
+        "deferred_row_count": raw.get("deferred_row_count"),
+        "approval_scope": raw.get("approval_scope"),
+        "confidence_threshold": raw.get("confidence_threshold"),
+        "created_at": artifact.get("created_at"),
+        "updated_at": artifact.get("updated_at"),
     }
 
 
@@ -10213,6 +11432,7 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 "data": response_payload.get("data"),
                 "conversation_plan": response_payload.get("conversation_plan"),
                 "chart_followup": response_payload.get("chart_followup"),
+                "data_quality": response_payload.get("data_quality"),
             },
             summary_json=summary_json,
             inference_json=inference_json,
@@ -10232,12 +11452,22 @@ def workspace_send_message(conversation_id: str, payload: dict):
                 "sql_present": bool(response_payload.get("sql")),
                 "conversation_plan": response_payload.get("conversation_plan"),
                 "last_chart_followup": response_payload.get("chart_followup"),
+                "data_quality_context": response_payload.get("data_quality"),
             },
         )
         return {"assistant_message": assistant_msg, "memory": new_memory}
 
-    def _compute_sync_result() -> dict:
-        response_payload, assistant_text_base, summary_json, inference_json = _workspace_query_response(
+    def _compute_workspace_response() -> tuple[dict, str, dict, dict]:
+        dq_response = build_data_quality_workspace_response(
+            settings,
+            tenant_id=conversation["tenant_id"],
+            domain_id=conversation["domain_id"],
+            run_id=conversation["run_id"],
+            question=user_query,
+        )
+        if dq_response is not None:
+            return dq_response
+        return _workspace_query_response(
             tenant_id=conversation["tenant_id"],
             domain_id=conversation["domain_id"],
             run_id=conversation["run_id"],
@@ -10252,8 +11482,11 @@ def workspace_send_message(conversation_id: str, payload: dict):
             dimensions=payload.get("dimensions") or [],
             limit=int(payload.get("limit") or 200),
         )
+
+    def _compute_sync_result() -> dict:
+        response_payload, assistant_text_base, summary_json, inference_json = _compute_workspace_response()
         assistant_text = assistant_text_base
-        if _workspace_llm_stream_enabled():
+        if _workspace_llm_stream_enabled() and str((response_payload.get("conversation_plan") or {}).get("sql_mode")) in {"pipeline", "llm_agent"}:
             try:
                 sys_prompt, usr_prompt = _workspace_narration_prompt(user_query, response_payload, summary_json)
                 collected = "".join(_stream_openai_tokens(sys_prompt, usr_prompt)).strip()
@@ -10291,25 +11524,11 @@ def workspace_send_message(conversation_id: str, payload: dict):
         try:
             yield f"data: {json.dumps({'event': 'message_start', 'conversation_id': conversation_id})}\n\n"
             yield f"data: {json.dumps({'event': 'status', 'stage': 'query_started'})}\n\n"
-            response_payload, assistant_text_base, summary_json, inference_json = _workspace_query_response(
-                tenant_id=conversation["tenant_id"],
-                domain_id=conversation["domain_id"],
-                run_id=conversation["run_id"],
-                question=effective_question,
-                conversation_id=conversation_id,
-                chart_context=chart_context,
-                chart_followup_context=chart_followup_context,
-                raw_user_query=user_query,
-                conversation_memory_text=(memory or {}).get("summary_text"),
-                business_context_text=_business_context_text,
-                metrics=payload.get("metrics") or [],
-                dimensions=payload.get("dimensions") or [],
-                limit=int(payload.get("limit") or 200),
-            )
+            response_payload, assistant_text_base, summary_json, inference_json = _compute_workspace_response()
             yield f"data: {json.dumps({'event': 'status', 'stage': 'query_completed', 'row_count': len(response_payload.get('rows') or [])})}\n\n"
             assistant_text = assistant_text_base
             streamed = False
-            if _workspace_llm_stream_enabled():
+            if _workspace_llm_stream_enabled() and str((response_payload.get("conversation_plan") or {}).get("sql_mode")) in {"pipeline", "llm_agent"}:
                 yield f"data: {json.dumps({'event': 'status', 'stage': 'narration_started'})}\n\n"
                 try:
                     sys_prompt, usr_prompt = _workspace_narration_prompt(user_query, response_payload, summary_json)
@@ -12451,6 +13670,7 @@ def get_dashboard_endpoint(dashboard_id: str, tenant_id: str | None = None) -> D
         quality_score=dash.get("quality_score"),
         quality_gate_passed=dash.get("quality_gate_passed"),
         created_by=dash.get("created_by"),
+        chart_plan=dash.get("chart_plan") or [],
         charts=charts_out,
         created_at=_iso(dash.get("created_at")),
         updated_at=_iso(dash.get("updated_at")),
@@ -19540,6 +20760,360 @@ def _semantic_propagation_response(row: dict, tenant_id: str, domain_id: str) ->
     )
 
 
+def _semantic_intake_artifact_summary(row: dict) -> SemanticIntakeArtifactSummary:
+    artifact_json = row.get("artifact_json") or {}
+    if not isinstance(artifact_json, dict):
+        artifact_json = {}
+    summary = (
+        artifact_json.get("description")
+        or artifact_json.get("source_text")
+        or artifact_json.get("guidance")
+        or artifact_json.get("rule")
+        or artifact_json.get("text")
+    )
+    if not summary and artifact_json.get("metric_name"):
+        summary = f"Metric refinement for {artifact_json.get('metric_name')}"
+    if not summary and artifact_json.get("column"):
+        summary = f"Column annotation for {artifact_json.get('column')}"
+    return SemanticIntakeArtifactSummary(
+        artifact_id=row.get("artifact_id"),
+        artifact_type=row.get("artifact_type"),
+        validation_status=row.get("validation_status") or "pending",
+        approval_status=row.get("approval_status") or "pending",
+        artifact_json=artifact_json,
+        validation_errors_json=row.get("validation_errors_json") or [],
+        summary=summary,
+    )
+
+
+def _semantic_intake_propagation_summary(row: dict | None) -> list[SemanticIntakePropagationSummary]:
+    if not row:
+        return []
+    affected_scope = row.get("affected_scope_json") or {}
+    if not isinstance(affected_scope, dict):
+        affected_scope = {}
+    return [
+        SemanticIntakePropagationSummary(
+            job_id=row.get("job_id"),
+            status=row.get("status") or "queued",
+            refresh_actions=affected_scope.get("refresh_actions") or [],
+            affected_scope_json=affected_scope,
+        )
+    ]
+
+
+@app.post(
+    "/semantic/intake",
+    response_model=SemanticIntakeResponse,
+    tags=["semantic"],
+    summary="Submit UI semantic intake text",
+    description=(
+        "UI-facing wrapper for semantic improvements. The UI sends only text plus type=semantics; "
+        "the backend infers refinement kind, extracts artifacts, auto-approves valid artifacts, "
+        "rebuilds semantic state, and queues propagation."
+    ),
+)
+def semantic_intake(payload: SemanticIntakeRequest) -> SemanticIntakeResponse:
+    intake_type = str(payload.type or "").strip().lower()
+    if intake_type != "semantics":
+        raise HTTPException(status_code=400, detail="Only type='semantics' is supported")
+    text = str(payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id = payload.connection_id
+    database_name = payload.database_name
+    schema_name = payload.schema_name
+    if not (connection_id and database_name and schema_name):
+        resolved_connection, resolved_database, resolved_schema, _ = _resolve_scope_values(payload.tenant_id, domain_id)
+        connection_id = connection_id or resolved_connection
+        database_name = database_name or resolved_database
+        schema_name = schema_name or resolved_schema
+
+    refinement_kind = infer_refinement_kind(text)
+    source_type = "conversation" if payload.conversation_id else "text"
+    errors = validate_refinement_input_payload(
+        source_type=source_type,
+        refinement_kind=refinement_kind,
+        source_text=text,
+        source_payload_json=None,
+    )
+    if errors:
+        raise HTTPException(status_code=400, detail={"errors": errors})
+
+    refinement_input_id = create_refinement_input(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        source_run_id=payload.source_run_id,
+        source_type=source_type,
+        refinement_kind=refinement_kind,
+        source_text=text,
+        source_payload_json={},
+        source_context_id=payload.conversation_id,
+        conversation_id=payload.conversation_id,
+        submitted_by=payload.submitted_by,
+    )
+    row = get_refinement_input(settings, refinement_input_id)
+    artifacts: list[dict] = []
+    semantic_state_id: str | None = None
+    propagation_job: dict | None = None
+    if row:
+        artifacts = process_refinement_input(
+            settings,
+            row,
+            auto_approve=True,
+            approved_by=payload.submitted_by or "system:auto_approve",
+        )
+        row = get_refinement_input(settings, refinement_input_id) or row
+        valid_artifacts = [
+            artifact
+            for artifact in artifacts
+            if artifact.get("validation_status") == "valid"
+            and artifact.get("approval_status") in {"approved", "auto_approved"}
+        ]
+        if valid_artifacts:
+            state_result = rebuild_semantic_state(
+                settings,
+                tenant_id=payload.tenant_id,
+                domain_id=domain_id,
+                connection_id=connection_id,
+                database_name=database_name,
+                schema_name=schema_name,
+                trigger_type="semantic_intake_auto_approved",
+            )
+            semantic_state_id = state_result.get("semantic_state_id")
+            propagation_job = enqueue_semantic_propagation_for_artifacts(
+                settings,
+                tenant_id=payload.tenant_id,
+                domain_id=domain_id,
+                connection_id=connection_id,
+                database_name=database_name,
+                schema_name=schema_name,
+                artifacts=valid_artifacts,
+                trigger_type="semantic_intake_auto_approved",
+                semantic_state_id=semantic_state_id,
+            )
+
+    return SemanticIntakeResponse(
+        status=(row or {}).get("status") or ("processed" if artifacts else "submitted"),
+        type="semantics",
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        inferred_refinement_kind=refinement_kind,
+        refinement_input_id=refinement_input_id,
+        semantic_state_id=semantic_state_id,
+        artifacts=[_semantic_intake_artifact_summary(item) for item in artifacts],
+        propagation_jobs=_semantic_intake_propagation_summary(propagation_job),
+    )
+
+
+@app.post(
+    "/semantic/impact-preview",
+    response_model=SemanticImpactPreviewResponse,
+    tags=["semantic"],
+    summary="Preview semantic refinement impact",
+    description=(
+        "Read-only preview of semantic refinement impact. Accepts either an existing refinement_input_id "
+        "or raw text/payload, extracts/profiles artifacts, compares them with active semantic state, and "
+        "returns affected scope without changing approval status or active state."
+    ),
+)
+def semantic_impact_preview(payload: SemanticImpactPreviewRequest) -> SemanticImpactPreviewResponse:
+    domain_id = _resolve_domain_id(payload.tenant_id, payload.domain_id)
+    connection_id = payload.connection_id
+    database_name = payload.database_name
+    schema_name = payload.schema_name
+    if not (connection_id and database_name and schema_name):
+        resolved_connection, resolved_database, resolved_schema, _ = _resolve_scope_values(payload.tenant_id, domain_id)
+        connection_id = connection_id or resolved_connection
+        database_name = database_name or resolved_database
+        schema_name = schema_name or resolved_schema
+
+    refinement_input_id = payload.refinement_input_id
+    refinement_kind: str | None = None
+    artifacts: list[dict] = []
+    if refinement_input_id:
+        row = get_refinement_input(settings, refinement_input_id)
+        if not row or row.get("tenant_id") != payload.tenant_id or row.get("domain_id") != domain_id:
+            raise HTTPException(status_code=404, detail="Refinement not found")
+        refinement_kind = row.get("refinement_kind")
+        artifacts = list_refinement_artifacts(
+            settings,
+            tenant_id=payload.tenant_id,
+            domain_id=domain_id,
+            refinement_input_id=refinement_input_id,
+            limit=100,
+        )
+        if not artifacts:
+            artifacts = extract_refinement_artifacts_with_llm(settings, row)
+    else:
+        text = str(payload.text or "").strip()
+        source_payload = payload.payload or {}
+        if not text and not source_payload:
+            raise HTTPException(status_code=400, detail="Provide refinement_input_id, text, or payload")
+        refinement_kind = str(payload.refinement_kind or "auto").strip()
+        if refinement_kind == "auto":
+            refinement_kind = infer_refinement_kind(text, source_payload)
+        errors = validate_refinement_input_payload(
+            source_type="text" if text else "structured",
+            refinement_kind=refinement_kind,
+            source_text=text,
+            source_payload_json=source_payload,
+        )
+        if errors:
+            raise HTTPException(status_code=400, detail={"errors": errors})
+        artifacts = extract_refinement_artifacts_with_llm(
+            settings,
+            {
+                "tenant_id": payload.tenant_id,
+                "domain_id": domain_id,
+                "connection_id": connection_id,
+                "database_name": database_name,
+                "schema_name": schema_name,
+                "source_type": "text" if text else "structured",
+                "refinement_kind": refinement_kind,
+                "source_text": text,
+                "source_payload_json": source_payload,
+            },
+        )
+
+    active_row = get_current_semantic_state(
+        settings,
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    active_state = (active_row or {}).get("state_json") or {}
+    preview = build_semantic_impact_preview(artifacts, active_state=active_state)
+    return SemanticImpactPreviewResponse(
+        tenant_id=payload.tenant_id,
+        domain_id=domain_id,
+        refinement_input_id=refinement_input_id,
+        inferred_refinement_kind=refinement_kind,
+        impact_level=preview.get("impact_level") or "none",
+        diff_summary=preview.get("diff_summary") or [],
+        affected_scope=preview.get("affected_scope") or {},
+        artifact_count=len(artifacts),
+        active_semantic_state_id=(active_row or {}).get("semantic_state_id"),
+    )
+
+
+@app.get(
+    "/semantic/audit",
+    response_model=SemanticAuditResponse,
+    tags=["semantic"],
+    summary="Get semantic audit timeline",
+    description=(
+        "Read-only audit timeline for semantic refinements, extracted artifacts, semantic state versions, "
+        "and propagation jobs in a tenant/domain scope."
+    ),
+)
+def get_semantic_audit(
+    tenant_id: str,
+    domain_id: str | None = None,
+    connection_id: str | None = None,
+    database_name: str | None = None,
+    schema_name: str | None = None,
+    limit: int = 100,
+) -> SemanticAuditResponse:
+    resolved_domain_id = _resolve_domain_id(tenant_id, domain_id)
+    refinements = list_refinement_inputs(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=resolved_domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        limit=limit,
+    )
+    artifacts_by_refinement: dict[str, list[dict]] = {}
+    for refinement in refinements:
+        refinement_input_id = str(refinement.get("refinement_input_id") or "")
+        if not refinement_input_id:
+            continue
+        artifacts_by_refinement[refinement_input_id] = list_refinement_artifacts(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=resolved_domain_id,
+            refinement_input_id=refinement_input_id,
+            limit=100,
+        )
+    semantic_states = list_semantic_states(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=resolved_domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        limit=limit,
+    )
+    propagation_jobs = list_semantic_propagation_jobs(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=resolved_domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        limit=limit,
+    )
+    audit = build_semantic_audit(
+        refinements=refinements,
+        artifacts_by_refinement=artifacts_by_refinement,
+        semantic_states=semantic_states,
+        propagation_jobs=propagation_jobs,
+    )
+    return SemanticAuditResponse(
+        tenant_id=tenant_id,
+        domain_id=resolved_domain_id,
+        refinements=audit.get("refinements") or [],
+        semantic_states=audit.get("semantic_states") or [],
+        propagation_jobs=audit.get("propagation_jobs") or [],
+        timeline=audit.get("timeline") or [],
+    )
+
+
+@app.get(
+    "/semantic/conflicts",
+    response_model=SemanticConflictResponse,
+    tags=["semantic"],
+    summary="Detect semantic refinement conflicts",
+    description="Read-only diagnostics for competing semantic refinement artifacts in a tenant/domain scope.",
+)
+def get_semantic_conflicts(
+    tenant_id: str,
+    domain_id: str | None = None,
+    connection_id: str | None = None,
+    database_name: str | None = None,
+    schema_name: str | None = None,
+    limit: int = 500,
+) -> SemanticConflictResponse:
+    resolved_domain_id = _resolve_domain_id(tenant_id, domain_id)
+    artifacts = list_refinement_artifacts(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=resolved_domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        validation_status="valid",
+        limit=limit,
+    )
+    conflicts = detect_semantic_conflicts(artifacts)
+    return SemanticConflictResponse(
+        tenant_id=tenant_id,
+        domain_id=resolved_domain_id,
+        conflicts=conflicts,
+        conflict_count=len(conflicts),
+    )
+
+
 @app.post(
     "/semantic/refinements",
     response_model=SemanticRefinementResponse,
@@ -19732,6 +21306,92 @@ def process_semantic_refinement(
     )
 
 
+@app.post(
+    "/semantic/refinement-artifacts/{artifact_id}/approve",
+    response_model=SemanticRefinementArtifactResponse,
+    tags=["semantic"],
+    summary="Approve a semantic refinement artifact",
+    description="Mark a valid artifact approved, rebuild semantic state, and queue propagation when requested.",
+)
+def approve_semantic_refinement_artifact(
+    artifact_id: str,
+    payload: SemanticRefinementApprovalRequest,
+) -> SemanticRefinementArtifactResponse:
+    artifact = get_refinement_artifact(settings, artifact_id, tenant_id=payload.tenant_id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Refinement artifact not found")
+    if artifact.get("validation_status") != "valid":
+        raise HTTPException(status_code=400, detail="Only valid artifacts can be approved")
+    update_refinement_artifact_approval(
+        settings,
+        artifact_id,
+        tenant_id=payload.tenant_id,
+        approval_status="approved",
+        approved_by=payload.approved_by or "system:manual_approval",
+    )
+    artifact = get_refinement_artifact(settings, artifact_id, tenant_id=payload.tenant_id) or artifact
+    semantic_state_id = None
+    if payload.rebuild_state:
+        state_result = rebuild_semantic_state(
+            settings,
+            tenant_id=payload.tenant_id,
+            domain_id=artifact.get("domain_id"),
+            connection_id=artifact.get("connection_id"),
+            database_name=artifact.get("database_name"),
+            schema_name=artifact.get("schema_name"),
+            trigger_type="manual_artifact_approved",
+        )
+        semantic_state_id = state_result.get("semantic_state_id")
+        enqueue_semantic_propagation_for_artifacts(
+            settings,
+            tenant_id=payload.tenant_id,
+            domain_id=artifact.get("domain_id"),
+            connection_id=artifact.get("connection_id"),
+            database_name=artifact.get("database_name"),
+            schema_name=artifact.get("schema_name"),
+            artifacts=[artifact],
+            trigger_type="manual_artifact_approved",
+            semantic_state_id=semantic_state_id,
+        )
+    return _refinement_artifact_response(artifact)
+
+
+@app.post(
+    "/semantic/refinement-artifacts/{artifact_id}/reject",
+    response_model=SemanticRefinementArtifactResponse,
+    tags=["semantic"],
+    summary="Reject a semantic refinement artifact",
+    description="Mark an artifact rejected and rebuild semantic state when requested.",
+)
+def reject_semantic_refinement_artifact(
+    artifact_id: str,
+    payload: SemanticRefinementApprovalRequest,
+) -> SemanticRefinementArtifactResponse:
+    artifact = get_refinement_artifact(settings, artifact_id, tenant_id=payload.tenant_id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Refinement artifact not found")
+    was_active = artifact.get("approval_status") in {"approved", "auto_approved"}
+    update_refinement_artifact_approval(
+        settings,
+        artifact_id,
+        tenant_id=payload.tenant_id,
+        approval_status="rejected",
+        approved_by=payload.approved_by or "system:manual_rejection",
+    )
+    artifact = get_refinement_artifact(settings, artifact_id, tenant_id=payload.tenant_id) or artifact
+    if payload.rebuild_state and was_active:
+        rebuild_semantic_state(
+            settings,
+            tenant_id=payload.tenant_id,
+            domain_id=artifact.get("domain_id"),
+            connection_id=artifact.get("connection_id"),
+            database_name=artifact.get("database_name"),
+            schema_name=artifact.get("schema_name"),
+            trigger_type="manual_artifact_rejected",
+        )
+    return _refinement_artifact_response(artifact)
+
+
 @app.get(
     "/semantic/state",
     response_model=SemanticStateResponse,
@@ -19762,6 +21422,53 @@ def get_semantic_state_endpoint(
     if not row:
         raise HTTPException(status_code=404, detail="Semantic state not found")
     return _semantic_state_response(row, tenant_id, resolved_domain_id)
+
+
+@app.get(
+    "/semantic/state/history",
+    response_model=list[SemanticStateResponse],
+    tags=["semantic"],
+    summary="List semantic state history",
+)
+def list_semantic_state_history(
+    tenant_id: str,
+    domain_id: str | None = None,
+    connection_id: str | None = None,
+    database_name: str | None = None,
+    schema_name: str | None = None,
+    limit: int = 100,
+) -> list[SemanticStateResponse]:
+    resolved_domain_id = _resolve_domain_id(tenant_id, domain_id)
+    rows = list_semantic_states(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=resolved_domain_id,
+        connection_id=connection_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        limit=limit,
+    )
+    return [_semantic_state_response(row, tenant_id, resolved_domain_id) for row in rows]
+
+
+@app.post(
+    "/semantic/state/{semantic_state_id}/activate",
+    response_model=SemanticStateResponse,
+    tags=["semantic"],
+    summary="Activate a previous semantic state",
+    description="Rollback/activate a semantic state version by switching active state for its tenant/domain/scope.",
+)
+def activate_semantic_state_endpoint(
+    semantic_state_id: str,
+    payload: SemanticStateActivateRequest,
+) -> SemanticStateResponse:
+    row = get_semantic_state(settings, semantic_state_id, tenant_id=payload.tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Semantic state not found")
+    activated = activate_semantic_state(settings, semantic_state_id, tenant_id=payload.tenant_id)
+    if not activated:
+        raise HTTPException(status_code=404, detail="Semantic state not found")
+    return _semantic_state_response(activated, payload.tenant_id, activated.get("domain_id") or "")
 
 
 @app.post(
@@ -21691,3 +23398,4 @@ def _assert_run_exists(correlation_run_id: str) -> None:
     row = get_correlation_run(settings, correlation_run_id)
     if not row:
         raise HTTPException(status_code=404, detail=f"Correlation run {correlation_run_id!r} not found")
+import uuid

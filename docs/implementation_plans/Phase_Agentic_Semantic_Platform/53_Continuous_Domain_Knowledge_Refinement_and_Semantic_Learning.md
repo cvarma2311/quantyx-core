@@ -623,11 +623,11 @@ If something cannot be validated:
 - persist it as pending or advisory
 - do not apply it blindly
 
-### Current Backend Rollout: Auto-Approval First
+### Current Backend Rollout: Auto-Approval Default with Manual Governance APIs
 
 For the first backend implementation, valid refinement artifacts are auto-approved after deterministic validation.
 
-Manual approval/rejection is intentionally deferred to a later product slice.
+Manual governance APIs are also available for reviewer and admin screens, but the default end-user path remains auto-approval.
 
 Current behavior:
 
@@ -639,12 +639,13 @@ Current behavior:
 - selective propagation jobs are queued from auto-approved artifacts, with refresh actions derived from artifact type
 - the propagation runner can rebuild semantic state, apply hierarchy refinements, apply metric refinements, recompute chart interaction metadata, queue dashboard refresh jobs, persist semantic glossary terms, and mark query/workspace/anomaly context refreshes as active-state read-through
 - workspace conversation messages can auto-write back likely semantic corrections into the same refinement pipeline before query planning
+- impact preview, audit timeline, conflict diagnostics, state history, rollback/state activation, and explicit artifact approve/reject APIs are implemented for governance flows
 
-Later manual approval work should add:
+Remaining UI work should add:
 
-- reviewer-specific approval and rejection endpoints
-- semantic diff and impact preview before approval
-- approval ownership and audit UI
+- reviewer-facing approval queue screens
+- semantic diff and impact preview screens
+- audit timeline screens
 - stricter approval rules for high-impact changes such as metric formulas, join restrictions, and canonical time rules
 
 ### Step 5. Merge and Precedence
@@ -1073,48 +1074,74 @@ Current backend rollout:
 - workspace user messages are screened for likely semantic corrections
 - inferred correction kinds are submitted as `source_type = conversation`
 - valid extracted artifacts are auto-approved, semantic state is rebuilt, and propagation jobs are enqueued
-- manual review, impact preview, and explicit approve/reject endpoints remain deferred
+- manual review can use the governance APIs for impact preview, audit, conflict diagnostics, rollback, and artifact approve/reject
 
-## End-to-End API Test Flow for UI Integration
+## UI Integration Guide
 
-This flow assumes the initial agentic deployment has already completed for a tenant/domain, for example after running the demo workspace deployment such as `demo_workspace_deployment_lpg`.
+This section is for UI developers and designers. It assumes the initial agentic deployment has completed for a tenant/domain, for example after `demo_workspace_deployment_lpg`.
 
-Use these placeholders in the examples:
+Use these placeholders in examples:
 
 - `BASE_URL=http://localhost:8000`
 - `TENANT_ID=VC_101`
 - `DOMAIN_ID=lpg_production_distribution`
 - `RUN_ID=<completed_agentic_run_id>`
-- `CONNECTION_ID=<optional_connection_id>`
-- `DATABASE_NAME=<optional_database_name>`
-- `SCHEMA_NAME=<optional_schema_name>`
+- `CONVERSATION_ID=<workspace_conversation_id>`
+- `SEMANTIC_STATE_ID=<semantic_state_id>`
+- `ARTIFACT_ID=<refinement_artifact_id>`
 
-The connection/database/schema values are optional for most UI calls. If omitted, the backend resolves the active deployment scope for the tenant/domain.
+The UI should not ask end users to choose `refinement_kind`. For normal semantic improvement, the UI sends raw text and `type=semantics`; the backend classifies the text, extracts artifacts, validates them, auto-approves valid artifacts, rebuilds semantic state, and queues propagation.
 
-Recommended UI contract: the UI should not ask the user to select `refinement_kind`, and it should not construct the lower-level semantic refinement payload for simple text input. The UI should send only:
+### Section A: Automatic Semantic Intake and Auto-Approval
 
-- the text the user entered
-- the user-facing intent/type, for example `semantics`
-- tenant/domain/conversation/run identifiers already available in the workspace
+Use this flow for the main user experience. This is the happy path where a user adds context or correction text and the platform applies valid refinements automatically.
 
-The backend should own classification, structured artifact extraction, validation, auto-approval, semantic-state rebuild, and propagation.
+#### A1. Load Semantic Context Questions
 
-The lower-level `POST /semantic/refinements` API remains useful for admin/debug tooling and structured imports. For that API, `refinement_kind` can be sent as `auto`; the backend derives the concrete kind from text or structured payload and persists the resolved value. Advanced/admin callers may still send an explicit kind when they know it.
+Purpose: render optional semantic discovery questions after the agentic run.
 
-Backend inference currently maps:
+```http
+GET /semantic/context-questions?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}
+```
 
-- hierarchy/drill path language to `hierarchy`
-- metric/KPI/formula/growth language to `metric_refinement`
-- field/column/means/represents/label language to `column_annotation`
-- do-not-join/exclude/filter language to `join_rule`
-- anomaly/correlation/significant/alert/expected/ignore language to `interpretation_rule`
-- chart/dashboard/trend/forecast/ranking language to `chart_guidance`
-- context question payloads with `question_id`, `answer_text`, or `maps_to` to `context_question_answer`
-- everything else to `business_context`
+Example:
 
-### Recommended Wrapper API for UI
+```bash
+curl -s "$BASE_URL/semantic/context-questions?tenant_id=$TENANT_ID&domain_id=$DOMAIN_ID"
+```
 
-Add a UI-facing wrapper endpoint:
+Response:
+
+```json
+{
+  "domain_id": "lpg_production_distribution",
+  "question_groups": [
+    {
+      "group_id": "dashboard_objectives",
+      "title": "Dashboard Objectives",
+      "questions": [
+        {
+          "question_id": "primary_kpis",
+          "prompt": "What are the most important KPIs this dashboard should track?",
+          "answer_type": "text",
+          "required": true,
+          "maps_to": ["metric_refinement", "chart_guidance"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+UI notes:
+
+- present these as plain business questions
+- do not expose artifact names as user choices
+- submit free-text answers through `POST /semantic/intake`
+
+#### A2. Submit User Text Through Semantic Intake
+
+Purpose: one simple endpoint for user-provided semantic text.
 
 ```http
 POST /semantic/intake
@@ -1129,200 +1156,32 @@ Request:
   "type": "semantics",
   "text": "Growth rate should use prior month as the baseline and should be evaluated monthly.",
   "conversation_id": "conv_...",
-  "source_run_id": "<completed_agentic_run_id>",
+  "source_run_id": "run_...",
   "submitted_by": "ui:user"
 }
 ```
 
-Minimal required fields:
+Minimal request:
 
-- `tenant_id`
-- `type`
-- `text`
+```json
+{
+  "tenant_id": "VC_101",
+  "type": "semantics",
+  "text": "Field ship_to_id means Ship-To Customer."
+}
+```
 
-Optional fields:
-
-- `domain_id`
-- `conversation_id`
-- `source_run_id`
-- `submitted_by`
-- `connection_id`
-- `database_name`
-- `schema_name`
-
-Backend behavior:
-
-1. Validate `type == "semantics"`.
-2. Resolve `domain_id` from tenant/domain context if omitted.
-3. Resolve connection/database/schema from the active deployment scope if omitted.
-4. Use deterministic classification first to infer the candidate `refinement_kind`.
-5. Optionally call the LLM extractor to produce one or more structured artifacts from the user text.
-6. Fall back to deterministic extraction when the LLM is unavailable or disabled.
-7. Create the lower-level refinement input using:
-   - `source_type = "text"` or `source_type = "conversation"` when `conversation_id` is present
-   - `refinement_kind = <inferred_kind>`
-   - `text = <user text>`
-   - `auto_process = true`
-   - `rebuild_state = true`
-8. Validate extracted artifacts against schema/metric/join context where possible.
-9. Mark valid artifacts as `auto_approved`.
-10. Rebuild active semantic state.
-11. Queue semantic propagation jobs from the approved artifact types.
-12. Return a UI-friendly summary.
-
-Suggested response:
+Response:
 
 ```json
 {
   "status": "processed",
   "type": "semantics",
+  "tenant_id": "VC_101",
+  "domain_id": "lpg_production_distribution",
   "inferred_refinement_kind": "metric_refinement",
   "refinement_input_id": "ref_...",
   "semantic_state_id": "sem_state_...",
-  "artifacts": [
-    {
-      "artifact_id": "ref_art_...",
-      "artifact_type": "metric_refinement",
-      "validation_status": "valid",
-      "approval_status": "auto_approved",
-      "summary": "Growth rate uses prior month as monthly baseline"
-    }
-  ],
-  "propagation_jobs": [
-    {
-      "job_id": "semprop_...",
-      "status": "queued",
-      "refresh_actions": [
-        "refresh_semantic_state",
-        "refresh_metrics",
-        "refresh_query_planner_constraints"
-      ]
-    }
-  ]
-}
-```
-
-Wrapper API implementation options:
-
-- reuse the existing `infer_refinement_kind(...)` helper for first-pass classification
-- reuse `create_refinement_input(...)`, `process_refinement_input(...)`, `rebuild_semantic_state(...)`, and `enqueue_semantic_propagation_for_artifacts(...)`
-- expose `POST /semantic/intake` as a thin orchestration wrapper rather than duplicating refinement logic
-- keep `POST /semantic/refinements` as the lower-level power-user API
-
-LLM role:
-
-- The LLM should not decide whether to apply a change directly.
-- The LLM can extract richer structured artifact JSON from text, for example multiple artifacts from one paragraph.
-- Deterministic validation still decides whether an artifact can become `auto_approved`.
-- If the LLM is disabled or fails, deterministic extraction should still produce a useful fallback artifact where possible.
-
-Example: one UI text input can create multiple artifacts:
-
-```json
-{
-  "type": "semantics",
-  "text": "Growth rate should use prior month as baseline. Field ship_to_id means Ship-To Customer. Do not join orders with customer_reference for KPI calculations."
-}
-```
-
-Backend may extract:
-
-```json
-[
-  {
-    "artifact_type": "metric_refinement",
-    "artifact_json": {
-      "metric_name": "growth_rate",
-      "formula": "month_over_month_growth",
-      "grain": "month"
-    }
-  },
-  {
-    "artifact_type": "column_annotation",
-    "artifact_json": {
-      "column": "ship_to_id",
-      "business_label": "Ship-To Customer"
-    }
-  },
-  {
-    "artifact_type": "join_rule",
-    "artifact_json": {
-      "rule_type": "join_restriction",
-      "left_table": "orders",
-      "right_table": "customer_reference",
-      "allowed": false
-    }
-  }
-]
-```
-
-UI implication:
-
-- The main user-facing UI should call `POST /semantic/intake`.
-- The UI should show returned inferred kind/artifacts as status, not as required user input.
-- If validation fails, show `validation_errors_json` and ask the user to clarify in natural language.
-- The admin/debug UI may still call `POST /semantic/refinements` directly.
-
-### 1. Confirm Pack Questions for the UI
-
-Use this to render semantic discovery questions for the domain.
-
-```bash
-curl -s "$BASE_URL/semantic/context-questions?tenant_id=$TENANT_ID&domain_id=$DOMAIN_ID"
-```
-
-Expected response shape:
-
-```json
-{
-  "domain_id": "lpg_production_distribution",
-  "question_groups": [
-    {
-      "group_id": "dashboard_objectives",
-      "title": "Dashboard Objectives",
-      "questions": []
-    }
-  ]
-}
-```
-
-UI behavior:
-
-- show the returned question groups as optional post-run context capture
-- submit each free-text answer through `POST /semantic/intake` with `type=semantics`
-- use `POST /semantic/refinements` only for admin/debug flows that intentionally send structured payloads
-- backend keeps `auto_process=true` and `rebuild_state=true` internally for the current auto-approval path
-
-### 2. Submit Direct Semantic Refinement Text
-
-Use this lower-level API for admin/debug tooling. The main UI should prefer the wrapper `POST /semantic/intake` so it can send only user text plus `type=semantics`.
-
-```bash
-curl -s -X POST "$BASE_URL/semantic/refinements" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "VC_101",
-    "domain_id": "lpg_production_distribution",
-    "source_type": "text",
-    "refinement_kind": "auto",
-    "text": "Growth rate should use prior month as the baseline and should be evaluated at month grain.",
-    "source_run_id": "<completed_agentic_run_id>",
-    "submitted_by": "ui:user",
-    "auto_process": true,
-    "rebuild_state": true
-  }'
-```
-
-Expected response shape:
-
-```json
-{
-  "refinement_input_id": "ref_...",
-  "tenant_id": "VC_101",
-  "domain_id": "lpg_production_distribution",
-  "source_type": "text",
-  "refinement_kind": "metric_refinement",
-  "status": "processed",
   "artifacts": [
     {
       "artifact_id": "ref_art_...",
@@ -1333,87 +1192,194 @@ Expected response shape:
         "metric_name": "growth_rate",
         "formula": "month_over_month_growth",
         "grain": "month"
-      }
+      },
+      "validation_errors_json": [],
+      "summary": "Metric refinement for growth_rate"
     }
   ],
-  "semantic_state_id": "sem_state_..."
+  "propagation_jobs": [
+    {
+      "job_id": "semprop_...",
+      "status": "queued",
+      "refresh_actions": [
+        "refresh_metrics",
+        "refresh_affected_dashboards",
+        "refresh_anomaly_correlation_context",
+        "refresh_workspace_semantics"
+      ],
+      "affected_scope_json": {
+        "artifact_ids": ["ref_art_..."],
+        "artifact_types": ["metric_refinement"],
+        "affected_metrics": ["growth_rate"],
+        "impact_level": "high"
+      }
+    }
+  ]
 }
 ```
 
-Important backend behavior:
+Backend behavior:
 
-- the input is persisted in `quantyx_domain_refinement_inputs`
-- structured artifacts are persisted in `quantyx_domain_refinement_artifacts`
-- valid artifacts are marked `auto_approved`
-- semantic state is rebuilt immediately
-- propagation jobs are queued automatically for the affected artifact types
+1. infers `refinement_kind`
+2. extracts one or more structured artifacts
+3. validates artifacts
+4. marks valid artifacts `auto_approved`
+5. rebuilds active semantic state
+6. queues propagation jobs
+7. returns artifact and job summaries for the UI
 
-### 3. Submit Structured Context Question Answers
+UI notes:
 
-Use this when the UI captures answers from `GET /semantic/context-questions`.
+- show a lightweight confirmation such as "Semantic update applied"
+- show invalid artifacts as clarification prompts, not as system errors
+- use `propagation_jobs[].job_id` only for advanced status panels
 
-```bash
-curl -s -X POST "$BASE_URL/semantic/refinements" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "VC_101",
-    "domain_id": "lpg_production_distribution",
-    "source_type": "structured",
-    "refinement_kind": "auto",
-    "payload": {
-      "group_id": "hierarchy_and_grain",
-      "question_id": "preferred_drill_path",
-      "answer_text": "Use hierarchy Zone > Region > Plant for drill downs.",
-      "maps_to": ["hierarchy_override"]
-    },
-    "source_run_id": "<completed_agentic_run_id>",
-    "submitted_by": "ui:user",
-    "auto_process": true,
-    "rebuild_state": true
-  }'
+#### A3. Create or Open Workspace Conversation
+
+Purpose: start the conversational workspace for the completed deployment.
+
+```http
+POST /workspace/conversations
 ```
 
-Expected result:
+Request:
 
-- a `context_question_answer` artifact is created
-- derived artifacts may also be created when the answer can be parsed deterministically, for example `hierarchy_override`
-- valid artifacts are auto-approved and included in the active semantic state
-
-### 4. List Refinements and Show Status in the UI
-
-Use this for a refinement history panel.
-
-```bash
-curl -s "$BASE_URL/semantic/refinements?tenant_id=$TENANT_ID&domain_id=$DOMAIN_ID&include_artifacts=true&limit=50"
+```json
+{
+  "tenant_id": "VC_101",
+  "domain_id": "lpg_production_distribution",
+  "title": "LPG semantic refinement test",
+  "created_by": "ui:user"
+}
 ```
 
-Useful UI fields:
+Response:
 
-- `refinement_input_id`
-- `source_type`
-- `refinement_kind`
-- `status`
-- `conversation_id`
-- `artifacts[].artifact_type`
-- `artifacts[].validation_status`
-- `artifacts[].approval_status`
-- `semantic_state_id`
-
-Current approval behavior:
-
-- valid artifacts should show `approval_status=auto_approved`
-- invalid artifacts should show validation errors and must not be treated as active
-- explicit approve/reject buttons should remain hidden or disabled until the later approval workflow is implemented
-
-### 5. Fetch the Active Semantic State
-
-Use this to verify the backend has merged the new refinement into the active semantic state.
-
-```bash
-curl -s "$BASE_URL/semantic/state?tenant_id=$TENANT_ID&domain_id=$DOMAIN_ID"
+```json
+{
+  "conversation_id": "conv_...",
+  "tenant_id": "VC_101",
+  "domain_id": "lpg_production_distribution",
+  "run_id": "run_...",
+  "title": "LPG semantic refinement test",
+  "status": "active"
+}
 ```
 
-Expected response shape:
+If this returns `409`, the deployment is missing or its required intelligence artifacts are incomplete.
+
+#### A4. Send Normal Workspace Message
+
+Purpose: run a normal conversation query against the active semantic state.
+
+```http
+POST /workspace/conversations/{CONVERSATION_ID}/messages
+```
+
+Request:
+
+```json
+{
+  "user_query": "Show production trend by plant for the last 30 days",
+  "resume_context": true,
+  "stream": false
+}
+```
+
+Response:
+
+```json
+{
+  "conversation_id": "conv_...",
+  "message_id": "msg_...",
+  "response": {
+    "chart_type": "line",
+    "chart_title": "Production Trend by Plant",
+    "sql": "SELECT ..."
+  },
+  "context_used": {
+    "resume_context": true,
+    "run_id": "run_..."
+  }
+}
+```
+
+Runtime behavior:
+
+- active semantic state is loaded
+- refined glossary terms are merged into planning
+- restricted joins from approved `join_rule` artifacts are removed from candidates
+
+#### A5. Conversation Correction Auto-Writeback
+
+Purpose: allow corrections inside chat without a separate UI form.
+
+Request:
+
+```json
+{
+  "user_query": "Actually growth rate should use prior month as the baseline and should be evaluated monthly.",
+  "resume_context": true,
+  "stream": false
+}
+```
+
+Backend behavior:
+
+- detects correction language
+- creates a conversation-sourced refinement
+- auto-approves valid artifacts
+- rebuilds semantic state
+- queues propagation
+- continues the conversation response
+
+UI notes:
+
+- no separate writeback API call is required
+- the UI can confirm the change by calling `GET /semantic/audit` or `GET /semantic/refinements`
+
+#### A6. List Refinements
+
+Purpose: show semantic update history or a developer/admin detail panel.
+
+```http
+GET /semantic/refinements?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}&include_artifacts=true&limit=50
+```
+
+Response:
+
+```json
+{
+  "refinements": [
+    {
+      "refinement_input_id": "ref_...",
+      "source_type": "conversation",
+      "refinement_kind": "metric_refinement",
+      "status": "processed",
+      "conversation_id": "conv_...",
+      "submitted_by": "ui:user",
+      "artifacts": [
+        {
+          "artifact_id": "ref_art_...",
+          "artifact_type": "metric_refinement",
+          "validation_status": "valid",
+          "approval_status": "auto_approved"
+        }
+      ]
+    }
+  ]
+}
+```
+
+#### A7. Fetch Active Semantic State
+
+Purpose: admin/developer verification of the resolved active state.
+
+```http
+GET /semantic/state?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}
+```
+
+Response:
 
 ```json
 {
@@ -1427,70 +1393,50 @@ Expected response shape:
       "approved_refinement_artifact_count": 2
     },
     "refinements": {
-      "hierarchies": [],
       "metric_overrides": [],
       "column_annotations": [],
-      "join_rules": [],
-      "interpretation_rules": []
+      "join_rules": []
     }
   },
   "created_from_artifact_ids": ["ref_art_..."]
 }
 ```
 
-UI behavior:
+#### A8. Track Propagation Jobs
 
-- use this as a read-only diagnostic or admin detail view
-- do not ask the user to manually activate anything in the current auto-approval path
+Purpose: show downstream refresh status in admin/debug views.
 
-### 6. Check Queued Propagation Jobs
-
-After submitting refinements, the backend queues propagation jobs automatically.
-
-```bash
-curl -s "$BASE_URL/semantic/propagation?tenant_id=$TENANT_ID&domain_id=$DOMAIN_ID&limit=20"
+```http
+GET /semantic/propagation?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}&limit=20
 ```
 
-Expected response shape:
+Response:
 
 ```json
 {
   "jobs": [
     {
       "job_id": "semprop_...",
-      "tenant_id": "VC_101",
-      "domain_id": "lpg_production_distribution",
-      "trigger_type": "refinement_auto_approved",
+      "trigger_type": "semantic_intake_auto_approved",
       "status": "queued",
       "affected_scope_json": {
         "artifact_ids": ["ref_art_..."],
         "artifact_types": ["metric_refinement"],
-        "refresh_actions": [
-          "refresh_semantic_state",
-          "refresh_metrics",
-          "refresh_query_planner_constraints"
-        ],
-        "affected_metrics": ["growth_rate"]
+        "refresh_actions": ["refresh_metrics"],
+        "impact_level": "high"
       }
     }
   ]
 }
 ```
 
-UI behavior:
+Optional test-only runner:
 
-- show queued/running/completed propagation status in an admin/debug panel if useful
-- the normal user flow does not need to manually run jobs unless you are testing the runner from the UI
-
-### 7. Run a Propagation Job Manually for Testing
-
-Use this during UI/backend testing to force a queued propagation job to execute.
-
-```bash
-curl -s -X POST "$BASE_URL/semantic/propagation/<job_id>/run?tenant_id=$TENANT_ID"
+```http
+POST /semantic/propagation/{job_id}/run?tenant_id={TENANT_ID}
 ```
 
-Expected response shape:
+Response:
 
 ```json
 {
@@ -1499,336 +1445,336 @@ Expected response shape:
   "affected_scope_json": {
     "action_results": [
       {
-        "action": "refresh_semantic_state",
-        "status": "completed",
-        "semantic_state_id": "sem_state_..."
-      },
-      {
         "action": "refresh_metrics",
         "status": "completed"
-      },
-      {
-        "action": "refresh_query_planner_constraints",
-        "status": "completed",
-        "mode": "active_semantic_state_read_through"
       }
     ]
   }
 }
 ```
 
-Current action behavior:
+### Section B: Manual Governance, Approval, Rollback, and Review
 
-- `refresh_hierarchies` writes approved hierarchy refinements into hierarchy override/business hierarchy stores
-- `refresh_metrics` writes approved metric refinements into the metric registry
-- `refresh_chart_interaction_metadata` recomputes chart interaction metadata
-- `refresh_affected_dashboards` queues dashboard refresh jobs
-- `refresh_query_planner_constraints` is read-through from active semantic state
-- `refresh_workspace_semantics` is read-through from active semantic state
-- `refresh_glossary` and `refresh_chart_labels` persist refined glossary terms
-- `refresh_anomaly_correlation_context` is read-through from active semantic state
+Use this flow for admin/reviewer screens. These APIs support reviewability, impact preview, manual approval/rejection, conflict diagnostics, rollback, and audit history.
 
-### 8. Create a Workspace Conversation After the Agentic Run
+#### B1. Preview Semantic Impact
 
-Use this when the UI opens a conversational workspace for the completed deployment.
+Purpose: show what would change before approval or help admins understand an already submitted refinement.
 
-```bash
-curl -s -X POST "$BASE_URL/workspace/conversations" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "VC_101",
-    "domain_id": "lpg_production_distribution",
-    "title": "LPG semantic refinement test",
-    "created_by": "ui:user"
-  }'
+```http
+POST /semantic/impact-preview
 ```
 
-Expected response shape:
+Request with raw text:
 
 ```json
 {
-  "conversation_id": "conv_...",
   "tenant_id": "VC_101",
   "domain_id": "lpg_production_distribution",
-  "run_id": "<completed_agentic_run_id>",
-  "title": "LPG semantic refinement test",
-  "status": "active"
+  "text": "Growth rate should use prior month as the baseline."
 }
 ```
 
-If the response is `409`, the tenant/domain either has no completed deployment or the required deployment intelligence artifacts are incomplete.
-
-### 9. Send a Normal Workspace Message
-
-Use this to verify existing conversation behavior still works with active semantic state read-through.
-
-```bash
-curl -s -X POST "$BASE_URL/workspace/conversations/<conversation_id>/messages" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_query": "Show production trend by plant for the last 30 days",
-    "resume_context": true,
-    "stream": false
-  }'
-```
-
-Expected response shape:
+Request with existing refinement:
 
 ```json
 {
-  "conversation_id": "conv_...",
-  "message_id": "msg_...",
-  "response": {
-    "chart_type": "line",
-    "chart_title": "Production Trend by Plant",
-    "sql": "SELECT ..."
-  },
-  "context_used": {
-    "resume_context": true,
-    "run_id": "<completed_agentic_run_id>"
+  "tenant_id": "VC_101",
+  "domain_id": "lpg_production_distribution",
+  "refinement_input_id": "ref_..."
+}
+```
+
+Response:
+
+```json
+{
+  "tenant_id": "VC_101",
+  "domain_id": "lpg_production_distribution",
+  "refinement_input_id": "ref_...",
+  "inferred_refinement_kind": "metric_refinement",
+  "impact_level": "high",
+  "artifact_count": 1,
+  "active_semantic_state_id": "sem_state_...",
+  "diff_summary": [
+    {
+      "artifact_id": "ref_art_...",
+      "artifact_type": "metric_refinement",
+      "change_type": "update_existing",
+      "target": "growth_rate",
+      "summary": "Refines growth_rate: month_over_month_growth",
+      "current_artifact_id": "ref_art_old",
+      "artifact_json": {
+        "metric_name": "growth_rate",
+        "formula": "month_over_month_growth"
+      }
+    }
+  ],
+  "affected_scope": {
+    "artifact_types": ["metric_refinement"],
+    "refresh_actions": [
+      "refresh_metrics",
+      "refresh_affected_dashboards",
+      "refresh_anomaly_correlation_context",
+      "refresh_workspace_semantics"
+    ],
+    "affected_metrics": ["growth_rate"],
+    "impact_level": "high"
   }
 }
 ```
 
-Runtime behavior:
+Designer notes:
 
-- active semantic state is loaded for this tenant/domain/scope
-- refined glossary terms are merged into query planning
-- restricted joins from approved `join_rule` artifacts are removed from join candidates
+- show `impact_level` prominently
+- show `diff_summary` as the review list
+- show `affected_scope.refresh_actions` as downstream effects
 
-### 10. Send a Conversation Correction and Let It Auto-Write Back
+#### B2. Audit Timeline
 
-Use this when the user gives more context after the initial agentic run has completed.
+Purpose: show a chronological semantic history.
 
-```bash
-curl -s -X POST "$BASE_URL/workspace/conversations/<conversation_id>/messages" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_query": "Actually growth rate should use prior month as the baseline and should be evaluated monthly.",
-    "resume_context": true,
-    "stream": false
-  }'
+```http
+GET /semantic/audit?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}&limit=50
 ```
 
-Backend behavior:
-
-- the message is screened for correction markers such as `actually`, `should use`, `instead of`, `do not`, `prefer`, `means`, or `represents`
-- the backend infers a `refinement_kind`, for example `metric_refinement`
-- the message is submitted as `source_type=conversation`
-- valid artifacts are `auto_approved`
-- semantic state is rebuilt before the workspace query path continues
-- propagation jobs are enqueued for downstream refreshes
-
-Then verify the writeback:
-
-```bash
-curl -s "$BASE_URL/semantic/refinements?tenant_id=$TENANT_ID&domain_id=$DOMAIN_ID&include_artifacts=true&limit=10"
-```
-
-Look for:
+Response:
 
 ```json
 {
-  "source_type": "conversation",
-  "refinement_kind": "metric_refinement",
-  "conversation_id": "conv_...",
-  "artifacts": [
+  "tenant_id": "VC_101",
+  "domain_id": "lpg_production_distribution",
+  "refinements": [],
+  "semantic_states": [],
+  "propagation_jobs": [],
+  "timeline": [
     {
-      "validation_status": "valid",
-      "approval_status": "auto_approved"
+      "event_type": "refinement",
+      "event_id": "ref_...",
+      "created_at": "2026-04-18T10:00:00",
+      "summary": "metric_refinement refinement processed",
+      "details": {
+        "submitted_by": "ui:user",
+        "artifact_count": 1
+      }
     }
   ]
 }
 ```
 
-### 11. Test Join Rule Writeback
+Designer notes:
 
-Use this to verify query planner constraints.
+- use `timeline[]` for the main activity feed
+- use `refinements`, `semantic_states`, and `propagation_jobs` for drill-in panels
 
-```bash
-curl -s -X POST "$BASE_URL/workspace/conversations/<conversation_id>/messages" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_query": "Actually do not join orders with customer_reference for KPI calculations.",
-    "resume_context": true,
-    "stream": false
-  }'
+#### B3. Conflict Diagnostics
+
+Purpose: show competing refinements for the same semantic target.
+
+```http
+GET /semantic/conflicts?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}
 ```
 
-Then verify:
-
-```bash
-curl -s "$BASE_URL/semantic/state?tenant_id=$TENANT_ID&domain_id=$DOMAIN_ID"
-```
-
-Look under:
+Response:
 
 ```json
 {
-  "state_json": {
-    "refinements": {
-      "join_rules": [
-        {
-          "artifact_json": {
-            "rule_type": "join_restriction",
-            "left_table": "orders",
-            "right_table": "customer_reference",
-            "allowed": false
-          }
-        }
-      ]
+  "tenant_id": "VC_101",
+  "domain_id": "lpg_production_distribution",
+  "conflict_count": 1,
+  "conflicts": [
+    {
+      "conflict_key": "metric_refinement:growth_rate",
+      "artifact_type": "metric_refinement",
+      "severity": "high",
+      "artifact_count": 2,
+      "artifact_ids": ["ref_art_1", "ref_art_2"],
+      "approval_statuses": ["auto_approved", "pending"],
+      "summary": "Conflicting metric_refinement artifacts for metric_refinement:growth_rate"
     }
+  ]
+}
+```
+
+Designer notes:
+
+- group conflicts by `severity`
+- let reviewers open each artifact from `artifact_ids`
+- conflict resolution can use approve/reject endpoints
+
+#### B4. Manual Approve Artifact
+
+Purpose: approve a valid artifact manually.
+
+```http
+POST /semantic/refinement-artifacts/{ARTIFACT_ID}/approve
+```
+
+Request:
+
+```json
+{
+  "tenant_id": "VC_101",
+  "approved_by": "reviewer:user",
+  "reason": "Confirmed by domain owner",
+  "rebuild_state": true
+}
+```
+
+Response:
+
+```json
+{
+  "artifact_id": "ref_art_...",
+  "refinement_input_id": "ref_...",
+  "tenant_id": "VC_101",
+  "domain_id": "lpg_production_distribution",
+  "artifact_type": "metric_refinement",
+  "artifact_json": {
+    "metric_name": "growth_rate"
+  },
+  "validation_status": "valid",
+  "validation_errors_json": [],
+  "approval_status": "approved",
+  "approved_by": "reviewer:user",
+  "approved_at": "2026-04-18T10:00:00Z"
+}
+```
+
+Backend behavior:
+
+- only `validation_status=valid` artifacts can be approved
+- state rebuild runs by default
+- propagation is queued for the approved artifact
+
+#### B5. Manual Reject Artifact
+
+Purpose: reject a pending, approved, or auto-approved artifact.
+
+```http
+POST /semantic/refinement-artifacts/{ARTIFACT_ID}/reject
+```
+
+Request:
+
+```json
+{
+  "tenant_id": "VC_101",
+  "approved_by": "reviewer:user",
+  "reason": "Metric definition conflicts with finance definition",
+  "rebuild_state": true
+}
+```
+
+Response:
+
+```json
+{
+  "artifact_id": "ref_art_...",
+  "refinement_input_id": "ref_...",
+  "tenant_id": "VC_101",
+  "domain_id": "lpg_production_distribution",
+  "artifact_type": "metric_refinement",
+  "validation_status": "valid",
+  "approval_status": "rejected",
+  "approved_by": "reviewer:user",
+  "approved_at": null
+}
+```
+
+Backend behavior:
+
+- if the artifact was active, semantic state is rebuilt without it
+- no destructive delete occurs
+
+#### B6. Semantic State History
+
+Purpose: support rollback and state comparison screens.
+
+```http
+GET /semantic/state/history?tenant_id={TENANT_ID}&domain_id={DOMAIN_ID}&limit=50
+```
+
+Response:
+
+```json
+[
+  {
+    "semantic_state_id": "sem_state_3",
+    "tenant_id": "VC_101",
+    "domain_id": "lpg_production_distribution",
+    "version_no": 3,
+    "is_active": true,
+    "trigger_type": "semantic_intake_auto_approved",
+    "created_from_artifact_ids": ["ref_art_3"],
+    "created_at": "2026-04-18T10:00:00Z"
+  },
+  {
+    "semantic_state_id": "sem_state_2",
+    "tenant_id": "VC_101",
+    "domain_id": "lpg_production_distribution",
+    "version_no": 2,
+    "is_active": false
   }
-}
+]
 ```
 
-After this, normal query/workspace APIs should load the active semantic state and remove that restricted join pair from candidate joins.
+#### B7. Activate / Roll Back to a Semantic State
 
-### 12. Test Glossary / Label Refresh
+Purpose: switch the active semantic state to a prior version.
 
-Use this when the user says what a field means.
-
-```bash
-curl -s -X POST "$BASE_URL/semantic/refinements" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "VC_101",
-    "domain_id": "lpg_production_distribution",
-    "source_type": "text",
-    "refinement_kind": "auto",
-    "text": "Field ship_to_id means Ship-To Customer and should be shown as a business identifier.",
-    "source_run_id": "<completed_agentic_run_id>",
-    "submitted_by": "ui:user",
-    "auto_process": true,
-    "rebuild_state": true
-  }'
+```http
+POST /semantic/state/{SEMANTIC_STATE_ID}/activate
 ```
 
-Then run the queued propagation job, or create a manual one:
-
-```bash
-curl -s -X POST "$BASE_URL/semantic/propagation" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "VC_101",
-    "domain_id": "lpg_production_distribution",
-    "trigger_type": "manual_glossary_refresh",
-    "affected_scope": {
-      "artifact_ids": [],
-      "artifact_types": ["column_annotation"],
-      "refresh_actions": ["refresh_glossary", "refresh_chart_labels"],
-      "affected_columns": ["ship_to_id"],
-      "affected_tables": [],
-      "affected_metrics": [],
-      "impact_level": "targeted"
-    }
-  }'
-```
-
-Run the returned `job_id`:
-
-```bash
-curl -s -X POST "$BASE_URL/semantic/propagation/<job_id>/run?tenant_id=$TENANT_ID"
-```
-
-Expected action result:
+Request:
 
 ```json
 {
-  "action": "refresh_glossary",
-  "status": "completed",
-  "applied_term_count": 1
+  "tenant_id": "VC_101",
+  "activated_by": "reviewer:user",
+  "reason": "Rollback after incorrect metric refinement"
 }
 ```
 
-### 13. Test Anomaly / Correlation Context
-
-Submit an interpretation rule:
-
-```bash
-curl -s -X POST "$BASE_URL/semantic/refinements" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "VC_101",
-    "domain_id": "lpg_production_distribution",
-    "source_type": "text",
-    "refinement_kind": "auto",
-    "text": "Ignore planned weekend shutdown dips when interpreting anomalies.",
-    "source_run_id": "<completed_agentic_run_id>",
-    "submitted_by": "ui:user",
-    "auto_process": true,
-    "rebuild_state": true
-  }'
-```
-
-Then queue a manual read-through refresh for test visibility:
-
-```bash
-curl -s -X POST "$BASE_URL/semantic/propagation" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "VC_101",
-    "domain_id": "lpg_production_distribution",
-    "trigger_type": "manual_anomaly_context_refresh",
-    "affected_scope": {
-      "artifact_ids": [],
-      "artifact_types": ["interpretation_rule"],
-      "refresh_actions": ["refresh_anomaly_correlation_context"],
-      "affected_columns": [],
-      "affected_tables": [],
-      "affected_metrics": [],
-      "impact_level": "targeted"
-    }
-  }'
-```
-
-Run the returned job:
-
-```bash
-curl -s -X POST "$BASE_URL/semantic/propagation/<job_id>/run?tenant_id=$TENANT_ID"
-```
-
-Expected action result:
+Response:
 
 ```json
 {
-  "action": "refresh_anomaly_correlation_context",
-  "status": "completed",
-  "mode": "active_semantic_state_read_through",
-  "interpretation_rule_count": 1
+  "semantic_state_id": "sem_state_2",
+  "tenant_id": "VC_101",
+  "domain_id": "lpg_production_distribution",
+  "version_no": 2,
+  "is_active": true,
+  "state_json": {},
+  "created_from_artifact_ids": ["ref_art_2"]
 }
 ```
 
-When correlation runs execute, the backend loads active semantic state and passes interpretation rules, metric refinements, chart guidance, and business context into correlation narration.
+Backend behavior:
 
-### 14. UI Integration Sequence
+- rollback is non-destructive
+- previous states remain stored
+- only one state is active for a tenant/domain/scope
 
-Recommended UI sequence after the initial agentic run completes:
+### Recommended UI Screens
 
-1. Create or open the workspace conversation for the completed deployment.
-2. Load `GET /semantic/context-questions` and optionally render a "Improve semantics" panel.
-3. When the user submits semantic context text, call `POST /semantic/intake` with `type=semantics` and the raw text.
-4. Show refinement history from `GET /semantic/refinements`.
-5. Show active state/debug information from `GET /semantic/state` only in an admin or developer panel.
-6. For normal chat, call `POST /workspace/conversations/{conversation_id}/messages`.
-7. If the message is a correction, the backend auto-writes it to refinements; the UI does not need a separate writeback call.
-8. Poll `GET /semantic/propagation` if the UI wants to show downstream refresh status.
-9. For testing only, call `POST /semantic/propagation/{job_id}/run` to force queued jobs to execute.
+#### Automatic Flow Screens
 
-### 15. What the UI Should Not Build Yet
+- Post-run semantic question panel
+- Simple semantic text input
+- Semantic update confirmation
+- Optional propagation status drawer
+- Workspace conversation surface
 
-Do not build these as active controls yet:
+#### Manual Governance Screens
 
-- manual approve/reject buttons
-- semantic diff approval screens
-- high-impact approval ownership workflow
-- conflict resolution UI
-
-For now, show them as "planned" or hide them. The backend path is intentionally auto-approval after validation.
-
-### 53G. Semantic Diff and Audit UI
-
-Show what changed, why, and how it affects downstream analytics.
+- Impact preview screen using `POST /semantic/impact-preview`
+- Audit timeline using `GET /semantic/audit`
+- Conflict diagnostics using `GET /semantic/conflicts`
+- Approval queue using `GET /semantic/refinements`
+- Artifact approve/reject actions
+- Semantic state history and rollback screen
 
 ---
 
@@ -2109,7 +2055,7 @@ Examples:
 - referenced table/column fields are strings
 - metric refinement contains a metric target
 
-Do not yet merge into active semantic state until approval and state build.
+At this implementation slice, do not merge directly into active semantic state until approval and state build are available. In the current backend, valid artifacts can be auto-approved and merged through the semantic state builder, while reviewer screens can use explicit approve/reject APIs.
 
 ### Success Criteria for 53.2
 
@@ -2260,7 +2206,7 @@ Only after these three should we implement:
 - semantic diff UI
 - conversation-driven semantic correction writeback
 
-Current status: selective propagation jobs and conversation-driven semantic correction writeback are implemented for the auto-approval backend path. Semantic diff UI remains later work.
+Current status: selective propagation jobs, conversation-driven semantic correction writeback, impact preview, audit timeline, conflict diagnostics, rollback/state activation, and explicit artifact approve/reject APIs are implemented for the backend path. Dedicated semantic diff and governance UI screens remain later work.
 
 ---
 

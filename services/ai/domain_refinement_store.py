@@ -240,6 +240,44 @@ def list_refinement_artifacts(
     )
 
 
+def get_refinement_artifact(settings: Settings, artifact_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+    rows = run_query(
+        settings,
+        """
+        SELECT *
+          FROM public.quantyx_domain_refinement_artifacts
+         WHERE artifact_id = %s
+           AND tenant_id = %s
+         LIMIT 1
+        """,
+        [artifact_id, tenant_id],
+    )
+    return rows[0] if rows else None
+
+
+def update_refinement_artifact_approval(
+    settings: Settings,
+    artifact_id: str,
+    *,
+    tenant_id: str,
+    approval_status: str,
+    approved_by: str | None = None,
+) -> None:
+    execute_non_query(
+        settings,
+        """
+        UPDATE public.quantyx_domain_refinement_artifacts
+           SET approval_status = %s,
+               approved_by = %s,
+               approved_at = CASE WHEN %s IN ('approved', 'auto_approved') THEN now() ELSE NULL END,
+               updated_at = now()
+         WHERE artifact_id = %s
+           AND tenant_id = %s
+        """,
+        [approval_status, approved_by, approval_status, artifact_id, tenant_id],
+    )
+
+
 def list_approved_refinement_artifacts(
     settings: Settings,
     *,
@@ -303,6 +341,90 @@ def get_current_semantic_state(
         [tenant_id, domain_id, connection_id, database_name, schema_name],
     )
     return rows[0] if rows else None
+
+
+def get_semantic_state(settings: Settings, semantic_state_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+    rows = run_query(
+        settings,
+        """
+        SELECT *
+          FROM public.quantyx_domain_semantic_state
+         WHERE semantic_state_id = %s
+           AND tenant_id = %s
+         LIMIT 1
+        """,
+        [semantic_state_id, tenant_id],
+    )
+    return rows[0] if rows else None
+
+
+def list_semantic_states(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str | None = None,
+    connection_id: str | None = None,
+    database_name: str | None = None,
+    schema_name: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    filters = ["tenant_id = %s"]
+    params: list[Any] = [tenant_id]
+    if domain_id:
+        filters.append("domain_id = %s")
+        params.append(domain_id)
+    if connection_id:
+        filters.append("connection_id IS NOT DISTINCT FROM %s")
+        params.append(connection_id)
+    if database_name:
+        filters.append("database_name IS NOT DISTINCT FROM %s")
+        params.append(database_name)
+    if schema_name:
+        filters.append("schema_name IS NOT DISTINCT FROM %s")
+        params.append(schema_name)
+    params.append(max(1, min(int(limit or 100), 500)))
+    return run_query(
+        settings,
+        f"""
+        SELECT *
+          FROM public.quantyx_domain_semantic_state
+         WHERE {' AND '.join(filters)}
+         ORDER BY created_at DESC, version_no DESC
+         LIMIT %s
+        """,
+        params,
+    )
+
+
+def activate_semantic_state(settings: Settings, semantic_state_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+    row = get_semantic_state(settings, semantic_state_id, tenant_id=tenant_id)
+    if not row:
+        return None
+    execute_non_query(
+        settings,
+        """
+        UPDATE public.quantyx_domain_semantic_state
+           SET is_active = false
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND connection_id IS NOT DISTINCT FROM %s
+           AND database_name IS NOT DISTINCT FROM %s
+           AND schema_name IS NOT DISTINCT FROM %s
+           AND is_active = true
+        """,
+        [tenant_id, row.get("domain_id"), row.get("connection_id"), row.get("database_name"), row.get("schema_name")],
+    )
+    execute_non_query(
+        settings,
+        """
+        UPDATE public.quantyx_domain_semantic_state
+           SET is_active = true
+         WHERE semantic_state_id = %s
+           AND tenant_id = %s
+        """,
+        [semantic_state_id, tenant_id],
+    )
+    return get_semantic_state(settings, semantic_state_id, tenant_id=tenant_id)
 
 
 def persist_semantic_state(

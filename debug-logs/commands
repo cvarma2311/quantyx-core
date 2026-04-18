@@ -182,3 +182,5 @@ python3 scripts/demo_workspace_deployment_lpg.py \
     - No target or pace data — all forecasting is trend-based on actuals only.
     - Do NOT join nozzle_sales to any other table — standalone dataset."\
    2>&1 | tee debug-logs/nozzle-sales-$(date +%H%M%S).log
+
+codex resume 019d9a0e-ff68-7282-8d78-e8ea564e40a1

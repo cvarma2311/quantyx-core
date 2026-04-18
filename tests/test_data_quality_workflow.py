@@ -1,0 +1,2506 @@
+from __future__ import annotations
+
+import pytest
+import zipfile
+from io import BytesIO
+
+from services.ai import data_quality_api_payloads as dq_api_payloads
+from services.ai import data_quality_dashboard as dq_dashboard
+from services.ai import data_quality_duplicates as dq_duplicates
+from services.ai import data_quality_enrichment as dq_enrichment
+from services.ai import data_quality_enrichment_questions as dq_enrichment_questions
+from services.ai import data_quality_evidence as dq_evidence
+from services.ai import data_quality_freshness as dq_freshness
+from services.ai import data_quality_orchestrator as dq_orchestrator
+from services.ai import data_quality_rule_review as dq_rule_review
+from services.ai import data_quality_remediation as dq_remediation
+from services.ai import data_quality_report as dq_report
+from services.ai import data_quality_rules as dq_rules
+from services.ai import data_quality_store as dq_store
+from services.ai import data_quality_trust as dq_trust
+from services.ai import data_quality_workspace as dq_workspace
+from services.ai import agentic_store
+
+
+def test_is_data_quality_workflow_by_builtin_pack() -> None:
+    assert dq_orchestrator.is_data_quality_workflow("data_quality_observability", {}) is True
+
+
+def test_is_data_quality_workflow_by_explicit_mode() -> None:
+    assert dq_orchestrator.is_data_quality_workflow("some_domain", {"workflow_mode": "data_quality"}) is True
+
+
+def test_quality_run_id_for_is_stable() -> None:
+    assert dq_store.quality_run_id_for("run_abc123") == "dqrun_abc123"
+
+
+def test_upsert_quality_artifacts_from_profiling_flattens_tables_and_columns(monkeypatch) -> None:
+    calls: list[tuple[str, list[object]]] = []
+    monkeypatch.setattr(dq_store, "execute_non_query", lambda settings, sql, params: calls.append((sql, params)))
+    profiling = {
+        "tables": [
+            {
+                "name": "customer",
+                "row_count": 10,
+                "quality_summary": {
+                    "row_count": 10,
+                    "table_trust_score": 72.5,
+                    "table_completeness_score": 80.0,
+                    "freshness_lag_days": 2,
+                    "duplicate_risk_columns_count": 1,
+                },
+                "column_profiles": [
+                    {
+                        "name": "email",
+                        "data_type": "text",
+                        "null_count": 2,
+                        "null_pct": 20.0,
+                        "blank_count": 1,
+                        "blank_pct": 10.0,
+                        "distinct_count": 8,
+                        "distinct_ratio": 0.8,
+                        "completeness_score": 80.0,
+                        "is_sparse": False,
+                        "is_very_sparse": False,
+                    }
+                ],
+            }
+        ]
+    }
+
+    result = dq_store.upsert_quality_artifacts_from_profiling(
+        object(),
+        quality_run_id="dqrun_1",
+        run_id="run_1",
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        connection_id="conn",
+        database_name="db",
+        schema_name="public",
+        profiling_json=profiling,
+    )
+
+    assert result == {"tables": 1, "columns": 1}
+    assert len(calls) == 2
+    assert calls[0][1][8] == "customer"
+    assert calls[0][1][14] == "warning"
+    assert calls[1][1][9] == "email"
+
+
+def test_extract_quality_rules_from_context_resolves_known_patterns() -> None:
+    schema_graph = {
+        "tables": [
+            {
+                "name": "orders",
+                "columns": [
+                    {"name": "customer_id"},
+                    {"name": "amount"},
+                ],
+            },
+            {"name": "customer", "columns": [{"name": "customer_id"}, {"name": "email"}]},
+        ]
+    }
+
+    rules = dq_rules.extract_quality_rules_from_context(
+        "orders.customer_id must exist in customer.customer_id. Customer email must be present and valid. Orders amount cannot be negative.",
+        schema_graph,
+    )
+
+    assert [rule["rule_type"] for rule in rules] == [
+        "referential_integrity",
+        "not_null",
+        "email_pattern",
+        "numeric_min",
+    ]
+    assert rules[0]["table_name"] == "orders"
+    assert rules[0]["reference_table"] == "customer"
+    assert rules[1]["table_name"] == "customer"
+    assert rules[3]["column_name"] == "amount"
+
+
+def test_extract_quality_rules_uses_llm_first_when_available(monkeypatch) -> None:
+    class Settings:
+        openai_api_key = "key"
+        openai_model = "model"
+
+    monkeypatch.setenv("DATA_QUALITY_RULE_LLM_MODE", "auto")
+    monkeypatch.setattr(
+        dq_rules,
+        "_extract_quality_rules_with_llm",
+        lambda settings, text, schema: [
+            {
+                "rule_type": "not_null",
+                "severity": "critical",
+                "table_name": "customer",
+                "column_name": "email",
+                "condition_json": {"source": "llm"},
+                "source": "llm_context_text",
+                "confidence": 0.91,
+                "status": "active",
+            }
+        ],
+    )
+    schema_graph = {"tables": [{"name": "customer", "columns": [{"name": "email"}]}]}
+
+    rules = dq_rules.extract_quality_rules_from_context(
+        "Customer email must be present.",
+        schema_graph,
+        settings=Settings(),
+    )
+
+    assert len(rules) == 1
+    assert rules[0]["source"] == "llm_context_text"
+    assert rules[0]["condition_json"] == {"source": "llm"}
+
+
+def test_build_quality_rule_execution_plan_for_referential_integrity() -> None:
+    plan = dq_rules.build_quality_rule_execution_plan(
+        {
+            "rule_type": "referential_integrity",
+            "table_name": "orders",
+            "column_name": "customer_id",
+            "reference_table": "customer",
+            "reference_column": "customer_id",
+        },
+        schema_name="public",
+    )
+
+    assert plan["executor_kind"] == "deterministic_sql"
+    assert "LEFT JOIN" in plan["validation_sql"]
+    assert "violating_value" in plan["sample_sql"]
+    assert plan["sql_preview"]["status"] == "available"
+    assert plan["sql_preview"]["source"] == "deterministic_fallback"
+    assert "LEFT JOIN" in str(plan["sql_preview"]["validation_sql"])
+
+
+def test_build_quality_rule_execution_plan_prefers_llm_sql_preview(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_rules,
+        "_build_quality_rule_sql_preview_with_llm",
+        lambda settings, rule, schema_name: {
+            "status": "available",
+            "source": "llm",
+            "validation_sql": 'SELECT COUNT(*) AS checked_row_count, COUNT(*) FILTER (WHERE "email" IS NULL) AS violation_count FROM "public"."customer"',
+            "sample_sql": 'SELECT * FROM "public"."customer" WHERE "email" IS NULL LIMIT 25',
+            "notes": ["LLM preview"],
+            "error": None,
+        },
+    )
+
+    plan = dq_rules.build_quality_rule_execution_plan(
+        {
+            "rule_type": "not_null",
+            "table_name": "customer",
+            "column_name": "email",
+        },
+        schema_name="public",
+        settings=type("Settings", (), {"openai_api_key": "key", "openai_model": "model"})(),
+    )
+
+    assert plan["sql_preview"]["source"] == "llm"
+    assert "customer" in str(plan["sql_preview"]["validation_sql"])
+
+
+def test_build_quality_rule_execution_plan_marks_preview_unavailable_when_no_safe_preview(monkeypatch) -> None:
+    monkeypatch.setattr(dq_rules, "_build_quality_rule_sql_preview_with_llm", lambda settings, rule, schema_name: None)
+
+    plan = dq_rules.build_quality_rule_execution_plan(
+        {
+            "rule_type": "date_range",
+            "table_name": "customer",
+            "column_name": "updated_at",
+            "condition_json": {"not_future": True},
+        },
+        schema_name="public",
+    )
+
+    assert plan["sql_preview"]["status"] == "preview_unavailable"
+    assert plan["sql_preview_source"] == "unavailable"
+
+
+def test_classify_quality_rule_review_status_marks_low_confidence_rule_for_review() -> None:
+    status = dq_rules.classify_quality_rule_review_status(
+        {
+            "confidence": 0.61,
+            "executor_kind": "deterministic_sql",
+            "execution_plan_json": {"sql_preview_status": "available"},
+        },
+        confidence_threshold=0.85,
+    )
+
+    assert status == "needs_review"
+
+
+def test_classify_quality_rule_review_status_marks_unimplemented_rule_unsupported() -> None:
+    status = dq_rules.classify_quality_rule_review_status(
+        {
+            "confidence": 0.99,
+            "executor_kind": "unimplemented",
+            "execution_plan_json": {"sql_preview_status": "preview_unavailable"},
+        },
+        confidence_threshold=0.85,
+    )
+
+    assert status == "unsupported"
+
+
+def test_replace_quality_rules_persists_source_text_and_execution_plan(monkeypatch) -> None:
+    calls: list[tuple[str, list[object]]] = []
+    monkeypatch.setattr(dq_store, "execute_non_query", lambda settings, sql, params: calls.append((sql, params)))
+
+    inserted = dq_store.replace_quality_rules(
+        object(),
+        quality_run_id="dqrun_1",
+        run_id="run_1",
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        connection_id="conn_1",
+        database_name="db_1",
+        schema_name="public",
+        rules=[
+            {
+                "rule_id": "dqr_1",
+                "rule_type": "not_null",
+                "severity": "critical",
+                "table_name": "customer",
+                "column_name": "email",
+                "source_text": "Customer email must be present.",
+                "executor_kind": "deterministic_sql",
+                "execution_plan_json": {
+                    "validation_sql": "SELECT ...",
+                    "sample_sql": "SELECT ...",
+                    "sql_preview": {"status": "available", "source": "deterministic_fallback", "validation_sql": "SELECT ..."},
+                    "sql_preview_status": "available",
+                    "sql_preview_source": "deterministic_fallback",
+                },
+                "condition_json": {"source_text": "Customer email must be present."},
+                "source": "context_text",
+                "confidence": 0.91,
+                "status": "active",
+            }
+        ],
+    )
+
+    assert inserted == 1
+    assert len(calls) == 2
+    insert_params = calls[1][1]
+    assert insert_params[14] == "Customer email must be present."
+    assert insert_params[15] == "deterministic_sql"
+
+
+def test_update_quality_rule_review_persists_review_fields(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_execute_returning_query(settings, sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"rule_id": "dqr_1", "status": "active", "reviewed_by": "reviewer"}]
+
+    monkeypatch.setattr(dq_store, "execute_returning_query", fake_execute_returning_query)
+
+    row = dq_store.update_quality_rule_review(
+        object(),
+        rule_id="dqr_1",
+        tenant_id="tenant",
+        status="active",
+        reviewed_by="reviewer",
+        review_notes="approved after review",
+        execution_plan_json={"sql_preview_status": "available"},
+    )
+
+    assert row["status"] == "active"
+    assert captured["params"][0] == "active"
+    assert captured["params"][1] == "reviewer"
+    assert captured["params"][2] == "approved after review"
+
+
+def test_get_quality_rule_review_queue_counts_reviewable_rules(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_rule_review,
+        "list_quality_rules",
+        lambda settings, tenant_id, domain_id, run_id, limit=500: [
+            {"rule_id": "r1", "status": "active"},
+            {"rule_id": "r2", "status": "needs_review"},
+            {"rule_id": "r3", "status": "unsupported"},
+        ],
+    )
+
+    result = dq_rule_review.get_quality_rule_review_queue(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+    )
+
+    assert result["summary"]["accepted_auto_count"] == 1
+    assert result["summary"]["needs_review_count"] == 1
+    assert result["summary"]["unsupported_count"] == 1
+    assert len(result["rules"]) == 2
+
+
+def test_apply_quality_rule_review_action_approves_and_executes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_rule_review,
+        "build_quality_rule_execution_plan",
+        lambda rule, schema_name, settings=None: {
+            "executor_kind": "deterministic_sql",
+            "validation_sql": "SELECT 1",
+            "sample_sql": "SELECT 1 LIMIT 25",
+            "sql_preview": {"status": "available", "source": "deterministic_fallback", "validation_sql": "SELECT 1"},
+            "sql_preview_status": "available",
+            "sql_preview_source": "deterministic_fallback",
+        },
+    )
+    monkeypatch.setattr(
+        dq_rule_review,
+        "update_quality_rule_review",
+        lambda *args, **kwargs: {"rule_id": "dqr_1", "status": kwargs["status"]},
+    )
+    monkeypatch.setattr(dq_rule_review, "resolve_database_credentials_cached", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        dq_rule_review,
+        "execute_quality_rules",
+        lambda settings, rules, schema_name, scoped_conn: {"rules_executed": 1, "results": [{"rule_id": rules[0]["rule_id"], "status": "passed"}]},
+    )
+
+    result = dq_rule_review.apply_quality_rule_review_action(
+        object(),
+        rule_row={
+            "rule_id": "dqr_1",
+            "tenant_id": "tenant",
+            "connection_id": "conn_1",
+            "schema_name": "public",
+            "rule_type": "not_null",
+            "table_name": "customer",
+            "column_name": "email",
+            "condition_json": {"source_text": "Customer email must be present."},
+            "confidence": 0.61,
+        },
+        action="approve",
+        reviewed_by="reviewer",
+        execute_after_approval=True,
+    )
+
+    assert result["status"] == "active"
+    assert result["execution"]["rules_executed"] == 1
+
+
+def test_apply_quality_rule_review_action_rejects_without_execution(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_rule_review,
+        "update_quality_rule_review",
+        lambda *args, **kwargs: {"rule_id": "dqr_2", "status": kwargs["status"]},
+    )
+
+    result = dq_rule_review.apply_quality_rule_review_action(
+        object(),
+        rule_row={"rule_id": "dqr_2", "tenant_id": "tenant"},
+        action="reject",
+        reviewed_by="reviewer",
+    )
+
+    assert result["status"] == "rejected"
+    assert result["execution"] is None
+
+
+def test_fetch_missingness_evidence_uses_scoped_query(monkeypatch) -> None:
+    captured: list[tuple[str, list[object]]] = []
+
+    def fake_run_query(settings, sql, params, scoped_conn=None, statement_timeout_ms=None):
+        captured.append((sql, params))
+        if "affected_row_count" in sql:
+            return [{"affected_row_count": 2}]
+        return [{"__row_ref": "(1,1)", "email": None}, {"__row_ref": "(1,2)", "email": ""}]
+
+    monkeypatch.setattr(dq_evidence, "resolve_quality_run_scoped_conn", lambda settings, run_row: object())
+    monkeypatch.setattr(dq_evidence, "run_query", fake_run_query)
+
+    result = dq_evidence.fetch_missingness_evidence(
+        object(),
+        run_row={"schema_name": "public"},
+        table_name="customer",
+        column_name="pincode",
+        include_blank=True,
+        limit=100,
+        offset=0,
+    )
+
+    assert result["affected_row_count"] == 2
+    assert result["column_alias"] == "postal_code"
+    assert len(result["rows"]) == 2
+    assert "btrim" in captured[0][0]
+
+
+def test_fetch_duplicate_evidence_rehydrates_exact_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "_get_duplicate_row",
+        lambda settings, tenant_id, domain_id, candidate_id: {
+            "candidate_id": candidate_id,
+            "run_id": "run_1",
+            "table_name": "customer",
+            "duplicate_type": "exact_key_duplicate",
+            "match_columns_json": ["customer_id"],
+            "sample_rows_json": [{"duplicate_value": "C001"}],
+        },
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "load_quality_run",
+        lambda settings, run_id, tenant_id, domain_id: {"schema_name": "public", "connection_id": "conn_1"},
+    )
+    monkeypatch.setattr(dq_evidence, "resolve_quality_run_scoped_conn", lambda settings, run_row: object())
+    monkeypatch.setattr(
+        dq_evidence,
+        "run_query",
+        lambda settings, sql, params, scoped_conn=None, statement_timeout_ms=None: [{"__row_ref": "(1,1)", "customer_id": "C001"}],
+    )
+
+    result = dq_evidence.fetch_duplicate_evidence(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        candidate_id="dqdup_1",
+        limit=100,
+    )
+
+    assert result["candidate"]["duplicate_type"] == "exact_key_duplicate"
+    assert result["match_column_aliases"] == ["customer_id"]
+    assert result["evidence_rows"][0]["customer_id"] == "C001"
+
+
+def test_fetch_freshness_evidence_returns_persisted_monitoring(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "list_quality_tables",
+        lambda *args, **kwargs: [
+            {
+                "table_name": "customer",
+                "summary_json": {
+                    "freshness_analysis": {"freshness_status": "stale", "freshness_lag_days": 9.0},
+                    "stability_analysis": {"stability_status": "changed", "row_count_change_pct": 25.0},
+                    "trust_components": {"freshness": 55.0},
+                },
+            }
+        ],
+    )
+
+    result = dq_evidence.fetch_freshness_evidence(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        table_name="customer",
+    )
+
+    assert result["freshness_analysis"]["freshness_status"] == "stale"
+    assert result["stability_analysis"]["stability_status"] == "changed"
+
+
+def test_fetch_enrichment_evidence_returns_proposed_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "get_quality_enrichment_proposal",
+        lambda settings, proposal_id, tenant_id=None: {
+            "proposal_id": proposal_id,
+            "target_column": "state",
+            "source_columns_json": ["pincode", "country"],
+            "matched_count": 10,
+            "unmatched_count": 2,
+            "source_references_json": [{"provider": "llm_context_inference"}],
+            "proposed_values_json": [{"row_ref": "(1,1)", "proposed_value": "Karnataka"}],
+        },
+    )
+
+    result = dq_evidence.fetch_enrichment_evidence(
+        object(),
+        proposal_id="dqep_1",
+        tenant_id="tenant",
+        limit=100,
+    )
+
+    assert result["summary"]["matched_count"] == 10
+    assert result["target_column_alias"] == "state"
+    assert result["source_column_aliases"] == ["postal_code", "country"]
+    assert result["proposed_rows"][0]["proposed_value"] == "Karnataka"
+
+
+def test_extract_quality_rules_falls_back_when_llm_returns_empty(monkeypatch) -> None:
+    class Settings:
+        openai_api_key = "key"
+        openai_model = "model"
+
+    monkeypatch.setenv("DATA_QUALITY_RULE_LLM_MODE", "auto")
+    monkeypatch.setattr(dq_rules, "_extract_quality_rules_with_llm", lambda settings, text, schema: [])
+    schema_graph = {"tables": [{"name": "customer", "columns": [{"name": "email"}]}]}
+
+    rules = dq_rules.extract_quality_rules_from_context(
+        "Customer email must be present.",
+        schema_graph,
+        settings=Settings(),
+    )
+
+    assert len(rules) == 1
+    assert rules[0]["rule_type"] == "not_null"
+    assert rules[0]["source"] == "context_text"
+
+
+def test_validate_llm_rule_rejects_unknown_columns() -> None:
+    schema_graph = {"tables": [{"name": "customer", "columns": [{"name": "email"}]}]}
+
+    assert dq_rules._validate_llm_rule(
+        {
+            "rule_type": "not_null",
+            "table_name": "customer",
+            "column_name": "missing_column",
+        },
+        schema_graph,
+    ) is None
+
+
+def test_execute_quality_rules_persists_referential_integrity_result(monkeypatch) -> None:
+    queries: list[tuple[str, list[object]]] = []
+    inserted: list[dict] = []
+
+    def fake_run_query(settings, sql, params, scoped_conn=None, statement_timeout_ms=None):
+        queries.append((sql, params))
+        if "COUNT(*) AS checked_row_count" in sql:
+            return [{"checked_row_count": 10, "violation_count": 2}]
+        return [{"violating_value": "missing_customer"}]
+
+    monkeypatch.setattr(dq_rules, "run_query", fake_run_query)
+    monkeypatch.setattr(
+        dq_rules,
+        "insert_quality_rule_result",
+        lambda settings, **kwargs: inserted.append(kwargs) or "dqrr_1",
+    )
+
+    summary = dq_rules.execute_quality_rules(
+        object(),
+        rules=[
+            {
+                "rule_id": "rule_1",
+                "quality_run_id": "dqrun_1",
+                "run_id": "run_1",
+                "tenant_id": "tenant",
+                "domain_id": "data_quality_observability",
+                "rule_type": "referential_integrity",
+                "table_name": "orders",
+                "column_name": "customer_id",
+                "reference_table": "customer",
+                "reference_column": "customer_id",
+            }
+        ],
+        schema_name="public",
+        scoped_conn=None,
+    )
+
+    assert summary["rules_executed"] == 1
+    assert summary["failed_rules"] == 1
+    assert inserted[0]["status"] == "failed"
+    assert inserted[0]["checked_row_count"] == 10
+    assert inserted[0]["violation_count"] == 2
+    assert inserted[0]["violation_pct"] == 20.0
+    assert "LEFT JOIN" in queries[0][0]
+
+
+def test_execute_quality_rules_supports_all_standard_llm_rule_types(monkeypatch) -> None:
+    inserted: list[dict] = []
+
+    def fake_run_query(settings, sql, params, scoped_conn=None, statement_timeout_ms=None):
+        if "COUNT(*) AS checked_row_count" in sql:
+            return [{"checked_row_count": 10, "violation_count": 1}]
+        return [{"violating_value": "bad"}]
+
+    monkeypatch.setattr(dq_rules, "run_query", fake_run_query)
+    monkeypatch.setattr(
+        dq_rules,
+        "insert_quality_rule_result",
+        lambda settings, **kwargs: inserted.append(kwargs) or "dqrr_1",
+    )
+
+    base = {
+        "quality_run_id": "dqrun_1",
+        "run_id": "run_1",
+        "tenant_id": "tenant",
+        "domain_id": "data_quality_observability",
+        "table_name": "customer",
+        "column_name": "status",
+    }
+    rules = [
+        {**base, "rule_id": "not_blank", "rule_type": "not_blank"},
+        {**base, "rule_id": "numeric_max", "rule_type": "numeric_max", "condition_json": {"max_value": 100}},
+        {**base, "rule_id": "allowed_values", "rule_type": "allowed_values", "condition_json": {"allowed_values": ["A", "B"]}},
+        {**base, "rule_id": "regex_pattern", "rule_type": "regex_pattern", "condition_json": {"pattern": "^[A-Z]+$"}},
+    ]
+
+    summary = dq_rules.execute_quality_rules(object(), rules=rules, schema_name="public", scoped_conn=None)
+
+    assert summary["rules_executed"] == 4
+    assert summary["failed_rules"] == 4
+    assert summary["not_executed_rules"] == 0
+    assert [item["status"] for item in inserted] == ["failed", "failed", "failed", "failed"]
+
+
+def test_custom_sql_executor_runs_safe_select_and_rejects_mutation(monkeypatch) -> None:
+    inserted: list[dict] = []
+
+    def fake_run_query(settings, sql, params, scoped_conn=None, statement_timeout_ms=None):
+        if "COUNT(*)" in sql:
+            return [{"checked_row_count": 5, "violation_count": 2}]
+        return [{"id": 1}]
+
+    monkeypatch.setattr(dq_rules, "run_query", fake_run_query)
+    monkeypatch.setattr(
+        dq_rules,
+        "insert_quality_rule_result",
+        lambda settings, **kwargs: inserted.append(kwargs) or "dqrr_1",
+    )
+
+    safe_rule = {
+        "rule_id": "custom_safe",
+        "quality_run_id": "dqrun_1",
+        "run_id": "run_1",
+        "tenant_id": "tenant",
+        "domain_id": "data_quality_observability",
+        "rule_type": "custom_sql",
+        "table_name": "orders",
+        "condition_json": {
+            "validation_sql": "SELECT COUNT(*) AS checked_row_count, COUNT(*) FILTER (WHERE status = 'BAD') AS violation_count FROM public.orders",
+            "sample_sql": "SELECT order_id, status FROM public.orders WHERE status = 'BAD'",
+        },
+    }
+    unsafe_rule = {
+        **safe_rule,
+        "rule_id": "custom_unsafe",
+        "condition_json": {"validation_sql": "DELETE FROM public.orders"},
+    }
+
+    summary = dq_rules.execute_quality_rules(object(), rules=[safe_rule, unsafe_rule], schema_name="public", scoped_conn=None)
+
+    assert summary["rules_executed"] == 2
+    assert summary["failed_rules"] == 1
+    assert summary["error_rules"] == 1
+    assert inserted[0]["status"] == "failed"
+    assert inserted[0]["violation_count"] == 2
+    assert inserted[1]["status"] == "error"
+    assert "Unsafe custom validation SQL rejected" in inserted[1]["error_message"]
+
+
+def test_validate_llm_rule_accepts_safe_custom_sql() -> None:
+    schema_graph = {"tables": [{"name": "orders", "columns": [{"name": "status"}]}]}
+
+    rule = dq_rules._validate_llm_rule(
+        {
+            "rule_type": "custom_sql",
+            "table_name": "orders",
+            "condition_json": {
+                "validation_sql": "SELECT COUNT(*) AS checked_row_count, COUNT(*) FILTER (WHERE status = 'BAD') AS violation_count FROM public.orders",
+            },
+        },
+        schema_graph,
+    )
+
+    assert rule is not None
+    assert rule["rule_type"] == "custom_sql"
+
+
+def test_validate_llm_rule_rejects_half_formed_rules() -> None:
+    schema_graph = {"tables": [{"name": "customer", "columns": [{"name": "status"}]}]}
+
+    assert dq_rules._validate_llm_rule(
+        {"rule_type": "allowed_values", "table_name": "customer", "column_name": "status", "condition_json": {}},
+        schema_graph,
+    ) is None
+    assert dq_rules._validate_llm_rule(
+        {"rule_type": "custom_sql", "table_name": "customer", "condition_json": {"validation_sql": "UPDATE customer SET status='X'"}},
+        schema_graph,
+    ) is None
+
+
+def test_validate_llm_rule_accepts_new_rule_families() -> None:
+    schema_graph = {
+        "tables": [
+            {
+                "name": "orders",
+                "columns": [
+                    {"name": "order_id"},
+                    {"name": "line_number"},
+                    {"name": "order_date"},
+                    {"name": "ship_date"},
+                    {"name": "status"},
+                    {"name": "amount"},
+                    {"name": "pincode"},
+                ],
+            }
+        ]
+    }
+
+    cases = [
+        {"rule_type": "unique", "table_name": "orders", "column_name": "order_id"},
+        {"rule_type": "composite_unique", "table_name": "orders", "condition_json": {"columns": ["order_id", "line_number"]}},
+        {"rule_type": "date_range", "table_name": "orders", "column_name": "order_date", "condition_json": {"not_future": True}},
+        {"rule_type": "freshness_sla", "table_name": "orders", "column_name": "order_date", "condition_json": {"max_lag_hours": 24}},
+        {
+            "rule_type": "conditional_required",
+            "table_name": "orders",
+            "condition_json": {"when_column": "status", "when_value": "SHIPPED", "required_column": "ship_date"},
+        },
+        {
+            "rule_type": "cross_column_consistency",
+            "table_name": "orders",
+            "condition_json": {"left_column": "ship_date", "operator": ">=", "right_column": "order_date"},
+        },
+        {"rule_type": "numeric_range", "table_name": "orders", "column_name": "amount", "condition_json": {"min_value": 0, "max_value": 100}},
+        {"rule_type": "length", "table_name": "orders", "column_name": "pincode", "condition_json": {"exact_length": 6}},
+        {"rule_type": "null_pct_threshold", "table_name": "orders", "column_name": "ship_date", "condition_json": {"max_null_pct": 5}},
+        {"rule_type": "row_count_change_pct", "table_name": "orders", "condition_json": {"baseline_row_count": 100, "max_change_pct": 20}},
+    ]
+
+    validated = [dq_rules._validate_llm_rule(case, schema_graph) for case in cases]
+
+    assert all(item is not None for item in validated)
+    assert validated[1]["condition_json"]["columns"] == ["order_id", "line_number"]
+    assert validated[4]["condition_json"]["required_column"] == "ship_date"
+
+
+def test_execute_quality_rules_supports_next_rule_families(monkeypatch) -> None:
+    inserted: list[dict] = []
+
+    def fake_run_query(settings, sql, params, scoped_conn=None, statement_timeout_ms=None):
+        if "lag_hours" in sql:
+            return [{"lag_hours": 48}]
+        if "current_row_count" in sql:
+            return [{"current_row_count": 150}]
+        if "COUNT(*) AS checked_row_count" in sql or "checked_row_count" in sql:
+            return [{"checked_row_count": 10, "violation_count": 1}]
+        return [{"violating_value": "bad"}]
+
+    monkeypatch.setattr(dq_rules, "run_query", fake_run_query)
+    monkeypatch.setattr(
+        dq_rules,
+        "insert_quality_rule_result",
+        lambda settings, **kwargs: inserted.append(kwargs) or "dqrr_1",
+    )
+    base = {
+        "quality_run_id": "dqrun_1",
+        "run_id": "run_1",
+        "tenant_id": "tenant",
+        "domain_id": "data_quality_observability",
+        "table_name": "orders",
+        "column_name": "amount",
+    }
+    rules = [
+        {**base, "rule_id": "unique", "rule_type": "unique", "column_name": "order_id"},
+        {**base, "rule_id": "composite_unique", "rule_type": "composite_unique", "condition_json": {"columns": ["order_id", "line_number"]}},
+        {**base, "rule_id": "date_range", "rule_type": "date_range", "column_name": "order_date", "condition_json": {"not_future": True}},
+        {**base, "rule_id": "freshness_sla", "rule_type": "freshness_sla", "column_name": "order_date", "condition_json": {"max_lag_hours": 24}},
+        {
+            **base,
+            "rule_id": "conditional_required",
+            "rule_type": "conditional_required",
+            "condition_json": {"when_column": "status", "when_values": ["SHIPPED"], "required_column": "ship_date"},
+        },
+        {
+            **base,
+            "rule_id": "cross_column_consistency",
+            "rule_type": "cross_column_consistency",
+            "condition_json": {"left_column": "ship_date", "operator": ">=", "right_column": "order_date"},
+        },
+        {**base, "rule_id": "numeric_range", "rule_type": "numeric_range", "condition_json": {"min_value": 0, "max_value": 100}},
+        {**base, "rule_id": "length", "rule_type": "length", "column_name": "pincode", "condition_json": {"exact_length": 6}},
+        {**base, "rule_id": "null_pct_threshold", "rule_type": "null_pct_threshold", "column_name": "ship_date", "condition_json": {"max_null_pct": 5}},
+        {**base, "rule_id": "row_count_change_pct", "rule_type": "row_count_change_pct", "condition_json": {"baseline_row_count": 100, "max_change_pct": 20}},
+    ]
+
+    summary = dq_rules.execute_quality_rules(object(), rules=rules, schema_name="public", scoped_conn=None)
+
+    assert summary["rules_executed"] == len(rules)
+    assert summary["not_executed_rules"] == 0
+    assert len(inserted) == len(rules)
+
+
+def test_build_xlsx_workbook_creates_open_xml_package() -> None:
+    workbook = dq_report.build_xlsx_workbook(
+        [
+            ("Executive Summary", [[{"value": "Metric", "style": 1}, {"value": "Value", "style": 1}], ["Run ID", "run_1"]]),
+            ("Validation Rules", [["Rule ID", "Status"], ["rule_1", "failed"]]),
+        ]
+    )
+
+    with zipfile.ZipFile(BytesIO(workbook)) as archive:
+        names = set(archive.namelist())
+        assert "[Content_Types].xml" in names
+        assert "xl/workbook.xml" in names
+        assert "xl/worksheets/sheet1.xml" in names
+        assert "xl/worksheets/sheet2.xml" in names
+        assert "run_1" in archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        assert 's="1"' in archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        assert "FFD9E2F3" in archive.read("xl/styles.xml").decode("utf-8")
+
+
+def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_report,
+        "get_quality_run_by_run_id",
+        lambda settings, run_id: {
+            "quality_run_id": "dqrun_1",
+            "run_id": run_id,
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "status": "completed",
+            "overall_trust_score": 82.5,
+            "summary_json": {"profiled_tables": 1},
+        },
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_tables",
+        lambda *args, **kwargs: [
+            {
+                "quality_run_id": "dqrun_1",
+                "run_id": "run_1",
+                "table_name": "customer",
+                "row_count": 10,
+                "trust_score": 80,
+                "severity": "good",
+                "summary_json": {
+                    "freshness_analysis": {
+                        "freshness_column": "updated_at",
+                        "latest_timestamp": "2026-04-18T10:00:00Z",
+                        "freshness_lag_days": 2.0,
+                        "freshness_status": "fresh",
+                    },
+                    "stability_analysis": {
+                        "row_count_change_pct": 12.0,
+                        "completeness_score_change": -4.0,
+                        "stability_status": "stable",
+                        "stability_issues": [],
+                    },
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "get_quality_table_detail",
+        lambda *args, **kwargs: {
+            "table_name": "customer",
+            "columns": [
+                {
+                    "table_name": "customer",
+                    "column_name": "email",
+                    "data_type": "text",
+                    "null_pct": 10,
+                    "completeness_score": 90,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_rules",
+        lambda *args, **kwargs: [
+            {
+                "rule_id": "rule_1",
+                "rule_type": "email_pattern",
+                "severity": "warning",
+                "table_name": "customer",
+                "column_name": "email",
+                "result_status": "failed",
+                "checked_row_count": 10,
+                "violation_count": 1,
+                "violation_pct": 10,
+                "sample_rows_json": [{"email": "bad"}],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_duplicate_candidates",
+        lambda *args, **kwargs: [
+            {
+                "candidate_id": "dqdup_1",
+                "table_name": "customer",
+                "duplicate_type": "exact_key_duplicate",
+                "match_columns_json": ["customer_id"],
+                "confidence": 0.99,
+                "candidate_record_count": 2,
+                "review_status": "needs_review",
+                "sample_rows_json": [{"duplicate_value": "C001", "duplicate_count": 2}],
+                "cluster_json": {"duplicate_group_count": 1},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_enrichment_opportunities",
+        lambda *args, **kwargs: [
+            {
+                "opportunity_id": "dqopp_1",
+                "table_name": "customer",
+                "target_column": "state",
+                "source_columns": ["pincode", "country"],
+                "missing_count": 4,
+                "confidence": 0.9,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "_list_staged_overlay_artifacts",
+        lambda settings, run_id: [
+            {
+                "artifact_id": "artifact_stage_1",
+                "raw_json": {
+                    "proposal_id": "dqep_1",
+                    "table_name": "customer",
+                    "target_column": "state",
+                    "target_column_alias": "state",
+                    "source_column_aliases": ["postal_code", "country"],
+                    "approval_scope": "high_confidence",
+                    "approved_rows": [
+                        {
+                            "row_ref": "(1,1)",
+                            "proposed_value": "Karnataka",
+                            "confidence": 0.91,
+                            "method": "llm_context_inference",
+                            "target_column_alias": "state",
+                            "source_column_aliases": ["postal_code", "country"],
+                            "source_values": {"pincode": "560001", "country": "India"},
+                        }
+                    ],
+                    "deferred_rows": [
+                        {
+                            "row_ref": "(1,2)",
+                            "proposed_value": "Unknown",
+                            "confidence": 0.61,
+                            "method": "llm_context_inference",
+                            "target_column_alias": "state",
+                            "source_column_aliases": ["postal_code", "country"],
+                            "source_values": {"pincode": "000000", "country": "India"},
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "_fetch_overlay_source_rows",
+        lambda *args, **kwargs: {
+            "(1,1)": {"__row_ref": "(1,1)", "pincode": "560001", "country": "India", "state": None},
+        },
+    )
+    monkeypatch.setattr(dq_report, "create_quality_report_metadata", lambda *args, **kwargs: "dqreport_1")
+
+    workbook, file_name, summary = dq_report.build_data_quality_excel_report(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+    )
+
+    assert file_name == "data_quality_run_1.xlsx"
+    assert summary["report_id"] == "dqreport_1"
+    assert summary["table_count"] == 1
+    assert summary["column_count"] == 1
+    assert summary["failed_rule_count"] == 1
+    assert summary["duplicate_candidate_count"] == 1
+    assert summary["approved_enrichment_row_count"] == 1
+    assert summary["deferred_enrichment_row_count"] == 1
+    assert summary["published_enrichment_sheet_count"] == 1
+    assert summary["remediation_action_count"] >= 2
+    with zipfile.ZipFile(BytesIO(workbook)) as archive:
+        sheet_texts = [
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.startswith("xl/worksheets/sheet")
+        ]
+        assert any("email_pattern" in text for text in sheet_texts)
+        sheet_names = archive.read("xl/workbook.xml").decode("utf-8")
+        assert "Freshness" in sheet_names
+        assert "Duplicates" in sheet_names
+        assert "Enrichment Summary" in sheet_names
+        assert "Recommended Actions" in sheet_names
+        assert "Staged Enrichment" in sheet_names
+        assert "Published customer" in sheet_names
+        assert any("Karnataka" in text and ('s=\"3\"' in text or 's=\"4\"' in text) for text in sheet_texts)
+        assert any("560001" in text and "India" in text and "Karnataka" in text for text in sheet_texts)
+        assert any("postal_code" in text for text in sheet_texts)
+
+
+def test_build_data_quality_dashboard_spec_shapes_quality_views() -> None:
+    spec = dq_dashboard.build_data_quality_dashboard_spec(
+        run_id="run_1",
+        domain_id="data_quality_observability",
+        profiling={
+            "tables": [
+                {
+                    "name": "customer",
+                    "row_count": 10,
+                    "quality_summary": {
+                        "table_trust_score": 72.5,
+                        "table_completeness_score": 80,
+                        "freshness_lag_days": 2,
+                        "duplicate_risk_columns_count": 1,
+                    },
+                    "column_profiles": [
+                        {"name": "email", "null_pct": 20, "blank_pct": 5, "completeness_score": 75},
+                    ],
+                }
+            ]
+        },
+        quality_tables=[
+            {
+                "table_name": "customer",
+                "trust_score": 68.0,
+                "completeness_score": 80.0,
+                "validity_score": 90.0,
+                "referential_integrity_score": 80.0,
+                "freshness_score": 90.0,
+                "duplicate_risk_score": 70.0,
+            }
+        ],
+        quality_summary={
+            "average_table_trust_score": 72.5,
+            "critical_issue_count": 0,
+            "warning_issue_count": 1,
+            "failed_rule_count": 1,
+        },
+        quality_rules=[
+            {
+                "rule_id": "rule_1",
+                "rule_type": "referential_integrity",
+                "severity": "critical",
+                "table_name": "orders",
+                "column_name": "customer_id",
+                "reference_table": "customer",
+                "reference_column": "customer_id",
+            }
+        ],
+        quality_rule_results=[
+            {
+                "status": "failed",
+                "violation_count": 2,
+                "violation_pct": 20.0,
+            }
+        ],
+        duplicate_candidates=[
+            {
+                "candidate_id": "dqdup_1",
+                "table_name": "customer",
+                "duplicate_type": "exact_key_duplicate",
+                "candidate_record_count": 4,
+                "confidence": 0.99,
+            }
+        ],
+        enrichment_opportunities=[
+            {
+                "opportunity_id": "dqopp_1",
+                "table_name": "customer",
+                "target_column": "state",
+                "missing_count": 20,
+                "confidence": 0.91,
+            }
+        ],
+    )
+
+    assert spec["title"] == "Data Quality Observability Data Quality Dashboard"
+    assert len(spec["chart_plan"]) == 7
+    assert spec["chart_plan"][0]["chart_key"] == "data_trust_scorecard"
+    assert spec["chart_plan"][1]["display_columns"][1] == {"field": "column_name", "label": "Physical Column"}
+    assert spec["chart_plan"][1]["display_columns"][2] == {"field": "column_alias", "label": "Semantic Alias"}
+    assert spec["chart_plan"][0]["rows"][0]["trust_score"] == 68.0
+    assert spec["chart_plan"][1]["rows"][0]["column_alias"] == "email"
+    assert "/data-quality/evidence/missingness" in str(spec["chart_plan"][1]["rows"][0]["evidence_path"])
+    assert spec["chart_plan"][3]["rows"][0]["reference_table"] == "customer"
+    assert spec["chart_plan"][3]["rows"][0]["column_alias"] == "customer_id"
+    assert "/data-quality/evidence/rules/" in str(spec["chart_plan"][3]["rows"][0]["evidence_path"])
+    assert spec["chart_plan"][4]["rows"][0]["duplicate_candidate_count"] == 1
+    assert "/data-quality/evidence/duplicates/" in str(spec["chart_plan"][4]["rows"][0]["evidence_path"])
+    assert spec["chart_plan"][6]["chart_key"] == "recommended_actions"
+
+
+def test_derive_data_quality_remediation_plan_prioritizes_explainable_actions() -> None:
+    plan = dq_remediation.derive_data_quality_remediation_plan(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        tables=[
+            {
+                "table_name": "customer",
+                "trust_score": 62.0,
+                "summary_json": {
+                    "freshness_analysis": {"freshness_status": "stale", "freshness_lag_days": 8.0, "freshness_column": "updated_at"},
+                    "stability_analysis": {"stability_status": "changed", "row_count_change_pct": 25.0, "completeness_score_change": -12.0},
+                    "trust_components": {"freshness": 40.0, "completeness": 70.0},
+                    "trust_component_explanations": {"freshness": "Freshness lag exceeds the expected SLA."},
+                },
+            }
+        ],
+        table_details=[
+            {
+                "table_name": "customer",
+                "trust_score": 62.0,
+                "columns": [
+                    {"column_name": "email", "null_pct": 35.0, "blank_pct": 0.0},
+                ],
+            }
+        ],
+        rules=[
+            {
+                "rule_id": "rule_1",
+                "rule_type": "referential_integrity",
+                "table_name": "orders",
+                "column_name": "customer_id",
+                "severity": "critical",
+                "result_status": "failed",
+                "violation_count": 12,
+                "violation_pct": 24.0,
+            }
+        ],
+        duplicates=[
+            {
+                "candidate_id": "dqdup_1",
+                "table_name": "customer",
+                "duplicate_type": "exact_key_duplicate",
+                "candidate_record_count": 30,
+                "confidence": 0.99,
+            }
+        ],
+        opportunities=[
+            {
+                "opportunity_id": "dqopp_1",
+                "table_name": "customer",
+                "target_column": "state",
+                "source_columns": ["pincode", "country"],
+                "missing_count": 80,
+                "confidence": 0.88,
+            }
+        ],
+        limit=20,
+    )
+
+    assert plan["summary"]["action_count"] >= 5
+    assert plan["summary"]["critical_action_count"] >= 1
+    assert any(row["evidence_type"] == "missingness" for row in plan["actions"])
+    assert any(row["evidence_type"] == "rule_failure" for row in plan["actions"])
+    assert any(row["evidence_type"] == "freshness" for row in plan["actions"])
+    assert any("/data-quality/evidence/missingness" in str(row["evidence_path"]) for row in plan["actions"])
+
+
+def test_create_data_quality_dashboard_uses_dashboard_store(monkeypatch) -> None:
+    created: dict = {}
+
+    def fake_create_dashboard(settings, **kwargs):
+        created.update(kwargs)
+        return {"dashboard_id": "db_dq_1"}
+
+    monkeypatch.setattr(dq_dashboard, "create_dashboard", fake_create_dashboard)
+
+    result = dq_dashboard.create_data_quality_dashboard(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        profiling={"tables": []},
+        quality_summary={"average_table_trust_score": 88.0, "critical_issue_count": 0},
+        quality_rules=[],
+        quality_rule_results=[],
+        duplicate_candidates=[],
+    )
+
+    assert result["dashboard_id"] == "db_dq_1"
+    assert created["dashboard_type"] == "data_quality"
+    assert created["run_id"] == "run_1"
+    assert isinstance(created["chart_plan"], list)
+
+
+def test_detect_duplicate_candidates_collects_exact_and_fuzzy(monkeypatch) -> None:
+    def fake_run_query(settings, sql, params, scoped_conn=None):
+        if "COUNT(*) AS duplicate_group_count" in sql:
+            return [{"duplicate_group_count": 1, "candidate_record_count": 2, "max_group_size": 2}]
+        if "duplicate_value" in sql:
+            return [{"duplicate_value": "C001", "duplicate_count": 2}]
+        if '"customer_name", "pincode"' in sql and "GROUP BY" in sql:
+            return [{"customer_name": "Acme", "pincode": "560001", "duplicate_count": 2}]
+        return [{"duplicate_group_count": 1, "candidate_record_count": 2, "max_group_size": 2}]
+
+    monkeypatch.setattr(dq_duplicates, "run_query", fake_run_query)
+
+    candidates = dq_duplicates.detect_duplicate_candidates(
+        object(),
+        profiling={
+            "tables": [
+                {
+                    "name": "customer",
+                    "candidate_keys": [{"column": "customer_id", "duplicate_count": 2, "uniqueness_ratio": 0.8}],
+                    "column_profiles": [{"name": "customer_name"}, {"name": "pincode"}],
+                    "sample_values": {"customer_name": ["Acme Ltd", "Acme  Ltd", "Beta Co", "Beta-Co"]},
+                    "fuzzy_duplicate_signals": [
+                        {
+                            "column": "customer_name",
+                            "raw_unique_sample_count": 4,
+                            "normalized_unique_sample_count": 2,
+                            "duplicate_pressure": 0.5,
+                            "risk_level": "high",
+                        }
+                    ],
+                }
+            ]
+        },
+        schema_name="public",
+        scoped_conn=None,
+        quality_run_id="dqrun_1",
+        run_id="run_1",
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+    )
+
+    assert any(item["duplicate_type"] == "exact_key_duplicate" for item in candidates)
+    assert any(item["duplicate_type"] == "exact_composite_duplicate" for item in candidates)
+    assert any(item["duplicate_type"] == "fuzzy_duplicate_signal" for item in candidates)
+
+
+def test_analyze_freshness_and_stability_compares_previous_snapshot() -> None:
+    result = dq_freshness.analyze_freshness_and_stability(
+        profiling={
+            "tables": [
+                {
+                    "name": "customer",
+                    "row_count": 120,
+                    "quality_summary": {
+                        "row_count": 120,
+                        "table_completeness_score": 80.0,
+                        "primary_time_column": "updated_at",
+                        "latest_timestamp": "2026-04-18T10:00:00Z",
+                        "freshness_lag_days": 9.0,
+                    },
+                }
+            ]
+        },
+        previous_tables_by_name={
+            "customer": {
+                "quality_run_id": "dqrun_prev",
+                "row_count": 90,
+                "completeness_score": 95.0,
+                "summary_json": {"quality_summary": {"row_count": 90, "table_completeness_score": 95.0}},
+            }
+        },
+    )
+
+    row = result["results"][0]
+    assert row["freshness_status"] == "stale"
+    assert row["stability_status"] == "changed"
+    assert row["row_count_change_pct"] == 33.33
+    assert row["completeness_score_change"] == -15.0
+    assert result["summary"]["stale_table_count"] == 1
+    assert result["summary"]["stability_issue_count"] == 1
+
+
+def test_compute_data_quality_trust_scores_uses_all_major_components() -> None:
+    result = dq_trust.compute_data_quality_trust_scores(
+        quality_tables=[
+            {
+                "table_name": "customer",
+                "row_count": 100.0,
+                "completeness_score": 80.0,
+                "freshness_score": 70.0,
+                "duplicate_risk_score": 85.0,
+            }
+        ],
+        quality_rules=[
+            {"table_name": "customer", "rule_type": "not_null", "result_status": "failed", "checked_row_count": 100, "violation_count": 10},
+            {"table_name": "customer", "rule_type": "referential_integrity", "result_status": "failed", "checked_row_count": 100, "violation_count": 5},
+        ],
+        duplicate_candidates=[
+            {"table_name": "customer", "duplicate_type": "exact_key_duplicate", "candidate_record_count": 8},
+            {"table_name": "customer", "duplicate_type": "fuzzy_duplicate_signal", "candidate_record_count": 2},
+        ],
+        freshness_results=[
+            {
+                "table_name": "customer",
+                "freshness_score": 70.0,
+                "freshness_status": "stale",
+                "stability_status": "changed",
+                "row_count_change_pct": 25.0,
+                "completeness_score_change": -12.0,
+            }
+        ],
+        enrichment_opportunities=[
+            {"table_name": "customer"},
+            {"table_name": "customer"},
+        ],
+    )
+
+    table = result["tables"][0]
+    assert table["validity_score"] == 90.0
+    assert table["referential_integrity_score"] == 95.0
+    assert table["uniqueness_score"] == 92.0
+    assert table["freshness_score"] == 70.0
+    assert table["trust_components"]["enrichment_readiness"] == 80.0
+    assert table["trust_score"] is not None
+    assert result["summary"]["average_table_trust_score"] == table["trust_score"]
+
+
+def test_discover_enrichment_opportunities_from_location_columns() -> None:
+    opportunities = dq_enrichment.discover_enrichment_opportunities(
+        {
+            "tables": [
+                {
+                    "name": "customer",
+                    "column_profiles": [
+                        {"name": "state", "null_count": 3, "blank_count": 1},
+                        {"name": "country", "null_count": 2, "blank_count": 0},
+                        {"name": "pincode", "null_count": 0, "blank_count": 0},
+                        {"name": "country_code", "null_count": 0, "blank_count": 0},
+                    ],
+                }
+            ]
+        },
+        quality_run_id="dqrun_1",
+        run_id="run_1",
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+    )
+
+    by_target = {item["target_column"]: item for item in opportunities}
+    assert "state" in by_target
+    assert by_target["state"]["candidate_method"] == "postal_context_inference"
+    assert by_target["state"]["target_column_alias"] == "state"
+    assert by_target["state"]["source_column_aliases_json"] == ["postal_code", "country"]
+    assert by_target["state"]["requires_external_lookup"] is False
+    assert by_target["country"]["candidate_method"] == "country_code_normalization"
+
+
+def test_discover_enrichment_opportunities_for_new_generic_types() -> None:
+    opportunities = dq_enrichment.discover_enrichment_opportunities(
+        {
+            "tables": [
+                {
+                    "name": "customer",
+                    "column_profiles": [
+                        {"name": "status", "null_count": 4, "blank_count": 0},
+                        {"name": "status_code", "null_count": 0, "blank_count": 0},
+                        {"name": "full_name", "null_count": 3, "blank_count": 0},
+                        {"name": "first_name", "null_count": 0, "blank_count": 0},
+                        {"name": "last_name", "null_count": 0, "blank_count": 0},
+                        {"name": "order_year", "null_count": 5, "blank_count": 0, "data_type": "integer"},
+                        {"name": "order_date", "null_count": 0, "blank_count": 0, "data_type": "date"},
+                    ],
+                },
+                {
+                    "name": "reference_data",
+                    "column_profiles": [
+                        {"name": "status", "null_count": 2, "blank_count": 0},
+                        {"name": "status_label", "null_count": 0, "blank_count": 0},
+                    ],
+                },
+            ]
+        },
+        quality_run_id="dqrun_1",
+        run_id="run_1",
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+    )
+
+    by_table_target = {(item["table_name"], item["target_column"]): item for item in opportunities}
+    assert by_table_target[("customer", "status")]["candidate_method"] == "code_to_label_derivation"
+    assert by_table_target[("customer", "full_name")]["candidate_method"] == "cross_column_derivation"
+    assert by_table_target[("customer", "order_year")]["candidate_method"] == "temporal_derivation"
+    assert by_table_target[("reference_data", "status")]["candidate_method"] == "canonical_label_normalization"
+
+
+def test_replace_quality_enrichment_opportunities_persists_rows(monkeypatch) -> None:
+    calls: list[tuple[str, list[object]]] = []
+    monkeypatch.setattr(dq_store, "execute_non_query", lambda settings, sql, params: calls.append((sql, params)))
+
+    inserted = dq_store.replace_quality_enrichment_opportunities(
+        object(),
+        quality_run_id="dqrun_1",
+        run_id="run_1",
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        opportunities=[
+            {
+                "opportunity_id": "dqeo_1",
+                "table_name": "customer",
+                "target_column": "state",
+                "source_columns_json": ["pincode", "country"],
+                "missing_count": 10,
+                "candidate_method": "postal_context_inference",
+                "requires_external_lookup": False,
+                "requires_user_approval": True,
+                "confidence": 0.82,
+                "question": "Can we use existing row context to propose missing state values from pincode, country?",
+                "status": "needs_user_approval",
+            }
+        ],
+    )
+
+    assert inserted == 1
+    assert len(calls) == 2
+    assert calls[1][1][5] == "customer"
+    assert calls[1][1][6] == "state"
+
+
+def test_build_enrichment_proposal_uses_preview_for_internal_normalization() -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(dq_enrichment, "_fetch_candidate_rows", lambda *args, **kwargs: [{"__row_ref": "(1,1)", "country": "India", "country_code": None}])
+    monkeypatch.setattr(dq_enrichment, "_fetch_example_rows", lambda *args, **kwargs: [{"country": "India", "country_code": "IN"}])
+    proposal = dq_enrichment.build_enrichment_proposal(
+        object(),
+        {
+            "opportunity_id": "dqeo_1",
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "table_name": "customer",
+            "target_column": "country_code",
+            "source_columns_json": ["country"],
+            "missing_count": 12,
+            "candidate_method": "country_code_normalization",
+            "requires_external_lookup": False,
+        },
+        scoped_conn=object(),
+        schema_name="public",
+    )
+    monkeypatch.undo()
+
+    assert proposal["matched_count"] == 1
+    assert proposal["unmatched_count"] == 0
+    assert proposal["proposed_values_json"][0]["method"] == "deterministic_exact_match"
+    assert proposal["proposed_values_json"][0]["proposed_value"] == "IN"
+
+
+def test_build_enrichment_proposal_uses_canonical_label_normalization() -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        dq_enrichment,
+        "_fetch_candidate_rows",
+        lambda *args, **kwargs: [{"__row_ref": "(1,1)", "status_label": "active", "status": None}],
+    )
+    monkeypatch.setattr(dq_enrichment, "_fetch_example_rows", lambda *args, **kwargs: [])
+    proposal = dq_enrichment.build_enrichment_proposal(
+        object(),
+        {
+            "opportunity_id": "dqeo_1",
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "table_name": "customer",
+            "target_column": "status",
+            "source_columns_json": ["status_label"],
+            "missing_count": 1,
+            "candidate_method": "canonical_label_normalization",
+            "requires_external_lookup": False,
+        },
+        scoped_conn=object(),
+        schema_name="public",
+    )
+    monkeypatch.undo()
+
+    assert proposal["matched_count"] == 1
+    assert proposal["target_column"] == "status"
+    assert proposal["target_column_alias"] == "status"
+    assert proposal["source_column_aliases_json"] == ["status"]
+    assert proposal["proposed_values_json"][0]["method"] == "deterministic_canonical_normalization"
+    assert proposal["proposed_values_json"][0]["proposed_value"] == "Active"
+    assert proposal["proposed_values_json"][0]["target_column_alias"] == "status"
+
+
+def test_build_enrichment_proposal_requires_sources_for_external_lookup() -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        dq_enrichment,
+        "_fetch_candidate_rows",
+        lambda *args, **kwargs: [{"__row_ref": "(1,1)", "pincode": "560001", "country": "India", "state": None}],
+    )
+    monkeypatch.setattr(
+        dq_enrichment,
+        "_fetch_example_rows",
+        lambda *args, **kwargs: [{"pincode": "999999", "country": "India", "state": "Known"}],
+    )
+    monkeypatch.setattr(
+        dq_enrichment,
+        "_llm_enrichment_proposals",
+        lambda *args, **kwargs: [{"row_ref": "(1,1)", "proposed_value": "Karnataka", "confidence": 0.84, "rationale": "Learned from examples", "method": "llm_context_inference"}],
+    )
+    proposal = dq_enrichment.build_enrichment_proposal(
+        object(),
+        {
+            "opportunity_id": "dqeo_1",
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "table_name": "customer",
+            "target_column": "state",
+            "source_columns_json": ["pincode", "country"],
+            "missing_count": 20,
+            "candidate_method": "postal_context_inference",
+            "requires_external_lookup": False,
+        },
+        scoped_conn=object(),
+        schema_name="public",
+        max_records=5,
+    )
+    monkeypatch.undo()
+
+    assert proposal["matched_count"] == 1
+    assert proposal["unmatched_count"] == 0
+    assert proposal["source_references_json"][1]["provider"] == "llm_context_inference"
+    assert proposal["proposed_values_json"][0]["proposed_value"] == "Karnataka"
+
+
+def test_build_enrichment_proposal_uses_cross_column_derivation() -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        dq_enrichment,
+        "_fetch_candidate_rows",
+        lambda *args, **kwargs: [{"__row_ref": "(1,1)", "first_name": "Ada", "last_name": "Lovelace", "full_name": None}],
+    )
+    monkeypatch.setattr(dq_enrichment, "_fetch_example_rows", lambda *args, **kwargs: [])
+    proposal = dq_enrichment.build_enrichment_proposal(
+        object(),
+        {
+            "opportunity_id": "dqeo_1",
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "table_name": "customer",
+            "target_column": "full_name",
+            "source_columns_json": ["first_name", "last_name"],
+            "missing_count": 1,
+            "candidate_method": "cross_column_derivation",
+            "requires_external_lookup": False,
+        },
+        scoped_conn=object(),
+        schema_name="public",
+    )
+    monkeypatch.undo()
+
+    assert proposal["matched_count"] == 1
+    assert proposal["proposed_values_json"][0]["method"] == "deterministic_cross_column_derivation"
+    assert proposal["proposed_values_json"][0]["proposed_value"] == "Ada Lovelace"
+
+
+def test_canonical_column_aliases_preserve_physical_name_and_expose_semantic_aliases() -> None:
+    assert dq_enrichment.canonical_column_alias("pincode") == "postal_code"
+    assert dq_enrichment.canonical_column_alias("province") == "state"
+    assert dq_enrichment.canonical_column_alias("status_label") == "status"
+    assert dq_enrichment.canonical_column_aliases(["pincode", "country_code"]) == ["postal_code", "country_code"]
+
+
+def test_build_enrichment_question_queue_shapes_pending_and_ready_questions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_enrichment_questions,
+        "list_quality_enrichment_opportunities",
+        lambda *args, **kwargs: [
+            {
+                "opportunity_id": "dqeo_1",
+                "run_id": "run_1",
+                "quality_run_id": "dqrun_1",
+                "table_name": "customer",
+                "target_column": "state",
+                "source_columns_json": ["pincode", "country"],
+                "missing_count": 25,
+                "candidate_method": "postal_context_inference",
+                "confidence": 0.88,
+                "question": "Can we use existing row context to propose missing state values from pincode, country?",
+                "status": "needs_user_approval",
+            },
+            {
+                "opportunity_id": "dqeo_2",
+                "run_id": "run_1",
+                "quality_run_id": "dqrun_1",
+                "table_name": "customer",
+                "target_column": "status",
+                "source_columns_json": ["status_code"],
+                "missing_count": 5,
+                "candidate_method": "code_to_label_derivation",
+                "confidence": 0.95,
+                "question": "Can we derive status labels from existing code values in status_code?",
+                "status": "proposal_generated",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        dq_enrichment_questions,
+        "get_latest_quality_enrichment_proposal_for_opportunity",
+        lambda settings, opportunity_id, tenant_id=None: (
+            {
+                "proposal_id": "dqep_2",
+                "status": "proposed",
+                "matched_count": 4,
+                "unmatched_count": 1,
+            }
+            if opportunity_id == "dqeo_2"
+            else None
+        ),
+    )
+
+    queue = dq_enrichment_questions.build_enrichment_question_queue(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+    )
+
+    assert queue["summary"]["question_count"] == 2
+    assert queue["summary"]["pending_answer_count"] == 1
+    assert queue["summary"]["proposal_ready_count"] == 1
+    assert queue["questions"][0]["opportunity_id"] == "dqeo_1"
+    assert queue["questions"][0]["status"] == "pending_answer"
+    assert queue["questions"][0]["target_column_alias"] == "state"
+    assert queue["questions"][0]["source_column_aliases_json"] == ["postal_code", "country"]
+    assert queue["questions"][0]["available_actions"] == ["approve", "defer", "reject"]
+    ready = next(item for item in queue["questions"] if item["opportunity_id"] == "dqeo_2")
+    assert ready["status"] == "proposal_ready"
+    assert ready["proposal_id"] == "dqep_2"
+    assert ready["available_actions"] == ["review_proposal", "defer", "reject"]
+
+
+def test_build_enrichment_proposal_uses_temporal_derivation() -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        dq_enrichment,
+        "_fetch_candidate_rows",
+        lambda *args, **kwargs: [{"__row_ref": "(1,1)", "order_date": "2026-04-18", "order_year": None}],
+    )
+    monkeypatch.setattr(dq_enrichment, "_fetch_example_rows", lambda *args, **kwargs: [])
+    proposal = dq_enrichment.build_enrichment_proposal(
+        object(),
+        {
+            "opportunity_id": "dqeo_1",
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "table_name": "orders",
+            "target_column": "order_year",
+            "source_columns_json": ["order_date"],
+            "missing_count": 1,
+            "candidate_method": "temporal_derivation",
+            "requires_external_lookup": False,
+        },
+        scoped_conn=object(),
+        schema_name="public",
+    )
+    monkeypatch.undo()
+
+    assert proposal["matched_count"] == 1
+    assert proposal["proposed_values_json"][0]["method"] == "deterministic_temporal_derivation"
+    assert proposal["proposed_values_json"][0]["proposed_value"] == "2026"
+
+
+def test_create_quality_enrichment_proposal_persists_row(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_store,
+        "execute_returning_query",
+        lambda settings, sql, params: [{"proposal_id": params[0], "status": params[6], "matched_count": params[7]}],
+    )
+
+    row = dq_store.create_quality_enrichment_proposal(
+        object(),
+        proposal={
+            "proposal_id": "dqep_1",
+            "opportunity_id": "dqeo_1",
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "status": "proposed",
+            "matched_count": 1,
+            "unmatched_count": 2,
+            "source_references_json": [],
+            "proposed_values_json": [],
+        },
+    )
+
+    assert row["proposal_id"] == "dqep_1"
+    assert row["status"] == "proposed"
+    assert row["matched_count"] == 1
+
+
+def test_summarize_enrichment_proposal_groups_and_buckets() -> None:
+    summary = dq_enrichment.summarize_enrichment_proposal(
+        {
+            "matched_count": 4,
+            "unmatched_count": 2,
+            "proposed_values_json": [
+                {"row_ref": "(1,1)", "proposed_value": "Karnataka", "confidence": 0.99, "method": "deterministic_exact_match", "source_values": {"pincode": "560001"}},
+                {"row_ref": "(1,2)", "proposed_value": "Karnataka", "confidence": 0.91, "method": "llm_context_inference", "source_values": {"pincode": "560001"}},
+                {"row_ref": "(1,3)", "proposed_value": "Maharashtra", "confidence": 0.88, "method": "llm_context_inference", "source_values": {"pincode": "400001"}},
+                {"row_ref": "(1,4)", "proposed_value": "Unknown", "confidence": 0.62, "method": "llm_context_inference", "source_values": {"pincode": "000000"}},
+            ],
+        }
+    )
+
+    assert summary["total_candidate_rows"] == 6
+    assert summary["confidence_buckets"] == {
+        "auto_approve": 1,
+        "high_confidence": 2,
+        "needs_review": 1,
+    }
+    assert summary["grouped_values"][0]["proposed_value"] == "Karnataka"
+    assert summary["grouped_values"][0]["row_count"] == 2
+
+
+def test_select_enrichment_rows_for_application_filters_by_scope_and_threshold() -> None:
+    proposal = {
+        "proposed_values_json": [
+            {"row_ref": "(1,1)", "proposed_value": "Karnataka", "confidence": 0.99, "method": "deterministic_exact_match"},
+            {"row_ref": "(1,2)", "proposed_value": "Karnataka", "confidence": 0.91, "method": "llm_context_inference"},
+            {"row_ref": "(1,3)", "proposed_value": "Unknown", "confidence": 0.62, "method": "llm_context_inference"},
+        ]
+    }
+
+    deterministic = dq_enrichment.select_enrichment_rows_for_application(proposal, approval_scope="deterministic_only")
+    assert len(deterministic["approved_rows"]) == 1
+    assert len(deterministic["deferred_rows"]) == 2
+
+    thresholded = dq_enrichment.select_enrichment_rows_for_application(proposal, approval_scope="high_confidence", min_confidence=0.9)
+    assert len(thresholded["approved_rows"]) == 2
+    assert len(thresholded["deferred_rows"]) == 1
+
+
+def test_build_staged_enrichment_overlay_artifact_contains_rows_and_policy() -> None:
+    artifact = dq_enrichment.build_staged_enrichment_overlay_artifact(
+        {
+            "proposal_id": "dqep_1",
+            "opportunity_id": "dqeo_1",
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "table_name": "customer",
+            "target_column": "state",
+            "source_references_json": [{"provider": "llm_context_inference"}],
+        },
+        selection={
+            "approval_scope": "high_confidence",
+            "confidence_threshold": 0.85,
+            "approved_rows": [
+                {"row_ref": "(1,1)", "proposed_value": "Karnataka", "confidence": 0.91, "table_name": "customer", "target_column": "state"},
+            ],
+            "deferred_rows": [
+                {"row_ref": "(1,2)", "proposed_value": "Unknown", "confidence": 0.61, "table_name": "customer", "target_column": "state"},
+            ],
+        },
+        approved_by="user_1",
+        application_mode="staged_overlay",
+        reason="Reviewed confidence buckets",
+    )
+
+    assert artifact["artifact_type"] == "data_quality_staged_overlay"
+    assert artifact["approved_row_count"] == 1
+    assert artifact["deferred_row_count"] == 1
+    assert artifact["approval_scope"] == "high_confidence"
+    assert artifact["summary"]["source_references"][0]["provider"] == "llm_context_inference"
+
+
+def test_get_agent_event_artifact_by_logical_event_id_filters_stage(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_run_query(settings, sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"artifact_id": "artifact_1", "logical_event_id": params[1], "stage_name": params[2]}]
+
+    monkeypatch.setattr(agentic_store, "run_query", fake_run_query)
+    row = agentic_store.get_agent_event_artifact_by_logical_event_id(
+        object(),
+        "run_1",
+        "dq_stage::dqep_1",
+        stage_name="staged_overlay",
+    )
+
+    assert row["artifact_id"] == "artifact_1"
+    assert captured["params"] == ["run_1", "dq_stage::dqep_1", "staged_overlay"]
+    assert "logical_event_id = %s" in captured["sql"]
+
+
+def test_run_data_quality_agentic_workflow_minimal(monkeypatch) -> None:
+    if dq_orchestrator.StateGraph is None:
+        pytest.skip("LangGraph is not installed")
+
+    events: list[dict] = []
+    monkeypatch.setattr(dq_orchestrator, "append_agent_run_event", lambda settings, run_id, agent, status, msg, artifacts=None: f"event_{agent}")
+    monkeypatch.setattr(dq_orchestrator, "append_agent_chat_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "create_or_update_quality_run", lambda *args, **kwargs: "dqrun_1")
+    monkeypatch.setattr(dq_orchestrator, "persist_schema_graph_artifact", lambda *args, **kwargs: "sg_1")
+    monkeypatch.setattr(dq_orchestrator, "persist_table_profile_artifact", lambda *args, **kwargs: "tp_1")
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "detect_duplicate_candidates",
+        lambda *args, **kwargs: [{"table_name": "customer", "duplicate_type": "exact_key_duplicate"}],
+    )
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_duplicate_candidates", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(dq_orchestrator, "get_previous_quality_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "list_quality_tables_by_quality_run", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "list_quality_tables",
+        lambda *args, **kwargs: [
+            {"table_name": "customer", "row_count": 10, "completeness_score": 100.0, "freshness_score": 90.0, "duplicate_risk_score": 100.0, "summary_json": {}}
+        ],
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "analyze_freshness_and_stability",
+        lambda **kwargs: {
+            "results": [{"table_name": "customer", "freshness_score": 90.0}],
+            "summary": {"stale_table_count": 0, "tables_without_freshness_column_count": 0, "stability_issue_count": 0},
+        },
+    )
+    monkeypatch.setattr(dq_orchestrator, "update_quality_table_monitoring", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "compute_data_quality_trust_scores",
+        lambda **kwargs: {
+            "tables": [{"table_name": "customer", "trust_score": 88.0, "severity": "good"}],
+            "summary": {"average_table_trust_score": 88.0, "low_trust_tables_count": 0, "critical_issue_count": 0, "warning_issue_count": 0},
+        },
+    )
+    monkeypatch.setattr(dq_orchestrator, "update_quality_table_trust_scores", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_rules", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(dq_orchestrator, "execute_quality_rules", lambda *args, **kwargs: {"rules_executed": 0, "failed_rules": 0, "passed_rules": 0, "error_rules": 0, "results": []})
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "create_data_quality_dashboard",
+        lambda *args, **kwargs: {"dashboard_id": "db_dq_1", "dashboard_title": "DQ Dashboard", "chart_plan": [{"chart_key": "data_trust_scorecard"}]},
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "discover_enrichment_opportunities",
+        lambda *args, **kwargs: [
+            {
+                "opportunity_id": "dqeo_1",
+                "table_name": "customer",
+                "target_column": "state",
+                "requires_external_lookup": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_enrichment_opportunities", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "build_schema_graph",
+        lambda payload: {"tables": [{"name": "customer", "columns": [{"name": "email", "data_type": "text"}]}]},
+    )
+    monkeypatch.setattr(dq_orchestrator, "enrich_schema_graph_columns", lambda *args, **kwargs: args[1])
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "profile_tables",
+        lambda *args, **kwargs: {
+            "quality_overview": {"average_table_trust_score": 80.0, "low_trust_tables_count": 0},
+            "tables": [
+                {
+                    "name": "customer",
+                    "quality_summary": {"table_trust_score": 80.0},
+                    "column_profiles": [{"name": "email", "completeness_score": 100.0}],
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(dq_orchestrator, "upsert_quality_artifacts_from_profiling", lambda *args, **kwargs: {"tables": 1, "columns": 1})
+
+    result = dq_orchestrator.run_data_quality_agentic_workflow(
+        object(),
+        "run_1",
+        {
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "schema_payload": {},
+            "schema_name": "public",
+        },
+        event_callback=lambda event: events.append(event),
+    )
+
+    assert result["workflow_kind"] == "data_quality"
+    assert result["quality_summary"]["profiled_tables"] == 1
+    assert result["quality_summary"]["duplicate_candidate_count"] == 1
+    assert result["quality_summary"]["average_table_trust_score"] == 88.0
+    assert result["quality_summary"]["stale_table_count"] == 0
+    assert result["quality_summary"]["dashboard_id"] == "db_dq_1"
+    assert result["quality_summary"]["enrichment_opportunity_count"] == 1
+    assert [event["agent_name"] for event in events] == [
+        "DataQualityWorkflowRouter",
+        "DataQualitySchemaAgent",
+        "DataQualitySchemaAgent",
+        "DataQualityProfilingAgent",
+        "DataQualityProfilingAgent",
+        "DuplicateDetectionAgent",
+        "DuplicateDetectionAgent",
+        "FreshnessAndStabilityAgent",
+        "FreshnessAndStabilityAgent",
+        "DataQualityRuleAgent",
+        "DataQualityRuleAgent",
+        "DataEnrichmentOpportunityAgent",
+        "DataEnrichmentOpportunityAgent",
+        "DataTrustScoringAgent",
+        "DataQualityDashboardAgent",
+        "DataQualityDashboardAgent",
+    ]
+
+
+def test_run_data_quality_agentic_workflow_pauses_for_rule_review(monkeypatch) -> None:
+    if dq_orchestrator.StateGraph is None:
+        pytest.skip("LangGraph is not installed")
+
+    events: list[dict] = []
+    statuses: list[str] = []
+    monkeypatch.setattr(dq_orchestrator, "append_agent_run_event", lambda settings, run_id, agent, status, msg, artifacts=None: f"event_{agent}")
+    monkeypatch.setattr(dq_orchestrator, "append_agent_chat_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "create_or_update_quality_run",
+        lambda *args, **kwargs: statuses.append(kwargs.get("status")) or "dqrun_1",
+    )
+    monkeypatch.setattr(dq_orchestrator, "persist_schema_graph_artifact", lambda *args, **kwargs: "sg_1")
+    monkeypatch.setattr(dq_orchestrator, "persist_table_profile_artifact", lambda *args, **kwargs: "tp_1")
+    monkeypatch.setattr(dq_orchestrator, "detect_duplicate_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_duplicate_candidates", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(dq_orchestrator, "get_previous_quality_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "list_quality_tables_by_quality_run", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "list_quality_tables", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "analyze_freshness_and_stability",
+        lambda **kwargs: {"results": [], "summary": {"stale_table_count": 0, "tables_without_freshness_column_count": 0, "stability_issue_count": 0}},
+    )
+    monkeypatch.setattr(dq_orchestrator, "update_quality_table_monitoring", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "update_quality_table_trust_scores", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_rules", lambda *args, **kwargs: len(kwargs.get("rules") or []))
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "execute_quality_rules",
+        lambda *args, **kwargs: pytest.fail("rules should not execute before review"),
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "build_schema_graph",
+        lambda payload: {"tables": [{"name": "customer", "columns": [{"name": "status", "data_type": "text"}]}]},
+    )
+    monkeypatch.setattr(dq_orchestrator, "enrich_schema_graph_columns", lambda *args, **kwargs: args[1])
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "profile_tables",
+        lambda *args, **kwargs: {
+            "quality_overview": {"average_table_trust_score": 80.0, "low_trust_tables_count": 0},
+            "tables": [
+                {
+                    "name": "customer",
+                    "quality_summary": {"table_trust_score": 80.0},
+                    "column_profiles": [{"name": "status", "completeness_score": 100.0}],
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(dq_orchestrator, "upsert_quality_artifacts_from_profiling", lambda *args, **kwargs: {"tables": 1, "columns": 1})
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "extract_quality_rules_from_context",
+        lambda *args, **kwargs: [
+            {
+                "rule_id": "rule_1",
+                "rule_type": "allowed_values",
+                "table_name": "customer",
+                "column_name": "status",
+                "condition_json": {},
+                "confidence": 0.41,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "build_quality_rule_execution_plan",
+        lambda rule, schema_name, settings=None: {"executor_kind": "deterministic_sql", "sql_preview_status": "available"},
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "classify_quality_rule_review_status",
+        lambda rule: "needs_review",
+    )
+
+    result = dq_orchestrator.run_data_quality_agentic_workflow(
+        object(),
+        "run_pause_1",
+        {
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "schema_payload": {},
+            "schema_name": "public",
+            "context_text": "customer.status should be valid",
+            "pause_for_rule_review": True,
+        },
+        event_callback=lambda event: events.append(event),
+    )
+
+    assert result["run_status"] == "awaiting_rule_review"
+    assert result["quality_summary"]["rule_review_required"] is True
+    assert result["quality_summary"]["review_queue_pending_count"] == 1
+    assert "awaiting_rule_review" in statuses
+    assert [event["agent_name"] for event in events][-2:] == ["DataQualityRuleAgent", "DataQualityReviewGate"]
+
+
+def test_resume_data_quality_agentic_workflow_after_rule_review_completes(monkeypatch) -> None:
+    events: list[dict] = []
+    statuses: list[str] = []
+    monkeypatch.setattr(dq_orchestrator, "append_agent_run_event", lambda settings, run_id, agent, status, msg, artifacts=None: f"event_{agent}")
+    monkeypatch.setattr(dq_orchestrator, "append_agent_chat_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "create_or_update_quality_run",
+        lambda *args, **kwargs: statuses.append(kwargs.get("status")) or "dqrun_resume_1",
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "get_quality_run_by_run_id",
+        lambda settings, run_id: {
+            "quality_run_id": "dqrun_resume_1",
+            "run_id": run_id,
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "connection_id": "conn_1",
+            "database_name": "db_1",
+            "schema_name": "public",
+            "status": "awaiting_rule_review",
+            "summary_json": {"persisted": {"tables": 1, "columns": 1}},
+        },
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "get_table_profile_artifact",
+        lambda *args, **kwargs: {
+            "profiling_json": {
+                "quality_overview": {"average_table_trust_score": 80.0, "low_trust_tables_count": 0},
+                "tables": [
+                    {
+                        "name": "customer",
+                        "quality_summary": {"table_trust_score": 80.0},
+                        "column_profiles": [{"name": "status", "completeness_score": 100.0}],
+                    }
+                ],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "list_quality_rules",
+        lambda *args, **kwargs: [
+            {
+                "rule_id": "rule_1",
+                "rule_type": "allowed_values",
+                "table_name": "customer",
+                "column_name": "status",
+                "status": "active",
+                "schema_name": "public",
+                "condition_json": {"allowed_values": ["ACTIVE", "INACTIVE"]},
+            }
+        ],
+    )
+    monkeypatch.setattr(dq_orchestrator, "_resolve_scoped_conn_from_scope", lambda settings, scope: None)
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "execute_quality_rules",
+        lambda *args, **kwargs: {
+            "rules_executed": 1,
+            "failed_rules": 0,
+            "passed_rules": 1,
+            "error_rules": 0,
+            "results": [{"rule_id": "rule_1", "status": "passed", "checked_row_count": 10, "violation_count": 0, "violation_pct": 0.0}],
+        },
+    )
+    monkeypatch.setattr(dq_orchestrator, "list_quality_duplicate_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "list_quality_tables",
+        lambda *args, **kwargs: [
+            {
+                "table_name": "customer",
+                "row_count": 10,
+                "completeness_score": 100.0,
+                "freshness_score": 90.0,
+                "duplicate_risk_score": 100.0,
+                "summary_json": {
+                    "freshness_analysis": {"freshness_status": "fresh", "freshness_score": 90.0},
+                    "stability_analysis": {"stability_status": "stable", "row_count_change_pct": 0.0, "completeness_score_change": 0.0},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "discover_enrichment_opportunities",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_enrichment_opportunities", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "compute_data_quality_trust_scores",
+        lambda **kwargs: {
+            "tables": [{"table_name": "customer", "trust_score": 92.0, "severity": "good"}],
+            "summary": {"average_table_trust_score": 92.0, "low_trust_tables_count": 0, "critical_issue_count": 0, "warning_issue_count": 0},
+        },
+    )
+    monkeypatch.setattr(dq_orchestrator, "update_quality_table_trust_scores", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "create_data_quality_dashboard",
+        lambda *args, **kwargs: {"dashboard_id": "db_dq_1", "dashboard_title": "DQ Dashboard", "chart_plan": [{"chart_key": "data_trust_scorecard"}]},
+    )
+
+    result = dq_orchestrator.resume_data_quality_agentic_workflow_after_rule_review(
+        object(),
+        "run_resume_1",
+        event_callback=lambda event: events.append(event),
+    )
+
+    assert result["run_status"] == "completed"
+    assert result["quality_summary"]["average_table_trust_score"] == 92.0
+    assert result["quality_summary"]["rule_review_required"] is False
+    assert statuses[0] == "running"
+    assert statuses[-1] == "completed"
+    assert [event["agent_name"] for event in events] == [
+        "DataQualityRuleAgent",
+        "DataQualityRuleAgent",
+        "DataEnrichmentOpportunityAgent",
+        "DataEnrichmentOpportunityAgent",
+        "DataTrustScoringAgent",
+        "DataQualityDashboardAgent",
+        "DataQualityDashboardAgent",
+    ]
+
+
+def test_build_data_quality_workspace_response_summary(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_workspace,
+        "get_quality_run_by_run_id",
+        lambda settings, run_id: {
+            "quality_run_id": "dqrun_1",
+            "run_id": run_id,
+            "overall_trust_score": 74.2,
+            "summary_json": {
+                "critical_issue_count": 2,
+                "warning_issue_count": 4,
+                "enrichment_opportunity_count": 1,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        dq_workspace,
+        "list_quality_tables",
+        lambda *args, **kwargs: [
+            {"table_name": "customer", "trust_score": 61.0, "severity": "critical"},
+            {"table_name": "orders", "trust_score": 82.0, "severity": "warning"},
+        ],
+    )
+    monkeypatch.setattr(
+        dq_workspace,
+        "list_quality_rules",
+        lambda *args, **kwargs: [
+            {
+                "rule_id": "rule_1",
+                "rule_type": "referential_integrity",
+                "severity": "critical",
+                "table_name": "orders",
+                "column_name": "customer_id",
+                "result_status": "failed",
+                "violation_count": 12,
+                "violation_pct": 6.0,
+            }
+        ],
+    )
+    monkeypatch.setattr(dq_workspace, "list_quality_duplicate_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_workspace, "list_quality_enrichment_opportunities", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        dq_workspace,
+        "build_data_quality_remediation_plan",
+        lambda *args, **kwargs: {
+            "summary": {"action_count": 2, "critical_action_count": 1},
+            "actions": [
+                {
+                    "priority": "critical",
+                    "action_type": "missingness_backfill",
+                    "title": "Backfill customer.email",
+                    "evidence_path": "/data-quality/evidence/missingness?tenant_id=tenant&run_id=run_1&table_name=customer&column_name=email",
+                }
+            ],
+        },
+    )
+
+    response = dq_workspace.build_data_quality_workspace_response(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        question="what are the top data quality issues?",
+    )
+
+    assert response is not None
+    payload, assistant_text, summary_json, inference_json = response
+    assert payload["conversation_plan"]["sql_mode"] == "data_quality_artifacts"
+    assert payload["conversation_plan"]["remediation_action_count"] == 2
+    assert payload["chart_title"] == "Top Data Quality Issues"
+    assert payload["data_quality"]["artifacts"]["dashboard"] == "/data-quality/runs/run_1/dashboard"
+    assert payload["data_quality"]["artifacts"]["remediation"].startswith("/data-quality/remediation")
+    assert payload["data_quality"]["remediation_summary"]["critical_action_count"] == 1
+    assert payload["data_quality"]["recommended_actions"][0]["action_type"] == "missingness_backfill"
+    assert payload["rows"][0]["issue_type"] in {"table_trust", "rule_failure"}
+    assert "Overall trust score is 74.2" in assistant_text
+    assert summary_json["data_quality"]["quality_run_id"] == "dqrun_1"
+    assert payload["artifact_lineage"]["remediation"].startswith("/data-quality/remediation")
+    assert inference_json["artifact_lineage"]["excel_report"].startswith("/data-quality/reports/run_1/excel")
+
+
+def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommended_actions() -> None:
+    response = dq_api_payloads.build_data_quality_run_summary_payload(
+        row={
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "connection_id": "conn_1",
+            "database_name": "db_1",
+            "schema_name": "public",
+            "status": "completed",
+            "overall_trust_score": 78.4,
+            "summary_json": {
+                "critical_issue_count": 2,
+                "warning_issue_count": 4,
+                "active_rule_count": 3,
+                "needs_review_rule_count": 1,
+                "rule_review_required": True,
+                "review_queue_pending_count": 1,
+                "workflow_status": "awaiting_rule_review",
+                "remediation_action_count": 6,
+                "critical_remediation_action_count": 2,
+            },
+        },
+        remediation_plan={
+            "summary": {"action_count": 6, "critical_action_count": 2},
+            "actions": [
+                {
+                    "priority": "critical",
+                    "action_type": "freshness_recovery",
+                    "title": "Restore freshness for customer",
+                }
+            ],
+        },
+    )
+
+    assert response["artifacts"]["dashboard"] == "/data-quality/runs/run_1/dashboard"
+    assert response["artifacts"]["rule_review_queue"].endswith("run_id=run_1")
+    assert response["artifacts"]["resume_after_rule_review"] == "/data-quality/runs/run_1/resume-after-rule-review"
+    assert response["artifacts"]["enrichment_questions"].endswith("run_id=run_1")
+    assert response["active_rule_count"] == 3
+    assert response["needs_review_rule_count"] == 1
+    assert response["rule_review_required"] is True
+    assert response["workflow_status"] == "awaiting_rule_review"
+    assert response["artifacts"]["remediation"].startswith("/data-quality/remediation?tenant_id=tenant")
+    assert response["remediation_summary"]["action_count"] == 6
+    assert response["recommended_actions"][0]["action_type"] == "freshness_recovery"
+
+
+def test_build_data_quality_run_hydration_payload_includes_pending_cards() -> None:
+    response = dq_api_payloads.build_data_quality_run_hydration_payload(
+        row={
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "status": "awaiting_rule_review",
+            "summary_json": {
+                "rule_review_required": True,
+                "review_queue_pending_count": 2,
+                "workflow_status": "awaiting_rule_review",
+            },
+        },
+        remediation_plan={
+            "summary": {"action_count": 2, "critical_action_count": 1},
+            "actions": [{"action_type": "missingness_backfill", "title": "Backfill customer state"}],
+        },
+        rule_review_queue={
+            "summary": {"needs_review_count": 2, "unsupported_count": 0},
+            "rules": [
+                {
+                    "rule_id": "rule_1",
+                    "table_name": "orders",
+                    "column_name": "status",
+                    "rule_type": "allowed_values",
+                    "severity": "warning",
+                    "confidence": 0.61,
+                    "status": "needs_review",
+                    "source_text": "Order status should be valid",
+                    "execution_plan_json": {"sql_preview_status": "available", "sql_preview_source": "llm"},
+                }
+            ],
+        },
+        enrichment_question_queue={
+            "summary": {"question_count": 1, "pending_answer_count": 1, "proposal_ready_count": 0},
+            "questions": [
+                {
+                    "question_id": "dqeo_1",
+                    "question": "Can we derive missing state values?",
+                    "target_column_alias": "state",
+                    "available_actions": ["approve", "defer", "reject"],
+                }
+            ],
+        },
+    )
+
+    assert response["run"]["workflow_status"] == "awaiting_rule_review"
+    assert response["pending_tasks"]["requires_attention"] is True
+    assert response["pending_tasks"]["rule_review"]["needs_review_count"] == 2
+    assert response["pending_tasks"]["rule_review"]["top_items"][0]["rule_id"] == "rule_1"
+    assert response["pending_tasks"]["enrichment_questions"]["pending_answer_count"] == 1
+    assert response["pending_tasks"]["enrichment_questions"]["top_items"][0]["question_id"] == "dqeo_1"
+    assert response["artifact_links"]["enrichment_questions"].endswith("run_id=run_1")
+
+
+def test_build_data_quality_workspace_response_missingness(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_workspace,
+        "get_quality_run_by_run_id",
+        lambda settings, run_id: {
+            "quality_run_id": "dqrun_1",
+            "run_id": run_id,
+            "overall_trust_score": 80.0,
+            "summary_json": {},
+        },
+    )
+    monkeypatch.setattr(
+        dq_workspace,
+        "list_quality_tables",
+        lambda *args, **kwargs: [{"table_name": "customer", "trust_score": 71.0, "severity": "warning"}],
+    )
+    monkeypatch.setattr(dq_workspace, "list_quality_duplicate_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_workspace, "list_quality_rules", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_workspace, "list_quality_enrichment_opportunities", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        dq_workspace,
+        "get_quality_table_detail",
+        lambda *args, **kwargs: {
+            "table_name": "customer",
+            "columns": [
+                {"column_name": "state", "null_count": 35, "null_pct": 35.0, "blank_count": 0, "blank_pct": 0.0, "completeness_score": 65.0},
+                {"column_name": "email", "null_count": 10, "null_pct": 10.0, "blank_count": 2, "blank_pct": 2.0, "completeness_score": 88.0},
+            ],
+        },
+    )
+
+    response = dq_workspace.build_data_quality_workspace_response(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        question="show missing columns for customer",
+    )
+
+    assert response is not None
+    payload, assistant_text, _, _ = response
+    assert payload["chart_title"] == "Missingness - customer"
+    assert payload["rows"][0]["column_name"] == "state"
+    assert "state at 35.0% null" in assistant_text
+
+
+def test_build_data_quality_workspace_response_enrichment(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_workspace,
+        "get_quality_run_by_run_id",
+        lambda settings, run_id: {
+            "quality_run_id": "dqrun_1",
+            "run_id": run_id,
+            "overall_trust_score": 80.0,
+            "summary_json": {},
+        },
+    )
+    monkeypatch.setattr(
+        dq_workspace,
+        "list_quality_tables",
+        lambda *args, **kwargs: [{"table_name": "customer", "trust_score": 71.0, "severity": "warning"}],
+    )
+    monkeypatch.setattr(dq_workspace, "list_quality_duplicate_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_workspace, "list_quality_rules", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        dq_workspace,
+        "list_quality_enrichment_opportunities",
+        lambda *args, **kwargs: [
+            {
+                "opportunity_id": "dqeo_1",
+                "table_name": "customer",
+                "target_column": "state",
+                "source_columns": ["pincode", "country"],
+                "missing_count": 35000,
+                "candidate_method": "postal_context_inference",
+                "confidence": 0.91,
+                "status": "open",
+                "question": "Can we infer missing state values?",
+            }
+        ],
+    )
+
+    response = dq_workspace.build_data_quality_workspace_response(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        question="what enrichment opportunities need approval?",
+    )
+
+    assert response is not None
+    payload, assistant_text, _, _ = response
+    assert payload["chart_title"] == "Enrichment Opportunities"
+    assert payload["rows"][0]["missing_count"] == 35000
+    assert "1 enrichment opportunities" in assistant_text
+
+
+def test_build_data_quality_workspace_response_freshness(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_workspace,
+        "get_quality_run_by_run_id",
+        lambda settings, run_id: {
+            "quality_run_id": "dqrun_1",
+            "run_id": run_id,
+            "overall_trust_score": 80.0,
+            "summary_json": {},
+        },
+    )
+    monkeypatch.setattr(
+        dq_workspace,
+        "list_quality_tables",
+        lambda *args, **kwargs: [
+            {
+                "table_name": "customer",
+                "trust_score": 71.0,
+                "severity": "warning",
+                "summary_json": {
+                    "freshness_analysis": {"freshness_column": "updated_at", "freshness_lag_days": 9.0, "freshness_status": "stale"},
+                    "stability_analysis": {"row_count_change_pct": 25.0, "completeness_score_change": -12.0, "stability_status": "changed", "stability_issues": ["row_count_change_pct>20"]},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(dq_workspace, "list_quality_duplicate_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_workspace, "list_quality_rules", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_workspace, "list_quality_enrichment_opportunities", lambda *args, **kwargs: [])
+
+    response = dq_workspace.build_data_quality_workspace_response(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        question="which tables are stale or unstable?",
+    )
+
+    assert response is not None
+    payload, assistant_text, _, _ = response
+    assert payload["chart_title"] == "Freshness and Stability"
+    assert payload["rows"][0]["freshness_status"] == "stale"
+    assert "1 stale tables and 1 tables with stability changes" in assistant_text
