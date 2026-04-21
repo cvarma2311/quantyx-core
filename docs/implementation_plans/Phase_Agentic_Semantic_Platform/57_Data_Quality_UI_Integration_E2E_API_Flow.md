@@ -74,7 +74,7 @@ Content-Type: application/json
   "schema_name": "public",
   "mode": "full",
   "pause_for_rule_review": true,
-  "context_text": "Validate orders.customer_id against customer.customer_id. Customer email must be present and valid. Pincode should map to the correct state."
+  "context_text": "Validate orders.customer_id against customer.customer_id. Customer email must be present and valid."
 }
 ```
 
@@ -191,24 +191,13 @@ GET /data-quality/runs/{run_id}/hydration
     "active_rule_count": 3,
     "needs_review_rule_count": 2,
     "unsupported_rule_count": 0,
-    "rejected_rule_count": 0,
     "rule_review_required": true,
     "review_queue_pending_count": 2,
     "workflow_status": "awaiting_rule_review",
-    "duplicate_candidate_count": 18,
-    "stale_table_count": 1,
     "enrichment_opportunity_count": 4,
     "artifacts": {
-      "run_summary": "/data-quality/runs/run_dq_001",
-      "dashboard": "/data-quality/runs/run_dq_001/dashboard",
-      "excel_report": "/data-quality/reports/run_dq_001/excel?tenant_id=VC_101&domain_id=data_quality_observability",
-      "tables": "/data-quality/tables?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
-      "rules": "/data-quality/rules?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
       "rule_review_queue": "/data-quality/rules/review-queue?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
       "resume_after_rule_review": "/data-quality/runs/run_dq_001/resume-after-rule-review",
-      "duplicates": "/data-quality/duplicates?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
-      "remediation": "/data-quality/remediation?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
-      "enrichment_opportunities": "/data-quality/enrichment/opportunities?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
       "enrichment_questions": "/data-quality/enrichment/questions?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001"
     },
     "remediation_summary": {
@@ -322,8 +311,6 @@ GET /data-quality/runs/{run_id}
   "workflow_status": "completed",
   "stale_table_count": 1,
   "enrichment_opportunity_count": 4,
-  "remediation_action_count": 9,
-  "critical_remediation_action_count": 3,
   "artifacts": {
     "dashboard": "/data-quality/runs/run_dq_001/dashboard",
     "excel_report": "/data-quality/reports/run_dq_001/excel?tenant_id=VC_101&domain_id=data_quality_observability",
@@ -595,36 +582,29 @@ Example response:
 
 ```json
 {
+  "tenant_id": "VC_101",
+  "domain_id": "data_quality_observability",
+  "run_id": "run_dq_001",
   "rules": [
     {
       "rule_id": "dq_rule_201",
       "rule_type": "referential_integrity",
-      "severity": "critical",
-      "table_name": "orders",
-      "column_name": "customer_id",
-      "reference_table": "customer",
-      "reference_column": "customer_id",
       "source_text": "orders.customer_id must exist in customer.customer_id",
       "executor_kind": "deterministic_sql",
       "execution_plan": {
         "validation_sql": "SELECT ...",
         "sample_sql": "SELECT ..."
       },
-      "sql_preview_status": "ready",
-      "sql_preview_source": "deterministic_fallback",
-      "condition_json": {},
-      "source": "context_text",
-      "confidence": 0.98,
+      "severity": "critical",
+      "table_name": "orders",
+      "column_name": "customer_id",
+      "reference_table": "customer",
+      "reference_column": "customer_id",
       "rule_status": "active",
-      "reviewed_by": "ui:user",
-      "reviewed_at": "2026-04-18T10:05:00Z",
-      "review_notes": "Approved as entered",
       "result": {
         "status": "failed",
-        "checked_row_count": 100000,
         "violation_count": 842,
-        "violation_pct": 0.84,
-        "sample_rows_json": []
+        "violation_pct": 0.84
       }
     }
   ]
@@ -827,6 +807,9 @@ Example response:
 
 ```json
 {
+  "tenant_id": "VC_101",
+  "domain_id": "data_quality_observability",
+  "run_id": "run_dq_001",
   "opportunities": [
     {
       "opportunity_id": "dq_enrich_001",
@@ -837,7 +820,6 @@ Example response:
       "source_column_aliases_json": ["postal_code", "country"],
       "missing_count": 1240,
       "candidate_method": "postal_context_inference",
-      "requires_user_approval": true,
       "confidence": 0.87,
       "question": "Can we use existing row context to propose missing customer.state values from pincode and country?",
       "status": "needs_user_approval"
@@ -973,6 +955,8 @@ Example response:
   "candidate_method": "postal_context_inference",
   "matched_count": 480,
   "unmatched_count": 20,
+  "source_references": [],
+  "sample_proposed_values": [],
   "summary": {
     "total_candidate_rows": 500,
     "confidence_buckets": {
@@ -986,8 +970,7 @@ Example response:
         "row_count": 140
       }
     ]
-  },
-  "sample_proposed_values": []
+  }
 }
 ```
 
@@ -1020,6 +1003,7 @@ Example response:
 {
   "proposal_id": "dq_enrich_prop_001",
   "status": "approved_for_staging",
+  "application_mode": "staged_overlay",
   "approval_scope": "high_confidence",
   "confidence_threshold": 0.85,
   "approved_row_count": 400,
@@ -1044,6 +1028,8 @@ Example response:
   "run_id": "run_dq_001",
   "proposal_id": "dq_enrich_prop_001",
   "status": "approved_for_staging",
+  "summary_raw_text": "Approved 400 rows for staged overlay; deferred 80 rows.",
+  "inference_raw_text": "{\"approval_scope\":\"high_confidence\",\"confidence_threshold\":0.85,\"approved_row_count\":400,\"deferred_row_count\":80}",
   "approved_row_count": 400,
   "deferred_row_count": 80,
   "approval_scope": "high_confidence",

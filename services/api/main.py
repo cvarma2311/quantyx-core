@@ -8915,11 +8915,514 @@ def _start_workspace_deployment(payload: dict) -> dict:
     }
 
 
+DQ_RUN_SUMMARY_EXAMPLE = {
+    "quality_run_id": "dqrun_001",
+    "run_id": "run_dq_001",
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "status": "completed",
+    "overall_trust_score": 82.4,
+    "critical_issue_count": 7,
+    "warning_issue_count": 18,
+    "dashboard_id": "dash_001",
+    "dashboard_title": "Data Quality Observability Data Quality Dashboard",
+    "duplicate_candidate_count": 18,
+    "active_rule_count": 25,
+    "needs_review_rule_count": 0,
+    "unsupported_rule_count": 0,
+    "rule_review_required": False,
+    "review_queue_pending_count": 0,
+    "workflow_status": "completed",
+    "stale_table_count": 1,
+    "enrichment_opportunity_count": 4,
+    "artifacts": {
+        "dashboard": "/data-quality/runs/run_dq_001/dashboard",
+        "excel_report": "/data-quality/reports/run_dq_001/excel?tenant_id=VC_101&domain_id=data_quality_observability",
+        "remediation": "/data-quality/remediation?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+    },
+    "remediation_summary": {"action_count": 9, "critical_action_count": 3},
+    "recommended_actions": [
+        {
+            "priority": "critical",
+            "action_type": "freshness_recovery",
+            "title": "Restore freshness for customer",
+        }
+    ],
+    "summary": {
+        "profiled_tables": 18,
+        "profiled_columns": 243,
+        "failed_rules": 5,
+        "referential_violations": 2,
+        "enrichment_opportunities": 4,
+    },
+}
+
+DQ_RUN_HYDRATION_EXAMPLE = {
+    "run": {
+        "quality_run_id": "dqrun_001",
+        "run_id": "run_dq_001",
+        "tenant_id": "VC_101",
+        "domain_id": "data_quality_observability",
+        "status": "awaiting_rule_review",
+        "overall_trust_score": 82.4,
+        "active_rule_count": 3,
+        "needs_review_rule_count": 2,
+        "unsupported_rule_count": 0,
+        "rule_review_required": True,
+        "review_queue_pending_count": 2,
+        "workflow_status": "awaiting_rule_review",
+        "enrichment_opportunity_count": 4,
+        "artifacts": {
+            "rule_review_queue": "/data-quality/rules/review-queue?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+            "resume_after_rule_review": "/data-quality/runs/run_dq_001/resume-after-rule-review",
+            "enrichment_questions": "/data-quality/enrichment/questions?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        },
+    },
+    "pending_tasks": {
+        "workflow_status": "awaiting_rule_review",
+        "requires_attention": True,
+        "rule_review": {
+            "rule_count": 2,
+            "needs_review_count": 2,
+            "unsupported_count": 0,
+            "top_items": [
+                {
+                    "rule_id": "dq_rule_101",
+                    "table_name": "orders",
+                    "column_name": "status",
+                    "rule_type": "allowed_values",
+                    "severity": "warning",
+                    "confidence": 0.62,
+                    "status": "needs_review",
+                    "source_text": "Order status should be valid",
+                    "sql_preview_status": "ready",
+                    "sql_preview_source": "llm",
+                }
+            ],
+        },
+        "enrichment_questions": {
+            "question_count": 4,
+            "pending_answer_count": 2,
+            "proposal_ready_count": 1,
+            "deferred_count": 1,
+            "rejected_count": 0,
+            "top_items": [],
+        },
+        "remediation": {
+            "summary": {"action_count": 5, "critical_action_count": 2},
+            "top_actions": [{"priority": "critical", "title": "Backfill missing values in customer.email"}],
+        },
+    },
+    "artifact_links": {
+        "run_summary": "/data-quality/runs/run_dq_001",
+        "dashboard": "/data-quality/runs/run_dq_001/dashboard",
+    },
+}
+
+DQ_TABLES_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "tables": [
+        {
+            "table_name": "customer",
+            "row_count": 100000,
+            "trust_score": 71.2,
+            "severity": "warning",
+            "duplicate_candidate_count": 18,
+            "enrichment_opportunity_count": 2,
+        }
+    ],
+}
+
+DQ_RULES_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "rules": [
+        {
+            "rule_id": "dq_rule_201",
+            "rule_type": "referential_integrity",
+            "source_text": "orders.customer_id must exist in customer.customer_id",
+            "executor_kind": "deterministic_sql",
+            "execution_plan": {"validation_sql": "SELECT ...", "sample_sql": "SELECT ..."},
+            "severity": "critical",
+            "table_name": "orders",
+            "column_name": "customer_id",
+            "reference_table": "customer",
+            "reference_column": "customer_id",
+            "rule_status": "active",
+            "result": {
+                "status": "failed",
+                "violation_count": 842,
+                "violation_pct": 0.84,
+            },
+        }
+    ],
+}
+
+DQ_RULE_REVIEW_QUEUE_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "summary": {"rule_count": 2, "needs_review_count": 2, "unsupported_count": 0},
+    "rules": [
+        {
+            "rule_id": "dq_rule_101",
+            "table_name": "orders",
+            "column_name": "status",
+            "rule_type": "allowed_values",
+            "severity": "warning",
+            "confidence": 0.62,
+            "status": "needs_review",
+            "source_text": "Order status should be valid",
+            "execution_plan_json": {"sql_preview_status": "ready", "sql_preview_source": "llm"},
+        }
+    ],
+}
+
+DQ_RULE_REVIEW_DETAIL_EXAMPLE = {
+    "rule_id": "dq_rule_101",
+    "run_id": "run_dq_001",
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "rule_type": "allowed_values",
+    "severity": "warning",
+    "table_name": "orders",
+    "column_name": "status",
+    "source_text": "Order status should be valid",
+    "condition_json": {"allowed_values": [], "ambiguity_reason": "Allowed values were not stated"},
+    "executor_kind": "deterministic_sql",
+    "sql_preview": {"validation_sql": "SELECT status FROM orders WHERE status IS NOT NULL"},
+    "sql_preview_status": "ready",
+    "sql_preview_source": "llm",
+    "confidence": 0.62,
+    "rule_status": "needs_review",
+    "result": None,
+}
+
+DQ_TABLE_DETAIL_EXAMPLE = {
+    "table_name": "customer",
+    "trust_score": 71.2,
+    "components": {
+        "completeness": 78.5,
+        "validity": 91.0,
+        "uniqueness": 92.0,
+        "referential_integrity": 88.0,
+        "duplicate_risk": 54.0,
+        "freshness": 100.0,
+        "stability": 96.0,
+        "enrichment_readiness": 90.0,
+    },
+    "trust_component_explanations": {},
+    "columns": [],
+    "failed_rules": [],
+    "duplicate_candidates": [],
+    "enrichment_opportunities": [],
+}
+
+DQ_FRESHNESS_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "freshness": [
+        {
+            "table_name": "customer",
+            "freshness_column": "updated_at",
+            "latest_timestamp": "2026-04-18T10:00:00Z",
+            "freshness_lag_days": 9.0,
+            "freshness_score": 55.0,
+            "freshness_status": "stale",
+            "baseline_quality_run_id": "dqrun_prev",
+            "baseline_row_count": 90000,
+            "row_count_change_pct": 33.33,
+            "baseline_completeness_score": 95.0,
+            "completeness_score_change": -15.0,
+            "stability_status": "changed",
+            "stability_issues": ["row_count_change_pct>20", "completeness_score_change>10"],
+        }
+    ],
+}
+
+DQ_DUPLICATES_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "duplicates": [
+        {
+            "candidate_id": "dqdup_001",
+            "table_name": "customer",
+            "duplicate_type": "exact_key_duplicate",
+            "match_columns_json": ["customer_id"],
+            "confidence": 0.99,
+            "candidate_record_count": 4,
+            "review_status": "needs_review",
+        }
+    ],
+}
+
+DQ_REMEDIATION_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "summary": {
+        "action_count": 9,
+        "critical_action_count": 3,
+        "warning_action_count": 5,
+        "info_action_count": 1,
+    },
+    "actions": [
+        {
+            "priority": "critical",
+            "action_type": "missingness_backfill",
+            "title": "Backfill missing values in customer.email",
+            "table_name": "customer",
+            "column_name": "email",
+            "issue_summary": "email is 35.0% null and 0.0% blank.",
+            "recommended_action": "Backfill or enrich customer.email before publishing downstream records.",
+            "owner_hint": "Data steward",
+            "evidence_type": "missingness",
+            "evidence_path": "/data-quality/evidence/missingness?tenant_id=VC_101&run_id=run_dq_001&table_name=customer&column_name=email",
+            "trust_component": "completeness",
+        }
+    ],
+}
+
+DQ_MISSINGNESS_EVIDENCE_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "run_id": "run_dq_001",
+    "table_name": "customer",
+    "column_name": "email",
+    "column_alias": "email",
+    "issue_type": "missingness",
+    "row_count": 290,
+    "rows": [{"customer_id": "C101", "email": None, "country": "US"}],
+}
+
+DQ_RULE_EVIDENCE_EXAMPLE = {
+    "rule_id": "dq_rule_201",
+    "table_name": "orders",
+    "column_name": "customer_id",
+    "column_alias": "customer_id",
+    "reference_table": "customer",
+    "reference_column": "customer_id",
+    "reference_column_alias": "customer_id",
+    "sample_rows": [{"order_id": "O101", "customer_id": "C999"}],
+}
+
+DQ_DUPLICATE_EVIDENCE_EXAMPLE = {
+    "candidate_id": "dqdup_001",
+    "table_name": "customer",
+    "match_columns": ["customer_id"],
+    "match_column_aliases": ["customer_id"],
+    "rows": [{"customer_id": "C101", "email": "x@example.com"}],
+}
+
+DQ_FRESHNESS_EVIDENCE_EXAMPLE = {
+    "table_name": "customer",
+    "freshness_column": "updated_at",
+    "freshness_column_alias": "updated_at",
+    "latest_timestamp": "2026-04-18T10:00:00Z",
+    "baseline_quality_run_id": "dqrun_prev",
+    "stability_status": "changed",
+}
+
+DQ_ENRICHMENT_EVIDENCE_EXAMPLE = {
+    "proposal_id": "dq_enrich_prop_001",
+    "table_name": "customer",
+    "target_column": "state",
+    "target_column_alias": "state",
+    "source_columns_json": ["pincode", "country"],
+    "source_column_aliases": ["postal_code", "country"],
+    "rows": [
+        {
+            "row_ref": {"customer_id": "C101"},
+            "proposed_value": "Karnataka",
+            "confidence": 0.91,
+            "method": "llm",
+        }
+    ],
+}
+
+DQ_DASHBOARD_EXAMPLE = {
+    "run_id": "run_dq_001",
+    "dashboard_id": "dash_001",
+    "dashboard_type": "data_quality",
+    "title": "Data Quality Observability Data Quality Dashboard",
+    "quality_score": 82.4,
+    "quality_gate_passed": False,
+    "chart_plan": [
+        {
+            "section": "Columns with Highest Missingness",
+            "display_columns": [
+                {"field": "column_name", "label": "Physical Column"},
+                {"field": "column_alias", "label": "Semantic Alias"},
+                {"field": "evidence_path", "label": "Evidence Path"},
+            ],
+            "rows": [],
+        }
+    ],
+}
+
+DQ_OPPORTUNITIES_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "opportunities": [
+        {
+            "opportunity_id": "dq_enrich_001",
+            "table_name": "customer",
+            "target_column": "state",
+            "target_column_alias": "state",
+            "source_columns_json": ["pincode", "country"],
+            "source_column_aliases_json": ["postal_code", "country"],
+            "missing_count": 1240,
+            "candidate_method": "postal_context_inference",
+            "confidence": 0.87,
+            "question": "Can we use existing row context to propose missing customer.state values from pincode and country?",
+            "status": "needs_user_approval",
+        }
+    ],
+}
+
+DQ_QUESTIONS_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "summary": {
+        "question_count": 4,
+        "pending_answer_count": 2,
+        "proposal_ready_count": 1,
+        "deferred_count": 1,
+        "rejected_count": 0,
+    },
+    "questions": [
+        {
+            "question_id": "dq_enrich_001",
+            "opportunity_id": "dq_enrich_001",
+            "table_name": "customer",
+            "target_column": "state",
+            "target_column_alias": "state",
+            "source_columns_json": ["pincode", "country"],
+            "source_column_aliases_json": ["postal_code", "country"],
+            "question": "Can we use existing row context to propose missing customer.state values from pincode and country?",
+            "missing_count": 1240,
+            "candidate_method": "postal_context_inference",
+            "confidence": 0.87,
+            "status": "pending_answer",
+            "available_actions": ["approve", "defer", "reject"],
+            "proposal_id": None,
+        }
+    ],
+}
+
+DQ_QUESTION_ANSWER_REQUEST_EXAMPLE = {"tenant_id": "VC_101", "answer": "approve", "approved_by": "ui:user", "max_records": 500}
+DQ_QUESTION_ANSWER_RESPONSE_EXAMPLE = {
+    "opportunity_id": "dq_enrich_001",
+    "status": "proposal_generated",
+    "proposal_id": "dq_enrich_prop_001",
+    "matched_count": 480,
+    "unmatched_count": 20,
+}
+
+DQ_APPROVE_RESEARCH_REQUEST_EXAMPLE = {"tenant_id": "VC_101", "approved_by": "ui:user", "max_records": 500}
+DQ_APPROVE_RESEARCH_RESPONSE_EXAMPLE = {
+    "opportunity_id": "dq_enrich_001",
+    "status": "proposal_generated",
+    "proposal_id": "dq_enrich_prop_001",
+    "target_column": "state",
+    "target_column_alias": "state",
+    "source_columns_json": ["pincode", "country"],
+    "source_column_aliases_json": ["postal_code", "country"],
+    "matched_count": 480,
+    "unmatched_count": 20,
+}
+
+DQ_PROPOSAL_EXAMPLE = {
+    "proposal_id": "dq_enrich_prop_001",
+    "opportunity_id": "dq_enrich_001",
+    "status": "proposed",
+    "table_name": "customer",
+    "target_column": "state",
+    "target_column_alias": "state",
+    "source_columns_json": ["pincode", "country"],
+    "source_column_aliases_json": ["postal_code", "country"],
+    "candidate_method": "postal_context_inference",
+    "matched_count": 480,
+    "unmatched_count": 20,
+    "source_references": [],
+    "sample_proposed_values": [],
+    "summary": {
+        "total_candidate_rows": 500,
+        "confidence_buckets": {"auto_approve": 220, "high_confidence": 180, "needs_review": 80},
+        "grouped_values": [{"proposed_value": "Karnataka", "row_count": 140}],
+    },
+}
+
+DQ_APPROVE_APPLICATION_REQUEST_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "approved_by": "data_steward:user",
+    "application_mode": "staged_overlay",
+    "approval_scope": "high_confidence",
+    "min_confidence": 0.85,
+    "reason": "Reviewed postal reference matches",
+}
+
+DQ_APPROVE_APPLICATION_RESPONSE_EXAMPLE = {
+    "proposal_id": "dq_enrich_prop_001",
+    "status": "approved_for_staging",
+    "application_mode": "staged_overlay",
+    "approval_scope": "high_confidence",
+    "confidence_threshold": 0.85,
+    "approved_row_count": 400,
+    "deferred_row_count": 80,
+    "staged_artifact_id": "artifact_stage_001",
+}
+
+DQ_STAGED_ARTIFACT_EXAMPLE = {
+    "artifact_id": "artifact_stage_001",
+    "event_id": "evt_stage_001",
+    "logical_event_id": "dq_stage::dq_enrich_prop_001",
+    "run_id": "run_dq_001",
+    "proposal_id": "dq_enrich_prop_001",
+    "status": "approved_for_staging",
+    "approved_row_count": 400,
+    "deferred_row_count": 80,
+    "approval_scope": "high_confidence",
+    "confidence_threshold": 0.85,
+    "raw_json": {"approved_rows": [], "deferred_rows": []},
+}
+
+DQ_RESUME_REQUEST_EXAMPLE = {"requested_by": "ui:user"}
+DQ_RESUME_RESPONSE_EXAMPLE = {
+    "run_id": "run_dq_001",
+    "status": "queued",
+    "job_id": "job_resume_001",
+    "resume_mode": "after_rule_review",
+}
+
+
 @app.get(
     "/data-quality/runs/{run_id}",
     tags=["data-quality"],
     summary="Get data quality run summary",
     description="Return the data-quality workflow summary produced by a data_quality_observability deployment run.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "completed_run": {
+                                "summary": "Completed data quality run summary",
+                                "value": DQ_RUN_SUMMARY_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_run_summary(run_id: str) -> dict:
     row = get_quality_run_by_run_id(settings, run_id)
@@ -8943,6 +9446,22 @@ def get_data_quality_run_summary(run_id: str) -> dict:
     tags=["data-quality"],
     summary="Get data quality run hydration payload",
     description="Return the consolidated data-quality state needed to rehydrate a deployment run UI, including summary, pending rule review, enrichment questions, and remediation.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "hydration": {
+                                "summary": "Hydration payload for run reload",
+                                "value": DQ_RUN_HYDRATION_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_run_hydration(run_id: str) -> dict:
     row = get_quality_run_by_run_id(settings, run_id)
@@ -8992,6 +9511,34 @@ def get_data_quality_run_hydration(run_id: str) -> dict:
     tags=["data-quality"],
     summary="Resume a paused data quality run after rule review",
     description="Queue continuation of a data-quality run that is waiting for rule review so approved rules execute and the workflow can finish.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "resume": {
+                            "summary": "Resume after rule review",
+                            "value": DQ_RESUME_REQUEST_EXAMPLE,
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "queued": {
+                                "summary": "Resume queued",
+                                "value": DQ_RESUME_RESPONSE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
 )
 def resume_data_quality_run_after_rule_review(run_id: str, payload: dict | None = None) -> dict:
     run = get_quality_run_by_run_id(settings, run_id)
@@ -9031,6 +9578,22 @@ def resume_data_quality_run_after_rule_review(run_id: str, payload: dict | None 
     tags=["data-quality"],
     summary="List data quality table summaries",
     description="Return table-level quality artifacts for a data quality deployment run.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "tables": {
+                                "summary": "Table quality list",
+                                "value": DQ_TABLES_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def list_data_quality_table_summaries(
     tenant_id: str,
@@ -9098,6 +9661,22 @@ def list_data_quality_table_summaries(
     tags=["data-quality"],
     summary="List data quality rules and latest results",
     description="Return validation rules extracted for a data quality deployment run with latest execution status.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "rules": {
+                                "summary": "Rule list with latest results",
+                                "value": DQ_RULES_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def list_data_quality_rules(
     tenant_id: str,
@@ -9167,6 +9746,22 @@ def list_data_quality_rules(
     tags=["data-quality"],
     summary="Get data quality rule review queue",
     description="Return reviewable low-confidence or unsupported rules before they are approved for execution.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "queue": {
+                                "summary": "Review queue",
+                                "value": DQ_RULE_REVIEW_QUEUE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_rule_review_queue(
     tenant_id: str,
@@ -9186,6 +9781,22 @@ def get_data_quality_rule_review_queue(
     tags=["data-quality"],
     summary="Get one data quality rule for review",
     description="Return the stored interpretation, SQL preview, and latest result metadata for one rule review item.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "detail": {
+                                "summary": "Review detail for one rule",
+                                "value": DQ_RULE_REVIEW_DETAIL_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_rule_review_detail(
     rule_id: str,
@@ -9242,6 +9853,56 @@ def get_data_quality_rule_review_detail(
     tags=["data-quality"],
     summary="Review and optionally execute one data quality rule",
     description="Approve, reject, or edit a reviewable data quality rule and optionally execute it after approval.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "approve_rule": {
+                            "summary": "Approve with condition patch",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "reviewed_by": "ui:user",
+                                "action": "approve",
+                                "review_notes": "Allowed values confirmed by steward",
+                                "condition_json": {
+                                    "allowed_values": ["CREATED", "SHIPPED", "CANCELLED"],
+                                },
+                            },
+                        },
+                        "reject_rule": {
+                            "summary": "Reject rule",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "reviewed_by": "ui:user",
+                                "action": "reject",
+                                "review_notes": "This rule is out of scope",
+                            },
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "approved": {
+                                "summary": "Rule review applied",
+                                "value": {
+                                    "rule_id": "dq_rule_101",
+                                    "status": "approved",
+                                    "stored_rule": {"rule_id": "dq_rule_101", "status": "active"},
+                                    "execution": None,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
 )
 def review_data_quality_rule(rule_id: str, payload: dict) -> dict:
     tenant_id = str(payload.get("tenant_id") or "").strip() or None
@@ -9282,6 +9943,22 @@ def review_data_quality_rule(rule_id: str, payload: dict) -> dict:
     tags=["data-quality"],
     summary="Get data quality table detail",
     description="Return table and column quality artifacts for one table.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "detail": {
+                                "summary": "One table detail",
+                                "value": DQ_TABLE_DETAIL_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_table_summary(
     table_name: str,
@@ -9365,6 +10042,22 @@ def get_data_quality_table_summary(
     tags=["data-quality"],
     summary="List freshness and stability results",
     description="Return freshness and stability rows derived for a data quality deployment run.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "freshness": {
+                                "summary": "Freshness and stability rows",
+                                "value": DQ_FRESHNESS_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def list_data_quality_freshness_results(
     tenant_id: str,
@@ -9414,6 +10107,22 @@ def list_data_quality_freshness_results(
     tags=["data-quality"],
     summary="List duplicate candidates",
     description="Return persisted duplicate candidates for a data quality deployment run.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "duplicates": {
+                                "summary": "Duplicate candidates",
+                                "value": DQ_DUPLICATES_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def list_data_quality_duplicate_candidates(
     tenant_id: str,
@@ -9447,6 +10156,22 @@ def list_data_quality_duplicate_candidates(
     tags=["data-quality"],
     summary="Get recommended remediation actions",
     description="Return prioritized remediation actions derived from persisted trust, rule, duplicate, freshness, and enrichment artifacts.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "remediation": {
+                                "summary": "Recommended actions",
+                                "value": DQ_REMEDIATION_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_remediation(
     tenant_id: str,
@@ -9475,6 +10200,22 @@ def get_data_quality_remediation(
     tags=["data-quality"],
     summary="Get missingness evidence rows",
     description="Return underlying source rows for a missing/null/blank column issue.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "missingness": {
+                                "summary": "Missingness drill-through",
+                                "value": DQ_MISSINGNESS_EVIDENCE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_missingness_evidence(
     tenant_id: str,
@@ -9503,6 +10244,22 @@ def get_data_quality_missingness_evidence(
     tags=["data-quality"],
     summary="Get rule evidence rows",
     description="Return persisted and, when possible, source evidence rows for a data quality rule.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "rule_evidence": {
+                                "summary": "Rule drill-through",
+                                "value": DQ_RULE_EVIDENCE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_rule_evidence(
     rule_id: str,
@@ -9524,6 +10281,22 @@ def get_data_quality_rule_evidence(
     tags=["data-quality"],
     summary="Get duplicate evidence rows",
     description="Return backing rows for a duplicate candidate or cluster.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "duplicate_evidence": {
+                                "summary": "Duplicate drill-through",
+                                "value": DQ_DUPLICATE_EVIDENCE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_duplicate_evidence(
     candidate_id: str,
@@ -9545,6 +10318,22 @@ def get_data_quality_duplicate_evidence(
     tags=["data-quality"],
     summary="Get freshness and stability evidence",
     description="Return baseline/current comparison details for freshness and stability of a table.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "freshness_evidence": {
+                                "summary": "Freshness drill-through",
+                                "value": DQ_FRESHNESS_EVIDENCE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_freshness_evidence(
     table_name: str,
@@ -9566,6 +10355,22 @@ def get_data_quality_freshness_evidence(
     tags=["data-quality"],
     summary="Get enrichment proposal evidence",
     description="Return proposed enrichment rows and source references for a proposal.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "enrichment_evidence": {
+                                "summary": "Enrichment drill-through",
+                                "value": DQ_ENRICHMENT_EVIDENCE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_enrichment_evidence(
     proposal_id: str,
@@ -9585,6 +10390,25 @@ def get_data_quality_enrichment_evidence(
     tags=["data-quality"],
     summary="Download data quality Excel report",
     description="Generate an Excel workbook from persisted data-quality artifacts for a completed deployment run.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "Excel workbook download",
+                "content": {
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
+                        "schema": {"type": "string", "format": "binary"}
+                    }
+                },
+                "headers": {
+                    "Content-Disposition": {
+                        "description": "Attachment file name",
+                        "schema": {"type": "string"},
+                        "example": 'attachment; filename="data_quality_run_dq_001.xlsx"',
+                    }
+                },
+            }
+        }
+    },
 )
 def download_data_quality_excel_report(
     run_id: str,
@@ -9612,6 +10436,22 @@ def download_data_quality_excel_report(
     tags=["data-quality"],
     summary="Get data quality dashboard for a run",
     description="Resolve the generated data quality dashboard for a deployment run and return its persisted dashboard metadata.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "dashboard": {
+                                "summary": "Data quality dashboard",
+                                "value": DQ_DASHBOARD_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_dashboard(run_id: str) -> dict:
     row = get_quality_run_by_run_id(settings, run_id)
@@ -9644,6 +10484,22 @@ def get_data_quality_dashboard(run_id: str) -> dict:
     tags=["data-quality"],
     summary="List data quality enrichment opportunities",
     description="Return user-reviewable enrichment opportunities discovered from data quality profiling artifacts.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "opportunities": {
+                                "summary": "Enrichment opportunities",
+                                "value": DQ_OPPORTUNITIES_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def list_data_quality_enrichment_opportunities(
     tenant_id: str,
@@ -9694,6 +10550,22 @@ def list_data_quality_enrichment_opportunities(
     tags=["data-quality"],
     summary="List question-centric enrichment review items",
     description="Return enrichment opportunities as user-facing questions with answer actions and proposal links.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "questions": {
+                                "summary": "Question-centric enrichment queue",
+                                "value": DQ_QUESTIONS_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def list_data_quality_enrichment_questions(
     tenant_id: str,
@@ -9717,6 +10589,38 @@ def list_data_quality_enrichment_questions(
     tags=["data-quality"],
     summary="Answer an enrichment review question",
     description="Approve, defer, reject, or reopen a question-centric enrichment item. Approval generates a proposal using the existing staged enrichment flow.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "approve": {
+                            "summary": "Approve question and generate proposal",
+                            "value": DQ_QUESTION_ANSWER_REQUEST_EXAMPLE,
+                        },
+                        "defer": {
+                            "summary": "Defer question",
+                            "value": {"tenant_id": "VC_101", "answer": "defer"},
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "proposal_generated": {
+                                "summary": "Question answered with proposal generation",
+                                "value": DQ_QUESTION_ANSWER_RESPONSE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
 )
 def answer_data_quality_enrichment_question(opportunity_id: str, payload: dict) -> dict:
     tenant_id = str(payload.get("tenant_id") or "").strip()
@@ -9803,6 +10707,34 @@ def answer_data_quality_enrichment_question(opportunity_id: str, payload: dict) 
     tags=["data-quality"],
     summary="Approve enrichment research",
     description="Approve a discovered enrichment opportunity for research/proposal generation.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "approve_research": {
+                            "summary": "Generate enrichment proposal",
+                            "value": DQ_APPROVE_RESEARCH_REQUEST_EXAMPLE,
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "proposal_generated": {
+                                "summary": "Proposal generated",
+                                "value": DQ_APPROVE_RESEARCH_RESPONSE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
 )
 def approve_data_quality_enrichment_research(opportunity_id: str, payload: dict) -> dict:
     tenant_id = str(payload.get("tenant_id") or "").strip()
@@ -9856,6 +10788,22 @@ def approve_data_quality_enrichment_research(opportunity_id: str, payload: dict)
     tags=["data-quality"],
     summary="Get enrichment proposal",
     description="Return a persisted enrichment proposal for UI review.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "proposal": {
+                                "summary": "Proposal detail",
+                                "value": DQ_PROPOSAL_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_enrichment_proposal(proposal_id: str, tenant_id: str | None = None) -> dict:
     proposal = get_quality_enrichment_proposal(settings, proposal_id, tenant_id=tenant_id)
@@ -9905,6 +10853,34 @@ def get_data_quality_enrichment_proposal(proposal_id: str, tenant_id: str | None
     tags=["data-quality"],
     summary="Approve enrichment proposal application",
     description="Approve a proposal for non-destructive staging. This does not write back to source tables.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "staged_overlay": {
+                            "summary": "Approve for staged overlay",
+                            "value": DQ_APPROVE_APPLICATION_REQUEST_EXAMPLE,
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "approved_for_staging": {
+                                "summary": "Staged overlay created",
+                                "value": DQ_APPROVE_APPLICATION_RESPONSE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
 )
 def approve_data_quality_enrichment_application(proposal_id: str, payload: dict) -> dict:
     tenant_id = str(payload.get("tenant_id") or "").strip()
@@ -10001,6 +10977,22 @@ def approve_data_quality_enrichment_application(proposal_id: str, payload: dict)
     tags=["data-quality"],
     summary="Get staged enrichment overlay artifact",
     description="Return the persisted staged overlay artifact created when an enrichment proposal was approved for staging.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "artifact": {
+                                "summary": "Staged overlay artifact",
+                                "value": DQ_STAGED_ARTIFACT_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
 )
 def get_data_quality_enrichment_staged_artifact(proposal_id: str, tenant_id: str | None = None) -> dict:
     proposal = get_quality_enrichment_proposal(settings, proposal_id, tenant_id=tenant_id)
@@ -10066,6 +11058,22 @@ def get_data_quality_enrichment_staged_artifact(proposal_id: str, tenant_id: str
                                 "mode": "full",
                             },
                         },
+                        "create_data_quality_deployment": {
+                            "summary": "Create data quality deployment",
+                            "value": {
+                                "tenant_id": "VC_101",
+                                "domain_id": "data_quality_observability",
+                                "connection_id": "conn_lpg",
+                                "database": "analytics",
+                                "schema_name": "public",
+                                "mode": "full",
+                                "pause_for_rule_review": True,
+                                "context_text": (
+                                    "Validate orders.customer_id against customer.customer_id. "
+                                    "Customer email must be present and valid."
+                                ),
+                            },
+                        },
                         "create_with_context_ids": {
                             "summary": "Create deployment with stored context references",
                             "value": {
@@ -10109,6 +11117,20 @@ def get_data_quality_enrichment_staged_artifact(proposal_id: str, tenant_id: str
                                     "job_id": "job_123",
                                 },
                             }
+                            ,
+                            "dq_queued": {
+                                "summary": "Data quality deployment queued",
+                                "value": {
+                                    "tenant_id": "VC_101",
+                                    "domain_id": "data_quality_observability",
+                                    "run_id": "run_dq_001",
+                                    "display_name": "Data Quality Observability Deployment v3",
+                                    "version_no": 3,
+                                    "status": "queued",
+                                    "workflow_kind": "data_quality",
+                                    "job_id": "job_001",
+                                },
+                            },
                         }
                     }
                 }
@@ -12250,6 +13272,10 @@ def agentic_debug_rollups(run_id: str) -> dict:
                             "running_event": {
                                 "summary": "Agent started",
                                 "value": "data: {\"agent_name\":\"SchemaAgent\",\"status\":\"running\",\"message\":\"Schema Agent started\"}\n\n",
+                            },
+                            "dq_review_required": {
+                                "summary": "Data quality run requires rule review",
+                                "value": "data: {\"agent_name\":\"DataQualityRuleAgent\",\"status\":\"needs_review\",\"stage_name\":\"awaiting_rule_review\",\"message\":\"Rule review required\",\"artifacts\":{\"raw_json\":{\"rule_review_required\":true,\"review_queue_pending_count\":2}}}\n\n",
                             },
                             "completed_event": {
                                 "summary": "Agent completed",

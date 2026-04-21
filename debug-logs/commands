@@ -184,3 +184,138 @@ python3 scripts/demo_workspace_deployment_lpg.py \
    2>&1 | tee debug-logs/nozzle-sales-$(date +%H%M%S).log
 
 codex resume 019d9a0e-ff68-7282-8d78-e8ea564e40a1
+
+
+# ------------------------------------------------------------------
+# Data Quality UI demo commands
+# Uses: scripts/demo_data_quality_ui_api_flow.py
+# Note: this script does not take --tables. The table in scope is
+# described in the plain-text business context file:
+#   debug-logs/dq_rules_context.txt
+# That context was derived from:
+#   debug-logs/dq_rules.json
+# ------------------------------------------------------------------
+
+# Set your environment first
+export API_BASE=http://localhost:8787
+export TENANT_ID=dq-ui-demo-01
+export DOMAIN_ID=data_quality_observability
+export CONNECTION_ID=2
+export DATABASE_NAME=hpcl_ceg
+export SCHEMA_NAME=public
+export CONTEXT_FILE=debug-logs/dq_rules_context.txt
+
+
+# 1. Start a fresh DQ deployment and only exercise the reload/hydration path
+python3 scripts/demo_data_quality_ui_api_flow.py \
+  --api-base "$API_BASE" \
+  --tenant-id "$TENANT_ID" \
+  --domain-id "$DOMAIN_ID" \
+  --connection-id "$CONNECTION_ID" \
+  --database "$DATABASE_NAME" \
+  --schema-name "$SCHEMA_NAME" \
+  --context-file "$CONTEXT_FILE" \
+  --scenario reload \
+  --pause-for-rule-review \
+  --wait-for-state \
+  --log-file "debug-logs/dq-ui-reload-$(date +%H%M%S).log"
+
+
+# 2. Start a fresh DQ deployment and walk the rule-review flow
+# This will:
+# - create the deployment
+# - wait for awaiting_rule_review
+# - fetch review queue
+# - approve the first rule
+# - attempt resume if the queue is fully resolved
+python3 scripts/demo_data_quality_ui_api_flow.py \
+  --api-base "$API_BASE" \
+  --tenant-id "$TENANT_ID" \
+  --domain-id "$DOMAIN_ID" \
+  --connection-id "$CONNECTION_ID" \
+  --database "$DATABASE_NAME" \
+  --schema-name "$SCHEMA_NAME" \
+  --context-file "$CONTEXT_FILE" \
+  --scenario review \
+  --pause-for-rule-review \
+  --wait-for-state \
+  --review-action approve \
+  --reviewed-by "ui:demo_user" \
+  --auto-resume \
+  --wait-after-resume \
+  --log-file "debug-logs/dq-ui-review-$(date +%H%M%S).log"
+
+
+# 3. For an existing run, replay the main completed-run surfaces
+# Replace RUN_ID with a real run id from step 1 or step 2
+python3 scripts/demo_data_quality_ui_api_flow.py \
+  --api-base "$API_BASE" \
+  --tenant-id "$TENANT_ID" \
+  --run-id RUN_ID \
+  --scenario completed \
+  --download-dir /tmp/dq_ui_demo \
+  --log-file "debug-logs/dq-ui-completed-$(date +%H%M%S).log"
+
+
+# 4. For an existing run, exercise the question-centric enrichment flow
+# This will:
+# - list opportunities
+# - list questions
+# - approve the first question
+# - fetch the proposal
+# - approve staged overlay
+# - fetch staged artifact
+python3 scripts/demo_data_quality_ui_api_flow.py \
+  --api-base "$API_BASE" \
+  --tenant-id "$TENANT_ID" \
+  --run-id RUN_ID \
+  --scenario enrichment \
+  --enrichment-answer approve \
+  --apply-staging \
+  --approval-scope high_confidence \
+  --min-confidence 0.85 \
+  --reviewed-by "ui:demo_user" \
+  --log-file "debug-logs/dq-ui-enrichment-$(date +%H%M%S).log"
+
+
+# 5. For an existing run, exercise evidence / drill-through APIs
+python3 scripts/demo_data_quality_ui_api_flow.py \
+  --api-base "$API_BASE" \
+  --tenant-id "$TENANT_ID" \
+  --run-id RUN_ID \
+  --scenario evidence \
+  --log-file "debug-logs/dq-ui-evidence-$(date +%H%M%S).log"
+
+
+# 6. End-to-end all-in-one pass for an existing run
+# This is the broadest readout for UI integration validation
+python3 scripts/demo_data_quality_ui_api_flow.py \
+  --api-base "$API_BASE" \
+  --tenant-id "$TENANT_ID" \
+  --run-id RUN_ID \
+  --scenario all \
+  --download-dir /tmp/dq_ui_demo \
+  --log-file "debug-logs/dq-ui-all-$(date +%H%M%S).log"
+
+
+# 7. Same as #4, but target a specific opportunity explicitly
+python3 scripts/demo_data_quality_ui_api_flow.py \
+  --api-base "$API_BASE" \
+  --tenant-id "$TENANT_ID" \
+  --run-id RUN_ID \
+  --scenario enrichment \
+  --opportunity-id dq_enrich_123 \
+  --enrichment-answer approve \
+  --apply-staging \
+  --log-file "debug-logs/dq-ui-enrichment-specific-$(date +%H%M%S).log"
+
+
+# 8. Same as #4, but use an existing proposal directly
+python3 scripts/demo_data_quality_ui_api_flow.py \
+  --api-base "$API_BASE" \
+  --tenant-id "$TENANT_ID" \
+  --run-id RUN_ID \
+  --scenario enrichment \
+  --proposal-id dq_enrich_prop_123 \
+  --apply-staging \
+  --log-file "debug-logs/dq-ui-proposal-specific-$(date +%H%M%S).log"
