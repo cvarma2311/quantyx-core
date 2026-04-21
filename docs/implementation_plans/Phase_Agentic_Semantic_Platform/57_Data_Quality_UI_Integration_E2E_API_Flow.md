@@ -423,6 +423,54 @@ Example response:
 }
 ```
 
+### 7.2.1 Rule statuses and allowed transitions
+
+The backend persists rule state in the rule row itself. For UI purposes, the important statuses are:
+
+- `active`
+  - the rule is approved for execution
+  - this is the steady-state after auto-accept or manual approve
+- `needs_review`
+  - the rule is ambiguous, low-confidence, or preview-unavailable and is waiting for user review
+- `unsupported`
+  - the extracted rule could not be mapped to a supported executable form and needs user correction or rejection
+- `rejected`
+  - the user explicitly rejected the rule and it will not execute
+
+What the UI will normally see:
+
+- in `GET /data-quality/rules/review-queue`
+  - only `needs_review` and `unsupported` rules are returned in the queue
+- in `GET /data-quality/rules/{rule_id}/review`
+  - `rule_status` can be any of:
+    - `active`
+    - `needs_review`
+    - `unsupported`
+    - `rejected`
+
+Allowed review actions in `POST /data-quality/rules/{rule_id}/review`:
+
+- `approve`
+- `reject`
+- `edit`
+
+Status transitions:
+
+- `needs_review` + `approve` -> `active`
+- `unsupported` + `approve` -> `active`
+- `needs_review` + `reject` -> `rejected`
+- `unsupported` + `reject` -> `rejected`
+- `needs_review` + `edit` -> usually reclassified to:
+  - `active` if the edited rule is now executable and safe
+  - `needs_review` if ambiguity still remains
+  - `unsupported` is internally normalized back to `needs_review` after edit so the queue stays reviewable
+
+Important UI point:
+
+- after manual approval, the rule does **not** move to a separate `approved` status
+- it moves to `active`
+- that is the status to treat as approved-and-runnable
+
 ### 7.3 Approve, reject, or edit a rule
 
 Approve with edits:
@@ -449,7 +497,7 @@ Example response:
 ```json
 {
   "rule_id": "dq_rule_101",
-  "status": "approved",
+  "status": "active",
   "stored_rule": {
     "rule_id": "dq_rule_101",
     "status": "active"

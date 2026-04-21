@@ -39,6 +39,7 @@ from services.ai.data_quality_store import (
 from services.ai.data_quality_rules import (
     classify_quality_rule_review_status,
     build_quality_rule_execution_plan,
+    data_quality_rule_auto_approve_all_enabled,
     execute_quality_rules,
     extract_quality_rules_from_context,
 )
@@ -484,6 +485,7 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         updated_summary["dashboard_chart_count"] = len(dashboard.get("chart_plan") or [])
         updated_summary["remediation_action_count"] = dashboard.get("remediation_action_count", 0)
         updated_summary["critical_remediation_action_count"] = dashboard.get("critical_remediation_action_count", 0)
+    updated_summary["workflow_status"] = "completed"
     create_or_update_quality_run(
         settings,
         **scope,
@@ -641,6 +643,7 @@ def run_data_quality_agentic_workflow(
         scope = _scope(state, run_id)
         quality_run_id = state.get("quality_run_id")
         pause_for_rule_review = bool(state.get("pause_for_rule_review", True))
+        auto_approve_all = data_quality_rule_auto_approve_all_enabled()
         resume_after_rule_review = bool(state.get("resume_after_rule_review"))
         rules = extract_quality_rules_from_context(
             state.get("context_text"),
@@ -678,7 +681,10 @@ def run_data_quality_agentic_workflow(
         rule_summary = _rule_summary_from_rules(rules, execution)
         rule_summary["rule_count"] = inserted
         review_pending_count = int(rule_summary.get("needs_review_rule_count", 0)) + int(rule_summary.get("unsupported_rule_count", 0))
-        if pause_for_rule_review and not resume_after_rule_review and review_pending_count > 0:
+        if auto_approve_all:
+            rule_summary["review_required"] = False
+            rule_summary["review_pending_count"] = 0
+        if pause_for_rule_review and not auto_approve_all and not resume_after_rule_review and review_pending_count > 0:
             rule_summary["review_required"] = True
             rule_summary["review_pending_count"] = review_pending_count
             state["quality_rules"] = rules
@@ -1038,7 +1044,9 @@ def run_data_quality_agentic_workflow(
         return state
 
     def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
-        summary = state.get("quality_summary") or {}
+        summary = dict(state.get("quality_summary") or {})
+        summary["workflow_status"] = "completed"
+        state["quality_summary"] = summary
         scope = _scope(state, run_id)
         create_or_update_quality_run(
             settings,

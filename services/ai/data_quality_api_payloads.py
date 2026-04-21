@@ -24,10 +24,13 @@ def build_data_quality_run_summary_payload(
     row: dict[str, Any],
     remediation_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    summary = row.get("summary_json") or {}
+    summary = dict(row.get("summary_json") or {})
     tenant_id = str(row.get("tenant_id") or "")
     domain_id = str(row.get("domain_id") or "data_quality_observability")
     run_id = str(row.get("run_id") or "")
+    row_status = str(row.get("status") or "").strip().lower()
+    if row_status in {"completed", "failed", "cancelled", "canceled"}:
+        summary["workflow_status"] = row_status
     artifact_links = build_data_quality_artifact_links(
         tenant_id=tenant_id,
         domain_id=domain_id,

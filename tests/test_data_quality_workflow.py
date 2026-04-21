@@ -201,7 +201,7 @@ def test_build_quality_rule_execution_plan_prefers_llm_sql_preview(monkeypatch) 
     assert "customer" in str(plan["sql_preview"]["validation_sql"])
 
 
-def test_build_quality_rule_execution_plan_marks_preview_unavailable_when_no_safe_preview(monkeypatch) -> None:
+def test_build_quality_rule_execution_plan_builds_deterministic_preview_for_date_range(monkeypatch) -> None:
     monkeypatch.setattr(dq_rules, "_build_quality_rule_sql_preview_with_llm", lambda settings, rule, schema_name: None)
 
     plan = dq_rules.build_quality_rule_execution_plan(
@@ -214,8 +214,26 @@ def test_build_quality_rule_execution_plan_marks_preview_unavailable_when_no_saf
         schema_name="public",
     )
 
-    assert plan["sql_preview"]["status"] == "preview_unavailable"
-    assert plan["sql_preview_source"] == "unavailable"
+    assert plan["sql_preview"]["status"] == "available"
+    assert plan["sql_preview_source"] == "deterministic_fallback"
+    assert "CURRENT_DATE" in str(plan["validation_sql"])
+
+
+def test_build_quality_rule_execution_plan_compiles_relative_date_expression(monkeypatch) -> None:
+    monkeypatch.setattr(dq_rules, "_build_quality_rule_sql_preview_with_llm", lambda settings, rule, schema_name: None)
+
+    plan = dq_rules.build_quality_rule_execution_plan(
+        {
+            "rule_type": "date_range",
+            "table_name": "customer",
+            "column_name": "dob",
+            "condition_json": {"max_date": "today - 1 day"},
+        },
+        schema_name="public",
+    )
+
+    assert plan["sql_preview"]["status"] == "available"
+    assert "CURRENT_DATE - INTERVAL '1 day'" in str(plan["validation_sql"])
 
 
 def test_classify_quality_rule_review_status_marks_low_confidence_rule_for_review() -> None:
@@ -242,6 +260,35 @@ def test_classify_quality_rule_review_status_marks_unimplemented_rule_unsupporte
     )
 
     assert status == "unsupported"
+
+
+def test_execute_date_range_supports_relative_date_expression(monkeypatch) -> None:
+    calls: list[tuple[str, list[object]]] = []
+
+    def _fake_run_query(settings, sql, params, scoped_conn=None):
+        calls.append((sql, params))
+        if "COUNT(*) AS checked_row_count" in sql:
+            return [{"checked_row_count": 10, "violation_count": 2}]
+        return [{"violating_value": "2036-11-28"}]
+
+    monkeypatch.setattr(dq_rules, "run_query", _fake_run_query)
+
+    result = dq_rules._execute_date_range(
+        object(),
+        rule={
+            "table_name": "customers_dq_data",
+            "column_name": "dob",
+            "condition_json": {"max_date": "today - 1 day"},
+        },
+        schema_name="public",
+        scoped_conn=None,
+    )
+
+    assert result[0] == "failed"
+    assert result[1] == 10
+    assert result[2] == 2
+    assert all(not params for _, params in calls)
+    assert "CURRENT_DATE - INTERVAL '1 day'" in calls[0][0]
 
 
 def test_replace_quality_rules_persists_source_text_and_execution_plan(monkeypatch) -> None:
@@ -703,6 +750,29 @@ def test_validate_llm_rule_accepts_safe_custom_sql() -> None:
 
     assert rule is not None
     assert rule["rule_type"] == "custom_sql"
+
+
+def test_validate_llm_rule_rewrites_date_text_custom_sql_safely() -> None:
+    schema_graph = {"tables": [{"name": "customers_dq_data", "columns": [{"name": "dob"}]}]}
+
+    rule = dq_rules._validate_llm_rule(
+        {
+            "rule_type": "custom_sql",
+            "table_name": "customers_dq_data",
+            "column_name": "dob",
+            "source_text": "dob must parse as YYYY-MM-DD and be strictly before today.",
+            "condition_json": {
+                "validation_sql": "SELECT COUNT(*) AS checked_row_count, COUNT(*) FILTER (WHERE dob >= CURRENT_DATE OR dob IS NULL OR dob !~ '^\\d{4}-\\d{2}-\\d{2}$') AS violation_count FROM public.customers_dq_data",
+                "sample_sql": "SELECT dob FROM public.customers_dq_data WHERE dob >= CURRENT_DATE OR dob IS NULL OR dob !~ '^\\d{4}-\\d{2}-\\d{2}$' LIMIT 25",
+            },
+        },
+        schema_graph,
+    )
+
+    assert rule is not None
+    assert rule["rule_type"] == "custom_sql"
+    assert "CASE WHEN \"dob\"::text ~ '^\\d{4}-\\d{2}-\\d{2}$'" in rule["condition_json"]["validation_sql"]
+    assert "FROM \"customers_dq_data\"" in rule["condition_json"]["validation_sql"]
 
 
 def test_validate_llm_rule_rejects_half_formed_rules() -> None:
@@ -2165,6 +2235,7 @@ def test_resume_data_quality_agentic_workflow_after_rule_review_completes(monkey
     assert result["run_status"] == "completed"
     assert result["quality_summary"]["average_table_trust_score"] == 92.0
     assert result["quality_summary"]["rule_review_required"] is False
+    assert result["quality_summary"]["workflow_status"] == "completed"
     assert statuses[0] == "running"
     assert statuses[-1] == "completed"
     assert [event["agent_name"] for event in events] == [
@@ -2265,13 +2336,13 @@ def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommend
             "quality_run_id": "dqrun_1",
             "run_id": "run_1",
             "tenant_id": "tenant",
-            "domain_id": "data_quality_observability",
-            "connection_id": "conn_1",
-            "database_name": "db_1",
-            "schema_name": "public",
-            "status": "completed",
-            "overall_trust_score": 78.4,
-            "summary_json": {
+                "domain_id": "data_quality_observability",
+                "connection_id": "conn_1",
+                "database_name": "db_1",
+                "schema_name": "public",
+                "status": "awaiting_rule_review",
+                "overall_trust_score": 78.4,
+                "summary_json": {
                 "critical_issue_count": 2,
                 "warning_issue_count": 4,
                 "active_rule_count": 3,
@@ -2306,6 +2377,23 @@ def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommend
     assert response["artifacts"]["remediation"].startswith("/data-quality/remediation?tenant_id=tenant")
     assert response["remediation_summary"]["action_count"] == 6
     assert response["recommended_actions"][0]["action_type"] == "freshness_recovery"
+
+
+def test_build_data_quality_run_summary_payload_overrides_terminal_workflow_status() -> None:
+    response = dq_api_payloads.build_data_quality_run_summary_payload(
+        row={
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "status": "completed",
+            "summary_json": {"workflow_status": "running"},
+        },
+        remediation_plan={"summary": {}, "actions": []},
+    )
+
+    assert response["workflow_status"] == "completed"
+    assert response["summary"]["workflow_status"] == "completed"
 
 
 def test_build_data_quality_run_hydration_payload_includes_pending_cards() -> None:

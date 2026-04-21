@@ -319,3 +319,20 @@ python3 scripts/demo_data_quality_ui_api_flow.py \
   --proposal-id dq_enrich_prop_123 \
   --apply-staging \
   --log-file "debug-logs/dq-ui-proposal-specific-$(date +%H%M%S).log"
+
+
+python3 scripts/demo_data_quality_ui_api_flow.py \
+    --api-base http://localhost:8787 \
+    --tenant-id dq-ui-demo-04 \
+    --domain-id data_quality_observability \
+    --connection-id 1 \
+    --database datafusion \
+    --schema-name public \
+    --tables customers_dq_data \
+    --context-file debug-logs/dq_rules_context.txt \
+    --scenario all \
+    --auto-bootstrap \
+    --pause-for-rule-review \
+    --wait-for-state \
+    --download-dir /tmp/dq_ui_demo \
+    --log-file "debug-logs/dq-ui-all-$(date +%H%M%S).log"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import date, datetime
 import json
 import logging
 import os
@@ -14,8 +15,67 @@ from services.ai.db import ScopedConnection, run_query
 logger = logging.getLogger(__name__)
 
 
+def data_quality_rule_auto_approve_all_enabled() -> bool:
+    value = str(os.getenv("DATA_QUALITY_RULE_AUTO_APPROVE_ALL", "")).strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
+
+
 def _qident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def _sql_date_literal(value: date) -> str:
+    return f"DATE '{value.isoformat()}'"
+
+
+def _compile_date_bound_expression(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _sql_date_literal(value.date())
+    if isinstance(value, date):
+        return _sql_date_literal(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"today", "current_date"}:
+        return "CURRENT_DATE"
+    if lowered == "yesterday":
+        return "CURRENT_DATE - INTERVAL '1 day'"
+    if lowered == "tomorrow":
+        return "CURRENT_DATE + INTERVAL '1 day'"
+    relative_match = re.match(
+        r"^(?:today|current_date)\s*([+-])\s*(\d+)\s*(?:day|days)?$",
+        lowered,
+    )
+    if relative_match:
+        operator, magnitude = relative_match.groups()
+        return f"CURRENT_DATE {operator} INTERVAL '{int(magnitude)} day'"
+    try:
+        return _sql_date_literal(date.fromisoformat(text))
+    except ValueError:
+        return None
+
+
+def _build_date_range_predicate_parts(column_sql: str, condition: dict[str, Any]) -> tuple[list[str], list[str]]:
+    predicates: list[str] = []
+    notes: list[str] = []
+    min_expr = _compile_date_bound_expression(condition.get("min_date"))
+    max_expr = _compile_date_bound_expression(condition.get("max_date"))
+    if condition.get("min_date") is not None:
+        if min_expr:
+            predicates.append(f"{column_sql} IS NOT NULL AND {column_sql}::date < {min_expr}")
+        else:
+            notes.append(f"Unsupported min_date expression: {condition.get('min_date')!r}")
+    if condition.get("max_date") is not None:
+        if max_expr:
+            predicates.append(f"{column_sql} IS NOT NULL AND {column_sql}::date > {max_expr}")
+        else:
+            notes.append(f"Unsupported max_date expression: {condition.get('max_date')!r}")
+    if condition.get("not_future"):
+        predicates.append(f"{column_sql} IS NOT NULL AND {column_sql}::date > CURRENT_DATE")
+    return predicates, notes
 
 
 EXECUTABLE_RULE_TYPES = {
@@ -189,6 +249,18 @@ def _validate_llm_rule(rule: dict[str, Any], schema_graph: dict[str, Any]) -> di
             return None
     if rule_type == "custom_sql":
         validation_sql = str(condition_json.get("validation_sql") or "").strip()
+        sample_sql = str(condition_json.get("sample_sql") or "").strip()
+        rewritten_sql = _rewrite_safe_date_text_custom_sql(
+            table_name=table_name,
+            column_name=column_name,
+            source_text=str(rule.get("source_text") or condition_json.get("source_text") or ""),
+            validation_sql=validation_sql,
+            sample_sql=sample_sql,
+        )
+        if rewritten_sql:
+            condition_json["validation_sql"] = rewritten_sql["validation_sql"]
+            condition_json["sample_sql"] = rewritten_sql["sample_sql"]
+            validation_sql = rewritten_sql["validation_sql"]
         if not validation_sql or not _is_safe_custom_sql(validation_sql, table_name=table_name):
             return None
     validated = {
@@ -213,6 +285,53 @@ def _validate_llm_rule(rule: dict[str, Any], schema_graph: dict[str, Any]) -> di
     if "source_text" not in validated["condition_json"] and rule.get("source_text"):
         validated["condition_json"]["source_text"] = str(rule.get("source_text"))[:1000]
     return validated
+
+
+def _rewrite_safe_date_text_custom_sql(
+    *,
+    table_name: str,
+    column_name: str | None,
+    source_text: str,
+    validation_sql: str,
+    sample_sql: str,
+) -> dict[str, str] | None:
+    column = str(column_name or "").strip()
+    if not column:
+        return None
+    validation = str(validation_sql or "").strip()
+    if not validation:
+        return None
+    source = str(source_text or "").lower()
+    lowered = validation.lower()
+    if "current_date" not in lowered:
+        return None
+    if column.lower() not in lowered:
+        return None
+    if "yyyy-mm-dd" not in source and r"\d{4}-\d{2}-\d{2}" not in validation:
+        return None
+
+    date_pattern = r"^\d{4}-\d{2}-\d{2}$"
+    col = _qident(column)
+    compare_operator = ">="
+    if re.search(rf"{re.escape(column)}\s*>\s*current_date", lowered):
+        compare_operator = ">"
+    predicate = (
+        f"{col} IS NULL OR "
+        f"{col}::text !~ '{date_pattern}' OR "
+        f"(CASE WHEN {col}::text ~ '{date_pattern}' THEN {col}::date {compare_operator} CURRENT_DATE ELSE FALSE END)"
+    )
+    return {
+        "validation_sql": (
+            f"SELECT COUNT(*) AS checked_row_count, "
+            f"COUNT(*) FILTER (WHERE {predicate}) AS violation_count "
+            f"FROM {_qident(table_name)}"
+        ),
+        "sample_sql": (
+            f"SELECT {col} AS violating_value "
+            f"FROM {_qident(table_name)} "
+            f"WHERE {predicate} LIMIT 25"
+        ),
+    }
 
 
 def _llm_mode() -> str:
@@ -250,7 +369,7 @@ def _is_safe_preview_sql(sql: str, *, allowed_tables: list[str]) -> bool:
     cleaned = str(sql or "").strip()
     if not cleaned:
         return False
-    if "<" in cleaned or ">" in cleaned:
+    if re.search(r"<[A-Za-z0-9_ ][A-Za-z0-9_ -]*>", cleaned):
         return False
     if ";" in cleaned.rstrip(";"):
         return False
@@ -816,11 +935,22 @@ def build_quality_rule_execution_plan(
             parameter_hints={"columns": condition.get("columns") or []},
         )
     if rule_type == "date_range":
+        predicates, notes = _build_date_range_predicate_parts(col, condition)
+        predicate_sql = " OR ".join(f"({item})" for item in predicates)
         return plan(
             executor_kind="deterministic_sql",
-            validation_sql=f"SELECT COUNT(*) AS checked_row_count, COUNT(*) FILTER (WHERE <date_range_predicate>) AS violation_count FROM {schema}.{table}",
-            sample_sql=f"SELECT {col} AS violating_value FROM {schema}.{table} WHERE <date_range_predicate> LIMIT 25",
+            validation_sql=(
+                f"SELECT COUNT(*) AS checked_row_count, COUNT(*) FILTER (WHERE {predicate_sql}) AS violation_count FROM {schema}.{table}"
+                if predicate_sql
+                else None
+            ),
+            sample_sql=(
+                f"SELECT {col} AS violating_value FROM {schema}.{table} WHERE {predicate_sql} LIMIT 25"
+                if predicate_sql
+                else None
+            ),
             parameter_hints={"min_date": condition.get("min_date"), "max_date": condition.get("max_date"), "not_future": condition.get("not_future")},
+            notes=notes,
         )
     if rule_type == "freshness_sla":
         return plan(
@@ -933,6 +1063,8 @@ def classify_quality_rule_review_status(
     *,
     confidence_threshold: float | None = None,
 ) -> str:
+    if data_quality_rule_auto_approve_all_enabled():
+        return "active"
     threshold = confidence_threshold
     if threshold is None:
         try:
@@ -1316,27 +1448,21 @@ def _execute_date_range(
     table = _qident(rule.get("table_name"))
     col = _qident(rule.get("column_name"))
     condition = rule.get("condition_json") or {}
-    predicates: list[str] = []
-    params: list[Any] = []
-    if condition.get("min_date") is not None:
-        predicates.append(f"{col} IS NOT NULL AND {col}::date < %s::date")
-        params.append(condition.get("min_date"))
-    if condition.get("max_date") is not None:
-        predicates.append(f"{col} IS NOT NULL AND {col}::date > %s::date")
-        params.append(condition.get("max_date"))
-    if condition.get("not_future"):
-        predicates.append(f"{col} IS NOT NULL AND {col}::date > CURRENT_DATE")
+    predicates, notes = _build_date_range_predicate_parts(col, condition)
+    if notes and not predicates:
+        return ("error", None, None, None, [], "; ".join(notes))
     predicate = " OR ".join(f"({item})" for item in predicates) or "false"
     counts = _run_scalar(
         settings,
         f"SELECT COUNT(*) AS checked_row_count, COUNT(*) FILTER (WHERE {predicate}) AS violation_count FROM {schema}.{table}",
-        params,
+        [],
         scoped_conn,
     )
     checked = int(counts.get("checked_row_count") or 0)
     violations = int(counts.get("violation_count") or 0)
-    samples = run_query(settings, f"SELECT {col} AS violating_value FROM {schema}.{table} WHERE {predicate} LIMIT 25", params, scoped_conn=scoped_conn)
-    return ("failed" if violations else "passed"), checked, violations, _pct(violations, checked), samples, None
+    samples = run_query(settings, f"SELECT {col} AS violating_value FROM {schema}.{table} WHERE {predicate} LIMIT 25", [], scoped_conn=scoped_conn)
+    error_message = "; ".join(notes) if notes else None
+    return ("failed" if violations else "passed"), checked, violations, _pct(violations, checked), samples, error_message
 
 
 def _execute_freshness_sla(
