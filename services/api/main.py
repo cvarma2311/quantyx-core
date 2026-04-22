@@ -12747,6 +12747,16 @@ def _parse_include_tokens(include: str | None, default_tokens: set[str] | None =
 def _filter_artifact_payload(artifact: dict | None, include_tokens: set[str]) -> dict:
     if not artifact:
         return {}
+    reserved_keys = {
+        "raw_json",
+        "summary_raw_text",
+        "summary_html",
+        "inference_raw_text",
+        "inference_html",
+        "truncation",
+    }
+    if not any(key in artifact for key in reserved_keys):
+        return dict(artifact)
     filtered: dict = {}
     if "raw_json" in include_tokens and artifact.get("raw_json") is not None:
         filtered["raw_json"] = artifact.get("raw_json")
@@ -12762,6 +12772,9 @@ def _filter_artifact_payload(artifact: dict | None, include_tokens: set[str]) ->
             filtered["inference_html"] = artifact.get("inference_html")
     if artifact.get("truncation") is not None:
         filtered["truncation"] = artifact.get("truncation")
+    for key, value in artifact.items():
+        if key not in reserved_keys and value is not None:
+            filtered[key] = value
     return filtered
 
 
@@ -12789,9 +12802,12 @@ def _list_events_v2(
             continue
         item = dict(row)
         event_id = item.get("event_id")
-        artifact_payload = item.get("artifacts")
+        direct_artifacts = item.get("artifacts")
+        artifact_payload = direct_artifacts
         if event_id and str(event_id) in artifact_by_event_id:
-            artifact_payload = _filter_artifact_payload(artifact_by_event_id[str(event_id)], include_tokens)
+            stored_artifacts = _filter_artifact_payload(artifact_by_event_id[str(event_id)], include_tokens)
+            direct_filtered = _filter_artifact_payload(direct_artifacts, include_tokens)
+            artifact_payload = {**direct_filtered, **stored_artifacts}
         item["artifacts"] = _filter_artifact_payload(artifact_payload, include_tokens)
         events.append(item)
     return events
