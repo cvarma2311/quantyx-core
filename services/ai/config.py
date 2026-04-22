@@ -25,6 +25,8 @@ class Settings:
     workspace_query_plan_mode: str
     workspace_query_plan_model: str | None
     workspace_query_plan_timeout_sec: int
+    cors_allow_origins: str | None
+    cors_allow_origin_regex: str | None
 
 
 def load_settings() -> Settings:
@@ -48,4 +50,6 @@ def load_settings() -> Settings:
         workspace_query_plan_mode=os.getenv("WORKSPACE_QUERY_PLAN_MODE", "auto"),
         workspace_query_plan_model=os.getenv("WORKSPACE_QUERY_PLAN_MODEL"),
         workspace_query_plan_timeout_sec=int(os.getenv("WORKSPACE_QUERY_PLAN_TIMEOUT_SEC", "30")),
+        cors_allow_origins=os.getenv("CORS_ALLOW_ORIGINS"),
+        cors_allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX"),
     )

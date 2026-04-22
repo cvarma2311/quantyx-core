@@ -20,6 +20,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from services.ai.catalog import Dimension, Metric, MetricCatalog, load_catalog_with_registry, resolve_ref
 from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
@@ -626,6 +627,26 @@ app = FastAPI(
 )
 
 settings = load_settings()
+_cors_allow_origins = [
+    origin.strip()
+    for origin in str(settings.cors_allow_origins or "").split(",")
+    if origin.strip()
+]
+_cors_allow_origin_regex = (
+    str(settings.cors_allow_origin_regex).strip()
+    if settings.cors_allow_origin_regex
+    else r"https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allow_origins,
+    allow_origin_regex=_cors_allow_origin_regex,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 catalog = load_catalog_with_registry(settings, settings.metrics_catalog_path)
 _CHART_FOLLOWUP_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "ai" / "prompts" / "chart_followup"
 LOW_CONFIDENCE_THRESHOLD = 0.7
@@ -8920,25 +8941,45 @@ DQ_RUN_SUMMARY_EXAMPLE = {
     "run_id": "run_dq_001",
     "tenant_id": "VC_101",
     "domain_id": "data_quality_observability",
+    "connection_id": "conn_001",
+    "database_name": "analytics",
+    "schema_name": "public",
     "status": "completed",
     "overall_trust_score": 82.4,
     "critical_issue_count": 7,
     "warning_issue_count": 18,
     "dashboard_id": "dash_001",
     "dashboard_title": "Data Quality Observability Data Quality Dashboard",
+    "dashboard_chart_count": 7,
     "duplicate_candidate_count": 18,
+    "exact_duplicate_candidate_count": 12,
+    "fuzzy_duplicate_candidate_count": 6,
     "active_rule_count": 25,
     "needs_review_rule_count": 0,
     "unsupported_rule_count": 0,
+    "rejected_rule_count": 0,
     "rule_review_required": False,
     "review_queue_pending_count": 0,
     "workflow_status": "completed",
     "stale_table_count": 1,
+    "tables_without_freshness_column_count": 0,
+    "stability_issue_count": 1,
     "enrichment_opportunity_count": 4,
+    "external_lookup_opportunity_count": 0,
+    "remediation_action_count": 9,
+    "critical_remediation_action_count": 3,
     "artifacts": {
+        "run_summary": "/data-quality/runs/run_dq_001",
         "dashboard": "/data-quality/runs/run_dq_001/dashboard",
         "excel_report": "/data-quality/reports/run_dq_001/excel?tenant_id=VC_101&domain_id=data_quality_observability",
+        "tables": "/data-quality/tables?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "rules": "/data-quality/rules?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "rule_review_queue": "/data-quality/rules/review-queue?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "resume_after_rule_review": "/data-quality/runs/run_dq_001/resume-after-rule-review",
+        "duplicates": "/data-quality/duplicates?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         "remediation": "/data-quality/remediation?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "enrichment_opportunities": "/data-quality/enrichment/opportunities?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "enrichment_questions": "/data-quality/enrichment/questions?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
     },
     "remediation_summary": {"action_count": 9, "critical_action_count": 3},
     "recommended_actions": [
@@ -8954,7 +8995,10 @@ DQ_RUN_SUMMARY_EXAMPLE = {
         "failed_rules": 5,
         "referential_violations": 2,
         "enrichment_opportunities": 4,
+        "workflow_status": "completed",
     },
+    "created_at": "2026-04-22T09:00:00Z",
+    "completed_at": "2026-04-22T09:05:00Z",
 }
 
 DQ_RUN_HYDRATION_EXAMPLE = {
@@ -8963,20 +9007,38 @@ DQ_RUN_HYDRATION_EXAMPLE = {
         "run_id": "run_dq_001",
         "tenant_id": "VC_101",
         "domain_id": "data_quality_observability",
+        "connection_id": "conn_001",
+        "database_name": "analytics",
+        "schema_name": "public",
         "status": "awaiting_rule_review",
         "overall_trust_score": 82.4,
+        "critical_issue_count": 2,
+        "warning_issue_count": 5,
         "active_rule_count": 3,
         "needs_review_rule_count": 2,
         "unsupported_rule_count": 0,
+        "rejected_rule_count": 0,
         "rule_review_required": True,
         "review_queue_pending_count": 2,
         "workflow_status": "awaiting_rule_review",
+        "stale_table_count": 0,
+        "tables_without_freshness_column_count": 0,
+        "stability_issue_count": 0,
         "enrichment_opportunity_count": 4,
+        "external_lookup_opportunity_count": 0,
+        "remediation_action_count": 5,
+        "critical_remediation_action_count": 2,
         "artifacts": {
+            "run_summary": "/data-quality/runs/run_dq_001",
             "rule_review_queue": "/data-quality/rules/review-queue?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
             "resume_after_rule_review": "/data-quality/runs/run_dq_001/resume-after-rule-review",
             "enrichment_questions": "/data-quality/enrichment/questions?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         },
+        "remediation_summary": {"action_count": 5, "critical_action_count": 2},
+        "recommended_actions": [{"priority": "critical", "title": "Backfill missing values in customer.email"}],
+        "summary": {"workflow_status": "awaiting_rule_review"},
+        "created_at": "2026-04-22T09:00:00Z",
+        "completed_at": None,
     },
     "pending_tasks": {
         "workflow_status": "awaiting_rule_review",
@@ -9102,23 +9164,70 @@ DQ_RULE_REVIEW_DETAIL_EXAMPLE = {
 }
 
 DQ_TABLE_DETAIL_EXAMPLE = {
+    "quality_run_id": "dqrun_001",
+    "run_id": "run_dq_001",
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
     "table_name": "customer",
+    "row_count": 100000,
     "trust_score": 71.2,
+    "completeness_score": 78.5,
+    "freshness_score": 100.0,
+    "duplicate_risk_score": 54.0,
+    "severity": "warning",
     "components": {
         "completeness": 78.5,
         "validity": 91.0,
-        "uniqueness": 92.0,
         "referential_integrity": 88.0,
         "duplicate_risk": 54.0,
         "freshness": 100.0,
-        "stability": 96.0,
-        "enrichment_readiness": 90.0,
     },
-    "trust_component_explanations": {},
-    "columns": [],
-    "failed_rules": [],
-    "duplicate_candidates": [],
-    "enrichment_opportunities": [],
+    "trust_component_explanations": {
+        "duplicate_risk": "High duplicate candidate volume is pulling down trust for this table."
+    },
+    "summary": {
+        "trust_components": {
+            "completeness": 78.5,
+            "validity": 91.0,
+            "referential_integrity": 88.0,
+            "duplicate_risk": 54.0,
+            "freshness": 100.0,
+        }
+    },
+    "columns": [
+        {
+            "column_name": "email",
+            "column_alias": "email",
+            "null_pct": 17.4,
+            "completeness_score": 82.6,
+        }
+    ],
+    "failed_rules": [
+        {
+            "rule_id": "dqr_001",
+            "rule_type": "email_pattern",
+            "table_name": "customer",
+            "column_name": "email",
+            "severity": "warning",
+        }
+    ],
+    "duplicate_candidates": [
+        {
+            "candidate_id": "dqdup_001",
+            "table_name": "customer",
+            "duplicate_type": "exact_key_duplicate",
+            "confidence": 0.99,
+            "candidate_record_count": 4,
+        }
+    ],
+    "enrichment_opportunities": [
+        {
+            "opportunity_id": "dq_enrich_001",
+            "table_name": "customer",
+            "target_column": "state",
+            "confidence": 0.87,
+        }
+    ],
 }
 
 DQ_FRESHNESS_EXAMPLE = {
@@ -9249,19 +9358,38 @@ DQ_DASHBOARD_EXAMPLE = {
     "dashboard_id": "dash_001",
     "dashboard_type": "data_quality",
     "title": "Data Quality Observability Data Quality Dashboard",
+    "name": "Data Quality Observability Data Quality Dashboard",
+    "description": "System-generated dashboard summarizing trust, missingness, validation failures, referential integrity, duplicate risk, and freshness.",
+    "status": "active",
     "quality_score": 82.4,
     "quality_gate_passed": False,
     "chart_plan": [
         {
-            "section": "Columns with Highest Missingness",
+            "title": "Columns with Highest Missingness",
+            "chart_key": "missingness_heatmap",
+            "chart_type": "table_heatmap",
+            "data_source": "quantyx_data_quality_column_artifacts",
+            "summary": {"column_count": 3},
             "display_columns": [
                 {"field": "column_name", "label": "Physical Column"},
                 {"field": "column_alias", "label": "Semantic Alias"},
                 {"field": "evidence_path", "label": "Evidence Path"},
             ],
-            "rows": [],
+            "rows": [
+                {
+                    "table_name": "customer",
+                    "column_name": "email",
+                    "column_alias": "email",
+                    "null_pct": 17.4,
+                    "completeness_score": 82.6,
+                    "evidence_path": "/data-quality/evidence/missingness?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&table_name=customer&column_name=email",
+                }
+            ],
         }
     ],
+    "charts": [],
+    "created_at": "2026-04-22T09:05:00Z",
+    "updated_at": "2026-04-22T09:05:00Z",
 }
 
 DQ_OPPORTUNITIES_EXAMPLE = {
