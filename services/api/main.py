@@ -8992,6 +8992,7 @@ DQ_RUN_SUMMARY_EXAMPLE = {
     "summary": {
         "profiled_tables": 18,
         "profiled_columns": 243,
+        "all_data_sheet_count": 18,
         "failed_rules": 5,
         "referential_violations": 2,
         "enrichment_opportunities": 4,
@@ -9363,7 +9364,103 @@ DQ_DASHBOARD_EXAMPLE = {
     "status": "active",
     "quality_score": 82.4,
     "quality_gate_passed": False,
+    "summary_view": {
+        "title": "Executive Summary",
+        "summary": {
+            "quality_score": 82.4,
+            "critical_issue_count": 7,
+            "failed_rule_count": 5,
+            "duplicate_candidate_count": 18,
+            "recommended_action_count": 9,
+            "critical_recommended_action_count": 3,
+            "run_id": "run_dq_001",
+            "dashboard_type": "data_quality",
+        },
+        "rows": [
+            {
+                "metric_key": "quality_score",
+                "label": "Quality Score",
+                "value": 82.4,
+                "note": "quality gate failed",
+                "evidence_path": None,
+            },
+            {
+                "metric_key": "failed_rules",
+                "label": "Failed Rules",
+                "value": 5,
+                "note": "validation rules with violations",
+                "evidence_path": "/data-quality/rules?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&status=failed",
+            },
+        ],
+    },
     "chart_plan": [
+        {
+            "title": "Executive Summary",
+            "chart_key": "executive_summary",
+            "chart_type": "summary_cards",
+            "data_source": "quantyx_data_quality_run_summary",
+            "summary": {
+                "quality_score": 82.4,
+                "critical_issue_count": 7,
+                "failed_rule_count": 5,
+                "duplicate_candidate_count": 18,
+                "recommended_action_count": 9,
+                "critical_recommended_action_count": 3,
+                "run_id": "run_dq_001",
+                "dashboard_type": "data_quality",
+            },
+            "display_columns": [
+                {"field": "metric_key", "label": "Metric Key"},
+                {"field": "label", "label": "Label"},
+                {"field": "value", "label": "Value"},
+                {"field": "note", "label": "Note"},
+                {"field": "evidence_path", "label": "Evidence Path"},
+            ],
+            "rows": [
+                {
+                    "metric_key": "quality_score",
+                    "label": "Quality Score",
+                    "value": 82.4,
+                    "note": "quality gate failed",
+                    "evidence_path": None,
+                },
+            ],
+        },
+        {
+            "title": "Data Trust Score by Table",
+            "chart_key": "data_trust_scorecard",
+            "chart_type": "horizontal_bar",
+            "data_source": "quantyx_data_quality_table_artifacts",
+            "x_field": "trust_score",
+            "y_field": "table_name",
+            "summary": {
+                "overall_trust_score": 82.4,
+                "critical_issue_count": 7,
+                "warning_issue_count": 18,
+            },
+            "display_columns": [
+                {"field": "table_name", "label": "Table"},
+                {"field": "trust_score", "label": "Trust Score"},
+                {"field": "completeness_score", "label": "Completeness"},
+                {"field": "validity_score", "label": "Validity"},
+                {"field": "referential_integrity_score", "label": "Referential Integrity"},
+                {"field": "freshness_score", "label": "Freshness"},
+                {"field": "duplicate_risk_score", "label": "Duplicate Risk"},
+                {"field": "row_count", "label": "Row Count"},
+            ],
+            "rows": [
+                {
+                    "table_name": "customer",
+                    "trust_score": 82.4,
+                    "completeness_score": 82.6,
+                    "validity_score": 91.0,
+                    "referential_integrity_score": 88.0,
+                    "freshness_score": 100.0,
+                    "duplicate_risk_score": 54.0,
+                    "row_count": 100000,
+                }
+            ],
+        },
         {
             "title": "Columns with Highest Missingness",
             "chart_key": "missingness_heatmap",
@@ -9371,8 +9468,12 @@ DQ_DASHBOARD_EXAMPLE = {
             "data_source": "quantyx_data_quality_column_artifacts",
             "summary": {"column_count": 3},
             "display_columns": [
+                {"field": "table_name", "label": "Table"},
                 {"field": "column_name", "label": "Physical Column"},
                 {"field": "column_alias", "label": "Semantic Alias"},
+                {"field": "null_pct", "label": "Null %"},
+                {"field": "blank_pct", "label": "Blank %"},
+                {"field": "completeness_score", "label": "Completeness"},
                 {"field": "evidence_path", "label": "Evidence Path"},
             ],
             "rows": [
@@ -9381,11 +9482,12 @@ DQ_DASHBOARD_EXAMPLE = {
                     "column_name": "email",
                     "column_alias": "email",
                     "null_pct": 17.4,
+                    "blank_pct": 0.0,
                     "completeness_score": 82.6,
                     "evidence_path": "/data-quality/evidence/missingness?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&table_name=customer&column_name=email",
                 }
             ],
-        }
+        },
     ],
     "charts": [],
     "created_at": "2026-04-22T09:05:00Z",
@@ -10517,7 +10619,11 @@ def get_data_quality_enrichment_evidence(
     "/data-quality/reports/{run_id}/excel",
     tags=["data-quality"],
     summary="Download data quality Excel report",
-    description="Generate an Excel workbook from persisted data-quality artifacts for a completed deployment run.",
+    description=(
+        "Generate an Excel workbook from persisted data-quality artifacts for a completed deployment run. "
+        "The workbook is generated on demand and includes a Legend sheet, summary sheets, validation/rule sheets, "
+        "raw `All Data {table}` sheets with failed validation cells highlighted, and enrichment sheets when staged overlays exist."
+    ),
     openapi_extra={
         "responses": {
             "200": {
@@ -10532,7 +10638,12 @@ def get_data_quality_enrichment_evidence(
                         "description": "Attachment file name",
                         "schema": {"type": "string"},
                         "example": 'attachment; filename="data_quality_run_dq_001.xlsx"',
-                    }
+                    },
+                    "X-Workbook-Sheets": {
+                        "description": "Illustrative workbook sheet set for this export shape.",
+                        "schema": {"type": "string"},
+                        "example": "Legend, Executive Summary, Trust Scorecard, Table Quality, Column Quality, Validation Rules, Rule Violations, Freshness, Duplicates, Recommended Actions, All Data customer, Enrichment Summary, Staged Enrichment, Published customer",
+                    },
                 },
             }
         }
@@ -10602,6 +10713,7 @@ def get_data_quality_dashboard(run_id: str) -> dict:
         "status": dashboard.get("status"),
         "quality_score": dashboard.get("quality_score"),
         "quality_gate_passed": dashboard.get("quality_gate_passed"),
+        "summary_view": dashboard.get("summary_view") or {},
         "chart_plan": dashboard.get("chart_plan") or [],
         "charts": dashboard.get("charts") or [],
     }

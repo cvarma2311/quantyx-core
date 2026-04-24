@@ -421,6 +421,14 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         event_callback=event_callback,
     )
     rule_rows = _merge_rule_rows(active_rules, execution.get("results", []))
+    _emit(
+        settings,
+        run_id,
+        "DataTrustScoringAgent",
+        "running",
+        "Computing data trust from quality, duplicate, freshness, and enrichment signals",
+        event_callback=event_callback,
+    )
     trust = compute_data_quality_trust_scores(
         quality_tables=quality_tables,
         quality_rules=rule_rows,

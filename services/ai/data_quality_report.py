@@ -13,6 +13,7 @@ from services.ai.config import Settings
 from services.ai.connection_registry import resolve_database_credentials_cached
 from services.ai.db import run_query
 from services.ai.data_quality_remediation import derive_data_quality_remediation_plan
+from services.ai.data_quality_rules import _build_date_range_predicate_parts
 from services.ai.data_quality_store import (
     create_quality_report_metadata,
     list_quality_duplicate_candidates,
@@ -30,6 +31,7 @@ STYLE_ENRICH_APPROVED_DETERMINISTIC = 2
 STYLE_ENRICH_APPROVED_LLM = 3
 STYLE_ENRICH_DEFERRED = 4
 STYLE_ENRICH_REJECTED = 5
+STYLE_VALIDATION_FAILED = 6
 
 
 def _stringify(value: Any) -> str:
@@ -169,16 +171,18 @@ def _styles_xml() -> str:
         '<fill><patternFill patternType="solid"><fgColor rgb="FFBDD7EE"/><bgColor indexed="64"/></patternFill></fill>'
         '<fill><patternFill patternType="solid"><fgColor rgb="FFFFE699"/><bgColor indexed="64"/></patternFill></fill>'
         '<fill><patternFill patternType="solid"><fgColor rgb="FFF4CCCC"/><bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFFCE4D6"/><bgColor indexed="64"/></patternFill></fill>'
         '</fills>'
         '<borders count="1"><border/></borders>'
         '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        '<cellXfs count="6">'
+        '<cellXfs count="7">'
         '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
         '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
         '<xf numFmtId="0" fontId="0" fillId="3" borderId="0" xfId="0" applyFill="1"/>'
         '<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/>'
         '<xf numFmtId="0" fontId="0" fillId="5" borderId="0" xfId="0" applyFill="1"/>'
         '<xf numFmtId="0" fontId="0" fillId="6" borderId="0" xfId="0" applyFill="1"/>'
+        '<xf numFmtId="0" fontId="0" fillId="7" borderId="0" xfId="0" applyFill="1"/>'
         '</cellXfs>'
         "</styleSheet>"
     )
@@ -229,6 +233,288 @@ def _list_staged_overlay_artifacts(settings: Settings, run_id: str) -> list[dict
 
 def _qident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def _fetch_table_rows(
+    settings: Settings,
+    *,
+    connection_id: str | None,
+    schema_name: str,
+    table_name: str,
+    column_names: list[str],
+) -> list[dict[str, Any]]:
+    connection_id = str(connection_id or "").strip()
+    if not connection_id or not column_names:
+        return []
+    scoped_conn = resolve_database_credentials_cached(settings, connection_id, schema_name)
+    if not scoped_conn:
+        return []
+    select_columns = ['ctid::text AS "__row_ref"'] + [f"{_qident(col)} AS {_qident(col)}" for col in column_names]
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT {", ".join(select_columns)}
+              FROM {_qident(schema_name)}.{_qident(table_name)}
+            """,
+            [],
+            scoped_conn=scoped_conn,
+            statement_timeout_ms=120000,
+        )
+    except Exception:
+        return []
+
+
+def _rule_failure_column_map(rule: dict[str, Any]) -> list[str]:
+    rule_type = str(rule.get("rule_type") or "").strip().lower()
+    condition = rule.get("condition_json") or {}
+    if rule_type in {
+        "not_null",
+        "not_blank",
+        "email_pattern",
+        "numeric_min",
+        "numeric_max",
+        "allowed_values",
+        "regex_pattern",
+        "date_range",
+        "numeric_range",
+        "length",
+        "null_pct_threshold",
+        "unique",
+    }:
+        column = str(rule.get("column_name") or "").strip()
+        return [column] if column else []
+    if rule_type == "referential_integrity":
+        column = str(rule.get("column_name") or "").strip()
+        return [column] if column else []
+    if rule_type == "conditional_required":
+        required_column = str(condition.get("required_column") or "").strip()
+        return [required_column] if required_column else []
+    if rule_type == "cross_column_consistency":
+        left_column = str(condition.get("left_column") or "").strip()
+        right_column = str(condition.get("right_column") or "").strip()
+        return [item for item in [left_column, right_column] if item]
+    if rule_type == "composite_unique":
+        return [str(item).strip() for item in (condition.get("columns") or []) if str(item).strip()]
+    return []
+
+
+def _build_rule_failure_row_ref_query(rule: dict[str, Any], schema_name: str) -> tuple[str | None, list[Any]]:
+    rule_type = str(rule.get("rule_type") or "").strip().lower()
+    table_name = str(rule.get("table_name") or "").strip()
+    if not table_name:
+        return None, []
+    schema = _qident(schema_name or "public")
+    table = _qident(table_name)
+    col = _qident(rule.get("column_name"))
+    condition = rule.get("condition_json") or {}
+    params: list[Any] = []
+
+    if rule_type == "referential_integrity":
+        parent_table = _qident(rule.get("reference_table"))
+        parent_col = _qident(rule.get("reference_column"))
+        sql = f"""
+        SELECT child.ctid::text AS __row_ref
+          FROM {schema}.{table} child
+          LEFT JOIN {schema}.{parent_table} parent
+            ON child.{col} = parent.{parent_col}
+         WHERE child.{col} IS NOT NULL
+           AND parent.{parent_col} IS NULL
+        """
+        return sql, params
+    if rule_type == "not_null":
+        return f'SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {col} IS NULL', params
+    if rule_type == "not_blank":
+        predicate = f"{col} IS NULL OR btrim({col}::text) = ''"
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {predicate}", params
+    if rule_type == "email_pattern":
+        pattern = r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$"
+        params = [pattern]
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {col} IS NOT NULL AND {col}::text !~ %s", params
+    if rule_type == "numeric_min":
+        params = [condition.get("min_value", 0)]
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {col} IS NOT NULL AND {col} < %s", params
+    if rule_type == "numeric_max":
+        params = [condition.get("max_value")]
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {col} IS NOT NULL AND {col} > %s", params
+    if rule_type == "allowed_values":
+        params = [[str(item) for item in (condition.get("allowed_values") or [])]]
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {col} IS NOT NULL AND NOT ({col}::text = ANY(%s))", params
+    if rule_type == "regex_pattern":
+        params = [str(condition.get("pattern") or "").strip()]
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {col} IS NOT NULL AND {col}::text !~ %s", params
+    if rule_type == "date_range":
+        predicates, notes = _build_date_range_predicate_parts(col, condition)
+        if notes and not predicates:
+            return None, []
+        predicate = " OR ".join(f"({item})" for item in predicates) or "false"
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {predicate}", params
+    if rule_type == "numeric_range":
+        min_value = condition.get("min_value")
+        max_value = condition.get("max_value")
+        if min_value is None and max_value is None:
+            return None, []
+        clauses: list[str] = []
+        if min_value is not None:
+            clauses.append(f"{col} < %s")
+            params.append(min_value)
+        if max_value is not None:
+            clauses.append(f"{col} > %s")
+            params.append(max_value)
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {col} IS NOT NULL AND ({' OR '.join(clauses)})", params
+    if rule_type == "length":
+        predicates: list[str] = []
+        if condition.get("exact_length") is not None:
+            predicates.append("length({col}::text) != %s")
+            params.append(condition.get("exact_length"))
+        if condition.get("min_length") is not None:
+            predicates.append("length({col}::text) < %s")
+            params.append(condition.get("min_length"))
+        if condition.get("max_length") is not None:
+            predicates.append("length({col}::text) > %s")
+            params.append(condition.get("max_length"))
+        if not predicates:
+            return None, []
+        predicate = " OR ".join(item.format(col=col) for item in predicates)
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {col} IS NOT NULL AND ({predicate})", params
+    if rule_type == "null_pct_threshold":
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {col} IS NULL", params
+    if rule_type == "conditional_required":
+        when_col = _qident(condition.get("when_column"))
+        req_col = _qident(condition.get("required_column"))
+        values = [str(item) for item in condition.get("when_values") or []]
+        where_when = f"{when_col}::text = ANY(%s)"
+        missing = f"{req_col} IS NULL OR btrim({req_col}::text) = ''"
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {where_when} AND ({missing})", [values]
+    if rule_type == "cross_column_consistency":
+        left = _qident(condition.get("left_column"))
+        right = _qident(condition.get("right_column"))
+        op = str(condition.get("operator") or "").strip()
+        if not op:
+            return None, []
+        predicate = f"{left} IS NOT NULL AND {right} IS NOT NULL AND NOT ({left} {op} {right})"
+        return f"SELECT ctid::text AS __row_ref FROM {schema}.{table} WHERE {predicate}", params
+    if rule_type == "unique":
+        sql = f"""
+        SELECT ctid::text AS __row_ref
+          FROM {schema}.{table}
+         WHERE {col} IS NOT NULL
+           AND {col} IN (
+                SELECT {col}
+                  FROM {schema}.{table}
+                 WHERE {col} IS NOT NULL
+                 GROUP BY {col}
+                HAVING COUNT(*) > 1
+           )
+        """
+        return sql, params
+    if rule_type == "composite_unique":
+        columns = [_qident(item) for item in (condition.get("columns") or []) if str(item).strip()]
+        if len(columns) < 2:
+            return None, []
+        group_cols = ", ".join(columns)
+        join_predicate = " AND ".join([f"src.{item} IS NOT DISTINCT FROM dupes.{item}" for item in columns])
+        sql = f"""
+        WITH dupes AS (
+            SELECT {group_cols}
+              FROM {schema}.{table}
+             GROUP BY {group_cols}
+            HAVING COUNT(*) > 1
+        )
+        SELECT src.ctid::text AS __row_ref
+          FROM {schema}.{table} src
+          JOIN dupes
+            ON {join_predicate}
+        """
+        return sql, params
+    return None, []
+
+
+def _build_validation_failure_map(
+    settings: Settings,
+    *,
+    connection_id: str | None,
+    schema_name: str,
+    rules: list[dict[str, Any]],
+) -> dict[str, dict[str, set[str]]]:
+    connection_id = str(connection_id or "").strip()
+    if not connection_id:
+        return {}
+    scoped_conn = resolve_database_credentials_cached(settings, connection_id, schema_name)
+    if not scoped_conn:
+        return {}
+    failure_map: dict[str, dict[str, set[str]]] = {}
+    for rule in rules:
+        if str(rule.get("result_status") or "").strip().lower() != "failed":
+            continue
+        table_name = str(rule.get("table_name") or "").strip()
+        affected_columns = _rule_failure_column_map(rule)
+        if not table_name or not affected_columns:
+            continue
+        sql, params = _build_rule_failure_row_ref_query(rule, schema_name)
+        if not sql:
+            continue
+        try:
+            rows = run_query(settings, sql, params, scoped_conn=scoped_conn, statement_timeout_ms=120000)
+        except Exception:
+            continue
+        table_map = failure_map.setdefault(table_name, {})
+        for row in rows:
+            row_ref = str(row.get("__row_ref") or "").strip()
+            if not row_ref:
+                continue
+            table_map.setdefault(row_ref, set()).update(affected_columns)
+    return failure_map
+
+
+def _all_data_sheets(
+    settings: Settings,
+    *,
+    run_row: dict[str, Any],
+    table_details: list[dict[str, Any]],
+    failed_rules: list[dict[str, Any]],
+) -> list[tuple[str, list[list[Any]]]]:
+    connection_id = str(run_row.get("connection_id") or "").strip()
+    schema_name = str(run_row.get("schema_name") or "public").strip() or "public"
+    failure_map = _build_validation_failure_map(
+        settings,
+        connection_id=connection_id,
+        schema_name=schema_name,
+        rules=failed_rules,
+    )
+    sheets: list[tuple[str, list[list[Any]]]] = []
+    for detail in table_details:
+        table_name = str(detail.get("table_name") or "").strip()
+        column_names = [str(row.get("column_name") or "").strip() for row in (detail.get("columns") or []) if str(row.get("column_name") or "").strip()]
+        if not table_name or not column_names:
+            continue
+        source_rows = _fetch_table_rows(
+            settings,
+            connection_id=connection_id,
+            schema_name=schema_name,
+            table_name=table_name,
+            column_names=column_names,
+        )
+        if not source_rows:
+            continue
+        rows: list[list[Any]] = [_header_row(["Row Ref", *column_names])]
+        table_failures = failure_map.get(table_name, {})
+        for source_row in source_rows:
+            row_ref = str(source_row.get("__row_ref") or "").strip()
+            failed_columns = table_failures.get(row_ref, set())
+            rows.append(
+                [
+                    row_ref,
+                    *[
+                        _cell(source_row.get(column_name), STYLE_VALIDATION_FAILED)
+                        if column_name in failed_columns
+                        else source_row.get(column_name)
+                        for column_name in column_names
+                    ],
+                ]
+            )
+        sheets.append((f"All Data {table_name}", rows))
+    return sheets
 
 
 def _fetch_overlay_source_rows(
@@ -421,6 +707,12 @@ def build_data_quality_excel_report(
     ]
     columns = [column for detail in table_details for column in detail.get("columns") or []]
     failed_rules = [rule for rule in rules if rule.get("result_status") == "failed"]
+    all_data_sheets = _all_data_sheets(
+        settings,
+        run_row=run,
+        table_details=table_details,
+        failed_rules=failed_rules,
+    )
     remediation_plan = derive_data_quality_remediation_plan(
         tenant_id=tenant_id,
         domain_id=domain_id,
@@ -480,10 +772,22 @@ def build_data_quality_excel_report(
         "approved_enrichment_row_count": len(approved_overlay_rows),
         "deferred_enrichment_row_count": len(deferred_overlay_rows),
         "published_enrichment_sheet_count": len(published_sheets),
+        "all_data_sheet_count": len(all_data_sheets),
         "remediation_action_count": (remediation_plan.get("summary") or {}).get("action_count", 0),
         "critical_remediation_action_count": (remediation_plan.get("summary") or {}).get("critical_action_count", 0),
     }
     sheets = [
+        (
+            "Legend",
+            [
+                _header_row(["Category", "Meaning", "Color"]),
+                ["Validation Failure", _cell("Cell failed one or more validation rules in the raw data export sheet.", STYLE_VALIDATION_FAILED), "light orange"],
+                ["Enrichment Approved (Deterministic)", _cell("Approved deterministic enrichment value.", STYLE_ENRICH_APPROVED_DETERMINISTIC), "green"],
+                ["Enrichment Approved (LLM)", _cell("Approved LLM-derived enrichment value.", STYLE_ENRICH_APPROVED_LLM), "blue"],
+                ["Enrichment Deferred", _cell("Deferred enrichment proposal.", STYLE_ENRICH_DEFERRED), "yellow"],
+                ["Enrichment Rejected", _cell("Rejected enrichment proposal.", STYLE_ENRICH_REJECTED), "red"],
+            ],
+        ),
         (
             "Executive Summary",
             [
@@ -505,6 +809,7 @@ def build_data_quality_excel_report(
                 ["Approved Enrichment Rows", len(approved_overlay_rows)],
                 ["Deferred Enrichment Rows", len(deferred_overlay_rows)],
                 ["Published Enrichment Sheets", len(published_sheets)],
+                ["All Data Sheets", len(all_data_sheets)],
                 ["Recommended Actions", (remediation_plan.get("summary") or {}).get("action_count", 0)],
                 ["Critical Recommended Actions", (remediation_plan.get("summary") or {}).get("critical_action_count", 0)],
                 ["Run Summary", run.get("summary_json") or {}],
@@ -766,6 +1071,7 @@ def build_data_quality_excel_report(
                 ],
             ],
         ),
+        *all_data_sheets,
         *published_sheets,
     ]
     workbook = build_xlsx_workbook(sheets)

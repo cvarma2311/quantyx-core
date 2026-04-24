@@ -878,7 +878,76 @@ Example response:
   "status": "active",
   "quality_score": 82.4,
   "quality_gate_passed": false,
+  "summary_view": {
+    "title": "Executive Summary",
+    "summary": {
+      "quality_score": 82.4,
+      "critical_issue_count": 7,
+      "failed_rule_count": 5,
+      "duplicate_candidate_count": 18,
+      "recommended_action_count": 9,
+      "critical_recommended_action_count": 3,
+      "run_id": "run_dq_001",
+      "dashboard_type": "data_quality"
+    },
+    "rows": [
+      {
+        "metric_key": "quality_score",
+        "label": "Quality Score",
+        "value": 82.4,
+        "note": "quality gate failed",
+        "evidence_path": null
+      }
+    ]
+  },
   "chart_plan": [
+    {
+      "title": "Executive Summary",
+      "chart_key": "executive_summary",
+      "chart_type": "summary_cards",
+      "data_source": "quantyx_data_quality_run_summary",
+      "summary": {
+        "quality_score": 82.4,
+        "critical_issue_count": 7,
+        "failed_rule_count": 5,
+        "duplicate_candidate_count": 18,
+        "recommended_action_count": 9,
+        "critical_recommended_action_count": 3,
+        "run_id": "run_dq_001",
+        "dashboard_type": "data_quality"
+      },
+      "display_columns": [
+        {
+          "field": "metric_key",
+          "label": "Metric Key"
+        },
+        {
+          "field": "label",
+          "label": "Label"
+        },
+        {
+          "field": "value",
+          "label": "Value"
+        },
+        {
+          "field": "note",
+          "label": "Note"
+        },
+        {
+          "field": "evidence_path",
+          "label": "Evidence Path"
+        }
+      ],
+      "rows": [
+        {
+          "metric_key": "quality_score",
+          "label": "Quality Score",
+          "value": 82.4,
+          "note": "quality gate failed",
+          "evidence_path": null
+        }
+      ]
+    },
     {
       "title": "Columns with Highest Missingness",
       "chart_key": "missingness_heatmap",

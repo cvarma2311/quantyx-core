@@ -20,6 +20,15 @@ def _display_column(field: str, label: str) -> dict[str, str]:
     return {"field": field, "label": label}
 
 
+def _append_chart_section(chart_plan: list[dict[str, Any]], section: dict[str, Any], *, include_when_empty: bool = False) -> None:
+    rows = section.get("rows")
+    if include_when_empty:
+        chart_plan.append(section)
+        return
+    if isinstance(rows, list) and rows:
+        chart_plan.append(section)
+
+
 def _table_rows(profiling: dict[str, Any]) -> list[dict[str, Any]]:
     return [table for table in (profiling.get("tables") or []) if isinstance(table, dict)]
 
@@ -165,7 +174,16 @@ def build_data_quality_dashboard_spec(
         reverse=True,
     )[:15]
     duplicate_rows = sorted(
-        [row for row in duplicate_rows if row.get("table_name")],
+        [
+            row
+            for row in duplicate_rows
+            if row.get("table_name")
+            and (
+                int(row.get("duplicate_candidate_count") or 0) > 0
+                or int(row.get("candidate_record_count") or 0) > 0
+                or int(row.get("duplicate_risk_columns_count") or 0) > 0
+            )
+        ],
         key=lambda row: (
             -int(row.get("duplicate_candidate_count") or 0),
             -int(row.get("duplicate_risk_columns_count") or 0),
@@ -196,12 +214,17 @@ def build_data_quality_dashboard_spec(
             }
             for row in columns
             if row.get("name")
+            and (
+                float(row.get("null_pct") or 0.0) > 0.0
+                or float(row.get("blank_pct") or 0.0) > 0.0
+            )
         ],
         key=lambda row: (
             -(float(row["null_pct"]) if row.get("null_pct") is not None else -1.0),
             -(float(row["blank_pct"]) if row.get("blank_pct") is not None else -1.0),
         ),
     )[:20]
+    top_missing_row = missingness_rows[0] if missingness_rows else None
 
     failed_rules = []
     referential_rows = []
@@ -252,8 +275,102 @@ def build_data_quality_dashboard_spec(
     rule_type_counts = Counter(str(rule.get("rule_type") or "unknown") for rule in quality_rules)
     failure_type_counts = Counter(str(row.get("rule_type") or "unknown") for row in failed_rules)
     failure_severity_counts = Counter(str(row.get("severity") or "unknown") for row in failed_rules)
+    duplicate_candidate_total = sum(int(row.get("duplicate_candidate_count") or 0) for row in duplicate_rows)
+    remediation_summary = remediation_plan.get("summary") or {}
+    executive_summary_rows = [
+        {
+            "metric_key": "quality_score",
+            "label": "Quality Score",
+            "value": quality_summary.get("average_table_trust_score"),
+            "note": "quality gate passed" if (quality_summary.get("critical_issue_count") or 0) == 0 else "quality gate failed",
+            "evidence_path": None,
+        },
+        {
+            "metric_key": "critical_issues",
+            "label": "Critical Issues",
+            "value": quality_summary.get("critical_issue_count", 0),
+            "note": "from trust scorecard summary",
+            "evidence_path": None,
+        },
+        {
+            "metric_key": "failed_rules",
+            "label": "Failed Rules",
+            "value": quality_summary.get("failed_rule_count", 0),
+            "note": "validation rules with violations",
+            "evidence_path": f"/data-quality/rules?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}&status=failed",
+        },
+        {
+            "metric_key": "top_missing_field",
+            "label": "Top Missing Field",
+            "value": top_missing_row.get("column_name") if top_missing_row else None,
+            "note": (
+                f"{top_missing_row.get('null_pct'):.1f}% nulls"
+                if top_missing_row and top_missing_row.get("null_pct") is not None
+                else "no missingness rows"
+            ),
+            "evidence_path": top_missing_row.get("evidence_path") if top_missing_row else None,
+        },
+        {
+            "metric_key": "duplicate_candidates",
+            "label": "Duplicate Candidates",
+            "value": duplicate_candidate_total,
+            "note": "across profiled tables",
+            "evidence_path": f"/data-quality/duplicates?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        },
+        {
+            "metric_key": "recommended_actions",
+            "label": "Recommended Actions",
+            "value": remediation_summary.get("action_count", 0),
+            "note": f"{int(remediation_summary.get('critical_action_count', 0) or 0)} critical",
+            "evidence_path": f"/data-quality/remediation?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        },
+        {
+            "metric_key": "run_id",
+            "label": "Run ID",
+            "value": run_id,
+            "note": None,
+            "evidence_path": f"/data-quality/runs/{run_id}",
+        },
+        {
+            "metric_key": "dashboard_type",
+            "label": "Dashboard Type",
+            "value": "data_quality",
+            "note": "active",
+            "evidence_path": f"/data-quality/runs/{run_id}/dashboard",
+        },
+    ]
 
-    chart_plan = [
+    chart_plan: list[dict[str, Any]] = []
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "executive_summary",
+            "title": "Executive Summary",
+            "chart_type": "summary_cards",
+            "data_source": "quantyx_data_quality_run_summary",
+            "display_columns": [
+                _display_column("metric_key", "Metric Key"),
+                _display_column("label", "Label"),
+                _display_column("value", "Value"),
+                _display_column("note", "Note"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": executive_summary_rows,
+            "summary": {
+                "quality_score": quality_summary.get("average_table_trust_score"),
+                "critical_issue_count": quality_summary.get("critical_issue_count", 0),
+                "failed_rule_count": quality_summary.get("failed_rule_count", 0),
+                "duplicate_candidate_count": duplicate_candidate_total,
+                "recommended_action_count": remediation_summary.get("action_count", 0),
+                "critical_recommended_action_count": remediation_summary.get("critical_action_count", 0),
+                "run_id": run_id,
+                "dashboard_type": "data_quality",
+            },
+        },
+        include_when_empty=True,
+    )
+    _append_chart_section(
+        chart_plan,
         {
             "chart_key": "data_trust_scorecard",
             "title": "Data Trust Score by Table",
@@ -278,6 +395,9 @@ def build_data_quality_dashboard_spec(
                 "warning_issue_count": quality_summary.get("warning_issue_count", 0),
             },
         },
+    )
+    _append_chart_section(
+        chart_plan,
         {
             "chart_key": "missingness_heatmap",
             "title": "Columns with Highest Missingness",
@@ -295,6 +415,9 @@ def build_data_quality_dashboard_spec(
             "rows": missingness_rows,
             "summary": {"column_count": len(missingness_rows)},
         },
+    )
+    _append_chart_section(
+        chart_plan,
         {
             "chart_key": "validation_rule_failures",
             "title": "Validation Rule Failures",
@@ -320,6 +443,9 @@ def build_data_quality_dashboard_spec(
                 "rule_type_counts": dict(rule_type_counts),
             },
         },
+    )
+    _append_chart_section(
+        chart_plan,
         {
             "chart_key": "referential_integrity",
             "title": "Referential Integrity Violations",
@@ -339,6 +465,9 @@ def build_data_quality_dashboard_spec(
             "rows": referential_rows,
             "summary": {"relationship_count": len(referential_rows)},
         },
+    )
+    _append_chart_section(
+        chart_plan,
         {
             "chart_key": "duplicate_risk",
             "title": "Duplicate Risk by Table",
@@ -356,6 +485,9 @@ def build_data_quality_dashboard_spec(
             "rows": duplicate_rows,
             "summary": {"table_count": len(duplicate_rows)},
         },
+    )
+    _append_chart_section(
+        chart_plan,
         {
             "chart_key": "freshness_and_stability",
             "title": "Freshness Lag by Table",
@@ -378,6 +510,9 @@ def build_data_quality_dashboard_spec(
                 "stability_issue_count": quality_summary.get("stability_issue_count", len([row for row in freshness_rows if row.get("stability_status") == "changed"])),
             },
         },
+    )
+    _append_chart_section(
+        chart_plan,
         {
             "chart_key": "recommended_actions",
             "title": "Recommended Actions",
@@ -395,12 +530,26 @@ def build_data_quality_dashboard_spec(
             "rows": remediation_plan.get("actions") or [],
             "summary": remediation_plan.get("summary") or {},
         },
-    ]
+    )
 
     dashboard_title = f"{str(domain_id).replace('_', ' ').replace('-', ' ').title()} Data Quality Dashboard"
     return {
         "title": dashboard_title,
         "description": "System-generated dashboard summarizing trust, missingness, validation failures, referential integrity, duplicate risk, and freshness.",
+        "summary_view": {
+            "title": "Executive Summary",
+            "rows": executive_summary_rows,
+            "summary": {
+                "quality_score": quality_summary.get("average_table_trust_score"),
+                "critical_issue_count": quality_summary.get("critical_issue_count", 0),
+                "failed_rule_count": quality_summary.get("failed_rule_count", 0),
+                "duplicate_candidate_count": duplicate_candidate_total,
+                "recommended_action_count": remediation_summary.get("action_count", 0),
+                "critical_recommended_action_count": remediation_summary.get("critical_action_count", 0),
+                "run_id": run_id,
+                "dashboard_type": "data_quality",
+            },
+        },
         "chart_plan": chart_plan,
         "quality": {
             "quality_score": quality_summary.get("average_table_trust_score"),
@@ -413,6 +562,7 @@ def build_data_quality_dashboard_spec(
             "failed_rule_count": quality_summary.get("failed_rule_count", 0),
             "duplicate_candidate_count": quality_summary.get("duplicate_candidate_count", 0),
             "remediation_action_count": (remediation_plan.get("summary") or {}).get("action_count", 0),
+            "executive_summary": executive_summary_rows,
         },
     }
 
@@ -461,9 +611,10 @@ def create_data_quality_dashboard(
     return {
         "dashboard_id": dashboard.get("dashboard_id"),
         "dashboard_title": spec.get("title"),
+        "summary_view": spec.get("summary_view") or {},
         "chart_plan": spec.get("chart_plan") or [],
         "quality_score": spec.get("quality", {}).get("quality_score"),
         "quality_gate_passed": spec.get("quality", {}).get("gate_passed"),
         "remediation_action_count": (spec.get("summary") or {}).get("remediation_action_count", 0),
-        "critical_remediation_action_count": ((spec.get("chart_plan") or [{}])[-1].get("summary") or {}).get("critical_action_count", 0),
+        "critical_remediation_action_count": ((spec.get("summary_view") or {}).get("summary") or {}).get("critical_recommended_action_count", 0),
     }

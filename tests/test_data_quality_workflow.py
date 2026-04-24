@@ -118,6 +118,26 @@ def test_extract_quality_rules_from_context_resolves_known_patterns() -> None:
     assert rules[3]["column_name"] == "amount"
 
 
+def test_list_agent_run_events_stage_aware_requests_latest_events(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(agentic_store, "_table_columns", lambda settings, table_name: {"stage_name", "stage_seq", "logical_event_id", "payload_compacted"})
+
+    def _fake_run_query(settings, sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(agentic_store, "run_query", _fake_run_query)
+
+    agentic_store.list_agent_run_events_stage_aware(object(), "run_1", limit=25)
+
+    sql = str(captured["sql"])
+    assert "ORDER BY created_at DESC" in sql
+    assert "ORDER BY created_at ASC" in sql
+    assert captured["params"] == ["run_1", 25]
+
+
 def test_extract_quality_rules_uses_llm_first_when_available(monkeypatch) -> None:
     class Settings:
         openai_api_key = "key"
@@ -1062,6 +1082,19 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
             "(1,1)": {"__row_ref": "(1,1)", "pincode": "560001", "country": "India", "state": None},
         },
     )
+    monkeypatch.setattr(
+        dq_report,
+        "_fetch_table_rows",
+        lambda *args, **kwargs: [
+            {"__row_ref": "(0,1)", "email": "bad@example"},
+            {"__row_ref": "(0,2)", "email": "good@example.com"},
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "_build_validation_failure_map",
+        lambda *args, **kwargs: {"customer": {"(0,1)": {"email"}}},
+    )
     monkeypatch.setattr(dq_report, "create_quality_report_metadata", lambda *args, **kwargs: "dqreport_1")
 
     workbook, file_name, summary = dq_report.build_data_quality_excel_report(
@@ -1080,6 +1113,7 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
     assert summary["approved_enrichment_row_count"] == 1
     assert summary["deferred_enrichment_row_count"] == 1
     assert summary["published_enrichment_sheet_count"] == 1
+    assert summary["all_data_sheet_count"] == 1
     assert summary["remediation_action_count"] >= 2
     with zipfile.ZipFile(BytesIO(workbook)) as archive:
         sheet_texts = [
@@ -1089,14 +1123,18 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         ]
         assert any("email_pattern" in text for text in sheet_texts)
         sheet_names = archive.read("xl/workbook.xml").decode("utf-8")
+        assert "Legend" in sheet_names
         assert "Freshness" in sheet_names
         assert "Duplicates" in sheet_names
         assert "Enrichment Summary" in sheet_names
         assert "Recommended Actions" in sheet_names
         assert "Staged Enrichment" in sheet_names
+        assert "All Data customer" in sheet_names
         assert "Published customer" in sheet_names
+        assert any("Validation Failure" in text and "light orange" in text for text in sheet_texts)
         assert any("Karnataka" in text and ('s=\"3\"' in text or 's=\"4\"' in text) for text in sheet_texts)
         assert any("560001" in text and "India" in text and "Karnataka" in text for text in sheet_texts)
+        assert any("bad@example" in text and 's=\"6\"' in text for text in sheet_texts)
         assert any("postal_code" in text for text in sheet_texts)
 
 
@@ -1177,19 +1215,66 @@ def test_build_data_quality_dashboard_spec_shapes_quality_views() -> None:
     )
 
     assert spec["title"] == "Data Quality Observability Data Quality Dashboard"
-    assert len(spec["chart_plan"]) == 7
-    assert spec["chart_plan"][0]["chart_key"] == "data_trust_scorecard"
-    assert spec["chart_plan"][1]["display_columns"][1] == {"field": "column_name", "label": "Physical Column"}
-    assert spec["chart_plan"][1]["display_columns"][2] == {"field": "column_alias", "label": "Semantic Alias"}
-    assert spec["chart_plan"][0]["rows"][0]["trust_score"] == 68.0
-    assert spec["chart_plan"][1]["rows"][0]["column_alias"] == "email"
-    assert "/data-quality/evidence/missingness" in str(spec["chart_plan"][1]["rows"][0]["evidence_path"])
-    assert spec["chart_plan"][3]["rows"][0]["reference_table"] == "customer"
-    assert spec["chart_plan"][3]["rows"][0]["column_alias"] == "customer_id"
-    assert "/data-quality/evidence/rules/" in str(spec["chart_plan"][3]["rows"][0]["evidence_path"])
-    assert spec["chart_plan"][4]["rows"][0]["duplicate_candidate_count"] == 1
-    assert "/data-quality/evidence/duplicates/" in str(spec["chart_plan"][4]["rows"][0]["evidence_path"])
-    assert spec["chart_plan"][6]["chart_key"] == "recommended_actions"
+    assert len(spec["chart_plan"]) == 8
+    assert spec["summary_view"]["title"] == "Executive Summary"
+    assert spec["summary_view"]["rows"][0]["metric_key"] == "quality_score"
+    assert spec["chart_plan"][0]["chart_key"] == "executive_summary"
+    assert spec["chart_plan"][0]["rows"][0]["metric_key"] == "quality_score"
+    assert spec["chart_plan"][1]["chart_key"] == "data_trust_scorecard"
+    assert spec["chart_plan"][2]["display_columns"][1] == {"field": "column_name", "label": "Physical Column"}
+    assert spec["chart_plan"][2]["display_columns"][2] == {"field": "column_alias", "label": "Semantic Alias"}
+    assert spec["chart_plan"][1]["rows"][0]["trust_score"] == 68.0
+    assert spec["chart_plan"][2]["rows"][0]["column_alias"] == "email"
+    assert "/data-quality/evidence/missingness" in str(spec["chart_plan"][2]["rows"][0]["evidence_path"])
+    assert spec["chart_plan"][4]["rows"][0]["reference_table"] == "customer"
+    assert spec["chart_plan"][4]["rows"][0]["column_alias"] == "customer_id"
+    assert "/data-quality/evidence/rules/" in str(spec["chart_plan"][4]["rows"][0]["evidence_path"])
+    assert spec["chart_plan"][5]["rows"][0]["duplicate_candidate_count"] == 1
+    assert "/data-quality/evidence/duplicates/" in str(spec["chart_plan"][5]["rows"][0]["evidence_path"])
+    assert spec["chart_plan"][7]["chart_key"] == "recommended_actions"
+
+
+def test_build_data_quality_dashboard_spec_skips_empty_sections() -> None:
+    spec = dq_dashboard.build_data_quality_dashboard_spec(
+        run_id="run_1",
+        domain_id="data_quality_observability",
+        profiling={
+            "tables": [
+                {
+                    "name": "customer",
+                    "row_count": 10,
+                    "quality_summary": {
+                        "table_trust_score": 72.5,
+                        "table_completeness_score": 80,
+                    },
+                    "column_profiles": [
+                        {"name": "email", "null_pct": 0, "blank_pct": 0, "completeness_score": 100},
+                    ],
+                }
+            ]
+        },
+        quality_tables=[
+            {
+                "table_name": "customer",
+                "trust_score": 68.0,
+                "completeness_score": 80.0,
+            }
+        ],
+        quality_summary={
+            "average_table_trust_score": 72.5,
+            "critical_issue_count": 0,
+            "warning_issue_count": 0,
+            "failed_rule_count": 0,
+        },
+        quality_rules=[],
+        quality_rule_results=[],
+        duplicate_candidates=[],
+        freshness_results=[],
+        enrichment_opportunities=[],
+    )
+
+    chart_keys = [item["chart_key"] for item in spec["chart_plan"]]
+    assert chart_keys == ["executive_summary", "data_trust_scorecard"]
 
 
 def test_derive_data_quality_remediation_plan_prioritizes_explainable_actions() -> None:
@@ -1285,6 +1370,7 @@ def test_create_data_quality_dashboard_uses_dashboard_store(monkeypatch) -> None
     assert created["dashboard_type"] == "data_quality"
     assert created["run_id"] == "run_1"
     assert isinstance(created["chart_plan"], list)
+    assert result["summary_view"]["title"] == "Executive Summary"
 
 
 def test_detect_duplicate_candidates_collects_exact_and_fuzzy(monkeypatch) -> None:
@@ -2243,6 +2329,7 @@ def test_resume_data_quality_agentic_workflow_after_rule_review_completes(monkey
         "DataQualityRuleAgent",
         "DataEnrichmentOpportunityAgent",
         "DataEnrichmentOpportunityAgent",
+        "DataTrustScoringAgent",
         "DataTrustScoringAgent",
         "DataQualityDashboardAgent",
         "DataQualityDashboardAgent",

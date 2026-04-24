@@ -335,11 +335,16 @@ def list_agent_run_events_stage_aware(settings: Settings, run_id: str, limit: in
         settings,
         f"""
         SELECT event_id, run_id, agent_name, status, message, artifacts,
-               {stage_name_expr}, {stage_seq_expr}, {logical_event_id_expr}, {payload_compacted_expr}, created_at
-          FROM public.quantyx_agent_run_events
-         WHERE run_id = %s
+               stage_name, stage_seq, logical_event_id, payload_compacted, created_at
+          FROM (
+                SELECT event_id, run_id, agent_name, status, message, artifacts,
+                       {stage_name_expr}, {stage_seq_expr}, {logical_event_id_expr}, {payload_compacted_expr}, created_at
+                  FROM public.quantyx_agent_run_events
+                 WHERE run_id = %s
+                 ORDER BY created_at DESC
+                 LIMIT %s
+               ) recent_events
          ORDER BY created_at ASC
-         LIMIT %s
         """,
         [run_id, limit],
     )

@@ -1541,7 +1541,27 @@ Response:
 Implementation status:
 
 - The backend generates the workbook on demand from persisted data-quality tables.
-- No raw source data is exported by default; the report contains profiling summaries, column quality metrics, rule definitions, latest rule execution results, and stored violation samples from `quantyx_data_quality_rule_results.sample_rows_json`.
+- The workbook now also includes raw source-data export sheets for the scoped tables:
+  - one `All Data {table}` sheet per profiled table
+  - each row includes a stable row reference column (`ctid::text` at export time) plus all source columns
+  - cells that violate supported failed validation rules are color-coded directly in the raw-data sheet
+- Cell highlighting in `All Data {table}` is currently applied for deterministic cell-level rule types such as:
+  - `not_null`
+  - `not_blank`
+  - `email_pattern`
+  - `numeric_min`
+  - `numeric_max`
+  - `numeric_range`
+  - `allowed_values`
+  - `regex_pattern`
+  - `date_range`
+  - `length`
+  - `referential_integrity`
+  - `conditional_required`
+  - `cross_column_consistency`
+  - `unique`
+  - `composite_unique`
+- Aggregate-only rule types that do not map cleanly to a specific cell, such as row-count drift or freshness SLA, remain represented in summary sheets rather than inline cell coloring.
 - Each download writes a metadata row to `quantyx_data_quality_reports` with `report_type=excel`, the generated file name, MIME type, and summary counts.
 - Current report sheets:
   - `Executive Summary`
@@ -1553,6 +1573,7 @@ Implementation status:
   - `Freshness`
   - `Duplicates`
   - `Recommended Actions`
+  - one `All Data {table}` sheet per profiled table
 - The workbook now also includes enrichment export sheets when staged overlay artifacts exist:
   - `Enrichment Summary`
   - `Staged Enrichment`
@@ -2157,6 +2178,7 @@ Implemented workbook additions:
 - `Trust Scorecard`
 - `Freshness`
 - `Duplicates`
+- `All Data {table}` raw export sheets with failed validation cells highlighted
 
 ---
 
