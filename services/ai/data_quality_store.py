@@ -690,6 +690,508 @@ def create_quality_report_metadata(
     return report_id
 
 
+def replace_quality_dataset_stages(
+    settings: Settings,
+    *,
+    quality_run_id: str,
+    run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    stages: list[dict[str, Any]],
+) -> int:
+    delete_sql = """
+        DELETE FROM public.quantyx_data_quality_dataset_stages
+         WHERE quality_run_id = %s
+    """
+    insert_sql = """
+        INSERT INTO public.quantyx_data_quality_dataset_stages (
+          stage_id, quality_run_id, run_id, tenant_id, domain_id,
+          stage_seq, stage_name, stage_type, input_row_count, output_row_count,
+          rejected_row_count, summary_json, created_at, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now(), now())
+    """
+    try:
+        execute_non_query(settings, delete_sql, [quality_run_id])
+        inserted = 0
+        for stage in stages:
+            stage_name = str(stage.get("stage_name") or "").strip()
+            stage_type = str(stage.get("stage_type") or "").strip()
+            if not stage_name or not stage_type:
+                continue
+            execute_non_query(
+                settings,
+                insert_sql,
+                [
+                    str(stage.get("stage_id") or f"dqstage_{uuid.uuid4().hex[:12]}"),
+                    quality_run_id,
+                    run_id,
+                    tenant_id,
+                    domain_id,
+                    stage.get("stage_seq"),
+                    stage_name,
+                    stage_type,
+                    stage.get("input_row_count"),
+                    stage.get("output_row_count"),
+                    stage.get("rejected_row_count"),
+                    Json(stage, dumps=lambda value: json.dumps(value, default=_json_default)),
+                ],
+            )
+            inserted += 1
+    except psycopg2.errors.UndefinedTable:
+        return 0
+    return inserted
+
+
+def list_quality_dataset_stages(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str | None = None,
+    limit: int = 1200,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [tenant_id, domain_id]
+    filters = ""
+    if run_id:
+        filters += " AND run_id = %s"
+        params.append(run_id)
+    params.append(max(1, min(int(limit or 1200), 4000)))
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_dataset_stages
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               {filters}
+             ORDER BY stage_seq ASC, created_at ASC
+             LIMIT %s
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def get_quality_dataset_stage(
+    settings: Settings,
+    stage_id: str,
+    *,
+    tenant_id: str | None = None,
+) -> dict[str, Any] | None:
+    params: list[Any] = [stage_id]
+    tenant_filter = ""
+    if tenant_id:
+        tenant_filter = " AND tenant_id = %s"
+        params.append(tenant_id)
+    try:
+        rows = run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_dataset_stages
+             WHERE stage_id = %s
+               {tenant_filter}
+             LIMIT 1
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return None
+    return rows[0] if rows else None
+
+
+def replace_quality_join_artifacts(
+    settings: Settings,
+    *,
+    quality_run_id: str,
+    run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    joins: list[dict[str, Any]],
+) -> int:
+    delete_sql = """
+        DELETE FROM public.quantyx_data_quality_join_artifacts
+         WHERE quality_run_id = %s
+    """
+    insert_sql = """
+        INSERT INTO public.quantyx_data_quality_join_artifacts (
+          join_artifact_id, quality_run_id, run_id, tenant_id, domain_id,
+          join_name, left_table, right_table, join_type, join_keys_json,
+          matched_row_count, unmatched_left_row_count, unmatched_right_row_count,
+          duplicate_match_count, summary_json, created_at, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s::jsonb, now(), now())
+    """
+    try:
+        execute_non_query(settings, delete_sql, [quality_run_id])
+        inserted = 0
+        for join in joins:
+            join_name = str(join.get("join_name") or "").strip()
+            left_table = str(join.get("left_table") or "").strip()
+            right_table = str(join.get("right_table") or "").strip()
+            if not join_name or not left_table or not right_table:
+                continue
+            join_keys_json = [
+                {
+                    "left_key": join.get("left_key"),
+                    "right_key": join.get("right_key"),
+                }
+            ]
+            execute_non_query(
+                settings,
+                insert_sql,
+                [
+                    str(join.get("join_artifact_id") or f"dqjoin_{uuid.uuid4().hex[:12]}"),
+                    quality_run_id,
+                    run_id,
+                    tenant_id,
+                    domain_id,
+                    join_name,
+                    left_table,
+                    right_table,
+                    join.get("join_type"),
+                    Json(join_keys_json, dumps=lambda value: json.dumps(value, default=_json_default)),
+                    join.get("matched_row_count"),
+                    join.get("unmatched_left_row_count"),
+                    join.get("unmatched_right_row_count"),
+                    join.get("duplicate_match_count"),
+                    Json(join, dumps=lambda value: json.dumps(value, default=_json_default)),
+                ],
+            )
+            inserted += 1
+    except psycopg2.errors.UndefinedTable:
+        return 0
+    return inserted
+
+
+def list_quality_join_artifacts(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str | None = None,
+    limit: int = 1200,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [tenant_id, domain_id]
+    filters = ""
+    if run_id:
+        filters += " AND run_id = %s"
+        params.append(run_id)
+    params.append(max(1, min(int(limit or 1200), 4000)))
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_join_artifacts
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               {filters}
+             ORDER BY created_at ASC, join_name ASC
+             LIMIT %s
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def get_quality_join_artifact(
+    settings: Settings,
+    join_artifact_id: str,
+    *,
+    tenant_id: str | None = None,
+) -> dict[str, Any] | None:
+    params: list[Any] = [join_artifact_id]
+    tenant_filter = ""
+    if tenant_id:
+        tenant_filter = " AND tenant_id = %s"
+        params.append(tenant_id)
+    try:
+        rows = run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_join_artifacts
+             WHERE join_artifact_id = %s
+               {tenant_filter}
+             LIMIT 1
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return None
+    return rows[0] if rows else None
+
+
+def replace_quality_stage_row_outcomes(
+    settings: Settings,
+    *,
+    quality_run_id: str,
+    run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    row_outcomes: list[dict[str, Any]],
+) -> int:
+    delete_sql = """
+        DELETE FROM public.quantyx_data_quality_stage_row_outcomes
+         WHERE quality_run_id = %s
+    """
+    insert_sql = """
+        INSERT INTO public.quantyx_data_quality_stage_row_outcomes (
+          outcome_id, quality_run_id, run_id, tenant_id, domain_id,
+          stage_id, stage_name, outcome_type, row_lineage_id, row_ref, source_table,
+          source_key_json, reason_code, reason_detail, row_data_json, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb, now())
+    """
+    try:
+        execute_non_query(settings, delete_sql, [quality_run_id])
+        inserted = 0
+        for item in row_outcomes:
+            stage_id = str(item.get("stage_id") or "").strip()
+            stage_name = str(item.get("stage_name") or "").strip()
+            outcome_type = str(item.get("outcome_type") or "").strip()
+            if not stage_id or not stage_name or not outcome_type:
+                continue
+            execute_non_query(
+                settings,
+                insert_sql,
+                [
+                    str(item.get("outcome_id") or f"dqout_{uuid.uuid4().hex[:12]}"),
+                    quality_run_id,
+                    run_id,
+                    tenant_id,
+                    domain_id,
+                    stage_id,
+                    stage_name,
+                    outcome_type,
+                    item.get("row_lineage_id"),
+                    item.get("row_ref"),
+                    item.get("source_table"),
+                    Json(item.get("source_key_json") or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+                    item.get("reason_code"),
+                    item.get("reason_detail"),
+                    Json(item.get("row_data_json") or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+                ],
+            )
+            inserted += 1
+    except psycopg2.errors.UndefinedTable:
+        return 0
+    return inserted
+
+
+def replace_quality_lineage_edges(
+    settings: Settings,
+    *,
+    quality_run_id: str,
+    run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    edges: list[dict[str, Any]],
+) -> int:
+    delete_sql = """
+        DELETE FROM public.quantyx_data_quality_lineage_edges
+         WHERE quality_run_id = %s
+    """
+    insert_sql = """
+        INSERT INTO public.quantyx_data_quality_lineage_edges (
+          edge_id, quality_run_id, run_id, tenant_id, domain_id,
+          row_lineage_id, from_stage_id, from_stage_name, to_stage_id, to_stage_name,
+          edge_type, summary_json, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+    """
+    try:
+        execute_non_query(settings, delete_sql, [quality_run_id])
+        inserted = 0
+        for item in edges:
+            row_lineage_id = str(item.get("row_lineage_id") or "").strip()
+            edge_type = str(item.get("edge_type") or "").strip()
+            if not row_lineage_id or not edge_type:
+                continue
+            execute_non_query(
+                settings,
+                insert_sql,
+                [
+                    str(item.get("edge_id") or f"dqedge_{uuid.uuid4().hex[:12]}"),
+                    quality_run_id,
+                    run_id,
+                    tenant_id,
+                    domain_id,
+                    row_lineage_id,
+                    item.get("from_stage_id"),
+                    item.get("from_stage_name"),
+                    item.get("to_stage_id"),
+                    item.get("to_stage_name"),
+                    edge_type,
+                    Json(item.get("summary_json") or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+                ],
+            )
+            inserted += 1
+    except psycopg2.errors.UndefinedTable:
+        return 0
+    return inserted
+
+
+def list_quality_lineage_edges(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str | None = None,
+    row_lineage_id: str | None = None,
+    limit: int = 1200,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [tenant_id, domain_id]
+    filters = ""
+    if run_id:
+        filters += " AND run_id = %s"
+        params.append(run_id)
+    if row_lineage_id:
+        filters += " AND row_lineage_id = %s"
+        params.append(row_lineage_id)
+    params.append(max(1, min(int(limit or 1200), 4000)))
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_lineage_edges
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               {filters}
+             ORDER BY created_at ASC
+             LIMIT %s
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def list_quality_stage_row_outcomes(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str | None = None,
+    stage_id: str | None = None,
+    outcome_type: str | None = None,
+    row_lineage_id: str | None = None,
+    limit: int = 1200,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [tenant_id, domain_id]
+    filters = ""
+    if run_id:
+        filters += " AND run_id = %s"
+        params.append(run_id)
+    if stage_id:
+        filters += " AND stage_id = %s"
+        params.append(stage_id)
+    if outcome_type:
+        filters += " AND outcome_type = %s"
+        params.append(outcome_type)
+    if row_lineage_id:
+        filters += " AND row_lineage_id = %s"
+        params.append(row_lineage_id)
+    params.append(max(1, min(int(limit or 1200), 4000)))
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_stage_row_outcomes
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               {filters}
+             ORDER BY created_at ASC
+             LIMIT %s
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def upsert_quality_final_dataset_artifact(
+    settings: Settings,
+    *,
+    quality_run_id: str,
+    run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    artifact: dict[str, Any],
+) -> str | None:
+    artifact_id = str(artifact.get("artifact_id") or f"dqfinal_{uuid.uuid4().hex[:12]}")
+    sql = """
+        INSERT INTO public.quantyx_data_quality_final_dataset_artifacts (
+          artifact_id, quality_run_id, run_id, tenant_id, domain_id,
+          final_stage_name, final_row_count, total_rejected_row_count, readiness_status,
+          summary_json, created_at, updated_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now(), now())
+        ON CONFLICT (quality_run_id)
+        DO UPDATE SET
+          artifact_id = EXCLUDED.artifact_id,
+          final_stage_name = EXCLUDED.final_stage_name,
+          final_row_count = EXCLUDED.final_row_count,
+          total_rejected_row_count = EXCLUDED.total_rejected_row_count,
+          readiness_status = EXCLUDED.readiness_status,
+          summary_json = EXCLUDED.summary_json,
+          updated_at = now()
+    """
+    try:
+        execute_non_query(
+            settings,
+            sql,
+            [
+                artifact_id,
+                quality_run_id,
+                run_id,
+                tenant_id,
+                domain_id,
+                artifact.get("final_stage_name"),
+                artifact.get("final_row_count"),
+                artifact.get("total_rejected_row_count"),
+                artifact.get("readiness_status"),
+                Json(artifact.get("summary_json") or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+            ],
+        )
+    except psycopg2.errors.UndefinedTable:
+        return None
+    return artifact_id
+
+
+def get_quality_final_dataset_artifact(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+) -> dict[str, Any] | None:
+    try:
+        rows = run_query(
+            settings,
+            """
+            SELECT *
+              FROM public.quantyx_data_quality_final_dataset_artifacts
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               AND run_id = %s
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            [tenant_id, domain_id, run_id],
+        )
+    except psycopg2.errors.UndefinedTable:
+        return None
+    return rows[0] if rows else None
+
+
 def replace_quality_enrichment_opportunities(
     settings: Settings,
     *,
@@ -754,7 +1256,7 @@ def list_quality_enrichment_opportunities(
     domain_id: str,
     run_id: str | None = None,
     status: str | None = None,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> list[dict[str, Any]]:
     params: list[Any] = [tenant_id, domain_id]
     filters = ""
@@ -764,7 +1266,7 @@ def list_quality_enrichment_opportunities(
     if status:
         filters += " AND status = %s"
         params.append(status)
-    params.append(max(1, min(int(limit or 100), 500)))
+    params.append(max(1, min(int(limit or 1200), 4000)))
     try:
         return run_query(
             settings,
@@ -791,7 +1293,7 @@ def list_quality_duplicate_candidates(
     run_id: str | None = None,
     table_name: str | None = None,
     review_status: str | None = None,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> list[dict[str, Any]]:
     params: list[Any] = [tenant_id, domain_id]
     filters = ""
@@ -804,7 +1306,7 @@ def list_quality_duplicate_candidates(
     if review_status:
         filters += " AND review_status = %s"
         params.append(review_status)
-    params.append(max(1, min(int(limit or 100), 500)))
+    params.append(max(1, min(int(limit or 1200), 4000)))
     try:
         return run_query(
             settings,
@@ -1018,7 +1520,7 @@ def list_quality_rules(
     run_id: str | None = None,
     status: str | None = None,
     rule_status: str | None = None,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> list[dict[str, Any]]:
     params: list[Any] = [tenant_id, domain_id]
     filters = ""
@@ -1031,7 +1533,7 @@ def list_quality_rules(
     if rule_status:
         filters += " AND r.status = %s"
         params.append(rule_status)
-    params.append(max(1, min(int(limit or 100), 500)))
+    params.append(max(1, min(int(limit or 1200), 4000)))
     try:
         return run_query(
             settings,
@@ -1089,14 +1591,14 @@ def list_quality_tables(
     tenant_id: str,
     domain_id: str,
     run_id: str | None = None,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> list[dict[str, Any]]:
     params: list[Any] = [tenant_id, domain_id]
     run_filter = ""
     if run_id:
         run_filter = "AND run_id = %s"
         params.append(run_id)
-    params.append(max(1, min(int(limit or 100), 500)))
+    params.append(max(1, min(int(limit or 1200), 4000)))
     try:
         return run_query(
             settings,

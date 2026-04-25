@@ -200,9 +200,15 @@ from services.ai.data_quality_orchestrator import resume_data_quality_agentic_wo
 from services.ai.data_quality_evidence import (
     fetch_duplicate_evidence,
     fetch_enrichment_evidence,
+    fetch_final_dataset_rows,
     fetch_freshness_evidence,
+    fetch_join_evidence,
+    fetch_lineage_journey,
+    fetch_lineage_overview,
+    fetch_lineage_trace,
     fetch_missingness_evidence,
     fetch_rule_evidence,
+    fetch_stage_evidence,
     load_quality_run,
 )
 from services.ai.data_quality_rule_review import (
@@ -212,13 +218,19 @@ from services.ai.data_quality_rule_review import (
 )
 from services.ai.data_quality_remediation import build_data_quality_remediation_plan
 from services.ai.data_quality_store import (
+    get_quality_final_dataset_artifact,
+    get_quality_dataset_stage,
+    get_quality_join_artifact,
     get_quality_rule,
     create_quality_enrichment_proposal,
+    list_quality_dataset_stages,
     list_quality_duplicate_candidates,
+    list_quality_stage_row_outcomes,
     get_quality_enrichment_opportunity,
     get_quality_enrichment_proposal,
     get_latest_quality_enrichment_proposal_for_opportunity,
     list_quality_enrichment_opportunities,
+    list_quality_join_artifacts,
     get_quality_run_by_run_id,
     get_quality_table_detail,
     list_quality_rules,
@@ -8961,6 +8973,12 @@ DQ_RUN_SUMMARY_EXAMPLE = {
     "rule_review_required": False,
     "review_queue_pending_count": 0,
     "workflow_status": "completed",
+    "dataset_stage_count": 6,
+    "join_stage_count": 2,
+    "filter_stage_count": 1,
+    "total_rejected_row_count": 340,
+    "final_dataset_row_count": 12110,
+    "final_dataset_readiness_status": "ready",
     "stale_table_count": 1,
     "tables_without_freshness_column_count": 0,
     "stability_issue_count": 1,
@@ -8972,6 +8990,10 @@ DQ_RUN_SUMMARY_EXAMPLE = {
         "run_summary": "/data-quality/runs/run_dq_001",
         "dashboard": "/data-quality/runs/run_dq_001/dashboard",
         "excel_report": "/data-quality/reports/run_dq_001/excel?tenant_id=VC_101&domain_id=data_quality_observability",
+        "stages": "/data-quality/stages?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "joins": "/data-quality/joins?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "rejected_records": "/data-quality/rejected-records?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "final_dataset": "/data-quality/final-dataset?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         "tables": "/data-quality/tables?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         "rules": "/data-quality/rules?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         "rule_review_queue": "/data-quality/rules/review-queue?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
@@ -9022,6 +9044,12 @@ DQ_RUN_HYDRATION_EXAMPLE = {
         "rule_review_required": True,
         "review_queue_pending_count": 2,
         "workflow_status": "awaiting_rule_review",
+        "dataset_stage_count": 5,
+        "join_stage_count": 1,
+        "filter_stage_count": 1,
+        "total_rejected_row_count": 0,
+        "final_dataset_row_count": None,
+        "final_dataset_readiness_status": None,
         "stale_table_count": 0,
         "tables_without_freshness_column_count": 0,
         "stability_issue_count": 0,
@@ -9031,6 +9059,10 @@ DQ_RUN_HYDRATION_EXAMPLE = {
         "critical_remediation_action_count": 2,
         "artifacts": {
             "run_summary": "/data-quality/runs/run_dq_001",
+            "stages": "/data-quality/stages?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+            "joins": "/data-quality/joins?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+            "rejected_records": "/data-quality/rejected-records?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+            "final_dataset": "/data-quality/final-dataset?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
             "rule_review_queue": "/data-quality/rules/review-queue?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
             "resume_after_rule_review": "/data-quality/runs/run_dq_001/resume-after-rule-review",
             "enrichment_questions": "/data-quality/enrichment/questions?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
@@ -9070,6 +9102,28 @@ DQ_RUN_HYDRATION_EXAMPLE = {
             "deferred_count": 1,
             "rejected_count": 0,
             "top_items": [],
+        },
+        "lineage": {
+            "lineage_row_count": 12,
+            "final_dataset_member_count": 8,
+            "rejected_row_count": 3,
+            "join_exception_row_count": 1,
+            "top_items": [
+                {
+                    "row_lineage_id": "dqlin_b3JkZXJzfCgwLDEp_a1b2c3d4",
+                    "source_table": "orders",
+                    "source_row_ref": "(0,1)",
+                    "decoded_lineage": "orders -> (0,1)",
+                    "transition_count": 2,
+                    "stage_count": 3,
+                    "rejected_count": 0,
+                    "join_exception_count": 0,
+                    "latest_stage_name": "final_dataset_projection",
+                    "final_state": "final_dataset_member",
+                    "final_dataset_member": True,
+                    "evidence_path": "/data-quality/lineage/dqlin_b3JkZXJzfCgwLDEp_a1b2c3d4/journey?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+                }
+            ],
         },
         "remediation": {
             "summary": {"action_count": 5, "critical_action_count": 2},
@@ -9269,6 +9323,344 @@ DQ_DUPLICATES_EXAMPLE = {
             "review_status": "needs_review",
         }
     ],
+}
+
+DQ_STAGES_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "stages": [
+        {
+            "stage_id": "dqstage_001",
+            "stage_seq": 1,
+            "stage_name": "source_profile_orders",
+            "stage_type": "source_profile",
+            "input_row_count": 12450,
+            "output_row_count": 12450,
+            "rejected_row_count": 0,
+            "summary_json": {
+                "stage_id": "dqstage_001",
+                "stage_seq": 1,
+                "stage_name": "source_profile_orders",
+                "stage_type": "source_profile",
+                "input_tables": ["orders"],
+                "output_dataset": "orders",
+                "measurement_status": "measured",
+                "evidence_path": "/data-quality/evidence/stages/dqstage_001?tenant_id=VC_101&domain_id=data_quality_observability",
+            },
+        },
+        {
+            "stage_id": "dqstage_002",
+            "stage_seq": 2,
+            "stage_name": "orders_to_customer_customer_id",
+            "stage_type": "join_validation",
+            "input_row_count": 12450,
+            "output_row_count": 12110,
+            "rejected_row_count": 340,
+            "summary_json": {
+                "join": {
+                    "join_artifact_id": "dqjoin_001",
+                    "join_name": "orders_to_customer_customer_id",
+                    "left_table": "orders",
+                    "right_table": "customer",
+                    "left_key": "customer_id",
+                    "right_key": "customer_id",
+                    "matched_row_count": 12110,
+                    "unmatched_left_row_count": 340,
+                    "unmatched_right_row_count": 18,
+                    "duplicate_match_count": 5,
+                    "evidence_path": "/data-quality/evidence/joins/dqjoin_001?tenant_id=VC_101&domain_id=data_quality_observability",
+                }
+            },
+        },
+    ],
+}
+
+DQ_JOINS_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "joins": [
+        {
+            "join_artifact_id": "dqjoin_001",
+            "join_name": "orders_to_customer_customer_id",
+            "left_table": "orders",
+            "right_table": "customer",
+            "join_type": "reference_lookup",
+            "join_keys_json": [{"left_key": "customer_id", "right_key": "customer_id"}],
+            "matched_row_count": 12110,
+            "unmatched_left_row_count": 340,
+            "unmatched_right_row_count": 18,
+            "duplicate_match_count": 5,
+            "summary_json": {
+                "join_name": "orders_to_customer_customer_id",
+                "source": "context_rule",
+                "left_row_count": 12450,
+                "right_row_count": 998,
+                "measurement_status": "measured",
+                "evidence_path": "/data-quality/evidence/joins/dqjoin_001?tenant_id=VC_101&domain_id=data_quality_observability",
+            },
+        }
+    ],
+}
+
+DQ_REJECTED_RECORDS_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "rejected_records": [
+        {
+            "outcome_id": "dqout_001",
+            "stage_id": "dqstage_002",
+            "stage_name": "orders_to_customer_customer_id",
+            "outcome_type": "rejected",
+            "row_ref": "(0,15)",
+            "source_table": "orders",
+            "source_key_json": {"customer_id": "CUST-404"},
+            "reason_code": "join_unmatched_left",
+            "reason_detail": "Row from orders did not match customer on customer_id -> customer_id",
+            "row_data_json": {"__left_row_ref": "(0,15)", "left_key_value": "CUST-404"},
+        }
+    ],
+}
+
+DQ_FINAL_DATASET_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "final_dataset": {
+        "artifact_id": "dqfinal_001",
+        "final_stage_name": "final_dataset_projection",
+        "final_row_count": 12110,
+        "total_rejected_row_count": 340,
+        "readiness_status": "ready",
+        "summary_json": {
+            "measurement_status": "derived",
+            "final_row_count": 12110,
+            "total_rejected_row_count": 340,
+        },
+    },
+}
+
+DQ_FINAL_DATASET_ROWS_EXAMPLE = {
+    "run_id": "run_dq_001",
+    "final_dataset": {
+        "artifact_id": "dqfinal_001",
+        "final_row_count": 12110,
+        "readiness_status": "ready",
+    },
+    "basis_stage": {
+        "stage_id": "dqstage_002",
+        "stage_name": "orders_to_customer_customer_id",
+        "stage_type": "join_validation",
+    },
+    "rows": [
+        {
+            "__left_row_ref": "(0,1)",
+            "__right_row_ref": "(0,9)",
+            "left_key_value": "CUST-001",
+            "right_key_value": "CUST-001",
+        }
+    ],
+    "limit": 100,
+    "offset": 0,
+}
+
+DQ_LINEAGE_TRACE_EXAMPLE = {
+    "run_id": "run_dq_001",
+    "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4",
+    "decoded_lineage": {
+        "raw": "orders|(0,15)",
+        "parts": ["orders", "(0,15)"],
+    },
+    "source_snapshot": {
+        "__row_ref": "(0,15)",
+        "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4",
+        "customer_id": "CUST-404",
+    },
+    "edges": [
+        {
+            "edge_id": "dqedge_001",
+            "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4",
+            "from_stage_id": "dqstage_001",
+            "from_stage_name": "source_profile_orders",
+            "to_stage_id": "dqstage_002",
+            "to_stage_name": "orders_to_customer_customer_id",
+            "edge_type": "join_unmatched_left",
+        }
+    ],
+    "outcomes": [
+        {
+            "outcome_id": "dqout_001",
+            "stage_id": "dqstage_002",
+            "stage_name": "orders_to_customer_customer_id",
+            "outcome_type": "rejected",
+            "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4",
+            "row_ref": "(0,15)",
+            "reason_code": "join_unmatched_left",
+        }
+    ],
+    "stage_trace": [
+        {
+            "stage_id": "dqstage_001",
+            "stage_name": "source_profile_orders",
+            "stage_type": "source_profile",
+            "stage_seq": 1,
+            "state": "entered",
+        },
+        {
+            "stage_id": "dqstage_002",
+            "stage_name": "orders_to_customer_customer_id",
+            "stage_type": "join_validation",
+            "stage_seq": 2,
+            "state": "join_unmatched_left",
+        },
+    ],
+    "final_dataset_membership": {
+        "is_member": False,
+        "basis_stage": {},
+        "row": None,
+    },
+}
+
+DQ_LINEAGE_JOURNEY_EXAMPLE = {
+    "run_id": "run_dq_001",
+    "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4",
+    "source": {
+        "source_table": "orders",
+        "source_row_ref": "(0,15)",
+        "decoded_lineage": "orders|(0,15)",
+        "source_snapshot": {
+            "__row_ref": "(0,15)",
+            "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4",
+            "customer_id": "CUST-404",
+        },
+    },
+    "summary": {
+        "step_count": 2,
+        "transition_count": 1,
+        "outcome_count": 1,
+        "final_dataset_member": False,
+        "final_state": "join_unmatched_left",
+    },
+    "journey": [
+        {
+            "step_index": 1,
+            "stage_id": "dqstage_001",
+            "stage_seq": 1,
+            "stage_name": "source_profile_orders",
+            "stage_type": "source_profile",
+            "state": "entered",
+            "status_category": "progressed",
+            "display_label": "Entered source_profile_orders",
+        },
+        {
+            "step_index": 2,
+            "stage_id": "dqstage_002",
+            "stage_seq": 2,
+            "stage_name": "orders_to_customer_customer_id",
+            "stage_type": "join_validation",
+            "state": "join_unmatched_left",
+            "status_category": "rejected",
+            "display_label": "Rejected by left-side join mismatch in orders_to_customer_customer_id",
+        },
+    ],
+    "final_dataset_membership": {
+        "is_member": False,
+        "basis_stage": {},
+        "row": None,
+    },
+    "trace_path": "/data-quality/lineage/dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+}
+
+DQ_LINEAGE_OVERVIEW_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "summary": {
+        "lineage_row_count": 2,
+        "final_dataset_member_count": 1,
+        "rejected_row_count": 1,
+        "join_exception_row_count": 0,
+    },
+    "rows": [
+        {
+            "row_lineage_id": "dqlin_b3JkZXJzfCgwLDEp_a1b2c3d4",
+            "source_table": "orders",
+            "source_row_ref": "(0,1)",
+            "decoded_lineage": "orders -> (0,1)",
+            "transition_count": 2,
+            "stage_count": 3,
+            "rejected_count": 0,
+            "join_exception_count": 0,
+            "latest_stage_name": "final_dataset_projection",
+            "final_state": "final_dataset_member",
+            "final_dataset_member": True,
+            "evidence_path": "/data-quality/lineage/dqlin_b3JkZXJzfCgwLDEp_a1b2c3d4?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        }
+    ],
+}
+
+DQ_STAGE_EVIDENCE_EXAMPLE = {
+    "stage_id": "dqstage_002",
+    "evidence_type": "join_validation",
+    "join_name": "orders_to_customer_customer_id",
+    "match_key_aliases": {
+        "left_key_alias": "customer_id",
+        "right_key_alias": "customer_id",
+    },
+    "matched_rows": [
+        {
+            "__left_row_ref": "(0,1)",
+            "__right_row_ref": "(0,9)",
+            "left_key_value": "CUST-001",
+            "right_key_value": "CUST-001",
+        }
+    ],
+    "unmatched_left_rows": [
+        {
+            "__left_row_ref": "(0,15)",
+            "left_key_value": "CUST-404",
+        }
+    ],
+    "unmatched_right_rows": [],
+    "summary": {
+        "measurement_status": "measured",
+        "join": {
+            "join_name": "orders_to_customer_customer_id",
+        },
+    },
+    "limit": 100,
+    "offset": 0,
+}
+
+DQ_JOIN_EVIDENCE_EXAMPLE = {
+    "join_artifact_id": "dqjoin_001",
+    "match_key_aliases": {
+        "left_key_alias": "customer_id",
+        "right_key_alias": "customer_id",
+    },
+    "matched_rows": [
+        {
+            "__left_row_ref": "(0,1)",
+            "__right_row_ref": "(0,9)",
+            "left_key_value": "CUST-001",
+            "right_key_value": "CUST-001",
+        }
+    ],
+    "unmatched_left_rows": [
+        {
+            "__left_row_ref": "(0,15)",
+            "left_key_value": "CUST-404",
+        }
+    ],
+    "unmatched_right_rows": [],
+    "summary": {
+        "join_name": "orders_to_customer_customer_id",
+        "measurement_status": "measured",
+    },
+    "limit": 100,
+    "offset": 0,
 }
 
 DQ_REMEDIATION_EXAMPLE = {
@@ -9728,11 +10120,22 @@ def get_data_quality_run_hydration(run_id: str) -> dict:
         )
     except Exception:
         enrichment_question_queue = {"summary": {}, "questions": []}
+    try:
+        lineage_overview = fetch_lineage_overview(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            limit=10,
+        )
+    except Exception:
+        lineage_overview = {"summary": {}, "rows": []}
     return build_data_quality_run_hydration_payload(
         row=row,
         remediation_plan=remediation_plan,
         rule_review_queue=rule_review_queue,
         enrichment_question_queue=enrichment_question_queue,
+        lineage_overview=lineage_overview,
     )
 
 
@@ -9779,7 +10182,7 @@ def resume_data_quality_run_after_rule_review(run_id: str, payload: dict | None 
         tenant_id=str(run.get("tenant_id") or ""),
         domain_id=str(run.get("domain_id") or "data_quality_observability"),
         run_id=run_id,
-        limit=500,
+        limit=1200,
     )
     unresolved = [row for row in pending if str(row.get("status") or "").strip().lower() in {"needs_review", "unsupported"}]
     if unresolved:
@@ -9794,7 +10197,6 @@ def resume_data_quality_run_after_rule_review(run_id: str, payload: dict | None 
         payload={"run_id": run_id, **(payload or {})},
         idempotency_key=None,
     )
-    mark_run_status(settings, run_id, "queued")
     return {
         "run_id": run_id,
         "status": "queued",
@@ -9829,21 +10231,21 @@ def list_data_quality_table_summaries(
     tenant_id: str,
     domain_id: str = "data_quality_observability",
     run_id: str | None = None,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> dict:
     duplicate_candidates = list_quality_duplicate_candidates(
         settings,
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        limit=500,
+        limit=1200,
     )
     enrichment_opportunities = list_quality_enrichment_opportunities(
         settings,
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        limit=500,
+        limit=1200,
     )
     duplicate_counts: dict[str, int] = {}
     for item in duplicate_candidates:
@@ -9914,7 +10316,7 @@ def list_data_quality_rules(
     run_id: str | None = None,
     status: str | None = None,
     rule_status: str | None = None,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> dict:
     rows = list_quality_rules(
         settings,
@@ -10293,7 +10695,7 @@ def list_data_quality_freshness_results(
     tenant_id: str,
     domain_id: str = "data_quality_observability",
     run_id: str | None = None,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> dict:
     tables = list_quality_tables(
         settings,
@@ -10360,7 +10762,7 @@ def list_data_quality_duplicate_candidates(
     run_id: str | None = None,
     table_name: str | None = None,
     review_status: str | None = None,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> dict:
     rows = list_quality_duplicate_candidates(
         settings,
@@ -10379,6 +10781,364 @@ def list_data_quality_duplicate_candidates(
         "review_status": review_status,
         "duplicates": rows,
     }
+
+
+@app.get(
+    "/data-quality/stages",
+    tags=["data-quality"],
+    summary="List multi-table dataset stages",
+    description="Return persisted dataset stage summaries for a data quality run.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "stages": {
+                                "summary": "Dataset stages",
+                                "value": DQ_STAGES_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_data_quality_dataset_stages_api(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    limit: int = 1200,
+) -> dict:
+    rows = list_quality_dataset_stages(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=limit,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "stages": rows,
+    }
+
+
+@app.get(
+    "/data-quality/stages/{stage_id}",
+    tags=["data-quality"],
+    summary="Get dataset stage detail",
+    description="Return one persisted dataset stage summary.",
+)
+def get_data_quality_dataset_stage_api(
+    stage_id: str,
+    tenant_id: str,
+) -> dict:
+    row = get_quality_dataset_stage(settings, stage_id, tenant_id=tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality stage not found")
+    return row
+
+
+@app.get(
+    "/data-quality/joins",
+    tags=["data-quality"],
+    summary="List planned or persisted join artifacts",
+    description="Return join artifacts captured for a multi-table data quality run.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "joins": {
+                                "summary": "Join artifacts",
+                                "value": DQ_JOINS_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_data_quality_join_artifacts_api(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    limit: int = 1200,
+) -> dict:
+    rows = list_quality_join_artifacts(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=limit,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "joins": rows,
+    }
+
+
+@app.get(
+    "/data-quality/joins/{join_artifact_id}",
+    tags=["data-quality"],
+    summary="Get join artifact detail",
+    description="Return one persisted join artifact.",
+)
+def get_data_quality_join_artifact_api(
+    join_artifact_id: str,
+    tenant_id: str,
+) -> dict:
+    row = get_quality_join_artifact(settings, join_artifact_id, tenant_id=tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality join artifact not found")
+    return row
+
+
+@app.get(
+    "/data-quality/rejected-records",
+    tags=["data-quality"],
+    summary="List rejected records across measured stages",
+    description="Return persisted rejected-record outcomes for a multi-table data quality run.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "rejected_records": {
+                                "summary": "Rejected records",
+                                "value": DQ_REJECTED_RECORDS_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_data_quality_rejected_records_api(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    stage_id: str | None = None,
+    limit: int = 1200,
+) -> dict:
+    rows = list_quality_stage_row_outcomes(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        stage_id=stage_id,
+        outcome_type="rejected",
+        limit=limit,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "stage_id": stage_id,
+        "rejected_records": rows,
+    }
+
+
+@app.get(
+    "/data-quality/final-dataset",
+    tags=["data-quality"],
+    summary="Get final dataset artifact summary",
+    description="Return the persisted final dataset summary artifact for a multi-table data quality run.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "final_dataset": {
+                                "summary": "Final dataset artifact",
+                                "value": DQ_FINAL_DATASET_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_data_quality_final_dataset_api(
+    tenant_id: str,
+    run_id: str,
+    domain_id: str = "data_quality_observability",
+) -> dict:
+    row = get_quality_final_dataset_artifact(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality final dataset artifact not found")
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "final_dataset": row,
+    }
+
+
+@app.get(
+    "/data-quality/final-dataset/rows",
+    tags=["data-quality"],
+    summary="Get final surviving dataset rows",
+    description="Return row-level surviving records for the current measurable final dataset basis stage.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "final_dataset_rows": {
+                                "summary": "Final dataset rows",
+                                "value": DQ_FINAL_DATASET_ROWS_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_data_quality_final_dataset_rows_api(
+    tenant_id: str,
+    run_id: str,
+    domain_id: str = "data_quality_observability",
+    limit: int = 1200,
+    offset: int = 0,
+) -> dict:
+    return fetch_final_dataset_rows(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/data-quality/lineage",
+    tags=["data-quality"],
+    summary="List lineage journey rows for a run",
+    description="Return run-level row-lineage overview rows with transition counts, latest stage, and final dataset membership.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "lineage_overview": {
+                                "summary": "Lineage overview for a run",
+                                "value": DQ_LINEAGE_OVERVIEW_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def list_data_quality_lineage_overview_api(
+    tenant_id: str,
+    run_id: str,
+    domain_id: str = "data_quality_observability",
+    limit: int = 1200,
+) -> dict:
+    return fetch_lineage_overview(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=limit,
+    )
+
+
+@app.get(
+    "/data-quality/lineage/{row_lineage_id}/journey",
+    tags=["data-quality"],
+    summary="Get UI-friendly row lineage journey",
+    description="Return a display-oriented stage-by-stage lineage journey with labels and status categories for one row lineage id.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "lineage_journey": {
+                                "summary": "Row lineage journey",
+                                "value": DQ_LINEAGE_JOURNEY_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_data_quality_lineage_journey_api(
+    row_lineage_id: str,
+    tenant_id: str,
+    run_id: str,
+    domain_id: str = "data_quality_observability",
+) -> dict:
+    return fetch_lineage_journey(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        row_lineage_id=row_lineage_id,
+    )
+
+
+@app.get(
+    "/data-quality/lineage/{row_lineage_id}",
+    tags=["data-quality"],
+    summary="Get row lineage trace",
+    description="Return the persisted transition edges, outcomes, and best-effort final dataset membership for one row lineage id.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "lineage_trace": {
+                                "summary": "Row lineage trace",
+                                "value": DQ_LINEAGE_TRACE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_data_quality_lineage_trace_api(
+    row_lineage_id: str,
+    tenant_id: str,
+    run_id: str,
+    domain_id: str = "data_quality_observability",
+) -> dict:
+    return fetch_lineage_trace(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        row_lineage_id=row_lineage_id,
+    )
 
 
 @app.get(
@@ -10454,7 +11214,7 @@ def get_data_quality_missingness_evidence(
     column_name: str,
     domain_id: str = "data_quality_observability",
     include_blank: bool = True,
-    limit: int = 100,
+    limit: int = 1200,
     offset: int = 0,
 ) -> dict:
     run_row = load_quality_run(settings, run_id=run_id, tenant_id=tenant_id, domain_id=domain_id)
@@ -10495,7 +11255,7 @@ def get_data_quality_rule_evidence(
     rule_id: str,
     tenant_id: str,
     domain_id: str = "data_quality_observability",
-    limit: int = 100,
+    limit: int = 1200,
 ) -> dict:
     return fetch_rule_evidence(
         settings,
@@ -10532,7 +11292,7 @@ def get_data_quality_duplicate_evidence(
     candidate_id: str,
     tenant_id: str,
     domain_id: str = "data_quality_observability",
-    limit: int = 100,
+    limit: int = 1200,
 ) -> dict:
     return fetch_duplicate_evidence(
         settings,
@@ -10605,13 +11365,91 @@ def get_data_quality_freshness_evidence(
 def get_data_quality_enrichment_evidence(
     proposal_id: str,
     tenant_id: str,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> dict:
     return fetch_enrichment_evidence(
         settings,
         proposal_id=proposal_id,
         tenant_id=tenant_id,
         limit=limit,
+    )
+
+
+@app.get(
+    "/data-quality/evidence/stages/{stage_id}",
+    tags=["data-quality"],
+    summary="Get dataset stage evidence",
+    description="Return row-level evidence for a persisted multi-table dataset stage.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "stage_evidence": {
+                                "summary": "Stage drill-through",
+                                "value": DQ_STAGE_EVIDENCE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_data_quality_stage_evidence(
+    stage_id: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    limit: int = 1200,
+    offset: int = 0,
+) -> dict:
+    return fetch_stage_evidence(
+        settings,
+        stage_id=stage_id,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/data-quality/evidence/joins/{join_artifact_id}",
+    tags=["data-quality"],
+    summary="Get join evidence rows",
+    description="Return matched and unmatched source rows for a persisted join artifact.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "join_evidence": {
+                                "summary": "Join drill-through",
+                                "value": DQ_JOIN_EVIDENCE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_data_quality_join_evidence(
+    join_artifact_id: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    limit: int = 1200,
+    offset: int = 0,
+) -> dict:
+    return fetch_join_evidence(
+        settings,
+        join_artifact_id=join_artifact_id,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -10746,7 +11584,7 @@ def list_data_quality_enrichment_opportunities(
     domain_id: str = "data_quality_observability",
     run_id: str | None = None,
     status: str | None = None,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> dict:
     rows = list_quality_enrichment_opportunities(
         settings,
@@ -10812,7 +11650,7 @@ def list_data_quality_enrichment_questions(
     domain_id: str = "data_quality_observability",
     run_id: str | None = None,
     status: str | None = None,
-    limit: int = 100,
+    limit: int = 1200,
 ) -> dict:
     return build_enrichment_question_queue(
         settings,
@@ -10884,7 +11722,7 @@ def answer_data_quality_enrichment_question(opportunity_id: str, payload: dict) 
             tenant_id=tenant_id,
             domain_id=str(updated.get("domain_id") or opportunity.get("domain_id") or "data_quality_observability"),
             run_id=str(updated.get("run_id") or opportunity.get("run_id") or ""),
-            limit=500,
+            limit=1200,
         )
         question = next((item for item in (queue_item.get("questions") or []) if item.get("opportunity_id") == opportunity_id), None)
         return {"opportunity_id": opportunity_id, "status": "deferred", "question": question}
@@ -10900,7 +11738,7 @@ def answer_data_quality_enrichment_question(opportunity_id: str, payload: dict) 
             tenant_id=tenant_id,
             domain_id=str(updated.get("domain_id") or opportunity.get("domain_id") or "data_quality_observability"),
             run_id=str(updated.get("run_id") or opportunity.get("run_id") or ""),
-            limit=500,
+            limit=1200,
         )
         question = next((item for item in (queue_item.get("questions") or []) if item.get("opportunity_id") == opportunity_id), None)
         return {"opportunity_id": opportunity_id, "status": "rejected", "question": question}
@@ -10916,7 +11754,7 @@ def answer_data_quality_enrichment_question(opportunity_id: str, payload: dict) 
             tenant_id=tenant_id,
             domain_id=str(updated.get("domain_id") or opportunity.get("domain_id") or "data_quality_observability"),
             run_id=str(updated.get("run_id") or opportunity.get("run_id") or ""),
-            limit=500,
+            limit=1200,
         )
         question = next((item for item in (queue_item.get("questions") or []) if item.get("opportunity_id") == opportunity_id), None)
         return {"opportunity_id": opportunity_id, "status": "pending_answer", "question": question}
@@ -10929,7 +11767,7 @@ def answer_data_quality_enrichment_question(opportunity_id: str, payload: dict) 
         tenant_id=tenant_id,
         domain_id=str(opportunity.get("domain_id") or "data_quality_observability"),
         run_id=str(opportunity.get("run_id") or ""),
-        limit=500,
+        limit=1200,
     )
     question = next((item for item in (queue_item.get("questions") or []) if item.get("opportunity_id") == opportunity_id), None)
     return {

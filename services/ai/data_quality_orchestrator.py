@@ -23,8 +23,17 @@ from services.ai.data_quality_enrichment import discover_enrichment_opportunitie
 from services.ai.data_quality_trust import compute_data_quality_trust_scores
 from services.ai.data_quality_store import (
     create_or_update_quality_run,
+    get_quality_final_dataset_artifact,
     get_quality_run_by_run_id,
     get_previous_quality_run,
+    list_quality_dataset_stages,
+    list_quality_join_artifacts,
+    list_quality_lineage_edges,
+    list_quality_stage_row_outcomes,
+    replace_quality_dataset_stages,
+    replace_quality_join_artifacts,
+    replace_quality_lineage_edges,
+    replace_quality_stage_row_outcomes,
     list_quality_tables_by_quality_run,
     list_quality_duplicate_candidates,
     list_quality_rules,
@@ -32,10 +41,12 @@ from services.ai.data_quality_store import (
     replace_quality_duplicate_candidates,
     replace_quality_enrichment_opportunities,
     replace_quality_rules,
+    upsert_quality_final_dataset_artifact,
     update_quality_table_monitoring,
     update_quality_table_trust_scores,
     upsert_quality_artifacts_from_profiling,
 )
+from services.ai.data_quality_stages import compute_stage_plan_metrics_tool, infer_stage_plan_tool
 from services.ai.data_quality_rules import (
     classify_quality_rule_review_status,
     build_quality_rule_execution_plan,
@@ -181,6 +192,26 @@ def _quality_summary(
     }
 
 
+_PHASE58_SUMMARY_KEYS = {
+    "dataset_stage_plan",
+    "dataset_stage_count",
+    "join_stage_count",
+    "filter_stage_count",
+    "total_rejected_row_count",
+    "lineage_edge_count",
+    "final_dataset_row_count",
+    "final_dataset_readiness_status",
+}
+
+
+def _merge_phase58_summary(existing: dict[str, Any] | None, summary: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(summary or {})
+    for key in _PHASE58_SUMMARY_KEYS:
+        if key not in merged and existing and key in existing:
+            merged[key] = existing.get(key)
+    return merged
+
+
 def _rule_status(rule: dict[str, Any]) -> str:
     return str(rule.get("status") or "").strip().lower()
 
@@ -293,7 +324,7 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        limit=500,
+        limit=1200,
     )
     pending_review = [row for row in rules if _rule_status(row) in {"needs_review", "unsupported"}]
     if pending_review:
@@ -336,23 +367,26 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        limit=500,
+        limit=1200,
     )
     quality_tables = list_quality_tables(
         settings,
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        limit=500,
+        limit=1200,
     )
     freshness_results = _freshness_results_from_quality_tables(quality_tables)
     freshness_summary = _freshness_summary_from_results(freshness_results)
-    updated_summary = _quality_summary(
-        profiling,
-        summary.get("persisted") or {"tables": len(quality_tables), "columns": 0},
-        rule_summary,
-        _duplicate_summary_from_candidates(duplicate_candidates),
-        freshness_summary,
+    updated_summary = _merge_phase58_summary(
+        summary,
+        _quality_summary(
+            profiling,
+            summary.get("persisted") or {"tables": len(quality_tables), "columns": 0},
+            rule_summary,
+            _duplicate_summary_from_candidates(duplicate_candidates),
+            freshness_summary,
+        ),
     )
     updated_summary.update(
         {
@@ -446,7 +480,7 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        limit=500,
+        limit=1200,
     )
     updated_summary.update(trust.get("summary") or {})
     create_or_update_quality_run(
@@ -486,6 +520,11 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         duplicate_candidates=duplicate_candidates,
         freshness_results=freshness_results,
         enrichment_opportunities=opportunities,
+        dataset_stages=list_quality_dataset_stages(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200),
+        join_artifacts=list_quality_join_artifacts(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200),
+        lineage_edges=list_quality_lineage_edges(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000),
+        row_outcomes=list_quality_stage_row_outcomes(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000),
+        final_dataset=get_quality_final_dataset_artifact(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id) or {},
     )
     if dashboard.get("dashboard_id"):
         updated_summary["dashboard_id"] = dashboard.get("dashboard_id")
@@ -626,7 +665,7 @@ def run_data_quality_agentic_workflow(
                 profiling_json=profiling,
                 **scope,
             )
-        summary = _quality_summary(profiling, persisted)
+        summary = _merge_phase58_summary(state.get("quality_summary"), _quality_summary(profiling, persisted))
         state["quality_summary"] = summary
         create_or_update_quality_run(
             settings,
@@ -642,6 +681,115 @@ def run_data_quality_agentic_workflow(
             "completed",
             "Data quality profiling completed",
             summary,
+            event_callback=event_callback,
+        )
+        return state
+
+    def stage_planner_node(state: dict[str, Any]) -> dict[str, Any]:
+        _emit(
+            settings,
+            run_id,
+            "DatasetStagePlannerAgent",
+            "running",
+            "Planning multi-table data quality stages from schema and context",
+            event_callback=event_callback,
+        )
+        scope = _scope(state, run_id)
+        quality_run_id = str(state.get("quality_run_id") or "").strip()
+        stage_plan = infer_stage_plan_tool(
+            schema_graph=state.get("schema_graph") or {},
+            context_text=state.get("context_text"),
+            settings=settings,
+        )
+        scoped_conn = _scoped_conn_from_state(state) or _resolve_scoped_conn_from_scope(settings, scope)
+        if scoped_conn is not None:
+            stage_plan = compute_stage_plan_metrics_tool(
+                settings,
+                scoped_conn=scoped_conn,
+                schema_name=scope["schema_name"],
+                tenant_id=scope["tenant_id"],
+                domain_id=scope["domain_id"],
+                stage_plan=stage_plan,
+            )
+        if quality_run_id:
+            replace_quality_dataset_stages(
+                settings,
+                quality_run_id=quality_run_id,
+                run_id=run_id,
+                tenant_id=scope["tenant_id"],
+                domain_id=scope["domain_id"],
+                stages=stage_plan.get("stages") or [],
+            )
+            replace_quality_join_artifacts(
+                settings,
+                quality_run_id=quality_run_id,
+                run_id=run_id,
+                tenant_id=scope["tenant_id"],
+                domain_id=scope["domain_id"],
+                joins=stage_plan.get("joins") or [],
+            )
+            replace_quality_stage_row_outcomes(
+                settings,
+                quality_run_id=quality_run_id,
+                run_id=run_id,
+                tenant_id=scope["tenant_id"],
+                domain_id=scope["domain_id"],
+                row_outcomes=stage_plan.get("row_outcomes") or [],
+            )
+            replace_quality_lineage_edges(
+                settings,
+                quality_run_id=quality_run_id,
+                run_id=run_id,
+                tenant_id=scope["tenant_id"],
+                domain_id=scope["domain_id"],
+                edges=stage_plan.get("lineage_edges") or [],
+            )
+            upsert_quality_final_dataset_artifact(
+                settings,
+                quality_run_id=quality_run_id,
+                run_id=run_id,
+                tenant_id=scope["tenant_id"],
+                domain_id=scope["domain_id"],
+                artifact=stage_plan.get("final_dataset") or {},
+            )
+        state["dataset_stage_plan"] = stage_plan
+        updated_summary = dict(state.get("quality_summary") or {})
+        updated_summary["dataset_stage_plan"] = stage_plan
+        updated_summary["dataset_stage_count"] = stage_plan.get("stage_count", 0)
+        updated_summary["join_stage_count"] = stage_plan.get("join_stage_count", 0)
+        updated_summary["filter_stage_count"] = stage_plan.get("filter_stage_count", 0)
+        updated_summary["total_rejected_row_count"] = stage_plan.get("rejected_row_count", 0)
+        updated_summary["lineage_edge_count"] = len(stage_plan.get("lineage_edges") or [])
+        updated_summary["final_dataset_row_count"] = (stage_plan.get("final_dataset") or {}).get("final_row_count")
+        updated_summary["final_dataset_readiness_status"] = (stage_plan.get("final_dataset") or {}).get("readiness_status")
+        state["quality_summary"] = updated_summary
+        create_or_update_quality_run(
+            settings,
+            **scope,
+            status="running",
+            overall_trust_score=updated_summary.get("average_table_trust_score"),
+            summary_json=updated_summary,
+        )
+        _emit(
+            settings,
+            run_id,
+            "DatasetStagePlannerAgent",
+            "completed",
+            "Multi-table data quality stage plan prepared",
+            {
+                "stage_count": stage_plan.get("stage_count", 0),
+                "join_stage_count": stage_plan.get("join_stage_count", 0),
+                "filter_stage_count": stage_plan.get("filter_stage_count", 0),
+                "stage_names": [item.get("stage_name") for item in (stage_plan.get("stages") or [])],
+                "measured_stage_count": sum(
+                    1
+                    for item in (stage_plan.get("stages") or [])
+                    if str((item.get("summary_json") or {}).get("measurement_status") or "").strip() in {"measured", "derived"}
+                ),
+                "rejected_row_count": stage_plan.get("rejected_row_count", 0),
+                "lineage_edge_count": len(stage_plan.get("lineage_edges") or []),
+                "final_dataset_row_count": (stage_plan.get("final_dataset") or {}).get("final_row_count"),
+            },
             event_callback=event_callback,
         )
         return state
@@ -701,12 +849,15 @@ def run_data_quality_agentic_workflow(
             state["quality_rule_rows"] = _merge_rule_rows(rules, [])
             state["awaiting_rule_review"] = True
             state["run_status"] = "awaiting_rule_review"
-            updated_summary = _quality_summary(
+            updated_summary = _merge_phase58_summary(
+                state.get("quality_summary"),
+                _quality_summary(
                 state.get("profiling_stats") or {},
                 (state.get("quality_summary") or {}).get("persisted") or {"tables": 0, "columns": 0},
                 rule_summary,
                 state.get("duplicate_summary") or {},
                 state.get("freshness_summary") or {},
+                ),
             )
             updated_summary.update(
                 {
@@ -749,12 +900,15 @@ def run_data_quality_agentic_workflow(
         state["quality_rule_summary"] = rule_summary
         state["quality_rule_results"] = execution.get("results", [])
         state["quality_rule_rows"] = _merge_rule_rows(rules, execution.get("results", []))
-        state["quality_summary"] = _quality_summary(
-            state.get("profiling_stats") or {},
-            (state.get("quality_summary") or {}).get("persisted") or {"tables": 0, "columns": 0},
-            rule_summary,
-            state.get("duplicate_summary") or {},
-            state.get("freshness_summary") or {},
+        state["quality_summary"] = _merge_phase58_summary(
+            state.get("quality_summary"),
+            _quality_summary(
+                state.get("profiling_stats") or {},
+                (state.get("quality_summary") or {}).get("persisted") or {"tables": 0, "columns": 0},
+                rule_summary,
+                state.get("duplicate_summary") or {},
+                state.get("freshness_summary") or {},
+            ),
         )
         state["quality_summary"].update(
             {
@@ -952,7 +1106,7 @@ def run_data_quality_agentic_workflow(
             tenant_id=scope["tenant_id"],
             domain_id=scope["domain_id"],
             run_id=run_id,
-            limit=500,
+            limit=1200,
         )
         trust = compute_data_quality_trust_scores(
             quality_tables=quality_tables,
@@ -971,7 +1125,7 @@ def run_data_quality_agentic_workflow(
             tenant_id=scope["tenant_id"],
             domain_id=scope["domain_id"],
             run_id=run_id,
-            limit=500,
+            limit=1200,
         )
         updated_summary = dict(state.get("quality_summary") or {})
         updated_summary.update(trust.get("summary") or {})
@@ -1018,6 +1172,11 @@ def run_data_quality_agentic_workflow(
             duplicate_candidates=state.get("duplicate_candidates") or [],
             freshness_results=state.get("freshness_results") or [],
             enrichment_opportunities=state.get("enrichment_opportunities") or [],
+            dataset_stages=list_quality_dataset_stages(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200),
+            join_artifacts=list_quality_join_artifacts(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200),
+            lineage_edges=list_quality_lineage_edges(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=4000),
+            row_outcomes=list_quality_stage_row_outcomes(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=4000),
+            final_dataset=get_quality_final_dataset_artifact(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id) or {},
         )
         state["dashboard_id"] = dashboard.get("dashboard_id")
         state["dashboard_title"] = dashboard.get("dashboard_title")
@@ -1132,6 +1291,7 @@ def run_data_quality_agentic_workflow(
 
     graph.add_node("router", router_node)
     graph.add_node("schema", schema_node)
+    graph.add_node("stage_planner", stage_planner_node)
     graph.add_node("profiling", profiling_node)
     graph.add_node("duplicates", duplicate_node)
     graph.add_node("freshness", freshness_node)
@@ -1143,7 +1303,8 @@ def run_data_quality_agentic_workflow(
     graph.add_node("finalize", finalize_node)
     graph.set_entry_point("router")
     graph.add_edge("router", "schema")
-    graph.add_edge("schema", "profiling")
+    graph.add_edge("schema", "stage_planner")
+    graph.add_edge("stage_planner", "profiling")
     graph.add_edge("profiling", "duplicates")
     graph.add_edge("duplicates", "freshness")
     graph.add_edge("freshness", "rules")

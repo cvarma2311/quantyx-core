@@ -16,6 +16,7 @@ from services.ai import data_quality_rule_review as dq_rule_review
 from services.ai import data_quality_remediation as dq_remediation
 from services.ai import data_quality_report as dq_report
 from services.ai import data_quality_rules as dq_rules
+from services.ai import data_quality_stages as dq_stages
 from services.ai import data_quality_store as dq_store
 from services.ai import data_quality_trust as dq_trust
 from services.ai import data_quality_workspace as dq_workspace
@@ -32,6 +33,31 @@ def test_is_data_quality_workflow_by_explicit_mode() -> None:
 
 def test_quality_run_id_for_is_stable() -> None:
     assert dq_store.quality_run_id_for("run_abc123") == "dqrun_abc123"
+
+
+def test_merge_phase58_summary_preserves_stage_and_lineage_fields() -> None:
+    merged = dq_orchestrator._merge_phase58_summary(
+        {
+            "dataset_stage_count": 7,
+            "join_stage_count": 3,
+            "filter_stage_count": 2,
+            "lineage_edge_count": 14,
+            "final_dataset_row_count": 120,
+            "final_dataset_readiness_status": "ready",
+        },
+        {
+            "profiled_tables": 4,
+            "failed_rule_count": 0,
+        },
+    )
+
+    assert merged["profiled_tables"] == 4
+    assert merged["dataset_stage_count"] == 7
+    assert merged["join_stage_count"] == 3
+    assert merged["filter_stage_count"] == 2
+    assert merged["lineage_edge_count"] == 14
+    assert merged["final_dataset_row_count"] == 120
+    assert merged["final_dataset_readiness_status"] == "ready"
 
 
 def test_upsert_quality_artifacts_from_profiling_flattens_tables_and_columns(monkeypatch) -> None:
@@ -116,6 +142,212 @@ def test_extract_quality_rules_from_context_resolves_known_patterns() -> None:
     assert rules[0]["reference_table"] == "customer"
     assert rules[1]["table_name"] == "customer"
     assert rules[3]["column_name"] == "amount"
+
+
+def test_infer_stage_plan_tool_builds_sources_joins_filters_and_final_stage() -> None:
+    plan = dq_stages.infer_stage_plan_tool(
+        schema_graph={
+            "tables": [
+                {"name": "orders", "columns": [{"name": "customer_id"}, {"name": "status"}]},
+                {"name": "customer", "columns": [{"name": "customer_id"}, {"name": "status"}]},
+            ]
+        },
+        context_text=(
+            "orders.customer_id must exist in customer.customer_id. "
+            "Only customer.status = active. "
+            "Filter to recent orders."
+        ),
+    )
+
+    assert plan["source_table_count"] == 2
+    assert plan["workflow_type"] in {"multi_table_quality", "reconciliation"}
+    assert isinstance(plan["shared_key_inferences"], list)
+    assert isinstance(plan["join_strategies"], list)
+    assert plan["join_stage_count"] >= 1
+    assert plan["filter_stage_count"] >= 1
+    assert plan["joins"][0]["join_artifact_id"].startswith("dqjoin_")
+    assert plan["stages"][0]["stage_id"].startswith("dqstage_")
+    assert plan["stages"][0]["stage_type"] == "source_profile"
+    assert plan["stages"][-1]["stage_type"] == "final_projection"
+
+
+def test_domain_context_interpreter_and_join_strategy_tools_return_structured_contracts() -> None:
+    schema_graph = {
+        "tables": [
+            {"name": "billing_cdr_data", "columns": [{"name": "rating_timestamp"}, {"name": "msisdn"}]},
+            {"name": "roaming_settlement_data", "columns": [{"name": "event_time"}, {"name": "msisdn"}]},
+        ]
+    }
+    interpreted = dq_stages.domain_context_interpreter_tool(
+        schema_graph=schema_graph,
+        context_text=(
+            "Billing to Roaming Settlement reconciliation\n"
+            "- Reconcile billing_cdr_data to roaming_settlement_data.\n"
+            "- Core match intent: billing rating_timestamp to roaming_settlement_data event_time inside the reconciliation window.\n"
+            "- Match window: 900 seconds.\n"
+        ),
+    )
+    shared_keys = dq_stages.shared_key_inference_tool(
+        schema_graph=schema_graph,
+        interpreted_context=interpreted,
+    )
+    asymmetries = dq_stages.asymmetry_detection_tool(
+        interpreted_context=interpreted,
+        shared_key_inferences=shared_keys,
+    )
+    strategies = dq_stages.join_strategy_builder_tool(
+        shared_key_inferences=shared_keys,
+        asymmetry_detections=asymmetries,
+    )
+
+    assert interpreted["workflow_type"] == "reconciliation"
+    assert interpreted["join_intents"][0]["left_table"] == "billing_cdr_data"
+    assert ("billing_cdr_data", "roaming_settlement_data") == (
+        shared_keys[0]["left_table"],
+        shared_keys[0]["right_table"],
+    )
+    assert any(item["left_key"] == "rating_timestamp" and item["right_key"] == "event_time" for item in shared_keys[0]["match_keys"])
+    assert any(item["asymmetry_type"] == "temporal_window" and item["tolerance_seconds"] == 900 for item in asymmetries[0]["asymmetries"])
+    assert strategies[0]["strategy_type"] == "windowed_temporal_join"
+
+
+def test_infer_stage_plan_tool_builds_cdr_reconciliation_joins() -> None:
+    plan = dq_stages.infer_stage_plan_tool(
+        schema_graph={
+            "tables": [
+                {"name": "network_cdr_data", "columns": [{"name": "call_id"}, {"name": "msisdn"}, {"name": "event_time"}]},
+                {"name": "mediation_data", "columns": [{"name": "call_id"}, {"name": "msisdn"}, {"name": "cdr_id"}]},
+                {"name": "billing_cdr_data", "columns": [{"name": "cdr_id"}, {"name": "rating_timestamp"}, {"name": "msisdn"}]},
+                {"name": "roaming_settlement_data", "columns": [{"name": "event_time"}, {"name": "msisdn"}, {"name": "partner_id"}]},
+            ]
+        },
+        context_text=(
+            "Network CDR to Mediation reconciliation\n"
+            "- Reconcile network_cdr_data to mediation_data.\n"
+            "- Core match intent: same call/session identity using call_id, msisdn, and time logic.\n"
+            "Mediation to Billing reconciliation\n"
+            "- Reconcile mediation_data to billing_cdr_data.\n"
+            "- Core match intent: mediation usage event to billing row by cdr_id and billing eligibility.\n"
+            "Billing to Roaming Settlement reconciliation\n"
+            "- Reconcile billing_cdr_data to roaming_settlement_data.\n"
+            "- Core match intent: billing rating_timestamp to roaming_settlement_data event_time inside the reconciliation window, with subscriber correlation and partner context.\n"
+        ),
+    )
+
+    join_pairs = {
+        (join["left_table"], join["left_key"], join["right_table"], join["right_key"])
+        for join in (plan.get("joins") or [])
+    }
+    assert ("network_cdr_data", "call_id", "mediation_data", "call_id") in join_pairs
+    assert ("network_cdr_data", "msisdn", "mediation_data", "msisdn") in join_pairs
+    assert ("mediation_data", "cdr_id", "billing_cdr_data", "cdr_id") in join_pairs
+    assert ("billing_cdr_data", "rating_timestamp", "roaming_settlement_data", "event_time") in join_pairs
+    assert any(strategy["strategy_type"] == "windowed_temporal_join" for strategy in (plan.get("join_strategies") or []))
+    assert plan["join_stage_count"] >= 4
+    assert plan["stage_count"] >= 9
+    assert plan["stages"][-1]["stage_type"] == "final_projection"
+
+
+def test_compute_stage_plan_metrics_tool_measures_source_and_join_counts(monkeypatch) -> None:
+    def fake_run_query(settings, sql, params, scoped_conn=None, statement_timeout_ms=None):
+        if 'COUNT(*) AS row_count FROM "public"."orders"' in sql:
+            return [{"row_count": 12}]
+        if 'COUNT(*) AS row_count FROM "public"."customer" WHERE "status"::text = %s' in sql:
+            return [{"row_count": 3}]
+        if 'COUNT(*) AS row_count FROM "public"."customer"' in sql:
+            return [{"row_count": 5}]
+        if "AS matched_row_count" in sql:
+            return [{"matched_row_count": 10}]
+        if 'FROM "public"."orders" l' in sql and "AS unmatched_row_count" in sql:
+            return [{"unmatched_row_count": 2}]
+        if 'FROM "public"."customer" r' in sql and "AS unmatched_row_count" in sql:
+            return [{"unmatched_row_count": 1}]
+        if "AS duplicate_match_count" in sql:
+            return [{"duplicate_match_count": 3}]
+        if "__right_row_ref" in sql:
+            return [{"__left_row_ref": "(0,1)", "__right_row_ref": "(0,9)", "left_key_value": "C001", "right_key_value": "C001"}]
+        if "__left_row_ref" in sql and "*" in sql:
+            return [{"__left_row_ref": "(0,2)", "left_key_value": "C404"}]
+        if "__right_row_ref" in sql and "*" in sql:
+            return [{"__right_row_ref": "(0,4)", "right_key_value": "C999"}]
+        if 'FROM "public"."customer" WHERE NOT ("status"::text = %s)' in sql:
+            return [{"__row_ref": "(0,5)", "status": "inactive"}]
+        return [{"__row_ref": "(0,1)", "customer_id": "C001"}]
+
+    monkeypatch.setattr(dq_stages, "run_query", fake_run_query)
+
+    plan = dq_stages.compute_stage_plan_metrics_tool(
+        object(),
+        scoped_conn=object(),
+        schema_name="public",
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        stage_plan={
+            "stages": [
+                {
+                    "stage_id": "dqstage_1",
+                    "stage_seq": 1,
+                    "stage_name": "source_profile_orders",
+                    "stage_type": "source_profile",
+                    "output_dataset": "orders",
+                },
+                {
+                    "stage_id": "dqstage_2",
+                    "stage_seq": 2,
+                    "stage_name": "orders_to_customer_customer_id",
+                    "stage_type": "join_validation",
+                    "join": {
+                        "join_artifact_id": "dqjoin_1",
+                        "join_name": "orders_to_customer_customer_id",
+                        "left_table": "orders",
+                        "right_table": "customer",
+                        "left_key": "customer_id",
+                        "right_key": "customer_id",
+                    },
+                },
+                {
+                    "stage_id": "dqstage_3",
+                    "stage_seq": 3,
+                    "stage_name": "filter_1",
+                    "stage_type": "filter",
+                    "output_dataset": "customer",
+                    "expression": {
+                        "expression_text": "customer.status = active",
+                        "parsed_filter": {"table_name": "customer", "column_name": "status", "operator": "=", "value": "active"},
+                    },
+                },
+                {
+                    "stage_id": "dqstage_4",
+                    "stage_seq": 4,
+                    "stage_name": "final_dataset_projection",
+                    "stage_type": "final_projection",
+                },
+            ],
+            "joins": [
+                {
+                    "join_artifact_id": "dqjoin_1",
+                    "join_name": "orders_to_customer_customer_id",
+                    "left_table": "orders",
+                    "right_table": "customer",
+                    "left_key": "customer_id",
+                    "right_key": "customer_id",
+                }
+            ],
+        },
+    )
+
+    assert plan["stages"][0]["output_row_count"] == 12
+    assert plan["joins"][0]["matched_row_count"] == 10
+    assert plan["joins"][0]["unmatched_left_row_count"] == 2
+    assert plan["stages"][1]["rejected_row_count"] == 2
+    assert plan["stages"][2]["output_row_count"] == 3
+    assert plan["stages"][2]["rejected_row_count"] == 2
+    assert plan["row_outcomes"][0]["row_lineage_id"].startswith("dqlin_")
+    assert plan["lineage_edges"][0]["row_lineage_id"].startswith("dqlin_")
+    assert any(item["reason_code"] == "filter_rejected" for item in plan["row_outcomes"])
+    assert plan["stages"][3]["output_row_count"] == 3
+    assert plan["final_dataset"]["final_row_count"] == 3
+    assert plan["final_dataset"]["summary_json"]["lineage_enabled"] is True
 
 
 def test_list_agent_run_events_stage_aware_requests_latest_events(monkeypatch) -> None:
@@ -592,6 +824,388 @@ def test_fetch_enrichment_evidence_returns_proposed_rows(monkeypatch) -> None:
     assert result["proposed_rows"][0]["proposed_value"] == "Karnataka"
 
 
+def test_fetch_stage_evidence_returns_join_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "get_quality_dataset_stage",
+        lambda settings, stage_id, tenant_id=None: {
+            "stage_id": stage_id,
+            "run_id": "run_1",
+            "tenant_id": tenant_id,
+            "domain_id": "data_quality_observability",
+            "stage_type": "join_validation",
+            "summary_json": {
+                "join": {
+                    "join_name": "orders_to_customer_customer_id",
+                    "left_table": "orders",
+                    "right_table": "customer",
+                    "left_key": "customer_id",
+                    "right_key": "customer_id",
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "load_quality_run",
+        lambda settings, run_id, tenant_id, domain_id: {"schema_name": "public", "connection_id": "conn_1"},
+    )
+    monkeypatch.setattr(dq_evidence, "resolve_quality_run_scoped_conn", lambda settings, run_row: object())
+
+    def fake_run_query(settings, sql, params, scoped_conn=None, statement_timeout_ms=None):
+        if "JOIN" in sql:
+            return [{"__left_row_ref": "(0,1)", "__right_row_ref": "(0,9)", "left_key_value": "C001", "right_key_value": "C001"}]
+        if 'FROM "public"."orders" l' in sql:
+            return [{"__left_row_ref": "(0,2)", "left_key_value": "C404"}]
+        return [{"__right_row_ref": "(0,4)", "right_key_value": "C999"}]
+
+    monkeypatch.setattr(dq_evidence, "run_query", fake_run_query)
+
+    result = dq_evidence.fetch_stage_evidence(
+        object(),
+        stage_id="dqstage_2",
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        limit=100,
+        offset=0,
+    )
+
+    assert result["evidence_type"] == "join_validation"
+    assert result["match_key_aliases"]["left_key_alias"] == "customer_id"
+    assert result["matched_rows"][0]["left_key_value"] == "C001"
+    assert result["matched_rows"][0]["row_lineage_id"].startswith("dqlin_")
+    assert result["unmatched_left_rows"][0]["left_key_value"] == "C404"
+
+
+def test_fetch_stage_evidence_returns_filter_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "get_quality_dataset_stage",
+        lambda settings, stage_id, tenant_id=None: {
+            "stage_id": stage_id,
+            "run_id": "run_1",
+            "tenant_id": tenant_id,
+            "domain_id": "data_quality_observability",
+            "stage_type": "filter",
+            "summary_json": {
+                "parsed_filter": {"table_name": "customer", "column_name": "status", "operator": "=", "value": "active"},
+                "output_dataset": "customer",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "load_quality_run",
+        lambda settings, run_id, tenant_id, domain_id: {"schema_name": "public", "connection_id": "conn_1"},
+    )
+    monkeypatch.setattr(dq_evidence, "resolve_quality_run_scoped_conn", lambda settings, run_row: object())
+    monkeypatch.setattr(
+        dq_evidence,
+        "list_quality_stage_row_outcomes",
+        lambda *args, **kwargs: [{"row_ref": "(0,2)", "reason_code": "filter_rejected"}],
+    )
+
+    def fake_run_query(settings, sql, params, scoped_conn=None, statement_timeout_ms=None):
+        return [{"__row_ref": "(0,1)", "status": "active"}]
+
+    monkeypatch.setattr(dq_evidence, "run_query", fake_run_query)
+
+    result = dq_evidence.fetch_stage_evidence(
+        object(),
+        stage_id="dqstage_filter_1",
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        limit=100,
+        offset=0,
+    )
+
+    assert result["evidence_type"] == "filter"
+    assert result["passed_rows"][0]["status"] == "active"
+    assert result["passed_rows"][0]["row_lineage_id"].startswith("dqlin_")
+    assert result["rejected_rows"][0]["reason_code"] == "filter_rejected"
+
+
+def test_fetch_join_evidence_returns_join_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "get_quality_join_artifact",
+        lambda settings, join_artifact_id, tenant_id=None: {
+            "join_artifact_id": join_artifact_id,
+            "run_id": "run_1",
+            "tenant_id": tenant_id,
+            "domain_id": "data_quality_observability",
+            "left_table": "orders",
+            "right_table": "customer",
+            "join_keys_json": [{"left_key": "customer_id", "right_key": "customer_id"}],
+            "summary_json": {"join_name": "orders_to_customer_customer_id", "measurement_status": "measured"},
+        },
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "load_quality_run",
+        lambda settings, run_id, tenant_id, domain_id: {"schema_name": "public", "connection_id": "conn_1"},
+    )
+    monkeypatch.setattr(dq_evidence, "resolve_quality_run_scoped_conn", lambda settings, run_row: object())
+
+    def fake_run_query(settings, sql, params, scoped_conn=None, statement_timeout_ms=None):
+        if "JOIN" in sql:
+            return [{"__left_row_ref": "(0,1)", "__right_row_ref": "(0,9)", "left_key_value": "C001", "right_key_value": "C001"}]
+        if 'FROM "public"."orders" l' in sql:
+            return [{"__left_row_ref": "(0,2)", "left_key_value": "C404"}]
+        return [{"__right_row_ref": "(0,4)", "right_key_value": "C999"}]
+
+    monkeypatch.setattr(dq_evidence, "run_query", fake_run_query)
+
+    result = dq_evidence.fetch_join_evidence(
+        object(),
+        join_artifact_id="dqjoin_1",
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        limit=100,
+        offset=0,
+    )
+
+    assert result["match_key_aliases"]["right_key_alias"] == "customer_id"
+    assert result["matched_rows"][0]["right_key_value"] == "C001"
+    assert result["matched_rows"][0]["row_lineage_id"].startswith("dqlin_")
+    assert result["summary"]["join_name"] == "orders_to_customer_customer_id"
+
+
+def test_fetch_final_dataset_rows_returns_rows_and_basis_stage(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "load_quality_run",
+        lambda settings, run_id, tenant_id, domain_id: {"schema_name": "public", "connection_id": "conn_1"},
+    )
+    monkeypatch.setattr(dq_evidence, "resolve_quality_run_scoped_conn", lambda settings, run_row: object())
+    monkeypatch.setattr(
+        dq_evidence,
+        "list_quality_dataset_stages",
+        lambda *args, **kwargs: [{"stage_id": "dqstage_2", "stage_name": "customer_join_region", "stage_type": "join_validation"}],
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "get_quality_final_dataset_artifact",
+        lambda *args, **kwargs: {"artifact_id": "dqfinal_1", "final_stage_name": "final_dataset_projection", "final_row_count": 8},
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "fetch_final_dataset_rows_tool",
+        lambda *args, **kwargs: (
+            [{"__left_row_ref": "(0,1)", "__right_row_ref": "(0,9)", "left_key_value": "C001", "right_key_value": "C001"}],
+            {"stage_id": "dqstage_2", "stage_name": "customer_join_region", "stage_type": "join_validation"},
+        ),
+    )
+
+    result = dq_evidence.fetch_final_dataset_rows(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        limit=100,
+        offset=0,
+    )
+
+    assert result["final_dataset"]["artifact_id"] == "dqfinal_1"
+    assert result["basis_stage"]["stage_name"] == "customer_join_region"
+    assert result["rows"][0]["left_key_value"] == "C001"
+
+
+def test_fetch_lineage_trace_returns_edges_and_membership(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "load_quality_run",
+        lambda settings, run_id, tenant_id, domain_id: {"schema_name": "public", "connection_id": "conn_1"},
+    )
+    monkeypatch.setattr(dq_evidence, "resolve_quality_run_scoped_conn", lambda settings, run_row: object())
+    monkeypatch.setattr(
+        dq_evidence,
+        "list_quality_dataset_stages",
+        lambda *args, **kwargs: [
+            {"stage_id": "dqstage_1", "stage_seq": 1, "stage_name": "source_profile_orders", "stage_type": "source_profile"},
+            {"stage_id": "dqstage_2", "stage_seq": 2, "stage_name": "orders_to_customer_customer_id", "stage_type": "join_validation"},
+        ],
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "list_quality_lineage_edges",
+        lambda *args, **kwargs: [
+            {
+                "edge_id": "dqedge_1",
+                "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_hash",
+                "from_stage_id": "dqstage_1",
+                "from_stage_name": "source_profile_orders",
+                "to_stage_id": "dqstage_2",
+                "to_stage_name": "orders_to_customer_customer_id",
+                "edge_type": "join_unmatched_left",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "list_quality_stage_row_outcomes",
+        lambda *args, **kwargs: [
+            {
+                "outcome_id": "dqout_1",
+                "stage_id": "dqstage_2",
+                "stage_name": "orders_to_customer_customer_id",
+                "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_hash",
+                "reason_code": "join_unmatched_left",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "get_quality_final_dataset_artifact",
+        lambda *args, **kwargs: {"artifact_id": "dqfinal_1", "final_stage_name": "final_dataset_projection"},
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "fetch_final_dataset_rows_tool",
+        lambda *args, **kwargs: ([], {}),
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "run_query",
+        lambda *args, **kwargs: [{"__row_ref": "(0,15)", "customer_id": "CUST-404"}],
+    )
+
+    result = dq_evidence.fetch_lineage_trace(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        row_lineage_id="dqlin_b3JkZXJzfCgwLDE1KQ_hash",
+    )
+
+    assert result["decoded_lineage"]["parts"] == ["orders", "(0,15)"]
+    assert result["source_snapshot"]["__row_ref"] == "(0,15)"
+    assert result["edges"][0]["edge_type"] == "join_unmatched_left"
+    assert result["stage_trace"][0]["stage_name"] == "source_profile_orders"
+    assert result["final_dataset_membership"]["is_member"] is False
+
+
+def test_fetch_lineage_overview_summarizes_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "load_quality_run",
+        lambda *args, **kwargs: {"run_id": "run_1", "schema_name": "public", "connection_id": "conn_1"},
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "resolve_quality_run_scoped_conn",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "list_quality_dataset_stages",
+        lambda *args, **kwargs: [
+            {"stage_id": "dqstage_1", "stage_seq": 1, "stage_name": "source_profile_orders", "stage_type": "source_profile"},
+            {"stage_id": "dqstage_2", "stage_seq": 2, "stage_name": "orders_to_customer_customer_id", "stage_type": "join_validation"},
+        ],
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "list_quality_lineage_edges",
+        lambda *args, **kwargs: [
+            {
+                "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_hash",
+                "from_stage_id": "dqstage_1",
+                "from_stage_name": "source_profile_orders",
+                "to_stage_id": "dqstage_2",
+                "to_stage_name": "orders_to_customer_customer_id",
+                "edge_type": "join_unmatched_left",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "list_quality_stage_row_outcomes",
+        lambda *args, **kwargs: [
+            {
+                "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_hash",
+                "stage_id": "dqstage_2",
+                "stage_name": "orders_to_customer_customer_id",
+                "outcome_type": "rejected",
+                "reason_code": "join_unmatched_left",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "get_quality_final_dataset_artifact",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "fetch_final_dataset_rows_tool",
+        lambda *args, **kwargs: ([], {}),
+    )
+
+    result = dq_evidence.fetch_lineage_overview(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        limit=10,
+    )
+
+    assert result["summary"]["lineage_row_count"] == 1
+    assert result["summary"]["rejected_row_count"] == 1
+    assert result["rows"][0]["source_table"] == "orders"
+    assert result["rows"][0]["final_state"] == "join_unmatched_left"
+    assert "/data-quality/lineage/dqlin_" in result["rows"][0]["evidence_path"]
+    assert "/journey?" in result["rows"][0]["evidence_path"]
+
+
+def test_fetch_lineage_journey_returns_display_steps(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "fetch_lineage_trace",
+        lambda *args, **kwargs: {
+            "run_id": "run_1",
+            "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_hash",
+            "decoded_lineage": {"raw": "orders|(0,15)", "parts": ["orders", "(0,15)"]},
+            "source_snapshot": {"__row_ref": "(0,15)", "customer_id": "C404"},
+            "edges": [{"edge_type": "join_unmatched_left"}],
+            "outcomes": [{"reason_code": "join_unmatched_left"}],
+            "stage_trace": [
+                {
+                    "stage_id": "dqstage_1",
+                    "stage_seq": 1,
+                    "stage_name": "source_profile_orders",
+                    "stage_type": "source_profile",
+                    "state": "entered",
+                },
+                {
+                    "stage_id": "dqstage_2",
+                    "stage_seq": 2,
+                    "stage_name": "orders_to_customer_customer_id",
+                    "stage_type": "join_validation",
+                    "state": "join_unmatched_left",
+                },
+            ],
+            "final_dataset_membership": {"is_member": False, "basis_stage": {}, "row": None},
+        },
+    )
+
+    result = dq_evidence.fetch_lineage_journey(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        row_lineage_id="dqlin_b3JkZXJzfCgwLDE1KQ_hash",
+    )
+
+    assert result["summary"]["step_count"] == 2
+    assert result["summary"]["final_state"] == "join_unmatched_left"
+    assert result["source"]["source_table"] == "orders"
+    assert result["journey"][0]["status_category"] == "progressed"
+    assert result["journey"][1]["status_category"] == "rejected"
+    assert "Rejected by left-side join mismatch" in result["journey"][1]["display_label"]
+    assert "/data-quality/lineage/dqlin_b3JkZXJzfCgwLDE1KQ_hash?" in result["trace_path"]
+
+
 def test_extract_quality_rules_falls_back_when_llm_returns_empty(monkeypatch) -> None:
     class Settings:
         openai_api_key = "key"
@@ -938,6 +1552,8 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
             "run_id": run_id,
             "tenant_id": "tenant",
             "domain_id": "data_quality_observability",
+            "connection_id": "conn_1",
+            "schema_name": "public",
             "status": "completed",
             "overall_trust_score": 82.5,
             "summary_json": {"profiled_tables": 1},
@@ -1024,6 +1640,133 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
     )
     monkeypatch.setattr(
         dq_report,
+        "list_quality_dataset_stages",
+        lambda *args, **kwargs: [
+            {
+                "stage_id": "dqstage_1",
+                "stage_seq": 1,
+                "stage_name": "source_profile_customer",
+                "stage_type": "source_profile",
+                "input_row_count": 10,
+                "output_row_count": 10,
+                "rejected_row_count": 0,
+                "summary_json": {"measurement_status": "measured"},
+            },
+            {
+                "stage_id": "dqstage_2",
+                "stage_seq": 2,
+                "stage_name": "customer_join_region",
+                "stage_type": "join_validation",
+                "input_row_count": 10,
+                "output_row_count": 8,
+                "rejected_row_count": 2,
+                "summary_json": {"measurement_status": "measured"},
+            },
+            {
+                "stage_id": "dqstage_3",
+                "stage_seq": 3,
+                "stage_name": "filter_1",
+                "stage_type": "filter",
+                "output_dataset": "customer",
+                "input_row_count": 8,
+                "output_row_count": 6,
+                "rejected_row_count": 2,
+                "expression": {"expression_text": "customer.status = active"},
+                "summary_json": {"measurement_status": "measured", "evidence_path": "/data-quality/evidence/stages/dqstage_3"},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_join_artifacts",
+        lambda *args, **kwargs: [
+            {
+                "join_artifact_id": "dqjoin_1",
+                "join_name": "customer_join_region",
+                "left_table": "customer",
+                "right_table": "region",
+                "join_type": "reference_lookup",
+                "matched_row_count": 8,
+                "unmatched_left_row_count": 2,
+                "unmatched_right_row_count": 0,
+                "duplicate_match_count": 0,
+                "summary_json": {"measurement_status": "measured"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_lineage_edges",
+        lambda *args, **kwargs: [
+            {
+                "row_lineage_id": "dqlin_Y3VzdG9tZXJ8KDAsMSk_hash",
+                "from_stage_id": "dqstage_1",
+                "from_stage_name": "source_profile_customer",
+                "to_stage_id": "dqstage_2",
+                "to_stage_name": "customer_join_region",
+                "edge_type": "join_matched",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_stage_row_outcomes",
+        lambda *args, **kwargs: [
+            {
+                "outcome_id": "dqout_1",
+                "stage_id": "dqstage_2",
+                "stage_name": "customer_join_region",
+                "outcome_type": "rejected",
+                "row_lineage_id": "dqlin_left_c404",
+                "row_ref": "(0,2)",
+                "source_table": "customer",
+                "source_key_json": {"customer_id": "C404"},
+                "reason_code": "join_unmatched_left",
+                "reason_detail": "No region match",
+                "row_data_json": {"left_key_value": "C404"},
+            },
+            {
+                "outcome_id": "dqout_2",
+                "stage_id": "dqstage_2",
+                "stage_name": "customer_join_region",
+                "outcome_type": "join_exception",
+                "row_lineage_id": "dqlin_right_r404",
+                "row_ref": "(0,4)",
+                "source_table": "region",
+                "source_key_json": {"region_id": "R404"},
+                "reason_code": "join_unmatched_right",
+                "reason_detail": "Unreferenced region row",
+                "row_data_json": {"right_key_value": "R404"},
+            },
+            {
+                "outcome_id": "dqout_3",
+                "stage_id": "dqstage_3",
+                "stage_name": "filter_1",
+                "outcome_type": "rejected",
+                "row_lineage_id": "dqlin_filter_inactive",
+                "row_ref": "(0,5)",
+                "source_table": "customer",
+                "source_key_json": {"status": "inactive"},
+                "reason_code": "filter_rejected",
+                "reason_detail": "Row did not satisfy filter",
+                "row_data_json": {"status": "inactive"},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "get_quality_final_dataset_artifact",
+        lambda *args, **kwargs: {
+            "artifact_id": "dqfinal_1",
+            "final_stage_name": "final_dataset_projection",
+            "final_row_count": 8,
+            "total_rejected_row_count": 2,
+            "readiness_status": "ready",
+            "summary_json": {"measurement_status": "derived"},
+        },
+    )
+    monkeypatch.setattr(
+        dq_report,
         "list_quality_enrichment_opportunities",
         lambda *args, **kwargs: [
             {
@@ -1082,6 +1825,17 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
             "(1,1)": {"__row_ref": "(1,1)", "pincode": "560001", "country": "India", "state": None},
         },
     )
+    monkeypatch.setattr(dq_report, "resolve_database_credentials_cached", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        dq_report,
+        "fetch_stage_snapshot_rows_tool",
+        lambda *args, **kwargs: [{"__row_ref": "(0,1)", "customer_id": "C001", "row_lineage_id": "dqlin_source_c001"}],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "fetch_final_dataset_rows_tool",
+        lambda *args, **kwargs: ([{"__left_row_ref": "(0,1)", "__right_row_ref": "(0,9)", "left_key_value": "C001", "right_key_value": "C001", "row_lineage_id": "dqlin_final_c001"}], {"stage_name": "customer_join_region"}),
+    )
     monkeypatch.setattr(
         dq_report,
         "_fetch_table_rows",
@@ -1110,9 +1864,17 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
     assert summary["column_count"] == 1
     assert summary["failed_rule_count"] == 1
     assert summary["duplicate_candidate_count"] == 1
+    assert summary["dataset_stage_count"] == 3
+    assert summary["join_artifact_count"] == 1
+    assert summary["lineage_edge_count"] == 1
+    assert summary["rejected_record_count"] == 2
+    assert summary["filter_rejection_count"] == 1
+    assert summary["join_exception_count"] == 1
+    assert summary["final_dataset_row_count"] == 8
     assert summary["approved_enrichment_row_count"] == 1
     assert summary["deferred_enrichment_row_count"] == 1
     assert summary["published_enrichment_sheet_count"] == 1
+    assert summary["stage_snapshot_sheet_count"] == 3
     assert summary["all_data_sheet_count"] == 1
     assert summary["remediation_action_count"] >= 2
     with zipfile.ZipFile(BytesIO(workbook)) as archive:
@@ -1126,6 +1888,16 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         assert "Legend" in sheet_names
         assert "Freshness" in sheet_names
         assert "Duplicates" in sheet_names
+        assert "Stage Waterfall" in sheet_names
+        assert "Join Health" in sheet_names
+        assert "Lineage Overview" in sheet_names
+        assert "Filter Impact" in sheet_names
+        assert "Rejected Records" in sheet_names
+        assert "Final Dataset" in sheet_names
+        assert "Join Exceptions" in sheet_names
+        assert "Stage 1 source_profile_customer" in sheet_names
+        assert "Stage 2 customer_join_region" in sheet_names
+        assert "Stage 3 filter_1" in sheet_names
         assert "Enrichment Summary" in sheet_names
         assert "Recommended Actions" in sheet_names
         assert "Staged Enrichment" in sheet_names
@@ -1133,9 +1905,80 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         assert "Published customer" in sheet_names
         assert any("Validation Failure" in text and "light orange" in text for text in sheet_texts)
         assert any("Karnataka" in text and ('s=\"3\"' in text or 's=\"4\"' in text) for text in sheet_texts)
+        assert any("join_matched" in text and "Lineage Overview" not in text for text in sheet_texts)
         assert any("560001" in text and "India" in text and "Karnataka" in text for text in sheet_texts)
         assert any("bad@example" in text and 's=\"6\"' in text for text in sheet_texts)
         assert any("postal_code" in text for text in sheet_texts)
+        assert any("customer_join_region" in text and "C001" in text for text in sheet_texts)
+        assert any("dqlin_final_c001" in text for text in sheet_texts)
+
+
+def test_build_data_quality_excel_report_flattens_source_json_values(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_report,
+        "get_quality_run_by_run_id",
+        lambda settings, run_id: {
+            "quality_run_id": "dqrun_1",
+            "run_id": run_id,
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "connection_id": "conn_1",
+            "schema_name": "public",
+            "status": "completed",
+            "overall_trust_score": 82.5,
+            "summary_json": {"profiled_tables": 1},
+        },
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_tables",
+        lambda *args, **kwargs: [
+            {"quality_run_id": "dqrun_1", "run_id": "run_1", "table_name": "customer", "row_count": 1, "trust_score": 80, "summary_json": {}}
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "get_quality_table_detail",
+        lambda *args, **kwargs: {
+            "table_name": "customer",
+            "columns": [
+                {"table_name": "customer", "column_name": "payload", "data_type": "jsonb", "null_pct": 0, "completeness_score": 100}
+            ],
+        },
+    )
+    monkeypatch.setattr(dq_report, "list_quality_rules", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_duplicate_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_dataset_stages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_join_artifacts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_lineage_edges", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_stage_row_outcomes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "get_quality_final_dataset_artifact", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_report, "list_quality_enrichment_opportunities", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "_list_staged_overlay_artifacts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "resolve_database_credentials_cached", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        dq_report,
+        "_fetch_table_rows",
+        lambda *args, **kwargs: [{"__row_ref": "(0,1)", "payload": {"city": "Dublin", "codes": ["IE", "DUB"]}}],
+    )
+    monkeypatch.setattr(dq_report, "_build_validation_failure_map", lambda *args, **kwargs: {})
+    monkeypatch.setattr(dq_report, "create_quality_report_metadata", lambda *args, **kwargs: "dqreport_1")
+
+    workbook, _, _ = dq_report.build_data_quality_excel_report(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+    )
+
+    with zipfile.ZipFile(BytesIO(workbook)) as archive:
+        sheet_texts = [
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.startswith("xl/worksheets/sheet")
+        ]
+        assert any("city=Dublin; codes=IE, DUB" in text for text in sheet_texts)
+        assert all('{"city"' not in text for text in sheet_texts)
 
 
 def test_build_data_quality_dashboard_spec_shapes_quality_views() -> None:
@@ -1212,26 +2055,98 @@ def test_build_data_quality_dashboard_spec_shapes_quality_views() -> None:
                 "confidence": 0.91,
             }
         ],
+        dataset_stages=[
+            {
+                "stage_id": "dqstage_1",
+                "stage_seq": 1,
+                "stage_name": "source_profile_customer",
+                "stage_type": "source_profile",
+                "input_row_count": 10,
+                "output_row_count": 10,
+                "rejected_row_count": 0,
+            },
+            {
+                "stage_id": "dqstage_2",
+                "stage_seq": 2,
+                "stage_name": "customer_join_region",
+                "stage_type": "join_validation",
+                "input_row_count": 10,
+                "output_row_count": 8,
+                "rejected_row_count": 2,
+            },
+            {
+                "stage_id": "dqstage_3",
+                "stage_seq": 3,
+                "stage_name": "filter_1",
+                "stage_type": "filter",
+                "output_dataset": "customer",
+                "input_row_count": 8,
+                "output_row_count": 6,
+                "rejected_row_count": 2,
+                "expression": {"expression_text": "customer.status = active"},
+            },
+        ],
+        join_artifacts=[
+            {
+                "join_artifact_id": "dqjoin_1",
+                "join_name": "customer_join_region",
+                "left_table": "customer",
+                "right_table": "region",
+                "matched_row_count": 8,
+                "unmatched_left_row_count": 2,
+                "unmatched_right_row_count": 0,
+                "duplicate_match_count": 0,
+            }
+        ],
+        lineage_edges=[
+            {
+                "row_lineage_id": "dqlin_Y3VzdG9tZXJ8KDAsMSk_hash",
+                "from_stage_id": "dqstage_1",
+                "from_stage_name": "source_profile_customer",
+                "to_stage_id": "dqstage_2",
+                "to_stage_name": "customer_join_region",
+                "edge_type": "join_matched",
+            }
+        ],
+        row_outcomes=[
+            {"outcome_type": "rejected"},
+            {"outcome_type": "join_exception"},
+            {"outcome_type": "rejected", "reason_code": "filter_rejected"},
+        ],
+        final_dataset={
+            "final_row_count": 8,
+            "total_rejected_row_count": 2,
+            "readiness_status": "ready",
+            "final_stage_name": "final_dataset_projection",
+            "summary_json": {"measurement_status": "derived"},
+        },
     )
 
     assert spec["title"] == "Data Quality Observability Data Quality Dashboard"
-    assert len(spec["chart_plan"]) == 8
+    assert len(spec["chart_plan"]) == 13
     assert spec["summary_view"]["title"] == "Executive Summary"
     assert spec["summary_view"]["rows"][0]["metric_key"] == "quality_score"
     assert spec["chart_plan"][0]["chart_key"] == "executive_summary"
     assert spec["chart_plan"][0]["rows"][0]["metric_key"] == "quality_score"
-    assert spec["chart_plan"][1]["chart_key"] == "data_trust_scorecard"
-    assert spec["chart_plan"][2]["display_columns"][1] == {"field": "column_name", "label": "Physical Column"}
-    assert spec["chart_plan"][2]["display_columns"][2] == {"field": "column_alias", "label": "Semantic Alias"}
-    assert spec["chart_plan"][1]["rows"][0]["trust_score"] == 68.0
-    assert spec["chart_plan"][2]["rows"][0]["column_alias"] == "email"
-    assert "/data-quality/evidence/missingness" in str(spec["chart_plan"][2]["rows"][0]["evidence_path"])
-    assert spec["chart_plan"][4]["rows"][0]["reference_table"] == "customer"
-    assert spec["chart_plan"][4]["rows"][0]["column_alias"] == "customer_id"
-    assert "/data-quality/evidence/rules/" in str(spec["chart_plan"][4]["rows"][0]["evidence_path"])
-    assert spec["chart_plan"][5]["rows"][0]["duplicate_candidate_count"] == 1
-    assert "/data-quality/evidence/duplicates/" in str(spec["chart_plan"][5]["rows"][0]["evidence_path"])
-    assert spec["chart_plan"][7]["chart_key"] == "recommended_actions"
+    assert spec["chart_plan"][1]["chart_key"] == "filter_impact"
+    assert spec["chart_plan"][2]["chart_key"] == "join_health"
+    assert spec["chart_plan"][3]["chart_key"] == "stage_waterfall"
+    assert spec["chart_plan"][4]["chart_key"] == "final_dataset_quality"
+    assert spec["chart_plan"][5]["chart_key"] == "lineage_overview"
+    assert spec["chart_plan"][6]["chart_key"] == "data_trust_scorecard"
+    assert spec["chart_plan"][1]["rows"][0]["rejected_row_count"] == 2
+    assert spec["chart_plan"][5]["rows"][0]["final_state"] == "join_matched"
+    assert spec["chart_plan"][7]["display_columns"][1] == {"field": "column_name", "label": "Physical Column"}
+    assert spec["chart_plan"][7]["display_columns"][2] == {"field": "column_alias", "label": "Semantic Alias"}
+    assert spec["chart_plan"][6]["rows"][0]["trust_score"] == 68.0
+    assert spec["chart_plan"][7]["rows"][0]["column_alias"] == "email"
+    assert "/data-quality/evidence/missingness" in str(spec["chart_plan"][7]["rows"][0]["evidence_path"])
+    assert spec["chart_plan"][9]["rows"][0]["reference_table"] == "customer"
+    assert spec["chart_plan"][9]["rows"][0]["column_alias"] == "customer_id"
+    assert "/data-quality/evidence/rules/" in str(spec["chart_plan"][9]["rows"][0]["evidence_path"])
+    assert spec["chart_plan"][10]["rows"][0]["duplicate_candidate_count"] == 1
+    assert "/data-quality/evidence/duplicates/" in str(spec["chart_plan"][10]["rows"][0]["evidence_path"])
+    assert spec["chart_plan"][12]["chart_key"] == "recommended_actions"
 
 
 def test_build_data_quality_dashboard_spec_skips_empty_sections() -> None:
@@ -1324,6 +2239,20 @@ def test_derive_data_quality_remediation_plan_prioritizes_explainable_actions() 
                 "confidence": 0.99,
             }
         ],
+        dataset_stages=[
+            {
+                "stage_id": "dqstage_filter_1",
+                "stage_name": "filter_1",
+                "stage_type": "filter",
+                "output_dataset": "customer",
+                "input_row_count": 100,
+                "rejected_row_count": 40,
+                "expression": {"expression_text": "customer.status = active"},
+            }
+        ],
+        row_outcomes=[
+            {"stage_id": "dqstage_filter_1", "reason_code": "filter_rejected"},
+        ],
         opportunities=[
             {
                 "opportunity_id": "dqopp_1",
@@ -1342,6 +2271,7 @@ def test_derive_data_quality_remediation_plan_prioritizes_explainable_actions() 
     assert any(row["evidence_type"] == "missingness" for row in plan["actions"])
     assert any(row["evidence_type"] == "rule_failure" for row in plan["actions"])
     assert any(row["evidence_type"] == "freshness" for row in plan["actions"])
+    assert any(row["action_type"] == "filter_review" for row in plan["actions"])
     assert any("/data-quality/evidence/missingness" in str(row["evidence_path"]) for row in plan["actions"])
 
 
@@ -2024,6 +2954,10 @@ def test_run_data_quality_agentic_workflow_minimal(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(dq_orchestrator, "update_quality_table_trust_scores", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_dataset_stages", lambda *args, **kwargs: len(kwargs.get("stages") or []))
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_join_artifacts", lambda *args, **kwargs: len(kwargs.get("joins") or []))
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_stage_row_outcomes", lambda *args, **kwargs: len(kwargs.get("row_outcomes") or []))
+    monkeypatch.setattr(dq_orchestrator, "upsert_quality_final_dataset_artifact", lambda *args, **kwargs: "dqfinal_1")
     monkeypatch.setattr(dq_orchestrator, "replace_quality_rules", lambda *args, **kwargs: 0)
     monkeypatch.setattr(dq_orchestrator, "execute_quality_rules", lambda *args, **kwargs: {"rules_executed": 0, "failed_rules": 0, "passed_rules": 0, "error_rules": 0, "results": []})
     monkeypatch.setattr(
@@ -2085,10 +3019,13 @@ def test_run_data_quality_agentic_workflow_minimal(monkeypatch) -> None:
     assert result["quality_summary"]["stale_table_count"] == 0
     assert result["quality_summary"]["dashboard_id"] == "db_dq_1"
     assert result["quality_summary"]["enrichment_opportunity_count"] == 1
+    assert result["quality_summary"]["dataset_stage_count"] >= 2
     assert [event["agent_name"] for event in events] == [
         "DataQualityWorkflowRouter",
         "DataQualitySchemaAgent",
         "DataQualitySchemaAgent",
+        "DatasetStagePlannerAgent",
+        "DatasetStagePlannerAgent",
         "DataQualityProfilingAgent",
         "DataQualityProfilingAgent",
         "DuplicateDetectionAgent",
@@ -2120,6 +3057,10 @@ def test_run_data_quality_agentic_workflow_pauses_for_rule_review(monkeypatch) -
     )
     monkeypatch.setattr(dq_orchestrator, "persist_schema_graph_artifact", lambda *args, **kwargs: "sg_1")
     monkeypatch.setattr(dq_orchestrator, "persist_table_profile_artifact", lambda *args, **kwargs: "tp_1")
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_dataset_stages", lambda *args, **kwargs: len(kwargs.get("stages") or []))
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_join_artifacts", lambda *args, **kwargs: len(kwargs.get("joins") or []))
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_stage_row_outcomes", lambda *args, **kwargs: len(kwargs.get("row_outcomes") or []))
+    monkeypatch.setattr(dq_orchestrator, "upsert_quality_final_dataset_artifact", lambda *args, **kwargs: "dqfinal_1")
     monkeypatch.setattr(dq_orchestrator, "detect_duplicate_candidates", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_orchestrator, "replace_quality_duplicate_candidates", lambda *args, **kwargs: 0)
     monkeypatch.setattr(dq_orchestrator, "get_previous_quality_run", lambda *args, **kwargs: None)
@@ -2306,6 +3247,11 @@ def test_resume_data_quality_agentic_workflow_after_rule_review_completes(monkey
         },
     )
     monkeypatch.setattr(dq_orchestrator, "update_quality_table_trust_scores", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "list_quality_dataset_stages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "list_quality_join_artifacts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "list_quality_lineage_edges", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "list_quality_stage_row_outcomes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "get_quality_final_dataset_artifact", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         dq_orchestrator,
         "create_data_quality_dashboard",
@@ -2437,6 +3383,13 @@ def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommend
                 "rule_review_required": True,
                 "review_queue_pending_count": 1,
                 "workflow_status": "awaiting_rule_review",
+                "dataset_stage_count": 5,
+                "join_stage_count": 1,
+                "filter_stage_count": 1,
+                "lineage_edge_count": 2,
+                "total_rejected_row_count": 2,
+                "final_dataset_row_count": 10,
+                "final_dataset_readiness_status": "ready",
                 "remediation_action_count": 6,
                 "critical_remediation_action_count": 2,
             },
@@ -2454,6 +3407,11 @@ def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommend
     )
 
     assert response["artifacts"]["dashboard"] == "/data-quality/runs/run_1/dashboard"
+    assert response["artifacts"]["stages"].endswith("run_id=run_1")
+    assert response["artifacts"]["joins"].endswith("run_id=run_1")
+    assert response["artifacts"]["rejected_records"].endswith("run_id=run_1")
+    assert response["artifacts"]["final_dataset"].endswith("run_id=run_1")
+    assert response["artifacts"]["lineage_base"].endswith("run_id=run_1")
     assert response["artifacts"]["rule_review_queue"].endswith("run_id=run_1")
     assert response["artifacts"]["resume_after_rule_review"] == "/data-quality/runs/run_1/resume-after-rule-review"
     assert response["artifacts"]["enrichment_questions"].endswith("run_id=run_1")
@@ -2461,6 +3419,13 @@ def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommend
     assert response["needs_review_rule_count"] == 1
     assert response["rule_review_required"] is True
     assert response["workflow_status"] == "awaiting_rule_review"
+    assert response["dataset_stage_count"] == 5
+    assert response["join_stage_count"] == 1
+    assert response["filter_stage_count"] == 1
+    assert response["lineage_edge_count"] == 2
+    assert response["total_rejected_row_count"] == 2
+    assert response["final_dataset_row_count"] == 10
+    assert response["final_dataset_readiness_status"] == "ready"
     assert response["artifacts"]["remediation"].startswith("/data-quality/remediation?tenant_id=tenant")
     assert response["remediation_summary"]["action_count"] == 6
     assert response["recommended_actions"][0]["action_type"] == "freshness_recovery"
@@ -2528,6 +3493,22 @@ def test_build_data_quality_run_hydration_payload_includes_pending_cards() -> No
                 }
             ],
         },
+        lineage_overview={
+            "summary": {
+                "lineage_row_count": 3,
+                "final_dataset_member_count": 2,
+                "rejected_row_count": 1,
+                "join_exception_row_count": 0,
+            },
+            "rows": [
+                {
+                    "row_lineage_id": "dqlin_1",
+                    "source_table": "orders",
+                    "final_state": "final_dataset_member",
+                    "evidence_path": "/data-quality/lineage/dqlin_1/journey?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1",
+                }
+            ],
+        },
     )
 
     assert response["run"]["workflow_status"] == "awaiting_rule_review"
@@ -2536,6 +3517,8 @@ def test_build_data_quality_run_hydration_payload_includes_pending_cards() -> No
     assert response["pending_tasks"]["rule_review"]["top_items"][0]["rule_id"] == "rule_1"
     assert response["pending_tasks"]["enrichment_questions"]["pending_answer_count"] == 1
     assert response["pending_tasks"]["enrichment_questions"]["top_items"][0]["question_id"] == "dqeo_1"
+    assert response["pending_tasks"]["lineage"]["lineage_row_count"] == 3
+    assert response["pending_tasks"]["lineage"]["top_items"][0]["row_lineage_id"] == "dqlin_1"
     assert response["artifact_links"]["enrichment_questions"].endswith("run_id=run_1")
 
 

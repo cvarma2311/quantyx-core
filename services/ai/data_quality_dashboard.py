@@ -6,6 +6,7 @@ from typing import Any
 from services.ai.config import Settings
 from services.ai.data_quality_enrichment import canonical_column_alias
 from services.ai.data_quality_remediation import derive_data_quality_remediation_plan
+from services.ai.data_quality_stages import parse_lineage_id
 from services.ai.dashboards_store import create_dashboard
 
 
@@ -59,6 +60,11 @@ def build_data_quality_dashboard_spec(
     duplicate_candidates: list[dict[str, Any]] | None = None,
     freshness_results: list[dict[str, Any]] | None = None,
     enrichment_opportunities: list[dict[str, Any]] | None = None,
+    dataset_stages: list[dict[str, Any]] | None = None,
+    join_artifacts: list[dict[str, Any]] | None = None,
+    lineage_edges: list[dict[str, Any]] | None = None,
+    row_outcomes: list[dict[str, Any]] | None = None,
+    final_dataset: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     tables = _table_rows(profiling)
     columns = _column_rows(profiling)
@@ -68,6 +74,11 @@ def build_data_quality_dashboard_spec(
     freshness_results = [item for item in (freshness_results or []) if isinstance(item, dict)]
     quality_tables = [item for item in (quality_tables or []) if isinstance(item, dict)]
     enrichment_opportunities = [item for item in (enrichment_opportunities or []) if isinstance(item, dict)]
+    dataset_stages = [item for item in (dataset_stages or []) if isinstance(item, dict)]
+    join_artifacts = [item for item in (join_artifacts or []) if isinstance(item, dict)]
+    lineage_edges = [item for item in (lineage_edges or []) if isinstance(item, dict)]
+    row_outcomes = [item for item in (row_outcomes or []) if isinstance(item, dict)]
+    final_dataset = dict(final_dataset or {})
     evidence_base = f"/data-quality/evidence"
     remediation_plan = derive_data_quality_remediation_plan(
         tenant_id=tenant_id,
@@ -77,6 +88,8 @@ def build_data_quality_dashboard_spec(
         rules=quality_rules,
         duplicates=duplicate_candidates,
         opportunities=enrichment_opportunities,
+        dataset_stages=dataset_stages,
+        row_outcomes=row_outcomes,
         limit=15,
     )
     freshness_by_table = {
@@ -275,8 +288,14 @@ def build_data_quality_dashboard_spec(
     rule_type_counts = Counter(str(rule.get("rule_type") or "unknown") for rule in quality_rules)
     failure_type_counts = Counter(str(row.get("rule_type") or "unknown") for row in failed_rules)
     failure_severity_counts = Counter(str(row.get("severity") or "unknown") for row in failed_rules)
+    lineage_ids: set[str] = set()
+    lineage_ids.update(str(row.get("row_lineage_id") or "").strip() for row in lineage_edges)
+    lineage_ids.update(str(row.get("row_lineage_id") or "").strip() for row in row_outcomes)
+    lineage_ids.discard("")
     duplicate_candidate_total = sum(int(row.get("duplicate_candidate_count") or 0) for row in duplicate_rows)
     remediation_summary = remediation_plan.get("summary") or {}
+    rejected_record_count = len([row for row in row_outcomes if str(row.get("outcome_type") or "").strip() == "rejected"])
+    join_exception_count = len([row for row in row_outcomes if str(row.get("outcome_type") or "").strip() == "join_exception"])
     executive_summary_rows = [
         {
             "metric_key": "quality_score",
@@ -318,6 +337,27 @@ def build_data_quality_dashboard_spec(
             "evidence_path": f"/data-quality/duplicates?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         },
         {
+            "metric_key": "rejected_records",
+            "label": "Rejected Records",
+            "value": rejected_record_count,
+            "note": f"{join_exception_count} join exceptions",
+            "evidence_path": f"/data-quality/rejected-records?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        },
+        {
+            "metric_key": "final_dataset_rows",
+            "label": "Final Dataset Rows",
+            "value": final_dataset.get("final_row_count"),
+            "note": str(final_dataset.get("readiness_status") or "unknown"),
+            "evidence_path": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        },
+        {
+            "metric_key": "lineage_rows",
+            "label": "Tracked Lineage Rows",
+            "value": len(lineage_ids),
+            "note": f"{len(lineage_edges)} lineage edges",
+            "evidence_path": f"/data-quality/lineage?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        },
+        {
             "metric_key": "recommended_actions",
             "label": "Recommended Actions",
             "value": remediation_summary.get("action_count", 0),
@@ -339,6 +379,123 @@ def build_data_quality_dashboard_spec(
             "evidence_path": f"/data-quality/runs/{run_id}/dashboard",
         },
     ]
+    filter_rows = [
+        {
+            "stage_id": row.get("stage_id"),
+            "stage_name": row.get("stage_name"),
+            "table_name": row.get("output_dataset"),
+            "expression_text": ((row.get("expression") or {}).get("expression_text")),
+            "input_row_count": row.get("input_row_count"),
+            "output_row_count": row.get("output_row_count"),
+            "rejected_row_count": row.get("rejected_row_count"),
+            "rejected_pct": (
+                round((float(row.get("rejected_row_count") or 0) / float(row.get("input_row_count") or 1)) * 100.0, 2)
+                if row.get("input_row_count") not in (None, 0) and row.get("rejected_row_count") is not None
+                else None
+            ),
+            "evidence_path": (
+                f"{evidence_base}/stages/{row.get('stage_id')}?tenant_id={tenant_id}&domain_id={domain_id}"
+                if row.get("stage_id")
+                else None
+            ),
+        }
+        for row in dataset_stages
+        if str(row.get("stage_type") or "").strip() == "filter"
+        and (row.get("rejected_row_count") is not None or row.get("output_row_count") is not None)
+    ]
+    stage_by_id = {str(row.get("stage_id") or ""): row for row in dataset_stages if str(row.get("stage_id") or "").strip()}
+    final_basis_stage_name = str(final_dataset.get("final_stage_name") or "").strip()
+    lineage_rows: list[dict[str, Any]] = []
+    lineage_ids: set[str] = set()
+    lineage_ids.update(str(row.get("row_lineage_id") or "").strip() for row in lineage_edges)
+    lineage_ids.update(str(row.get("row_lineage_id") or "").strip() for row in row_outcomes)
+    lineage_ids.discard("")
+    final_stage_seq = None
+    for stage in dataset_stages:
+        if str(stage.get("stage_name") or "").strip() == final_basis_stage_name:
+            final_stage_seq = stage.get("stage_seq")
+            break
+    for row_lineage_id in sorted(lineage_ids):
+        decoded = row_lineage_id
+        source_table = None
+        source_row_ref = None
+        if row_lineage_id.startswith("dqlin_"):
+            try:
+                parsed = parse_lineage_id(row_lineage_id)
+            except Exception:
+                parsed = None
+            if parsed:
+                parts = parsed.get("parts") or []
+                decoded = " -> ".join(str(part) for part in parts if str(part).strip()) or row_lineage_id
+                if len(parts) >= 2:
+                    source_table = parts[0]
+                    source_row_ref = parts[1]
+        row_edge_items = [item for item in lineage_edges if str(item.get("row_lineage_id") or "") == row_lineage_id]
+        row_outcome_items = [item for item in row_outcomes if str(item.get("row_lineage_id") or "") == row_lineage_id]
+        stage_names: set[str] = set()
+        latest_stage_name = None
+        latest_stage_seq_local = -1
+        for item in row_edge_items:
+            for stage_id_key, stage_name_key in (("from_stage_id", "from_stage_name"), ("to_stage_id", "to_stage_name")):
+                stage_id = str(item.get(stage_id_key) or "")
+                if not stage_id:
+                    continue
+                stage = stage_by_id.get(stage_id) or {}
+                stage_name = str(item.get(stage_name_key) or stage.get("stage_name") or "").strip()
+                if stage_name:
+                    stage_names.add(stage_name)
+                stage_seq = int(stage.get("stage_seq") or -1)
+                if stage_seq >= latest_stage_seq_local:
+                    latest_stage_seq_local = stage_seq
+                    latest_stage_name = stage_name or latest_stage_name
+        for item in row_outcome_items:
+            stage_id = str(item.get("stage_id") or "")
+            stage = stage_by_id.get(stage_id) or {}
+            stage_name = str(item.get("stage_name") or stage.get("stage_name") or "").strip()
+            if stage_name:
+                stage_names.add(stage_name)
+            stage_seq = int(stage.get("stage_seq") or -1)
+            if stage_seq >= latest_stage_seq_local:
+                latest_stage_seq_local = stage_seq
+                latest_stage_name = stage_name or latest_stage_name
+        final_dataset_member = bool(final_basis_stage_name and latest_stage_name == final_basis_stage_name)
+        if final_dataset_member and final_stage_seq is not None:
+            latest_stage_seq_local = int(final_stage_seq or latest_stage_seq_local)
+        reason_codes = [str(item.get("reason_code") or "").strip() for item in row_outcome_items if str(item.get("reason_code") or "").strip()]
+        if final_dataset_member:
+            final_state = "final_dataset_member"
+        elif reason_codes:
+            final_state = reason_codes[-1]
+        elif row_edge_items:
+            final_state = str(row_edge_items[-1].get("edge_type") or "transition")
+        else:
+            final_state = "tracked"
+        lineage_rows.append(
+            {
+                "row_lineage_id": row_lineage_id,
+                "source_table": source_table,
+                "source_row_ref": source_row_ref,
+                "decoded_lineage": decoded,
+                "transition_count": len(row_edge_items),
+                "stage_count": len(stage_names),
+                "rejected_count": sum(1 for item in row_outcome_items if str(item.get("outcome_type") or "").strip() == "rejected"),
+                "join_exception_count": sum(1 for item in row_outcome_items if str(item.get("outcome_type") or "").strip() == "join_exception"),
+                "latest_stage_name": latest_stage_name,
+                "final_state": final_state,
+                "final_dataset_member": final_dataset_member,
+                "evidence_path": f"/data-quality/lineage/{row_lineage_id}?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+            }
+        )
+    lineage_rows = sorted(
+        lineage_rows,
+        key=lambda row: (
+            0 if row.get("final_dataset_member") else 1,
+            -(int(row.get("rejected_count") or 0) + int(row.get("join_exception_count") or 0)),
+            -(int(row.get("transition_count") or 0)),
+            str(row.get("source_table") or ""),
+            str(row.get("source_row_ref") or ""),
+        ),
+    )[:20]
 
     chart_plan: list[dict[str, Any]] = []
     _append_chart_section(
@@ -368,6 +525,184 @@ def build_data_quality_dashboard_spec(
             },
         },
         include_when_empty=True,
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "filter_impact",
+            "title": "Filter Impact",
+            "chart_type": "table",
+            "data_source": "quantyx_data_quality_dataset_stages",
+            "display_columns": [
+                _display_column("stage_name", "Filter Stage"),
+                _display_column("table_name", "Table"),
+                _display_column("expression_text", "Expression"),
+                _display_column("input_row_count", "Input Rows"),
+                _display_column("output_row_count", "Output Rows"),
+                _display_column("rejected_row_count", "Rejected Rows"),
+                _display_column("rejected_pct", "Rejected %"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": sorted(filter_rows, key=lambda row: -(float(row.get("rejected_pct") or 0.0)))[:20],
+            "summary": {
+                "filter_stage_count": len(filter_rows),
+                "total_rejected_row_count": sum(int(row.get("rejected_row_count") or 0) for row in filter_rows),
+            },
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "join_health",
+            "title": "Join Health",
+            "chart_type": "table",
+            "data_source": "quantyx_data_quality_join_artifacts",
+            "display_columns": [
+                _display_column("join_name", "Join Name"),
+                _display_column("left_table", "Left Table"),
+                _display_column("right_table", "Right Table"),
+                _display_column("matched_row_count", "Matched Rows"),
+                _display_column("unmatched_left_row_count", "Unmatched Left"),
+                _display_column("unmatched_right_row_count", "Unmatched Right"),
+                _display_column("duplicate_match_count", "Duplicate Matches"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": [
+                {
+                    "join_name": row.get("join_name"),
+                    "left_table": row.get("left_table"),
+                    "right_table": row.get("right_table"),
+                    "matched_row_count": row.get("matched_row_count"),
+                    "unmatched_left_row_count": row.get("unmatched_left_row_count"),
+                    "unmatched_right_row_count": row.get("unmatched_right_row_count"),
+                    "duplicate_match_count": row.get("duplicate_match_count"),
+                    "evidence_path": (
+                        f"{evidence_base}/joins/{row.get('join_artifact_id')}?tenant_id={tenant_id}&domain_id={domain_id}"
+                        if row.get("join_artifact_id")
+                        else None
+                    ),
+                }
+                for row in join_artifacts
+            ],
+            "summary": {
+                "join_count": len(join_artifacts),
+                "total_unmatched_left": sum(int(row.get("unmatched_left_row_count") or 0) for row in join_artifacts),
+                "total_unmatched_right": sum(int(row.get("unmatched_right_row_count") or 0) for row in join_artifacts),
+            },
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "stage_waterfall",
+            "title": "Stage Waterfall",
+            "chart_type": "waterfall",
+            "data_source": "quantyx_data_quality_dataset_stages",
+            "display_columns": [
+                _display_column("stage_seq", "Stage Seq"),
+                _display_column("stage_name", "Stage Name"),
+                _display_column("stage_type", "Stage Type"),
+                _display_column("input_row_count", "Input Rows"),
+                _display_column("output_row_count", "Output Rows"),
+                _display_column("rejected_row_count", "Rejected Rows"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": [
+                {
+                    "stage_seq": row.get("stage_seq"),
+                    "stage_name": row.get("stage_name"),
+                    "stage_type": row.get("stage_type"),
+                    "input_row_count": row.get("input_row_count"),
+                    "output_row_count": row.get("output_row_count"),
+                    "rejected_row_count": row.get("rejected_row_count"),
+                    "evidence_path": (
+                        f"{evidence_base}/stages/{row.get('stage_id')}?tenant_id={tenant_id}&domain_id={domain_id}"
+                        if row.get("stage_id")
+                        else None
+                    ),
+                }
+                for row in dataset_stages
+            ],
+            "summary": {
+                "stage_count": len(dataset_stages),
+                "total_rejected_row_count": rejected_record_count,
+            },
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "final_dataset_quality",
+            "title": "Final Dataset Quality",
+            "chart_type": "summary_cards",
+            "data_source": "quantyx_data_quality_final_dataset_artifacts",
+            "display_columns": [
+                _display_column("metric_key", "Metric Key"),
+                _display_column("label", "Label"),
+                _display_column("value", "Value"),
+                _display_column("note", "Note"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": [
+                {
+                    "metric_key": "final_row_count",
+                    "label": "Final Row Count",
+                    "value": final_dataset.get("final_row_count"),
+                    "note": final_dataset.get("final_stage_name"),
+                    "evidence_path": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+                },
+                {
+                    "metric_key": "total_rejected_row_count",
+                    "label": "Rejected Rows",
+                    "value": final_dataset.get("total_rejected_row_count"),
+                    "note": "across measured stages",
+                    "evidence_path": f"/data-quality/rejected-records?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+                },
+                {
+                    "metric_key": "readiness_status",
+                    "label": "Readiness",
+                    "value": final_dataset.get("readiness_status"),
+                    "note": (final_dataset.get("summary_json") or {}).get("measurement_status"),
+                    "evidence_path": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+                },
+            ]
+            if final_dataset
+            else [],
+            "summary": {
+                "final_row_count": final_dataset.get("final_row_count"),
+                "total_rejected_row_count": final_dataset.get("total_rejected_row_count"),
+                "readiness_status": final_dataset.get("readiness_status"),
+            },
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "lineage_overview",
+            "title": "Lineage Journey Overview",
+            "chart_type": "table",
+            "data_source": "quantyx_data_quality_lineage_edges",
+            "display_columns": [
+                _display_column("row_lineage_id", "Row Lineage ID"),
+                _display_column("source_table", "Source Table"),
+                _display_column("source_row_ref", "Source Row Ref"),
+                _display_column("decoded_lineage", "Decoded Lineage"),
+                _display_column("transition_count", "Transitions"),
+                _display_column("stage_count", "Stages"),
+                _display_column("rejected_count", "Rejected"),
+                _display_column("join_exception_count", "Join Exceptions"),
+                _display_column("latest_stage_name", "Latest Stage"),
+                _display_column("final_state", "Final State"),
+                _display_column("final_dataset_member", "Final Dataset Member"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": lineage_rows,
+            "summary": {
+                "lineage_row_count": len(lineage_ids),
+                "lineage_edge_count": len(lineage_edges),
+                "final_dataset_member_count": len([row for row in lineage_rows if row.get("final_dataset_member")]),
+            },
+        },
     )
     _append_chart_section(
         chart_plan,
@@ -544,6 +879,9 @@ def build_data_quality_dashboard_spec(
                 "critical_issue_count": quality_summary.get("critical_issue_count", 0),
                 "failed_rule_count": quality_summary.get("failed_rule_count", 0),
                 "duplicate_candidate_count": duplicate_candidate_total,
+                "rejected_record_count": rejected_record_count,
+                "final_dataset_row_count": final_dataset.get("final_row_count"),
+                "lineage_row_count": len(lineage_ids),
                 "recommended_action_count": remediation_summary.get("action_count", 0),
                 "critical_recommended_action_count": remediation_summary.get("critical_action_count", 0),
                 "run_id": run_id,
@@ -561,6 +899,9 @@ def build_data_quality_dashboard_spec(
             "profiled_columns": quality_summary.get("profiled_columns", 0),
             "failed_rule_count": quality_summary.get("failed_rule_count", 0),
             "duplicate_candidate_count": quality_summary.get("duplicate_candidate_count", 0),
+            "rejected_record_count": rejected_record_count,
+            "final_dataset_row_count": final_dataset.get("final_row_count"),
+            "lineage_row_count": len(lineage_ids),
             "remediation_action_count": (remediation_plan.get("summary") or {}).get("action_count", 0),
             "executive_summary": executive_summary_rows,
         },
@@ -581,6 +922,11 @@ def create_data_quality_dashboard(
     duplicate_candidates: list[dict[str, Any]] | None = None,
     freshness_results: list[dict[str, Any]] | None = None,
     enrichment_opportunities: list[dict[str, Any]] | None = None,
+    dataset_stages: list[dict[str, Any]] | None = None,
+    join_artifacts: list[dict[str, Any]] | None = None,
+    lineage_edges: list[dict[str, Any]] | None = None,
+    row_outcomes: list[dict[str, Any]] | None = None,
+    final_dataset: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     spec = build_data_quality_dashboard_spec(
         tenant_id=tenant_id,
@@ -594,6 +940,11 @@ def create_data_quality_dashboard(
         duplicate_candidates=duplicate_candidates,
         freshness_results=freshness_results,
         enrichment_opportunities=enrichment_opportunities,
+        dataset_stages=dataset_stages,
+        join_artifacts=join_artifacts,
+        lineage_edges=lineage_edges,
+        row_outcomes=row_outcomes,
+        final_dataset=final_dataset,
     )
     dashboard = create_dashboard(
         settings,

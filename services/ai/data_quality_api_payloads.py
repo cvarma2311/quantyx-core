@@ -8,6 +8,13 @@ def build_data_quality_artifact_links(*, tenant_id: str, domain_id: str, run_id:
         "run_summary": f"/data-quality/runs/{run_id}",
         "dashboard": f"/data-quality/runs/{run_id}/dashboard",
         "excel_report": f"/data-quality/reports/{run_id}/excel?tenant_id={tenant_id}&domain_id={domain_id}",
+        "stages": f"/data-quality/stages?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "joins": f"/data-quality/joins?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "rejected_records": f"/data-quality/rejected-records?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "final_dataset": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "final_dataset_rows": f"/data-quality/final-dataset/rows?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "lineage": f"/data-quality/lineage?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "lineage_base": f"/data-quality/lineage?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "tables": f"/data-quality/tables?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "rules": f"/data-quality/rules?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "rule_review_queue": f"/data-quality/rules/review-queue?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
@@ -62,6 +69,13 @@ def build_data_quality_run_summary_payload(
         "rule_review_required": bool(summary.get("rule_review_required")),
         "review_queue_pending_count": summary.get("review_queue_pending_count", 0),
         "workflow_status": summary.get("workflow_status") or row.get("status"),
+        "dataset_stage_count": summary.get("dataset_stage_count", 0),
+        "join_stage_count": summary.get("join_stage_count", 0),
+        "filter_stage_count": summary.get("filter_stage_count", 0),
+        "total_rejected_row_count": summary.get("total_rejected_row_count", 0),
+        "final_dataset_row_count": summary.get("final_dataset_row_count"),
+        "final_dataset_readiness_status": summary.get("final_dataset_readiness_status"),
+        "lineage_edge_count": summary.get("lineage_edge_count", 0),
         "stale_table_count": summary.get("stale_table_count", 0),
         "tables_without_freshness_column_count": summary.get("tables_without_freshness_column_count", 0),
         "stability_issue_count": summary.get("stability_issue_count", 0),
@@ -100,10 +114,12 @@ def build_data_quality_run_hydration_payload(
     remediation_plan: dict[str, Any] | None = None,
     rule_review_queue: dict[str, Any] | None = None,
     enrichment_question_queue: dict[str, Any] | None = None,
+    lineage_overview: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     run_payload = build_data_quality_run_summary_payload(row=row, remediation_plan=remediation_plan)
     rule_review_queue = rule_review_queue or {"summary": {}, "rules": []}
     enrichment_question_queue = enrichment_question_queue or {"summary": {}, "questions": []}
+    lineage_overview = lineage_overview or {"summary": {}, "rows": []}
     top_rule_review_items = [
         _trim_rule_review_item(item)
         for item in (rule_review_queue.get("rules") or [])[:5]
@@ -130,6 +146,14 @@ def build_data_quality_run_hydration_payload(
             "enrichment_questions": {
                 **(enrichment_question_queue.get("summary") or {}),
                 "top_items": top_enrichment_questions,
+            },
+            "lineage": {
+                **(lineage_overview.get("summary") or {}),
+                "top_items": [
+                    item
+                    for item in (lineage_overview.get("rows") or [])[:5]
+                    if isinstance(item, dict)
+                ],
             },
             "remediation": {
                 "summary": (remediation_plan or {}).get("summary") or {},

@@ -116,7 +116,7 @@ def get_quality_rule_review_queue(
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        limit=500,
+        limit=1200,
     )
     reviewable = [
         row for row in rows

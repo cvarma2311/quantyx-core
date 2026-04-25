@@ -7,6 +7,7 @@ It focuses on:
 - the deployment run flow
 - the minimal APIs needed to render and reload a run
 - the structured APIs the UI should call for review, enrichment, evidence, dashboard, and report actions
+- the multi-table stage/join/filter/final-dataset and lineage flows
 - example requests and responses for the main cases
 
 The intended UI model is:
@@ -49,6 +50,7 @@ That is enough to render:
 - workflow status banner
 - paused rule review state
 - top pending enrichment questions
+- lineage summary card
 - remediation summary
 - report/dashboard/action links
 
@@ -260,6 +262,28 @@ GET /data-quality/runs/{run_id}/hydration
       "rejected_count": 0,
       "top_items": []
     },
+    "lineage": {
+      "lineage_row_count": 12,
+      "final_dataset_member_count": 8,
+      "rejected_row_count": 3,
+      "join_exception_row_count": 1,
+      "top_items": [
+        {
+          "row_lineage_id": "dqlin_b3JkZXJzfCgwLDEp_a1b2c3d4",
+          "source_table": "orders",
+          "source_row_ref": "(0,1)",
+          "decoded_lineage": "orders -> (0,1)",
+          "transition_count": 2,
+          "stage_count": 3,
+          "rejected_count": 0,
+          "join_exception_count": 0,
+          "latest_stage_name": "final_dataset_projection",
+          "final_state": "final_dataset_member",
+          "final_dataset_member": true,
+          "evidence_path": "/data-quality/lineage/dqlin_b3JkZXJzfCgwLDEp_a1b2c3d4/journey?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001"
+        }
+      ]
+    },
     "remediation": {
       "summary": {
         "action_count": 5,
@@ -288,6 +312,7 @@ Use this payload to render:
 - status banner
 - pending review cards
 - top enrichment questions
+- lineage summary card
 - remediation preview
 - report/dashboard buttons
 
@@ -329,6 +354,13 @@ GET /data-quality/runs/{run_id}
   "rule_review_required": false,
   "review_queue_pending_count": 0,
   "workflow_status": "completed",
+  "dataset_stage_count": 5,
+  "join_stage_count": 1,
+  "filter_stage_count": 1,
+  "total_rejected_row_count": 2880,
+  "final_dataset_row_count": 97120,
+  "final_dataset_readiness_status": "ready",
+  "lineage_edge_count": 6421,
   "stale_table_count": 1,
   "tables_without_freshness_column_count": 0,
   "stability_issue_count": 1,
@@ -340,6 +372,12 @@ GET /data-quality/runs/{run_id}
     "run_summary": "/data-quality/runs/run_dq_001",
     "dashboard": "/data-quality/runs/run_dq_001/dashboard",
     "excel_report": "/data-quality/reports/run_dq_001/excel?tenant_id=VC_101&domain_id=data_quality_observability",
+    "stages": "/data-quality/stages?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+    "joins": "/data-quality/joins?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+    "rejected_records": "/data-quality/rejected-records?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+    "final_dataset": "/data-quality/final-dataset?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+    "final_dataset_rows": "/data-quality/final-dataset/rows?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+    "lineage": "/data-quality/lineage?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
     "tables": "/data-quality/tables?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
     "rules": "/data-quality/rules?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
     "rule_review_queue": "/data-quality/rules/review-queue?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
@@ -366,12 +404,46 @@ GET /data-quality/runs/{run_id}
     "failed_rules": 5,
     "referential_violations": 2,
     "enrichment_opportunities": 4,
+    "dataset_stage_count": 5,
+    "join_stage_count": 1,
+    "filter_stage_count": 1,
+    "total_rejected_row_count": 2880,
+    "final_dataset_row_count": 97120,
+    "lineage_edge_count": 6421,
     "workflow_status": "completed"
   },
   "created_at": "2026-04-22T09:00:00Z",
   "completed_at": "2026-04-22T09:05:00Z"
 }
 ```
+
+## 6.1 Multi-table stage, join, final dataset, and lineage surfaces
+
+For multi-table runs, the UI should treat these as first-class product surfaces:
+
+- dataset stages
+- join health
+- rejected records
+- final dataset summary
+- final surviving rows
+- lineage overview
+- row journey
+
+Recommended lazy-load order:
+
+1. `GET /data-quality/stages?...`
+2. `GET /data-quality/joins?...`
+3. `GET /data-quality/rejected-records?...`
+4. `GET /data-quality/final-dataset?...`
+5. `GET /data-quality/final-dataset/rows?...`
+6. `GET /data-quality/lineage?...`
+7. `GET /data-quality/lineage/{row_lineage_id}/journey?...`
+
+These should usually be opened from:
+
+- hydration cards
+- dashboard drill-through
+- Excel/report links
 
 ## 7. Rule Review Flow Before Execution
 
@@ -592,6 +664,253 @@ Example response:
 ## 8. Tables, Rules, Duplicates, and Freshness
 
 These are the main summary/detail APIs after or during run completion.
+
+## 8A. Multi-table stages and joins
+
+### 8A.1 List dataset stages
+
+```http
+GET /data-quality/stages?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+Example response:
+
+```json
+{
+  "tenant_id": "VC_101",
+  "domain_id": "data_quality_observability",
+  "run_id": "run_dq_001",
+  "stages": [
+    {
+      "stage_id": "dqstage_001",
+      "stage_seq": 1,
+      "stage_name": "source_profile_orders",
+      "stage_type": "source_profile",
+      "input_row_count": 100000,
+      "output_row_count": 100000,
+      "rejected_row_count": 0,
+      "summary_json": {
+        "measurement_status": "measured",
+        "evidence_path": "/data-quality/evidence/stages/dqstage_001?tenant_id=VC_101&domain_id=data_quality_observability"
+      }
+    },
+    {
+      "stage_id": "dqstage_002",
+      "stage_seq": 2,
+      "stage_name": "orders_to_customer_customer_id",
+      "stage_type": "join_validation",
+      "input_row_count": 100000,
+      "output_row_count": 98200,
+      "rejected_row_count": 1800,
+      "summary_json": {
+        "measurement_status": "measured",
+        "evidence_path": "/data-quality/evidence/stages/dqstage_002?tenant_id=VC_101&domain_id=data_quality_observability"
+      }
+    }
+  ]
+}
+```
+
+### 8A.2 List join artifacts
+
+```http
+GET /data-quality/joins?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+Example response:
+
+```json
+{
+  "tenant_id": "VC_101",
+  "domain_id": "data_quality_observability",
+  "run_id": "run_dq_001",
+  "joins": [
+    {
+      "join_artifact_id": "dqjoin_001",
+      "join_name": "orders_to_customer_customer_id",
+      "left_table": "orders",
+      "right_table": "customer",
+      "join_type": "reference_lookup",
+      "matched_row_count": 98200,
+      "unmatched_left_row_count": 1800,
+      "unmatched_right_row_count": 0,
+      "duplicate_match_count": 0,
+      "summary_json": {
+        "measurement_status": "measured",
+        "evidence_path": "/data-quality/evidence/joins/dqjoin_001?tenant_id=VC_101&domain_id=data_quality_observability"
+      }
+    }
+  ]
+}
+```
+
+### 8A.3 List rejected records
+
+```http
+GET /data-quality/rejected-records?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+Example response:
+
+```json
+{
+  "tenant_id": "VC_101",
+  "domain_id": "data_quality_observability",
+  "run_id": "run_dq_001",
+  "stage_id": null,
+  "rejected_records": [
+    {
+      "outcome_id": "dqout_001",
+      "stage_id": "dqstage_002",
+      "stage_name": "orders_to_customer_customer_id",
+      "outcome_type": "rejected",
+      "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4",
+      "row_ref": "(0,15)",
+      "source_table": "orders",
+      "reason_code": "join_unmatched_left",
+      "reason_detail": "No customer match"
+    }
+  ]
+}
+```
+
+### 8A.4 Final dataset summary and rows
+
+```http
+GET /data-quality/final-dataset?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+```json
+{
+  "tenant_id": "VC_101",
+  "domain_id": "data_quality_observability",
+  "run_id": "run_dq_001",
+  "final_dataset": {
+    "artifact_id": "dqfinal_001",
+    "final_stage_name": "final_dataset_projection",
+    "final_row_count": 97120,
+    "total_rejected_row_count": 2880,
+    "readiness_status": "ready",
+    "summary_json": {
+      "measurement_status": "derived",
+      "lineage_enabled": true
+    }
+  }
+}
+```
+
+```http
+GET /data-quality/final-dataset/rows?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+UI usage:
+
+- summary card from `/final-dataset`
+- row table from `/final-dataset/rows`
+- drill-through path from stage or dashboard sections
+
+## 8B. Lineage overview and row journey
+
+### 8B.1 List lineage overview rows
+
+```http
+GET /data-quality/lineage?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+Example response:
+
+```json
+{
+  "tenant_id": "VC_101",
+  "domain_id": "data_quality_observability",
+  "run_id": "run_dq_001",
+  "summary": {
+    "lineage_row_count": 12,
+    "final_dataset_member_count": 8,
+    "rejected_row_count": 3,
+    "join_exception_row_count": 1
+  },
+  "rows": [
+    {
+      "row_lineage_id": "dqlin_b3JkZXJzfCgwLDEp_a1b2c3d4",
+      "source_table": "orders",
+      "source_row_ref": "(0,1)",
+      "decoded_lineage": "orders -> (0,1)",
+      "transition_count": 2,
+      "stage_count": 3,
+      "rejected_count": 0,
+      "join_exception_count": 0,
+      "latest_stage_name": "final_dataset_projection",
+      "final_state": "final_dataset_member",
+      "final_dataset_member": true,
+      "evidence_path": "/data-quality/lineage/dqlin_b3JkZXJzfCgwLDEp_a1b2c3d4/journey?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001"
+    }
+  ]
+}
+```
+
+### 8B.2 Open a UI-friendly lineage journey
+
+```http
+GET /data-quality/lineage/dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4/journey?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+Example response:
+
+```json
+{
+  "run_id": "run_dq_001",
+  "row_lineage_id": "dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4",
+  "source": {
+    "source_table": "orders",
+    "source_row_ref": "(0,15)",
+    "decoded_lineage": "orders|(0,15)"
+  },
+  "summary": {
+    "step_count": 2,
+    "transition_count": 1,
+    "outcome_count": 1,
+    "final_dataset_member": false,
+    "final_state": "join_unmatched_left"
+  },
+  "journey": [
+    {
+      "step_index": 1,
+      "stage_id": "dqstage_001",
+      "stage_seq": 1,
+      "stage_name": "source_profile_orders",
+      "stage_type": "source_profile",
+      "state": "entered",
+      "status_category": "progressed",
+      "display_label": "Entered source_profile_orders"
+    },
+    {
+      "step_index": 2,
+      "stage_id": "dqstage_002",
+      "stage_seq": 2,
+      "stage_name": "orders_to_customer_customer_id",
+      "stage_type": "join_validation",
+      "state": "join_unmatched_left",
+      "status_category": "rejected",
+      "display_label": "Rejected by left-side join mismatch in orders_to_customer_customer_id"
+    }
+  ]
+}
+```
+
+### 8B.3 Open the raw lineage trace when needed
+
+```http
+GET /data-quality/lineage/dqlin_b3JkZXJzfCgwLDE1KQ_a1b2c3d4?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+Use this only for:
+
+- engineering/debug tooling
+- audit inspection
+- lower-level trace rendering
+
+For user-facing lineage journey UI, prefer `/journey`.
 
 ### 8.1 List table summaries
 

@@ -9,7 +9,9 @@ from services.ai.data_quality_store import (
     get_quality_table_detail,
     list_quality_duplicate_candidates,
     list_quality_enrichment_opportunities,
+    list_quality_dataset_stages,
     list_quality_rules,
+    list_quality_stage_row_outcomes,
     list_quality_tables,
 )
 
@@ -137,6 +139,8 @@ def derive_data_quality_remediation_plan(
     rules: list[dict[str, Any]] | None = None,
     duplicates: list[dict[str, Any]] | None = None,
     opportunities: list[dict[str, Any]] | None = None,
+    dataset_stages: list[dict[str, Any]] | None = None,
+    row_outcomes: list[dict[str, Any]] | None = None,
     limit: int = 25,
 ) -> dict[str, Any]:
     tables = [item for item in (tables or []) if isinstance(item, dict)]
@@ -144,6 +148,8 @@ def derive_data_quality_remediation_plan(
     rules = [item for item in (rules or []) if isinstance(item, dict)]
     duplicates = [item for item in (duplicates or []) if isinstance(item, dict)]
     opportunities = [item for item in (opportunities or []) if isinstance(item, dict)]
+    dataset_stages = [item for item in (dataset_stages or []) if isinstance(item, dict)]
+    row_outcomes = [item for item in (row_outcomes or []) if isinstance(item, dict)]
 
     actions: list[dict[str, Any]] = []
     action_keys: set[str] = set()
@@ -273,6 +279,54 @@ def derive_data_quality_remediation_plan(
                 trust_component="duplicate_risk",
                 owner_hint=_component_owner("duplicate_risk"),
                 source_refs={"candidate_id": candidate_id, "duplicate_type": item.get("duplicate_type")},
+            )
+        )
+
+    filter_rejected_counts: dict[str, int] = Counter(
+        str(row.get("stage_id") or "")
+        for row in row_outcomes
+        if str(row.get("reason_code") or "").strip() == "filter_rejected"
+    )
+    for stage in dataset_stages:
+        if str(stage.get("stage_type") or "").strip() != "filter":
+            continue
+        stage_id = str(stage.get("stage_id") or "").strip()
+        rejected_row_count = int(stage.get("rejected_row_count") or filter_rejected_counts.get(stage_id) or 0)
+        input_row_count = int(stage.get("input_row_count") or 0)
+        if rejected_row_count <= 0:
+            continue
+        rejected_pct = (rejected_row_count / input_row_count * 100.0) if input_row_count > 0 else None
+        priority = "critical" if (rejected_pct or 0.0) >= 30.0 else "warning"
+        expression_text = str(((stage.get("expression") or {}).get("expression_text") or "")).strip()
+        add_action(
+            _action(
+                key=f"filter:{stage_id}",
+                priority=priority,
+                action_type="filter_review",
+                title=f"Review filter impact in {stage.get('stage_name')}",
+                recommended_action=(
+                    f"Review the filter `{expression_text}` and confirm whether this rejection rate is intentional. "
+                    "If the filter is business-critical, document it as a gating rule; otherwise consider soft-fail handling or upstream normalization."
+                ),
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+                table_name=str((stage.get("output_dataset") or "")).strip() or None,
+                issue_summary=(
+                    f"{rejected_row_count} rows were rejected"
+                    + (f" ({rejected_pct:.1f}%)." if rejected_pct is not None else ".")
+                ),
+                metric_value=rejected_pct if rejected_pct is not None else rejected_row_count,
+                metric_unit="rejected_pct" if rejected_pct is not None else "rejected_count",
+                evidence_type="stage_filter_rejected",
+                evidence_path=_build_evidence_path(
+                    f"/data-quality/evidence/stages/{stage_id}",
+                    tenant_id=tenant_id,
+                    domain_id=domain_id,
+                ),
+                trust_component="validity",
+                owner_hint="Domain owner",
+                source_refs={"stage_id": stage_id, "stage_name": stage.get("stage_name"), "expression_text": expression_text},
             )
         )
 
@@ -463,15 +517,17 @@ def build_data_quality_remediation_plan(
     run_id: str,
     limit: int = 25,
 ) -> dict[str, Any]:
-    tables = list_quality_tables(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=500)
+    tables = list_quality_tables(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
     table_details = [
         detail
         for table in tables
         if (detail := get_quality_table_detail(settings, tenant_id=tenant_id, domain_id=domain_id, table_name=table.get("table_name"), run_id=run_id))
     ]
-    rules = list_quality_rules(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=500)
-    duplicates = list_quality_duplicate_candidates(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=500)
-    opportunities = list_quality_enrichment_opportunities(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=500)
+    rules = list_quality_rules(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    duplicates = list_quality_duplicate_candidates(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    opportunities = list_quality_enrichment_opportunities(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    dataset_stages = list_quality_dataset_stages(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    row_outcomes = list_quality_stage_row_outcomes(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
     return derive_data_quality_remediation_plan(
         tenant_id=tenant_id,
         domain_id=domain_id,
@@ -481,5 +537,7 @@ def build_data_quality_remediation_plan(
         rules=rules,
         duplicates=duplicates,
         opportunities=opportunities,
+        dataset_stages=dataset_stages,
+        row_outcomes=row_outcomes,
         limit=limit,
     )

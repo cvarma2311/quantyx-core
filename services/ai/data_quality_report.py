@@ -6,7 +6,6 @@ from io import BytesIO
 from typing import Any
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
-import json
 import re
 
 from services.ai.config import Settings
@@ -14,10 +13,16 @@ from services.ai.connection_registry import resolve_database_credentials_cached
 from services.ai.db import run_query
 from services.ai.data_quality_remediation import derive_data_quality_remediation_plan
 from services.ai.data_quality_rules import _build_date_range_predicate_parts
+from services.ai.data_quality_stages import fetch_final_dataset_rows_tool, fetch_stage_snapshot_rows_tool, parse_lineage_id
 from services.ai.data_quality_store import (
     create_quality_report_metadata,
+    get_quality_final_dataset_artifact,
     list_quality_duplicate_candidates,
     list_quality_enrichment_opportunities,
+    list_quality_dataset_stages,
+    list_quality_lineage_edges,
+    list_quality_join_artifacts,
+    list_quality_stage_row_outcomes,
     get_quality_run_by_run_id,
     get_quality_table_detail,
     list_quality_rules,
@@ -41,8 +46,15 @@ def _stringify(value: Any) -> str:
         return value.isoformat()
     if isinstance(value, Decimal):
         return str(value)
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, default=str, ensure_ascii=False)
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key, item in value.items():
+            item_text = _stringify(item)
+            if item_text:
+                parts.append(f"{key}={item_text}")
+        return "; ".join(parts)
+    if isinstance(value, list):
+        return ", ".join(item for item in (_stringify(item) for item in value) if item)
     return str(value)
 
 
@@ -577,6 +589,58 @@ def _alias_display(physical_name: Any, alias_name: Any) -> str:
     return f"{alias} ({physical})"
 
 
+def _flatten_mapping(mapping: Any, *, item_sep: str = "; ", kv_sep: str = "=") -> str:
+    if not isinstance(mapping, dict):
+        return _stringify(mapping)
+    parts: list[str] = []
+    for key, value in mapping.items():
+        text = _flatten_value(value)
+        if text:
+            parts.append(f"{key}{kv_sep}{text}")
+    return item_sep.join(parts)
+
+
+def _flatten_sequence(values: Any, *, item_sep: str = ", ") -> str:
+    if not isinstance(values, list):
+        return _stringify(values)
+    parts = [text for text in (_flatten_value(item) for item in values) if text]
+    return item_sep.join(parts)
+
+
+def _flatten_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return _flatten_mapping(value)
+    if isinstance(value, list):
+        return _flatten_sequence(value)
+    return _stringify(value)
+
+
+def _sample_rows_summary(rows: Any, *, max_rows: int = 3) -> str:
+    if not isinstance(rows, list):
+        return _flatten_value(rows)
+    snippets: list[str] = []
+    for row in rows[:max_rows]:
+        snippets.append(_flatten_value(row))
+    extra = max(0, len(rows) - max_rows)
+    if extra:
+        snippets.append(f"+{extra} more")
+    return " | ".join(item for item in snippets if item)
+
+
+def _table_summary_text(summary_json: dict[str, Any]) -> str:
+    freshness = summary_json.get("freshness_analysis") or {}
+    stability = summary_json.get("stability_analysis") or {}
+    parts = [
+        f"freshness_status={freshness.get('freshness_status')}" if freshness.get("freshness_status") else "",
+        f"freshness_lag_days={freshness.get('freshness_lag_days')}" if freshness.get("freshness_lag_days") is not None else "",
+        f"stability_status={stability.get('stability_status')}" if stability.get("stability_status") else "",
+        f"row_count_change_pct={stability.get('row_count_change_pct')}" if stability.get("row_count_change_pct") is not None else "",
+    ]
+    return "; ".join(item for item in parts if item)
+
+
 def _published_enrichment_sheets(
     settings: Settings,
     *,
@@ -681,6 +745,131 @@ def _published_enrichment_sheets(
     return sheets
 
 
+def _stage_snapshot_sheets(
+    settings: Settings,
+    *,
+    run_row: dict[str, Any],
+    dataset_stages: list[dict[str, Any]],
+) -> list[tuple[str, list[list[Any]]]]:
+    connection_id = str(run_row.get("connection_id") or "").strip()
+    schema_name = str(run_row.get("schema_name") or "public").strip() or "public"
+    if not connection_id:
+        return []
+    scoped_conn = resolve_database_credentials_cached(settings, connection_id, schema_name)
+    if not scoped_conn:
+        return []
+    sheets: list[tuple[str, list[list[Any]]]] = []
+    for stage in dataset_stages:
+        stage_type = str(stage.get("stage_type") or "").strip()
+        if stage_type not in {"source_profile", "join_validation", "filter"}:
+            continue
+        snapshot_rows = fetch_stage_snapshot_rows_tool(
+            settings,
+            scoped_conn=scoped_conn,
+            schema_name=schema_name,
+            stage=stage,
+            limit=1200,
+            offset=0,
+        )
+        if not snapshot_rows:
+            continue
+        headers = list(snapshot_rows[0].keys())
+        rows: list[list[Any]] = [
+            _header_row(headers),
+            *[[row.get(header) for header in headers] for row in snapshot_rows],
+        ]
+        sheets.append((f"Stage {stage.get('stage_seq')} {stage.get('stage_name')}", rows))
+    return sheets
+
+
+def _lineage_overview_rows(
+    *,
+    run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    dataset_stages: list[dict[str, Any]],
+    final_dataset: dict[str, Any],
+    lineage_edges: list[dict[str, Any]],
+    row_outcomes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    stage_by_id = {str(row.get("stage_id") or ""): row for row in dataset_stages if str(row.get("stage_id") or "").strip()}
+    final_stage_name = str(final_dataset.get("final_stage_name") or "").strip()
+    lineage_ids: set[str] = set()
+    lineage_ids.update(str(row.get("row_lineage_id") or "").strip() for row in lineage_edges)
+    lineage_ids.update(str(row.get("row_lineage_id") or "").strip() for row in row_outcomes)
+    lineage_ids.discard("")
+    rows: list[dict[str, Any]] = []
+    for row_lineage_id in sorted(lineage_ids):
+        parsed = parse_lineage_id(row_lineage_id)
+        source_table = None
+        source_row_ref = None
+        decoded_lineage = row_lineage_id
+        if parsed:
+            parts = parsed.get("parts") or []
+            decoded_lineage = " -> ".join(str(part) for part in parts if str(part).strip()) or row_lineage_id
+            if len(parts) >= 2:
+                source_table = parts[0]
+                source_row_ref = parts[1]
+        edge_rows = [row for row in lineage_edges if str(row.get("row_lineage_id") or "") == row_lineage_id]
+        outcome_rows = [row for row in row_outcomes if str(row.get("row_lineage_id") or "") == row_lineage_id]
+        latest_stage_name = None
+        latest_stage_seq = -1
+        for row in edge_rows:
+            for stage_id_key, stage_name_key in (("from_stage_id", "from_stage_name"), ("to_stage_id", "to_stage_name")):
+                stage_id = str(row.get(stage_id_key) or "")
+                if not stage_id:
+                    continue
+                stage = stage_by_id.get(stage_id) or {}
+                stage_name = str(row.get(stage_name_key) or stage.get("stage_name") or "").strip()
+                stage_seq = int(stage.get("stage_seq") or -1)
+                if stage_seq >= latest_stage_seq:
+                    latest_stage_seq = stage_seq
+                    latest_stage_name = stage_name or latest_stage_name
+        for row in outcome_rows:
+            stage_id = str(row.get("stage_id") or "")
+            stage = stage_by_id.get(stage_id) or {}
+            stage_name = str(row.get("stage_name") or stage.get("stage_name") or "").strip()
+            stage_seq = int(stage.get("stage_seq") or -1)
+            if stage_seq >= latest_stage_seq:
+                latest_stage_seq = stage_seq
+                latest_stage_name = stage_name or latest_stage_name
+        final_dataset_member = bool(final_stage_name and latest_stage_name == final_stage_name)
+        reason_codes = [str(row.get("reason_code") or "").strip() for row in outcome_rows if str(row.get("reason_code") or "").strip()]
+        if final_dataset_member:
+            final_state = "final_dataset_member"
+        elif reason_codes:
+            final_state = reason_codes[-1]
+        elif edge_rows:
+            final_state = str(edge_rows[-1].get("edge_type") or "transition")
+        else:
+            final_state = "tracked"
+        rows.append(
+            {
+                "row_lineage_id": row_lineage_id,
+                "source_table": source_table,
+                "source_row_ref": source_row_ref,
+                "decoded_lineage": decoded_lineage,
+                "transition_count": len(edge_rows),
+                "rejected_count": sum(1 for row in outcome_rows if str(row.get("outcome_type") or "").strip() == "rejected"),
+                "join_exception_count": sum(1 for row in outcome_rows if str(row.get("outcome_type") or "").strip() == "join_exception"),
+                "latest_stage_name": latest_stage_name,
+                "final_state": final_state,
+                "final_dataset_member": final_dataset_member,
+                "evidence_path": f"/data-quality/lineage/{row_lineage_id}?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (
+            0 if row.get("final_dataset_member") else 1,
+            -(int(row.get("rejected_count") or 0) + int(row.get("join_exception_count") or 0)),
+            -(int(row.get("transition_count") or 0)),
+            str(row.get("source_table") or ""),
+            str(row.get("source_row_ref") or ""),
+        ),
+    )
+
+
 def build_data_quality_excel_report(
     settings: Settings,
     *,
@@ -694,12 +883,18 @@ def build_data_quality_excel_report(
     if str(run.get("tenant_id")) != str(tenant_id) or str(run.get("domain_id")) != str(domain_id):
         raise ValueError("Data quality run does not match tenant/domain")
 
-    tables = list_quality_tables(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=500)
-    rules = list_quality_rules(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=500)
-    duplicates = list_quality_duplicate_candidates(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=500)
-    opportunities = list_quality_enrichment_opportunities(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=500)
+    tables = list_quality_tables(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    rules = list_quality_rules(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    duplicates = list_quality_duplicate_candidates(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    dataset_stages = list_quality_dataset_stages(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    join_artifacts = list_quality_join_artifacts(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    lineage_edges = list_quality_lineage_edges(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000)
+    stage_row_outcomes = list_quality_stage_row_outcomes(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000)
+    final_dataset = get_quality_final_dataset_artifact(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id) or {}
+    opportunities = list_quality_enrichment_opportunities(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
     staged_artifacts = _list_staged_overlay_artifacts(settings, run_id)
     published_sheets = _published_enrichment_sheets(settings, run_row=run, staged_artifacts=staged_artifacts)
+    stage_snapshot_sheets = _stage_snapshot_sheets(settings, run_row=run, dataset_stages=dataset_stages)
     table_details = [
         detail
         for table in tables
@@ -722,6 +917,8 @@ def build_data_quality_excel_report(
         rules=rules,
         duplicates=duplicates,
         opportunities=opportunities,
+        dataset_stages=dataset_stages,
+        row_outcomes=stage_row_outcomes,
         limit=50,
     )
     freshness_rows = []
@@ -754,6 +951,21 @@ def build_data_quality_excel_report(
         for row in ((artifact.get("raw_json") or {}).get("deferred_rows") or [])
         if isinstance(row, dict)
     ]
+    rejected_records = [row for row in stage_row_outcomes if str(row.get("outcome_type") or "").strip() == "rejected"]
+    join_exceptions = [row for row in stage_row_outcomes if str(row.get("outcome_type") or "").strip() == "join_exception"]
+    filter_rejections = [row for row in rejected_records if str(row.get("reason_code") or "").strip() == "filter_rejected"]
+    connection_id = str(run.get("connection_id") or "").strip()
+    schema_name = str(run.get("schema_name") or "public").strip() or "public"
+    scoped_conn = resolve_database_credentials_cached(settings, connection_id, schema_name) if connection_id else None
+    final_dataset_rows, final_dataset_basis_stage = fetch_final_dataset_rows_tool(
+        settings,
+        scoped_conn=scoped_conn,
+        schema_name=schema_name,
+        stages=dataset_stages,
+        final_dataset=final_dataset,
+        limit=1200,
+        offset=0,
+    )
 
     summary = {
         "run_id": run_id,
@@ -765,6 +977,14 @@ def build_data_quality_excel_report(
         "rule_count": len(rules),
         "failed_rule_count": len(failed_rules),
         "duplicate_candidate_count": len(duplicates),
+        "dataset_stage_count": len(dataset_stages),
+        "join_artifact_count": len(join_artifacts),
+        "lineage_edge_count": len(lineage_edges),
+        "rejected_record_count": len(rejected_records),
+        "filter_rejection_count": len(filter_rejections),
+        "join_exception_count": len(join_exceptions),
+        "final_dataset_row_count": final_dataset.get("final_row_count"),
+        "final_dataset_readiness_status": final_dataset.get("readiness_status"),
         "stale_table_count": len([row for row in freshness_rows if row.get("freshness_status") == "stale"]),
         "stability_issue_count": len([row for row in freshness_rows if row.get("stability_status") == "changed"]),
         "overall_trust_score": run.get("overall_trust_score"),
@@ -772,6 +992,7 @@ def build_data_quality_excel_report(
         "approved_enrichment_row_count": len(approved_overlay_rows),
         "deferred_enrichment_row_count": len(deferred_overlay_rows),
         "published_enrichment_sheet_count": len(published_sheets),
+        "stage_snapshot_sheet_count": len(stage_snapshot_sheets),
         "all_data_sheet_count": len(all_data_sheets),
         "remediation_action_count": (remediation_plan.get("summary") or {}).get("action_count", 0),
         "critical_remediation_action_count": (remediation_plan.get("summary") or {}).get("critical_action_count", 0),
@@ -803,16 +1024,142 @@ def build_data_quality_excel_report(
                 ["Validation Rules", len(rules)],
                 ["Failed Rules", len(failed_rules)],
                 ["Duplicate Candidates", len(duplicates)],
+                ["Dataset Stages", len(dataset_stages)],
+                ["Join Artifacts", len(join_artifacts)],
+                ["Lineage Edges", len(lineage_edges)],
+                ["Rejected Records", len(rejected_records)],
+                ["Filter Rejections", len(filter_rejections)],
+                ["Join Exceptions", len(join_exceptions)],
+                ["Final Dataset Rows", final_dataset.get("final_row_count")],
+                ["Final Dataset Readiness", final_dataset.get("readiness_status")],
                 ["Stale Tables", len([row for row in freshness_rows if row.get("freshness_status") == "stale"])],
                 ["Stability Issues", len([row for row in freshness_rows if row.get("stability_status") == "changed"])],
                 ["Staged Overlay Artifacts", len(staged_artifacts)],
                 ["Approved Enrichment Rows", len(approved_overlay_rows)],
                 ["Deferred Enrichment Rows", len(deferred_overlay_rows)],
                 ["Published Enrichment Sheets", len(published_sheets)],
+                ["Stage Snapshot Sheets", len(stage_snapshot_sheets)],
                 ["All Data Sheets", len(all_data_sheets)],
                 ["Recommended Actions", (remediation_plan.get("summary") or {}).get("action_count", 0)],
                 ["Critical Recommended Actions", (remediation_plan.get("summary") or {}).get("critical_action_count", 0)],
-                ["Run Summary", run.get("summary_json") or {}],
+                ["Workflow Status", (run.get("summary_json") or {}).get("workflow_status") or run.get("status")],
+            ],
+        ),
+        (
+            "Stage Waterfall",
+            [
+                _header_row(["Stage Seq", "Stage Name", "Stage Type", "Input Rows", "Output Rows", "Rejected Rows", "Measurement Status", "Evidence Path", "Details"]),
+                *[
+                    [
+                        row.get("stage_seq"),
+                        row.get("stage_name"),
+                        row.get("stage_type"),
+                        row.get("input_row_count"),
+                        row.get("output_row_count"),
+                        row.get("rejected_row_count"),
+                        (row.get("summary_json") or {}).get("measurement_status"),
+                        (row.get("summary_json") or {}).get("evidence_path"),
+                        _flatten_mapping(
+                            {
+                                "output_dataset": row.get("output_dataset"),
+                                "input_tables": _flatten_sequence(row.get("input_tables") or []),
+                                "measurement_error": (row.get("summary_json") or {}).get("measurement_error"),
+                            }
+                        ),
+                    ]
+                    for row in dataset_stages
+                ],
+            ],
+        ),
+        (
+            "Join Health",
+            [
+                _header_row(["Join Name", "Left Table", "Right Table", "Join Type", "Matched Rows", "Unmatched Left", "Unmatched Right", "Duplicate Matches", "Evidence Path", "Source", "Sample Matches", "Sample Unmatched Left", "Sample Unmatched Right"]),
+                *[
+                    [
+                        row.get("join_name"),
+                        row.get("left_table"),
+                        row.get("right_table"),
+                        row.get("join_type"),
+                        row.get("matched_row_count"),
+                        row.get("unmatched_left_row_count"),
+                        row.get("unmatched_right_row_count"),
+                        row.get("duplicate_match_count"),
+                        (row.get("summary_json") or {}).get("evidence_path"),
+                        (row.get("summary_json") or {}).get("source"),
+                        _sample_rows_summary((row.get("summary_json") or {}).get("sample_matches") or []),
+                        _sample_rows_summary((row.get("summary_json") or {}).get("sample_unmatched_left_rows") or []),
+                        _sample_rows_summary((row.get("summary_json") or {}).get("sample_unmatched_right_rows") or []),
+                    ]
+                    for row in join_artifacts
+                ],
+            ],
+        ),
+        (
+            "Lineage Overview",
+            [
+                _header_row([
+                    "Row Lineage ID",
+                    "Source Table",
+                    "Source Row Ref",
+                    "Decoded Lineage",
+                    "Transitions",
+                    "Rejected",
+                    "Join Exceptions",
+                    "Latest Stage",
+                    "Final State",
+                    "Final Dataset Member",
+                    "Evidence Path",
+                ]),
+                *[
+                    [
+                        row.get("row_lineage_id"),
+                        row.get("source_table"),
+                        row.get("source_row_ref"),
+                        row.get("decoded_lineage"),
+                        row.get("transition_count"),
+                        row.get("rejected_count"),
+                        row.get("join_exception_count"),
+                        row.get("latest_stage_name"),
+                        row.get("final_state"),
+                        row.get("final_dataset_member"),
+                        row.get("evidence_path"),
+                    ]
+                    for row in _lineage_overview_rows(
+                        run_id=run_id,
+                        tenant_id=tenant_id,
+                        domain_id=domain_id,
+                        dataset_stages=dataset_stages,
+                        final_dataset=final_dataset,
+                        lineage_edges=lineage_edges,
+                        row_outcomes=stage_row_outcomes,
+                    )
+                ],
+            ],
+        ),
+        (
+            "Filter Impact",
+            [
+                _header_row(["Stage Seq", "Stage Name", "Table", "Expression", "Input Rows", "Output Rows", "Rejected Rows", "Rejected %", "Evidence Path"]),
+                *[
+                    [
+                        row.get("stage_seq"),
+                        row.get("stage_name"),
+                        row.get("output_dataset"),
+                        ((row.get("expression") or {}).get("expression_text")),
+                        row.get("input_row_count"),
+                        row.get("output_row_count"),
+                        row.get("rejected_row_count"),
+                        (
+                            round((float(row.get("rejected_row_count") or 0) / float(row.get("input_row_count") or 1)) * 100.0, 2)
+                            if row.get("input_row_count") not in (None, 0) and row.get("rejected_row_count") is not None
+                            else None
+                        ),
+                        (row.get("summary_json") or {}).get("evidence_path"),
+                    ]
+                    for row in dataset_stages
+                    if str(row.get("stage_type") or "").strip() == "filter"
+                ],
             ],
         ),
         (
@@ -828,7 +1175,8 @@ def build_data_quality_excel_report(
                     "Freshness",
                     "Duplicate Risk",
                     "Severity",
-                    "Trust Components",
+                    "Stability",
+                    "Enrichment Readiness",
                     "Explanations",
                 ]),
                 *[
@@ -842,8 +1190,9 @@ def build_data_quality_excel_report(
                         row.get("freshness_score"),
                         row.get("duplicate_risk_score"),
                         row.get("severity"),
-                        (row.get("summary_json") or {}).get("trust_components") or {},
-                        (row.get("summary_json") or {}).get("trust_component_explanations") or {},
+                        ((row.get("summary_json") or {}).get("trust_components") or {}).get("stability"),
+                        ((row.get("summary_json") or {}).get("trust_components") or {}).get("enrichment_readiness"),
+                        _flatten_mapping((row.get("summary_json") or {}).get("trust_component_explanations") or {}),
                     ]
                     for row in tables
                 ],
@@ -852,7 +1201,7 @@ def build_data_quality_excel_report(
         (
             "Table Quality",
             [
-                _header_row(["Table", "Rows", "Trust Score", "Completeness", "Freshness", "Duplicate Risk", "Severity", "Summary"]),
+                _header_row(["Table", "Rows", "Trust Score", "Completeness", "Freshness", "Duplicate Risk", "Severity", "Table Summary"]),
                 *[
                     [
                         row.get("table_name"),
@@ -862,7 +1211,7 @@ def build_data_quality_excel_report(
                         row.get("freshness_score"),
                         row.get("duplicate_risk_score"),
                         row.get("severity"),
-                        row.get("summary_json") or {},
+                        _table_summary_text(row.get("summary_json") or {}),
                     ]
                     for row in tables
                 ],
@@ -871,7 +1220,7 @@ def build_data_quality_excel_report(
         (
             "Column Quality",
             [
-                _header_row(["Table", "Column", "Type", "Null Count", "Null %", "Blank Count", "Blank %", "Distinct Count", "Distinct Ratio", "Completeness", "Trust Score", "Flags"]),
+                _header_row(["Table", "Column", "Type", "Null Count", "Null %", "Blank Count", "Blank %", "Distinct Count", "Distinct Ratio", "Completeness", "Trust Score", "Is Sparse", "Is Very Sparse", "Semantic Role"]),
                 *[
                     [
                         row.get("table_name"),
@@ -885,7 +1234,9 @@ def build_data_quality_excel_report(
                         row.get("distinct_ratio"),
                         row.get("completeness_score"),
                         row.get("column_trust_score"),
-                        row.get("quality_flags_json") or {},
+                        (row.get("quality_flags_json") or {}).get("is_sparse"),
+                        (row.get("quality_flags_json") or {}).get("is_very_sparse"),
+                        (row.get("quality_flags_json") or {}).get("semantic_role"),
                     ]
                     for row in columns
                 ],
@@ -894,7 +1245,7 @@ def build_data_quality_excel_report(
         (
             "Validation Rules",
             [
-                _header_row(["Rule ID", "Type", "Severity", "Table", "Column", "Reference Table", "Reference Column", "Rule Status", "Result Status", "Checked Rows", "Violations", "Violation %", "Error", "Condition"]),
+                _header_row(["Rule ID", "Type", "Severity", "Table", "Column", "Reference Table", "Reference Column", "Rule Status", "Result Status", "Checked Rows", "Violations", "Violation %", "Error", "Source Text", "Rule Detail"]),
                 *[
                     [
                         row.get("rule_id"),
@@ -910,7 +1261,8 @@ def build_data_quality_excel_report(
                         row.get("violation_count"),
                         row.get("violation_pct"),
                         row.get("error_message"),
-                        row.get("condition_json") or {},
+                        row.get("source_text"),
+                        _flatten_mapping(row.get("condition_json") or {}),
                     ]
                     for row in rules
                 ],
@@ -919,7 +1271,7 @@ def build_data_quality_excel_report(
         (
             "Rule Violations",
             [
-                _header_row(["Rule ID", "Type", "Table", "Column", "Violation Count", "Violation %", "Sample Rows"]),
+                _header_row(["Rule ID", "Type", "Table", "Column", "Violation Count", "Violation %", "Sample Evidence"]),
                 *[
                     [
                         row.get("rule_id"),
@@ -928,7 +1280,7 @@ def build_data_quality_excel_report(
                         row.get("column_name"),
                         row.get("violation_count"),
                         row.get("violation_pct"),
-                        row.get("sample_rows_json") or [],
+                        _sample_rows_summary(row.get("sample_rows_json") or []),
                     ]
                     for row in failed_rules
                 ],
@@ -948,7 +1300,7 @@ def build_data_quality_excel_report(
                         row.get("row_count_change_pct"),
                         row.get("completeness_score_change"),
                         row.get("stability_status"),
-                        row.get("stability_issues") or [],
+                        _flatten_sequence(row.get("stability_issues") or []),
                     ]
                     for row in freshness_rows
                 ],
@@ -957,23 +1309,86 @@ def build_data_quality_excel_report(
         (
             "Duplicates",
             [
-                _header_row(["Candidate ID", "Table", "Duplicate Type", "Match Columns", "Confidence", "Candidate Records", "Review Status", "Sample Rows", "Cluster"]),
+                _header_row(["Candidate ID", "Table", "Duplicate Type", "Match Columns", "Confidence", "Candidate Records", "Review Status", "Sample Evidence", "Duplicate Groups"]),
                 *[
                     [
                         row.get("candidate_id"),
                         row.get("table_name"),
                         row.get("duplicate_type"),
-                        row.get("match_columns_json") or [],
+                        _flatten_sequence(row.get("match_columns_json") or []),
                         row.get("confidence"),
                         row.get("candidate_record_count"),
                         row.get("review_status"),
-                        row.get("sample_rows_json") or [],
-                        row.get("cluster_json") or {},
+                        _sample_rows_summary(row.get("sample_rows_json") or []),
+                        (row.get("cluster_json") or {}).get("duplicate_group_count"),
                     ]
                     for row in duplicates
                 ],
             ],
         ),
+        (
+            "Rejected Records",
+            [
+                _header_row(["Outcome ID", "Stage ID", "Stage Name", "Row Lineage ID", "Row Ref", "Source Table", "Source Key", "Reason Code", "Reason Detail", "Row Snapshot"]),
+                *[
+                    [
+                        row.get("outcome_id"),
+                        row.get("stage_id"),
+                        row.get("stage_name"),
+                        row.get("row_lineage_id"),
+                        row.get("row_ref"),
+                        row.get("source_table"),
+                        _flatten_mapping(row.get("source_key_json") or {}),
+                        row.get("reason_code"),
+                        row.get("reason_detail"),
+                        _flatten_mapping(row.get("row_data_json") or {}),
+                    ]
+                    for row in rejected_records
+                ],
+            ],
+        ),
+        (
+            "Final Dataset",
+            [
+                _header_row(["Metric", "Value"]),
+                ["Artifact ID", final_dataset.get("artifact_id")],
+                ["Final Stage Name", final_dataset.get("final_stage_name")],
+                ["Basis Stage Name", (final_dataset_basis_stage or {}).get("stage_name")],
+                ["Final Row Count", final_dataset.get("final_row_count")],
+                ["Total Rejected Row Count", final_dataset.get("total_rejected_row_count")],
+                ["Readiness Status", final_dataset.get("readiness_status")],
+                ["Measurement Status", (final_dataset.get("summary_json") or {}).get("measurement_status")],
+                ["Lineage Enabled", (final_dataset.get("summary_json") or {}).get("lineage_enabled")],
+                [],
+                _header_row(list(final_dataset_rows[0].keys()) if final_dataset_rows else ["No Rows"]),
+                *[
+                    [row.get(header) for header in final_dataset_rows[0].keys()]
+                    for row in final_dataset_rows
+                ],
+            ],
+        ),
+        (
+            "Join Exceptions",
+            [
+                _header_row(["Outcome ID", "Stage ID", "Stage Name", "Row Lineage ID", "Row Ref", "Source Table", "Source Key", "Reason Code", "Reason Detail", "Row Snapshot"]),
+                *[
+                    [
+                        row.get("outcome_id"),
+                        row.get("stage_id"),
+                        row.get("stage_name"),
+                        row.get("row_lineage_id"),
+                        row.get("row_ref"),
+                        row.get("source_table"),
+                        _flatten_mapping(row.get("source_key_json") or {}),
+                        row.get("reason_code"),
+                        row.get("reason_detail"),
+                        _flatten_mapping(row.get("row_data_json") or {}),
+                    ]
+                    for row in join_exceptions
+                ],
+            ],
+        ),
+        *stage_snapshot_sheets,
         (
             "Enrichment Summary",
             [
@@ -1042,7 +1457,7 @@ def build_data_quality_excel_report(
                         row.get("confidence"),
                         row.get("method"),
                         (artifact.get("raw_json") or {}).get("approval_scope"),
-                        row.get("source_values") or {},
+                        _flatten_mapping(row.get("source_values") or {}),
                     ]
                     for artifact in staged_artifacts
                     for row in ((artifact.get("raw_json") or {}).get("approved_rows") or [])
@@ -1063,7 +1478,7 @@ def build_data_quality_excel_report(
                         row.get("confidence"),
                         row.get("method"),
                         (artifact.get("raw_json") or {}).get("approval_scope"),
-                        row.get("source_values") or {},
+                        _flatten_mapping(row.get("source_values") or {}),
                     ]
                     for artifact in staged_artifacts
                     for row in ((artifact.get("raw_json") or {}).get("deferred_rows") or [])
