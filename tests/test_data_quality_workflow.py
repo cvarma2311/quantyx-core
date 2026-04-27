@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import pytest
 import zipfile
+from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
 
+from services.ai import dashboards_store
 from services.ai import data_quality_api_payloads as dq_api_payloads
 from services.ai import data_quality_anomalies as dq_anomalies
 from services.ai import data_quality_dashboard as dq_dashboard
@@ -25,6 +28,21 @@ from services.ai import data_quality_trust as dq_trust
 from services.ai import data_quality_trends as dq_trends
 from services.ai import data_quality_workspace as dq_workspace
 from services.ai import agentic_store
+
+
+def test_dashboard_store_json_default_serializes_decimal() -> None:
+    payload = {
+        "chart_plan": [
+            {
+                "title": "Quality Trends",
+                "rows": [{"metric_name": "trust_score", "current_value_num": Decimal("82.4")}],
+            }
+        ]
+    }
+
+    serialized = json.dumps(payload, default=dashboards_store._json_default)
+
+    assert '"current_value_num": 82.4' in serialized
 
 
 def test_is_data_quality_workflow_by_builtin_pack() -> None:

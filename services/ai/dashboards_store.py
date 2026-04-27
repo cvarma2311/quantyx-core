@@ -7,6 +7,7 @@ Single source of truth for all dashboard CRUD over:
 """
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -14,6 +15,17 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from services.ai.config import Settings
+
+
+def _json_default(value: Any):
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return str(value)
 
 
 def _conn(settings: Settings):
@@ -44,7 +56,6 @@ def create_dashboard(
     quality_gate_passed: bool | None = None,
     created_by: str | None = None,
 ) -> dict:
-    import json
     dashboard_id = f"db_{uuid.uuid4().hex[:10]}"
     sql = """
         INSERT INTO public.quantyx_dashboards
@@ -58,7 +69,7 @@ def create_dashboard(
     params = [
         dashboard_id, tenant_id, domain_id, name, description, dashboard_type,
         run_id,
-        json.dumps(chart_plan) if chart_plan is not None else None,
+        json.dumps(chart_plan, default=_json_default) if chart_plan is not None else None,
         quality_score, quality_gate_passed, created_by,
     ]
     c = _conn(settings)
@@ -154,7 +165,6 @@ def update_dashboard(
     quality_gate_passed: bool | None = None,
     chart_plan: list | dict | None = None,
 ) -> dict | None:
-    import json
     updates = ["updated_at = now()"]
     params: list[Any] = []
     if name is not None:
@@ -172,7 +182,7 @@ def update_dashboard(
     if quality_gate_passed is not None:
         updates.append("quality_gate_passed = %s"); params.append(quality_gate_passed)
     if chart_plan is not None:
-        updates.append("chart_plan = %s::jsonb"); params.append(json.dumps(chart_plan))
+        updates.append("chart_plan = %s::jsonb"); params.append(json.dumps(chart_plan, default=_json_default))
     params.append(dashboard_id)
 
     sql = f"""
