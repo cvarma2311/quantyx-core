@@ -2944,6 +2944,7 @@ def test_create_data_quality_dashboard_uses_dashboard_store(monkeypatch) -> None
 
 def test_detect_duplicate_candidates_collects_exact_and_fuzzy(monkeypatch) -> None:
     def fake_run_query(settings, sql, params, scoped_conn=None):
+        assert "duplicate_value::text" not in sql
         if "COUNT(*) AS duplicate_group_count" in sql:
             return [{"duplicate_group_count": 1, "candidate_record_count": 2, "max_group_size": 2}]
         if "duplicate_value" in sql:

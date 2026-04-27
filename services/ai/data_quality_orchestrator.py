@@ -80,10 +80,62 @@ from services.ai.data_quality_rules import (
 from services.ai.db import ScopedConnection
 from services.ai.connection_registry import resolve_database_credentials_cached
 from services.ai.semantic_layer.pack_loader import load_pack
-from services.ai.workspace_store import list_runs_by_trend_scope
+from services.ai.workspace_store import get_deployment_run, list_runs_by_trend_scope
 
 
 logger = logging.getLogger(__name__)
+
+
+def _resolved_trend_metadata(
+    settings,
+    run_id: str,
+    *,
+    state: dict[str, Any] | None = None,
+    run_row: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    state = state or {}
+    run_row = run_row or {}
+    deployment_row = get_deployment_run(settings, run_id) or {}
+
+    trend_mode = (
+        str(state.get("trend_mode") or run_row.get("trend_mode") or deployment_row.get("trend_mode") or "").strip().lower()
+        or None
+    )
+    trend_scope_key = (
+        str(
+            state.get("trend_scope_key")
+            or run_row.get("trend_scope_key")
+            or ((run_row.get("summary_json") or {}) if isinstance(run_row.get("summary_json"), dict) else {}).get("trend_scope_key")
+            or deployment_row.get("trend_scope_key")
+            or ""
+        ).strip()
+        or None
+    )
+    trend_scope_label = (
+        str(
+            state.get("trend_scope_label")
+            or run_row.get("trend_scope_label")
+            or deployment_row.get("trend_scope_label")
+            or ""
+        ).strip()
+        or None
+    )
+    baseline_run_id = (
+        str(
+            state.get("baseline_run_id")
+            or run_row.get("baseline_run_id")
+            or ((run_row.get("summary_json") or {}) if isinstance(run_row.get("summary_json"), dict) else {}).get("baseline_run_id")
+            or deployment_row.get("baseline_run_id")
+            or ""
+        ).strip()
+        or None
+    )
+    return {
+        "trend_mode": trend_mode,
+        "trend_scope_key": trend_scope_key,
+        "trend_scope_label": trend_scope_label,
+        "baseline_run_id": baseline_run_id,
+    }
 
 
 def is_data_quality_workflow(domain_id: str | None, initial_state: dict[str, Any] | None = None) -> bool:
@@ -153,8 +205,9 @@ def _persist_trend_artifacts(settings, run_id: str, state: dict[str, Any]) -> di
     quality_run_id = str(state.get("quality_run_id") or "").strip()
     if not quality_run_id:
         return {"baseline_run_id": None, "trends": [], "summary": {}}
-    trend_mode = str(state.get("trend_mode") or "").strip().lower() or None
-    trend_scope_key = str(state.get("trend_scope_key") or "").strip() or None
+    trend_meta = _resolved_trend_metadata(settings, run_id, state=state)
+    trend_mode = trend_meta.get("trend_mode")
+    trend_scope_key = trend_meta.get("trend_scope_key")
     current_summary = dict(state.get("quality_summary") or {})
     if not trend_scope_key:
         return {"baseline_run_id": None, "trends": [], "summary": {}}
@@ -285,7 +338,7 @@ def _persist_trend_artifacts(settings, run_id: str, state: dict[str, Any]) -> di
         business_term_trends = {"summary": {}, "rows": []}
     summary["trend_mode"] = trend_mode
     summary["trend_scope_key"] = trend_scope_key
-    summary["trend_scope_label"] = str(state.get("trend_scope_label") or "").strip() or None
+    summary["trend_scope_label"] = trend_meta.get("trend_scope_label")
     summary["baseline_run_id"] = baseline_run_id
     summary["business_term_group_count"] = (business_term_trends.get("summary") or {}).get("business_term_group_count", 0)
     summary["worsened_business_term_count"] = (business_term_trends.get("summary") or {}).get("worsened_business_term_count", 0)

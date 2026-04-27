@@ -89,7 +89,7 @@ def _single_column_duplicate_candidate(
          WHERE {predicate}
          GROUP BY {column}
         HAVING COUNT(*) > 1
-         ORDER BY duplicate_count DESC, duplicate_value::text ASC
+         ORDER BY duplicate_count DESC, {column}::text ASC
          LIMIT 10
     """
     count_row = (run_query(settings, count_sql, [], scoped_conn=scoped_conn) or [{}])[0]

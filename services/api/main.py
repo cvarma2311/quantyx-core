@@ -8839,6 +8839,42 @@ def _build_workspace_run_history_payload(tenant_id: str, domain_id: str, rows: l
     }
 
 
+def _resolve_run_trend_metadata(row: dict | None, deployment_row: dict | None = None) -> dict[str, str | None]:
+    row = row or {}
+    deployment_row = deployment_row or {}
+    summary = row.get("summary_json") if isinstance(row.get("summary_json"), dict) else {}
+    return {
+        "trend_scope_key": str(
+            row.get("trend_scope_key")
+            or summary.get("trend_scope_key")
+            or deployment_row.get("trend_scope_key")
+            or ""
+        ).strip()
+        or None,
+        "baseline_run_id": str(
+            row.get("baseline_run_id")
+            or summary.get("baseline_run_id")
+            or deployment_row.get("baseline_run_id")
+            or ""
+        ).strip()
+        or None,
+        "trend_mode": str(
+            row.get("trend_mode")
+            or summary.get("trend_mode")
+            or deployment_row.get("trend_mode")
+            or ""
+        ).strip()
+        or None,
+        "trend_scope_label": str(
+            row.get("trend_scope_label")
+            or summary.get("trend_scope_label")
+            or deployment_row.get("trend_scope_label")
+            or ""
+        ).strip()
+        or None,
+    }
+
+
 @app.get(
     "/workspace/deployments",
     tags=["workspace"],
@@ -10843,6 +10879,8 @@ def get_data_quality_run_hydration(run_id: str) -> dict:
     row = get_quality_run_by_run_id(settings, run_id)
     if not row:
         raise HTTPException(status_code=404, detail="Data quality run not found")
+    deployment_row = get_deployment_run(settings, run_id) or {}
+    trend_meta = _resolve_run_trend_metadata(row, deployment_row)
     tenant_id = str(row.get("tenant_id") or "")
     domain_id = str(row.get("domain_id") or "data_quality_observability")
     try:
@@ -10889,8 +10927,8 @@ def get_data_quality_run_hydration(run_id: str) -> dict:
             tenant_id=tenant_id,
             domain_id=domain_id,
             run_id=run_id,
-            trend_scope_key=str(row.get("trend_scope_key") or (row.get("summary_json") or {}).get("trend_scope_key") or "").strip() or None,
-            baseline_run_id=str(row.get("baseline_run_id") or (row.get("summary_json") or {}).get("baseline_run_id") or "").strip() or None,
+            trend_scope_key=trend_meta.get("trend_scope_key"),
+            baseline_run_id=trend_meta.get("baseline_run_id"),
             trends=list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50),
         )
     except Exception:
@@ -10925,7 +10963,7 @@ def get_data_quality_run_hydration(run_id: str) -> dict:
     try:
         readiness_overview = build_readiness_trend_payload(
             run_id=run_id,
-            baseline_run_id=str(row.get("baseline_run_id") or (row.get("summary_json") or {}).get("baseline_run_id") or "").strip() or None,
+            baseline_run_id=trend_meta.get("baseline_run_id"),
             final_dataset=get_quality_final_dataset_artifact(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id) or {},
             trends=list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50),
             issues=list_quality_issues(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50),
@@ -10971,8 +11009,7 @@ def get_data_quality_trends(
     row = get_quality_run_by_run_id(settings, run_id)
     if not row:
         raise HTTPException(status_code=404, detail="Data quality run not found")
-    trend_scope_key = str(row.get("trend_scope_key") or (row.get("summary_json") or {}).get("trend_scope_key") or "").strip() or None
-    baseline_run_id = str(row.get("baseline_run_id") or (row.get("summary_json") or {}).get("baseline_run_id") or "").strip() or None
+    trend_meta = _resolve_run_trend_metadata(row, get_deployment_run(settings, run_id) or {})
     trends = list_quality_trends(
         settings,
         tenant_id=tenant_id,
@@ -10986,8 +11023,8 @@ def get_data_quality_trends(
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        trend_scope_key=trend_scope_key,
-        baseline_run_id=baseline_run_id,
+        trend_scope_key=trend_meta.get("trend_scope_key"),
+        baseline_run_id=trend_meta.get("baseline_run_id"),
         trends=trends,
     )
 
@@ -11082,12 +11119,13 @@ def get_data_quality_table_trends(
     row = get_quality_run_by_run_id(settings, run_id)
     if not row:
         raise HTTPException(status_code=404, detail="Data quality run not found")
+    trend_meta = _resolve_run_trend_metadata(row, get_deployment_run(settings, run_id) or {})
     trends = list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, object_type="table", object_key=table_name, limit=4000)
     return build_trend_table_payload(
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        trend_scope_key=str(row.get("trend_scope_key") or (row.get("summary_json") or {}).get("trend_scope_key") or "").strip() or None,
+        trend_scope_key=trend_meta.get("trend_scope_key"),
         table_name=table_name,
         trends=trends,
     )
@@ -11105,12 +11143,13 @@ def get_data_quality_rule_trends(
     row = get_quality_run_by_run_id(settings, run_id)
     if not row:
         raise HTTPException(status_code=404, detail="Data quality run not found")
+    trend_meta = _resolve_run_trend_metadata(row, get_deployment_run(settings, run_id) or {})
     trends = list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, object_type="rule", object_key=rule_logical_key, limit=4000)
     return build_trend_rule_payload(
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        trend_scope_key=str(row.get("trend_scope_key") or (row.get("summary_json") or {}).get("trend_scope_key") or "").strip() or None,
+        trend_scope_key=trend_meta.get("trend_scope_key"),
         rule_key=rule_logical_key,
         trends=trends,
     )
