@@ -17,13 +17,17 @@ from services.ai.agentic_artifacts_registry import (
 )
 from services.ai.agentic_store import append_agent_chat_log, append_agent_run_event
 from services.ai.data_quality_dashboard import create_data_quality_dashboard
+from services.ai.data_quality_anomalies import derive_data_quality_anomalies, summarize_data_quality_anomalies
 from services.ai.data_quality_duplicates import detect_duplicate_candidates
 from services.ai.data_quality_freshness import analyze_freshness_and_stability
 from services.ai.data_quality_enrichment import discover_enrichment_opportunities
+from services.ai.data_quality_issues import derive_data_quality_issues
 from services.ai.data_quality_trust import compute_data_quality_trust_scores
 from services.ai.data_quality_store import (
     create_or_update_quality_run,
     get_quality_final_dataset_artifact,
+    list_quality_anomalies,
+    list_quality_issues,
     get_quality_run_by_run_id,
     get_previous_quality_run,
     list_quality_dataset_stages,
@@ -37,26 +41,46 @@ from services.ai.data_quality_store import (
     list_quality_tables_by_quality_run,
     list_quality_duplicate_candidates,
     list_quality_rules,
+    list_quality_run_metric_snapshots,
     list_quality_tables,
+    list_quality_object_metric_snapshots,
+    list_quality_trends,
     replace_quality_duplicate_candidates,
     replace_quality_enrichment_opportunities,
+    replace_quality_anomalies,
+    replace_quality_object_metric_snapshots,
+    replace_quality_run_metric_snapshots,
     replace_quality_rules,
+    replace_quality_trends,
     upsert_quality_final_dataset_artifact,
+    upsert_quality_issues,
     update_quality_table_monitoring,
     update_quality_table_trust_scores,
     upsert_quality_artifacts_from_profiling,
 )
 from services.ai.data_quality_stages import compute_stage_plan_metrics_tool, infer_stage_plan_tool
+from services.ai.data_quality_trends import (
+    build_business_term_trend_payload,
+    build_object_metric_snapshots,
+    build_run_metric_snapshots,
+    build_trend_rows,
+    select_trend_baseline_run,
+    summarize_trends,
+)
+from services.ai.glossary import fetch_glossary_terms
 from services.ai.data_quality_rules import (
+    build_validation_rule_coverage,
     classify_quality_rule_review_status,
     build_quality_rule_execution_plan,
     data_quality_rule_auto_approve_all_enabled,
     execute_quality_rules,
     extract_quality_rules_from_context,
+    plan_quality_rules_from_context,
 )
 from services.ai.db import ScopedConnection
 from services.ai.connection_registry import resolve_database_credentials_cached
 from services.ai.semantic_layer.pack_loader import load_pack
+from services.ai.workspace_store import list_runs_by_trend_scope
 
 
 logger = logging.getLogger(__name__)
@@ -122,6 +146,223 @@ def _emit(
             event_callback(payload)
         except Exception:
             logger.warning("data_quality.event_callback_failed | run_id=%s agent=%s", run_id, agent_name, exc_info=True)
+
+
+def _persist_trend_artifacts(settings, run_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    scope = _scope(state, run_id)
+    quality_run_id = str(state.get("quality_run_id") or "").strip()
+    if not quality_run_id:
+        return {"baseline_run_id": None, "trends": [], "summary": {}}
+    trend_mode = str(state.get("trend_mode") or "").strip().lower() or None
+    trend_scope_key = str(state.get("trend_scope_key") or "").strip() or None
+    current_summary = dict(state.get("quality_summary") or {})
+    if not trend_scope_key:
+        return {"baseline_run_id": None, "trends": [], "summary": {}}
+    quality_tables = list_quality_tables(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200)
+    quality_rules = list_quality_rules(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200)
+    dataset_stages = list_quality_dataset_stages(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200)
+    final_dataset = get_quality_final_dataset_artifact(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id) or {}
+    current_run_row = {
+        "run_id": run_id,
+        "overall_trust_score": state.get("overall_trust_score") or current_summary.get("average_table_trust_score"),
+        "summary_json": current_summary,
+    }
+    run_snapshots = build_run_metric_snapshots(
+        run_row=current_run_row,
+        tables=quality_tables,
+        rules=quality_rules,
+        stages=dataset_stages,
+        final_dataset=final_dataset,
+    )
+    object_snapshots = build_object_metric_snapshots(
+        tables=quality_tables,
+        rules=quality_rules,
+        stages=dataset_stages,
+        final_dataset=final_dataset,
+    )
+    replace_quality_run_metric_snapshots(
+        settings,
+        quality_run_id=quality_run_id,
+        run_id=run_id,
+        tenant_id=scope["tenant_id"],
+        domain_id=scope["domain_id"],
+        trend_scope_key=trend_scope_key,
+        snapshots=run_snapshots,
+    )
+    replace_quality_object_metric_snapshots(
+        settings,
+        quality_run_id=quality_run_id,
+        run_id=run_id,
+        tenant_id=scope["tenant_id"],
+        domain_id=scope["domain_id"],
+        trend_scope_key=trend_scope_key,
+        snapshots=object_snapshots,
+    )
+    comparable_runs: list[dict[str, Any]] = []
+    if trend_mode in {"monitor", "baseline_reset"}:
+        comparable_runs = list_runs_by_trend_scope(
+            settings,
+            tenant_id=scope["tenant_id"],
+            domain_id=scope["domain_id"],
+            trend_scope_key=trend_scope_key,
+            exclude_run_id=run_id,
+            completed_only=True,
+            limit=20,
+        )
+    baseline_run = select_trend_baseline_run(
+        trend_mode=trend_mode,
+        previous_runs=comparable_runs,
+    )
+    baseline_run_id = str((baseline_run or {}).get("run_id") or "").strip() or None
+    previous_snapshots: list[dict[str, Any]] = []
+    if baseline_run_id:
+        previous_snapshots.extend(
+            {
+                "object_type": "run",
+                "object_key": "__run__",
+                "object_name": "Run Summary",
+                "metric_name": item.get("metric_name"),
+                "metric_value_num": item.get("metric_value_num"),
+                "metric_value_text": item.get("metric_value_text"),
+                "metric_unit": item.get("metric_unit"),
+            }
+            for item in list_quality_run_metric_snapshots(
+                settings,
+                tenant_id=scope["tenant_id"],
+                domain_id=scope["domain_id"],
+                run_id=baseline_run_id,
+                limit=1200,
+            )
+        )
+        previous_snapshots.extend(
+            {
+                "object_type": item.get("object_type"),
+                "object_key": item.get("object_key"),
+                "object_name": item.get("object_name"),
+                "metric_name": item.get("metric_name"),
+                "metric_value_num": item.get("metric_value_num"),
+                "metric_value_text": item.get("metric_value_text"),
+                "metric_unit": item.get("metric_unit"),
+            }
+            for item in list_quality_object_metric_snapshots(
+                settings,
+                tenant_id=scope["tenant_id"],
+                domain_id=scope["domain_id"],
+                run_id=baseline_run_id,
+                limit=4000,
+            )
+        )
+    current_snapshots = (
+        [{"object_type": "run", "object_key": "__run__", "object_name": "Run Summary", **item} for item in run_snapshots]
+        + object_snapshots
+    )
+    trends = build_trend_rows(
+        current_run_id=run_id,
+        baseline_run_id=baseline_run_id,
+        current_snapshots=current_snapshots,
+        previous_snapshots=previous_snapshots,
+    )
+    replace_quality_trends(
+        settings,
+        quality_run_id=quality_run_id,
+        run_id=run_id,
+        tenant_id=scope["tenant_id"],
+        domain_id=scope["domain_id"],
+        trend_scope_key=trend_scope_key,
+        baseline_run_id=baseline_run_id,
+        trends=trends,
+    )
+    summary = summarize_trends(trends)
+    try:
+        business_term_trends = build_business_term_trend_payload(
+            tenant_id=scope["tenant_id"],
+            domain_id=scope["domain_id"],
+            run_id=run_id,
+            trends=trends,
+            glossary_terms=fetch_glossary_terms(settings, scope["tenant_id"], scope["domain_id"]),
+        )
+    except Exception:
+        business_term_trends = {"summary": {}, "rows": []}
+    summary["trend_mode"] = trend_mode
+    summary["trend_scope_key"] = trend_scope_key
+    summary["trend_scope_label"] = str(state.get("trend_scope_label") or "").strip() or None
+    summary["baseline_run_id"] = baseline_run_id
+    summary["business_term_group_count"] = (business_term_trends.get("summary") or {}).get("business_term_group_count", 0)
+    summary["worsened_business_term_count"] = (business_term_trends.get("summary") or {}).get("worsened_business_term_count", 0)
+    return {"baseline_run_id": baseline_run_id, "trends": trends, "summary": summary}
+
+
+def _persist_issue_artifacts(settings, run_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    scope = _scope(state, run_id)
+    quality_run_id = str(state.get("quality_run_id") or "").strip()
+    if not quality_run_id:
+        return {"issues": [], "summary": {}}
+    issues = derive_data_quality_issues(
+        tenant_id=scope["tenant_id"],
+        domain_id=scope["domain_id"],
+        run_id=run_id,
+        trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+        quality_summary=dict(state.get("quality_summary") or {}),
+        rules=list_quality_rules(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200),
+        duplicate_candidates=list_quality_duplicate_candidates(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200),
+        freshness_results=state.get("freshness_results") or [],
+        dataset_stages=list_quality_dataset_stages(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200),
+        join_artifacts=list_quality_join_artifacts(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200),
+        final_dataset=get_quality_final_dataset_artifact(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id) or {},
+        trends=list_quality_trends(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=4000),
+    )
+    summary = upsert_quality_issues(
+        settings,
+        tenant_id=scope["tenant_id"],
+        domain_id=scope["domain_id"],
+        trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+        run_id=run_id,
+        quality_run_id=quality_run_id,
+        issues=issues,
+    )
+    current_rows = list_quality_issues(
+        settings,
+        tenant_id=scope["tenant_id"],
+        domain_id=scope["domain_id"],
+        run_id=run_id,
+        limit=1200,
+    )
+    summary.setdefault("issue_count", len(current_rows))
+    return {"issues": current_rows, "summary": summary}
+
+
+def _persist_anomaly_artifacts(settings, run_id: str, state: dict[str, Any]) -> dict[str, Any]:
+    scope = _scope(state, run_id)
+    quality_run_id = str(state.get("quality_run_id") or "").strip()
+    if not quality_run_id:
+        return {"anomalies": [], "summary": {}}
+    anomalies = derive_data_quality_anomalies(
+        tenant_id=scope["tenant_id"],
+        domain_id=scope["domain_id"],
+        run_id=run_id,
+        quality_run_id=quality_run_id,
+        trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+        baseline_run_id=str(state.get("baseline_run_id") or "").strip() or None,
+        trends=list_quality_trends(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=4000),
+    )
+    replace_quality_anomalies(
+        settings,
+        quality_run_id=quality_run_id,
+        run_id=run_id,
+        tenant_id=scope["tenant_id"],
+        domain_id=scope["domain_id"],
+        trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+        anomalies=anomalies,
+    )
+    current_rows = list_quality_anomalies(
+        settings,
+        tenant_id=scope["tenant_id"],
+        domain_id=scope["domain_id"],
+        run_id=run_id,
+        limit=1200,
+    )
+    summary = summarize_data_quality_anomalies(current_rows)
+    return {"anomalies": current_rows, "summary": summary}
 
 
 def _resolve_scoped_conn_from_scope(settings, scope: dict[str, str]) -> ScopedConnection | None:
@@ -201,6 +442,12 @@ _PHASE58_SUMMARY_KEYS = {
     "lineage_edge_count",
     "final_dataset_row_count",
     "final_dataset_readiness_status",
+    "rule_validation_planner_mode",
+    "validation_control_count",
+    "compiled_validation_control_count",
+    "uncovered_validation_control_count",
+    "validation_controls",
+    "rule_coverage",
 }
 
 
@@ -344,6 +591,10 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         **scope,
         status="running",
         overall_trust_score=summary.get("average_table_trust_score"),
+        trend_mode=str(run_row.get("trend_mode") or "").strip() or None,
+        trend_scope_key=str(run_row.get("trend_scope_key") or "").strip() or None,
+        trend_scope_label=str(run_row.get("trend_scope_label") or "").strip() or None,
+        baseline_run_id=run_row.get("baseline_run_id"),
         summary_json=summary,
     )
     _emit(
@@ -440,6 +691,10 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         **scope,
         status="running",
         overall_trust_score=updated_summary.get("average_table_trust_score"),
+        trend_mode=str(run_row.get("trend_mode") or "").strip() or None,
+        trend_scope_key=str(run_row.get("trend_scope_key") or "").strip() or None,
+        trend_scope_label=str(run_row.get("trend_scope_label") or "").strip() or None,
+        baseline_run_id=run_row.get("baseline_run_id"),
         summary_json=updated_summary,
     )
     _emit(
@@ -488,6 +743,10 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         **scope,
         status="running",
         overall_trust_score=updated_summary.get("average_table_trust_score"),
+        trend_mode=str(run_row.get("trend_mode") or "").strip() or None,
+        trend_scope_key=str(run_row.get("trend_scope_key") or "").strip() or None,
+        trend_scope_label=str(run_row.get("trend_scope_label") or "").strip() or None,
+        baseline_run_id=run_row.get("baseline_run_id"),
         summary_json=updated_summary,
     )
     _emit(
@@ -497,6 +756,122 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         "completed",
         "Data trust summary completed",
         updated_summary,
+        event_callback=event_callback,
+    )
+    _emit(
+        settings,
+        run_id,
+        "TrendAnalysisAgent",
+        "running",
+        "Persisting trend snapshots and computing run-over-run deltas",
+        event_callback=event_callback,
+    )
+    trend_result = _persist_trend_artifacts(
+        settings,
+        run_id,
+        {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "connection_id": connection_id,
+            "database_name": database_name,
+            "schema_name": schema_name,
+            "quality_run_id": quality_run_id,
+            "trend_mode": run_row.get("trend_mode"),
+            "trend_scope_key": run_row.get("trend_scope_key"),
+            "trend_scope_label": run_row.get("trend_scope_label"),
+            "overall_trust_score": updated_summary.get("average_table_trust_score"),
+            "quality_summary": updated_summary,
+        },
+    )
+    updated_summary.update(trend_result.get("summary") or {})
+    _emit(
+        settings,
+        run_id,
+        "TrendAnalysisAgent",
+        "completed",
+        "Trend snapshots and deltas persisted",
+        {
+            "baseline_run_id": updated_summary.get("baseline_run_id"),
+            "trend_row_count": updated_summary.get("trend_row_count", 0),
+            "improved_metric_count": updated_summary.get("improved_metric_count", 0),
+            "worsened_metric_count": updated_summary.get("worsened_metric_count", 0),
+        },
+        event_callback=event_callback,
+    )
+    _emit(
+        settings,
+        run_id,
+        "AnomalyDetectionAgent",
+        "running",
+        "Deriving anomaly records from persisted quality trends and regressions",
+        event_callback=event_callback,
+    )
+    anomaly_result = _persist_anomaly_artifacts(
+        settings,
+        run_id,
+        {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "connection_id": connection_id,
+            "database_name": database_name,
+            "schema_name": schema_name,
+            "quality_run_id": quality_run_id,
+            "trend_scope_key": run_row.get("trend_scope_key"),
+            "baseline_run_id": updated_summary.get("baseline_run_id"),
+            "quality_summary": updated_summary,
+        },
+    )
+    updated_summary.update(anomaly_result.get("summary") or {})
+    _emit(
+        settings,
+        run_id,
+        "AnomalyDetectionAgent",
+        "completed",
+        "Anomaly records persisted",
+        {
+            "anomaly_count": updated_summary.get("anomaly_count", 0),
+            "critical_anomaly_count": updated_summary.get("critical_anomaly_count", 0),
+        },
+        event_callback=event_callback,
+    )
+    _emit(
+        settings,
+        run_id,
+        "IssueRegisterAgent",
+        "running",
+        "Deriving issue register from persisted quality, stage, and trend artifacts",
+        event_callback=event_callback,
+    )
+    issue_result = _persist_issue_artifacts(
+        settings,
+        run_id,
+        {
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "connection_id": connection_id,
+            "database_name": database_name,
+            "schema_name": schema_name,
+            "quality_run_id": quality_run_id,
+            "trend_mode": run_row.get("trend_mode"),
+            "trend_scope_key": run_row.get("trend_scope_key"),
+            "trend_scope_label": run_row.get("trend_scope_label"),
+            "overall_trust_score": updated_summary.get("average_table_trust_score"),
+            "quality_summary": updated_summary,
+            "freshness_results": freshness_results,
+        },
+    )
+    updated_summary.update(issue_result.get("summary") or {})
+    _emit(
+        settings,
+        run_id,
+        "IssueRegisterAgent",
+        "completed",
+        "Issue register updated",
+        {
+            "issue_count": updated_summary.get("issue_count", 0),
+            "open_issue_count": updated_summary.get("open_issue_count", 0),
+            "overdue_issue_count": updated_summary.get("overdue_issue_count", 0),
+        },
         event_callback=event_callback,
     )
     _emit(
@@ -525,6 +900,9 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         lineage_edges=list_quality_lineage_edges(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000),
         row_outcomes=list_quality_stage_row_outcomes(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000),
         final_dataset=get_quality_final_dataset_artifact(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id) or {},
+        trends=trend_result.get("trends") or [],
+        anomalies=anomaly_result.get("anomalies") or [],
+        issues=issue_result.get("issues") or [],
     )
     if dashboard.get("dashboard_id"):
         updated_summary["dashboard_id"] = dashboard.get("dashboard_id")
@@ -532,12 +910,20 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         updated_summary["dashboard_chart_count"] = len(dashboard.get("chart_plan") or [])
         updated_summary["remediation_action_count"] = dashboard.get("remediation_action_count", 0)
         updated_summary["critical_remediation_action_count"] = dashboard.get("critical_remediation_action_count", 0)
+        updated_summary["anomaly_count"] = dashboard.get("anomaly_count", 0)
+        updated_summary["critical_anomaly_count"] = dashboard.get("critical_anomaly_count", 0)
+        updated_summary["open_issue_count"] = dashboard.get("open_issue_count", 0)
+        updated_summary["overdue_issue_count"] = dashboard.get("overdue_issue_count", 0)
     updated_summary["workflow_status"] = "completed"
     create_or_update_quality_run(
         settings,
         **scope,
         status="completed",
         overall_trust_score=updated_summary.get("average_table_trust_score"),
+        trend_mode=str(run_row.get("trend_mode") or "").strip() or None,
+        trend_scope_key=str(run_row.get("trend_scope_key") or "").strip() or None,
+        trend_scope_label=str(run_row.get("trend_scope_label") or "").strip() or None,
+        baseline_run_id=updated_summary.get("baseline_run_id"),
         summary_json=updated_summary,
         completed=True,
     )
@@ -586,7 +972,7 @@ def run_data_quality_agentic_workflow(
     event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if StateGraph is None or END is None:
-        raise RuntimeError("LangGraph is not available")
+        raise RuntimeError("LangGraph is not available. Install the 'langgraph' package in the active runtime environment.")
 
     graph = StateGraph(dict)
 
@@ -596,6 +982,9 @@ def run_data_quality_agentic_workflow(
             settings,
             **scope,
             status="running",
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
             summary_json={"workflow_kind": "data_quality"},
         )
         state["workflow_kind"] = "data_quality"
@@ -638,54 +1027,10 @@ def run_data_quality_agentic_workflow(
         )
         return state
 
-    def profiling_node(state: dict[str, Any]) -> dict[str, Any]:
-        _emit(settings, run_id, "DataQualityProfilingAgent", "running", "Profiling tables for quality signals", event_callback=event_callback)
-        scope = _scope(state, run_id)
-        try:
-            profiling = profile_tables(
-                settings,
-                state.get("schema_graph") or {},
-                scope["schema_name"],
-                scoped_conn=_scoped_conn_from_state(state),
-            )
-        except Exception:
-            logger.exception("data_quality.profiling.failed | run_id=%s", run_id)
-            profiling = {"tables": [], "quality_overview": {}, "errors": ["profiling_failed"]}
-        state["profiling_stats"] = profiling
-        try:
-            persist_table_profile_artifact(settings, profiling_json=profiling, **scope)
-        except Exception:
-            logger.exception("data_quality.profile_artifact.persist_failed | run_id=%s", run_id)
-        quality_run_id = state.get("quality_run_id")
-        persisted = {"tables": 0, "columns": 0}
-        if quality_run_id:
-            persisted = upsert_quality_artifacts_from_profiling(
-                settings,
-                quality_run_id=str(quality_run_id),
-                profiling_json=profiling,
-                **scope,
-            )
-        summary = _merge_phase58_summary(state.get("quality_summary"), _quality_summary(profiling, persisted))
-        state["quality_summary"] = summary
-        create_or_update_quality_run(
-            settings,
-            **scope,
-            status="running",
-            overall_trust_score=summary.get("average_table_trust_score"),
-            summary_json=summary,
-        )
-        _emit(
-            settings,
-            run_id,
-            "DataQualityProfilingAgent",
-            "completed",
-            "Data quality profiling completed",
-            summary,
-            event_callback=event_callback,
-        )
-        return state
-
-    def stage_planner_node(state: dict[str, Any]) -> dict[str, Any]:
+    def _ensure_stage_plan(state: dict[str, Any]) -> dict[str, Any]:
+        existing_plan = state.get("dataset_stage_plan")
+        if isinstance(existing_plan, dict) and existing_plan.get("stages") is not None:
+            return state
         _emit(
             settings,
             run_id,
@@ -768,6 +1113,10 @@ def run_data_quality_agentic_workflow(
             **scope,
             status="running",
             overall_trust_score=updated_summary.get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=state.get("baseline_run_id"),
             summary_json=updated_summary,
         )
         _emit(
@@ -794,6 +1143,61 @@ def run_data_quality_agentic_workflow(
         )
         return state
 
+    def profiling_node(state: dict[str, Any]) -> dict[str, Any]:
+        state = _ensure_stage_plan(state)
+        _emit(settings, run_id, "DataQualityProfilingAgent", "running", "Profiling tables for quality signals", event_callback=event_callback)
+        scope = _scope(state, run_id)
+        try:
+            profiling = profile_tables(
+                settings,
+                state.get("schema_graph") or {},
+                scope["schema_name"],
+                scoped_conn=_scoped_conn_from_state(state),
+            )
+        except Exception:
+            logger.exception("data_quality.profiling.failed | run_id=%s", run_id)
+            profiling = {"tables": [], "quality_overview": {}, "errors": ["profiling_failed"]}
+        state["profiling_stats"] = profiling
+        try:
+            persist_table_profile_artifact(settings, profiling_json=profiling, **scope)
+        except Exception:
+            logger.exception("data_quality.profile_artifact.persist_failed | run_id=%s", run_id)
+        quality_run_id = state.get("quality_run_id")
+        persisted = {"tables": 0, "columns": 0}
+        if quality_run_id:
+            persisted = upsert_quality_artifacts_from_profiling(
+                settings,
+                quality_run_id=str(quality_run_id),
+                profiling_json=profiling,
+                **scope,
+            )
+        summary = _merge_phase58_summary(state.get("quality_summary"), _quality_summary(profiling, persisted))
+        state["quality_summary"] = summary
+        create_or_update_quality_run(
+            settings,
+            **scope,
+            status="running",
+            overall_trust_score=summary.get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=state.get("baseline_run_id"),
+            summary_json=summary,
+        )
+        _emit(
+            settings,
+            run_id,
+            "DataQualityProfilingAgent",
+            "completed",
+            "Data quality profiling completed",
+            summary,
+            event_callback=event_callback,
+        )
+        return state
+
+    def stage_planner_node(state: dict[str, Any]) -> dict[str, Any]:
+        return _ensure_stage_plan(state)
+
     def rules_node(state: dict[str, Any]) -> dict[str, Any]:
         _emit(settings, run_id, "DataQualityRuleAgent", "running", "Extracting and classifying data quality rules", event_callback=event_callback)
         scope = _scope(state, run_id)
@@ -801,11 +1205,14 @@ def run_data_quality_agentic_workflow(
         pause_for_rule_review = bool(state.get("pause_for_rule_review", True))
         auto_approve_all = data_quality_rule_auto_approve_all_enabled()
         resume_after_rule_review = bool(state.get("resume_after_rule_review"))
-        rules = extract_quality_rules_from_context(
-            state.get("context_text"),
-            state.get("schema_graph") or {},
+        planned_rules = plan_quality_rules_from_context(
+            context_text=state.get("context_text"),
+            schema_graph=state.get("schema_graph") or {},
             settings=settings,
         )
+        rules = list(planned_rules.get("rules") or [])
+        rule_planner_mode = str(planned_rules.get("planner_mode") or "deterministic")
+        validation_controls = list(planned_rules.get("validation_controls") or [])
         for rule in rules:
             source_text = str(
                 rule.get("source_text")
@@ -823,6 +1230,11 @@ def run_data_quality_agentic_workflow(
             rule["executor_kind"] = execution_plan.get("executor_kind")
             rule["execution_plan_json"] = execution_plan
             rule["status"] = classify_quality_rule_review_status(rule)
+        rule_coverage = build_validation_rule_coverage(
+            validation_controls=validation_controls,
+            rules=rules,
+            planner_mode=rule_planner_mode,
+        )
         inserted = 0
         execution = {"rules_executed": 0, "failed_rules": 0, "passed_rules": 0, "error_rules": 0, "results": []}
         if quality_run_id and rules:
@@ -865,6 +1277,12 @@ def run_data_quality_agentic_workflow(
                     "needs_review_rule_count": rule_summary.get("needs_review_rule_count", 0),
                     "unsupported_rule_count": rule_summary.get("unsupported_rule_count", 0),
                     "rejected_rule_count": rule_summary.get("rejected_rule_count", 0),
+                    "rule_validation_planner_mode": rule_planner_mode,
+                    "validation_control_count": rule_coverage.get("validation_control_count", 0),
+                    "compiled_validation_control_count": rule_coverage.get("compiled_validation_control_count", 0),
+                    "uncovered_validation_control_count": rule_coverage.get("uncovered_validation_control_count", 0),
+                    "validation_controls": validation_controls,
+                    "rule_coverage": rule_coverage,
                 }
             )
             updated_summary["rule_review_required"] = True
@@ -876,6 +1294,10 @@ def run_data_quality_agentic_workflow(
                 **scope,
                 status="awaiting_rule_review",
                 overall_trust_score=updated_summary.get("average_table_trust_score"),
+                trend_mode=str(state.get("trend_mode") or "").strip() or None,
+                trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+                trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+                baseline_run_id=state.get("baseline_run_id"),
                 summary_json=updated_summary,
             )
             _emit(
@@ -916,6 +1338,12 @@ def run_data_quality_agentic_workflow(
                 "needs_review_rule_count": rule_summary.get("needs_review_rule_count", 0),
                 "unsupported_rule_count": rule_summary.get("unsupported_rule_count", 0),
                 "rejected_rule_count": rule_summary.get("rejected_rule_count", 0),
+                "rule_validation_planner_mode": rule_planner_mode,
+                "validation_control_count": rule_coverage.get("validation_control_count", 0),
+                "compiled_validation_control_count": rule_coverage.get("compiled_validation_control_count", 0),
+                "uncovered_validation_control_count": rule_coverage.get("uncovered_validation_control_count", 0),
+                "validation_controls": validation_controls,
+                "rule_coverage": rule_coverage,
             }
         )
         state["quality_summary"]["rule_review_required"] = False
@@ -926,6 +1354,10 @@ def run_data_quality_agentic_workflow(
             **scope,
             status="running",
             overall_trust_score=state["quality_summary"].get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=state.get("baseline_run_id"),
             summary_json=state["quality_summary"],
         )
         _emit(
@@ -1006,6 +1438,10 @@ def run_data_quality_agentic_workflow(
             **scope,
             status="running",
             overall_trust_score=updated_summary.get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=state.get("baseline_run_id"),
             summary_json=updated_summary,
         )
         _emit(
@@ -1086,6 +1522,10 @@ def run_data_quality_agentic_workflow(
             **scope,
             status="running",
             overall_trust_score=updated_summary.get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=state.get("baseline_run_id"),
             summary_json=updated_summary,
         )
         _emit(
@@ -1136,6 +1576,10 @@ def run_data_quality_agentic_workflow(
             **scope,
             status="running",
             overall_trust_score=updated_summary.get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=state.get("baseline_run_id"),
             summary_json=updated_summary,
         )
         _emit(
@@ -1177,6 +1621,9 @@ def run_data_quality_agentic_workflow(
             lineage_edges=list_quality_lineage_edges(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=4000),
             row_outcomes=list_quality_stage_row_outcomes(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=4000),
             final_dataset=get_quality_final_dataset_artifact(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id) or {},
+            trends=list_quality_trends(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=4000),
+            anomalies=list_quality_anomalies(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200),
+            issues=list_quality_issues(settings, tenant_id=scope["tenant_id"], domain_id=scope["domain_id"], run_id=run_id, limit=1200),
         )
         state["dashboard_id"] = dashboard.get("dashboard_id")
         state["dashboard_title"] = dashboard.get("dashboard_title")
@@ -1187,12 +1634,20 @@ def run_data_quality_agentic_workflow(
             updated_summary["dashboard_chart_count"] = len(dashboard.get("chart_plan") or [])
             updated_summary["remediation_action_count"] = dashboard.get("remediation_action_count", 0)
             updated_summary["critical_remediation_action_count"] = dashboard.get("critical_remediation_action_count", 0)
+            updated_summary["anomaly_count"] = dashboard.get("anomaly_count", 0)
+            updated_summary["critical_anomaly_count"] = dashboard.get("critical_anomaly_count", 0)
+            updated_summary["open_issue_count"] = dashboard.get("open_issue_count", 0)
+            updated_summary["overdue_issue_count"] = dashboard.get("overdue_issue_count", 0)
             state["quality_summary"] = updated_summary
             create_or_update_quality_run(
                 settings,
                 **scope,
                 status="running",
                 overall_trust_score=updated_summary.get("average_table_trust_score"),
+                trend_mode=str(state.get("trend_mode") or "").strip() or None,
+                trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+                trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+                baseline_run_id=updated_summary.get("baseline_run_id"),
                 summary_json=updated_summary,
             )
         _emit(
@@ -1210,6 +1665,128 @@ def run_data_quality_agentic_workflow(
         )
         return state
 
+    def issues_node(state: dict[str, Any]) -> dict[str, Any]:
+        _emit(
+            settings,
+            run_id,
+            "IssueRegisterAgent",
+            "running",
+            "Deriving issue register from persisted quality, stage, and trend artifacts",
+            event_callback=event_callback,
+        )
+        issue_result = _persist_issue_artifacts(settings, run_id, state)
+        updated_summary = dict(state.get("quality_summary") or {})
+        updated_summary.update(issue_result.get("summary") or {})
+        state["quality_summary"] = updated_summary
+        state["issues"] = issue_result.get("issues") or []
+        scope = _scope(state, run_id)
+        create_or_update_quality_run(
+            settings,
+            **scope,
+            status="running",
+            overall_trust_score=updated_summary.get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=updated_summary.get("baseline_run_id"),
+            summary_json=updated_summary,
+        )
+        _emit(
+            settings,
+            run_id,
+            "IssueRegisterAgent",
+            "completed",
+            "Issue register updated",
+            {
+                "issue_count": updated_summary.get("issue_count", 0),
+                "open_issue_count": updated_summary.get("open_issue_count", 0),
+                "overdue_issue_count": updated_summary.get("overdue_issue_count", 0),
+            },
+            event_callback=event_callback,
+        )
+        return state
+
+    def anomalies_node(state: dict[str, Any]) -> dict[str, Any]:
+        _emit(
+            settings,
+            run_id,
+            "AnomalyDetectionAgent",
+            "running",
+            "Deriving anomaly records from persisted quality trends and regressions",
+            event_callback=event_callback,
+        )
+        anomaly_result = _persist_anomaly_artifacts(settings, run_id, state)
+        updated_summary = dict(state.get("quality_summary") or {})
+        updated_summary.update(anomaly_result.get("summary") or {})
+        state["quality_summary"] = updated_summary
+        state["anomalies"] = anomaly_result.get("anomalies") or []
+        scope = _scope(state, run_id)
+        create_or_update_quality_run(
+            settings,
+            **scope,
+            status="running",
+            overall_trust_score=updated_summary.get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=updated_summary.get("baseline_run_id"),
+            summary_json=updated_summary,
+        )
+        _emit(
+            settings,
+            run_id,
+            "AnomalyDetectionAgent",
+            "completed",
+            "Anomaly records persisted",
+            {
+                "anomaly_count": updated_summary.get("anomaly_count", 0),
+                "critical_anomaly_count": updated_summary.get("critical_anomaly_count", 0),
+            },
+            event_callback=event_callback,
+        )
+        return state
+
+    def trends_node(state: dict[str, Any]) -> dict[str, Any]:
+        _emit(
+            settings,
+            run_id,
+            "TrendAnalysisAgent",
+            "running",
+            "Persisting trend snapshots and computing run-over-run deltas",
+            event_callback=event_callback,
+        )
+        trend_result = _persist_trend_artifacts(settings, run_id, state)
+        updated_summary = dict(state.get("quality_summary") or {})
+        updated_summary.update(trend_result.get("summary") or {})
+        state["quality_summary"] = updated_summary
+        scope = _scope(state, run_id)
+        create_or_update_quality_run(
+            settings,
+            **scope,
+            status="running",
+            overall_trust_score=updated_summary.get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=updated_summary.get("baseline_run_id"),
+            summary_json=updated_summary,
+        )
+        _emit(
+            settings,
+            run_id,
+            "TrendAnalysisAgent",
+            "completed",
+            "Trend snapshots and deltas persisted",
+            {
+                "baseline_run_id": updated_summary.get("baseline_run_id"),
+                "trend_row_count": updated_summary.get("trend_row_count", 0),
+                "improved_metric_count": updated_summary.get("improved_metric_count", 0),
+                "worsened_metric_count": updated_summary.get("worsened_metric_count", 0),
+            },
+            event_callback=event_callback,
+        )
+        return state
+
     def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
         summary = dict(state.get("quality_summary") or {})
         summary["workflow_status"] = "completed"
@@ -1220,6 +1797,10 @@ def run_data_quality_agentic_workflow(
             **scope,
             status="completed",
             overall_trust_score=summary.get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=summary.get("baseline_run_id"),
             summary_json=summary,
             completed=True,
         )
@@ -1273,6 +1854,10 @@ def run_data_quality_agentic_workflow(
             **scope,
             status="running",
             overall_trust_score=updated_summary.get("average_table_trust_score"),
+            trend_mode=str(state.get("trend_mode") or "").strip() or None,
+            trend_scope_key=str(state.get("trend_scope_key") or "").strip() or None,
+            trend_scope_label=str(state.get("trend_scope_label") or "").strip() or None,
+            baseline_run_id=state.get("baseline_run_id"),
             summary_json=updated_summary,
         )
         _emit(
@@ -1300,6 +1885,9 @@ def run_data_quality_agentic_workflow(
     graph.add_node("enrichment", enrichment_node)
     graph.add_node("trust", trust_node)
     graph.add_node("dashboard", dashboard_node)
+    graph.add_node("trends", trends_node)
+    graph.add_node("anomalies", anomalies_node)
+    graph.add_node("issues", issues_node)
     graph.add_node("finalize", finalize_node)
     graph.set_entry_point("router")
     graph.add_edge("router", "schema")
@@ -1318,7 +1906,10 @@ def run_data_quality_agentic_workflow(
     )
     graph.add_edge("pause_review", END)
     graph.add_edge("enrichment", "trust")
-    graph.add_edge("trust", "dashboard")
+    graph.add_edge("trust", "trends")
+    graph.add_edge("trends", "anomalies")
+    graph.add_edge("anomalies", "issues")
+    graph.add_edge("issues", "dashboard")
     graph.add_edge("dashboard", "finalize")
     graph.add_edge("finalize", END)
     logger.info("data_quality.workflow.compiling | run_id=%s", run_id)

@@ -83,6 +83,13 @@ def _agent_runs_select_fields(settings: Settings) -> str:
             "display_name" if "display_name" in cols else "NULL AS display_name",
             "superseded_by_run_id" if "superseded_by_run_id" in cols else "NULL AS superseded_by_run_id",
             "completed_at" if "completed_at" in cols else "NULL AS completed_at",
+            "trend_mode" if "trend_mode" in cols else "NULL AS trend_mode",
+            "trend_scope_key" if "trend_scope_key" in cols else "NULL AS trend_scope_key",
+            "trend_scope_label" if "trend_scope_label" in cols else "NULL AS trend_scope_label",
+            "parent_run_id" if "parent_run_id" in cols else "NULL AS parent_run_id",
+            "rerun_root_run_id" if "rerun_root_run_id" in cols else "NULL AS rerun_root_run_id",
+            "rerun_reason" if "rerun_reason" in cols else "NULL AS rerun_reason",
+            "deployment_payload_json" if "deployment_payload_json" in cols else "NULL AS deployment_payload_json",
         ]
     )
 
@@ -113,6 +120,13 @@ def initialize_run_metadata(
     version_no: int,
     display_name: str,
     is_canonical: bool = False,
+    trend_mode: str | None = None,
+    trend_scope_key: str | None = None,
+    trend_scope_label: str | None = None,
+    parent_run_id: str | None = None,
+    rerun_root_run_id: str | None = None,
+    rerun_reason: str | None = None,
+    deployment_payload_json: dict[str, Any] | None = None,
 ) -> None:
     cols = _table_columns(settings, "quantyx_agent_runs")
     updates: list[str] = []
@@ -126,6 +140,27 @@ def initialize_run_metadata(
     if "is_canonical" in cols:
         updates.append("is_canonical = %s")
         params.append(is_canonical)
+    if "trend_mode" in cols:
+        updates.append("trend_mode = %s")
+        params.append(trend_mode)
+    if "trend_scope_key" in cols:
+        updates.append("trend_scope_key = %s")
+        params.append(trend_scope_key)
+    if "trend_scope_label" in cols:
+        updates.append("trend_scope_label = %s")
+        params.append(trend_scope_label)
+    if "parent_run_id" in cols:
+        updates.append("parent_run_id = %s")
+        params.append(parent_run_id)
+    if "rerun_root_run_id" in cols:
+        updates.append("rerun_root_run_id = %s")
+        params.append(rerun_root_run_id)
+    if "rerun_reason" in cols:
+        updates.append("rerun_reason = %s")
+        params.append(rerun_reason)
+    if "deployment_payload_json" in cols:
+        updates.append("deployment_payload_json = %s::jsonb")
+        params.append(Json(deployment_payload_json, dumps=_json_dumps) if deployment_payload_json is not None else None)
     if not updates:
         return
     updates.append("updated_at = now()")
@@ -140,6 +175,131 @@ def initialize_run_metadata(
          WHERE run_id = %s
            AND tenant_id = %s
            AND domain_id = %s
+        """,
+        params,
+    )
+
+
+def get_deployment_run(settings: Settings, run_id: str) -> dict[str, Any] | None:
+    fields = _agent_runs_select_fields(settings)
+    rows = run_query(
+        settings,
+        f"""
+        SELECT {fields}
+          FROM public.quantyx_agent_runs
+         WHERE run_id = %s
+         LIMIT 1
+        """,
+        [run_id],
+    )
+    return rows[0] if rows else None
+
+
+def list_runs_by_trend_scope(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    trend_scope_key: str,
+    exclude_run_id: str | None = None,
+    completed_only: bool = False,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    fields = _agent_runs_select_fields(settings)
+    params: list[Any] = [tenant_id, domain_id, trend_scope_key]
+    extra_filters = ""
+    if exclude_run_id:
+        extra_filters += " AND run_id <> %s"
+        params.append(exclude_run_id)
+    if completed_only:
+        extra_filters += " AND status = 'completed'"
+    params.append(limit)
+    return run_query(
+        settings,
+        f"""
+        SELECT {fields}
+          FROM public.quantyx_agent_runs
+         WHERE tenant_id = %s
+           AND domain_id = %s
+           AND trend_scope_key = %s
+           {extra_filters}
+         ORDER BY created_at DESC
+         LIMIT %s
+        """,
+        params,
+    )
+
+
+def create_run_lineage_edge(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    parent_run_id: str,
+    child_run_id: str,
+    edge_type: str,
+    trend_scope_key: str | None = None,
+    summary_json: dict[str, Any] | None = None,
+) -> str | None:
+    cols = _table_columns(settings, "quantyx_agent_run_lineage")
+    if not cols:
+        return None
+    edge_id = f"runedge_{uuid.uuid4().hex[:12]}"
+    execute_non_query(
+        settings,
+        """
+        INSERT INTO public.quantyx_agent_run_lineage (
+          lineage_edge_id, tenant_id, domain_id, parent_run_id, child_run_id,
+          edge_type, trend_scope_key, summary_json, created_at
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+        """,
+        [
+            edge_id,
+            tenant_id,
+            domain_id,
+            parent_run_id,
+            child_run_id,
+            edge_type,
+            trend_scope_key,
+            Json(summary_json or {}, dumps=_json_dumps),
+        ],
+    )
+    return edge_id
+
+
+def list_run_lineage_edges(
+    settings: Settings,
+    *,
+    tenant_id: str | None = None,
+    domain_id: str | None = None,
+    run_id: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    cols = _table_columns(settings, "quantyx_agent_run_lineage")
+    if not cols:
+        return []
+    params: list[Any] = []
+    filters = []
+    if tenant_id:
+        filters.append("tenant_id = %s")
+        params.append(tenant_id)
+    if domain_id:
+        filters.append("domain_id = %s")
+        params.append(domain_id)
+    if run_id:
+        filters.append("(parent_run_id = %s OR child_run_id = %s)")
+        params.extend([run_id, run_id])
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params.append(limit)
+    return run_query(
+        settings,
+        f"""
+        SELECT *
+          FROM public.quantyx_agent_run_lineage
+          {where}
+         ORDER BY created_at DESC
+         LIMIT %s
         """,
         params,
     )

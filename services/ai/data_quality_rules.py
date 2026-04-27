@@ -105,6 +105,93 @@ def _norm(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
 
+def _pretty_identifier(value: str | None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text.replace("_", " ")
+
+
+def derive_quality_rule_label(rule: dict[str, Any]) -> str:
+    rule_type = str(rule.get("rule_type") or "").strip().lower()
+    table_name = str(rule.get("table_name") or "").strip()
+    column_name = str(rule.get("column_name") or "").strip()
+    reference_table = str(rule.get("reference_table") or "").strip()
+    reference_column = str(rule.get("reference_column") or "").strip()
+    condition = rule.get("condition_json") if isinstance(rule.get("condition_json"), dict) else {}
+    validation_sql = str(
+        condition.get("validation_sql")
+        or ((rule.get("execution_plan_json") or {}).get("validation_sql"))
+        or ""
+    ).strip()
+    source_text = str(rule.get("source_text") or condition.get("source_text") or "").strip()
+
+    if rule_type == "referential_integrity" and table_name and column_name and reference_table and reference_column:
+        return f"{table_name}.{column_name} must exist in {reference_table}.{reference_column}"
+    if rule_type == "not_null" and table_name and column_name:
+        return f"{table_name}.{column_name} is required"
+    if rule_type == "not_blank" and table_name and column_name:
+        return f"{table_name}.{column_name} cannot be blank"
+    if rule_type == "email_pattern" and table_name and column_name:
+        return f"Validate {table_name}.{column_name} email format"
+    if rule_type == "unique" and table_name and column_name:
+        return f"{table_name}.{column_name} must be unique"
+    if rule_type == "numeric_min" and table_name and column_name:
+        return f"{table_name}.{column_name} minimum value check"
+    if rule_type == "numeric_max" and table_name and column_name:
+        return f"{table_name}.{column_name} maximum value check"
+    if rule_type == "numeric_range" and table_name and column_name:
+        return f"{table_name}.{column_name} numeric range check"
+    if rule_type == "date_range" and table_name and column_name:
+        return f"{table_name}.{column_name} date range check"
+    if rule_type == "allowed_values" and table_name and column_name:
+        return f"{table_name}.{column_name} allowed values check"
+    if rule_type == "custom_sql":
+        normalized_sql = " ".join(validation_sql.split())
+        if table_name and re.search(r"\bcharged_amount\s*<\s*0\b", normalized_sql, flags=re.IGNORECASE):
+            return f"Negative charged amount in {table_name}"
+        invalid_values = re.search(
+            r"\b([A-Za-z_][\w]*)\s+NOT\s+IN\s*\(",
+            normalized_sql,
+            flags=re.IGNORECASE,
+        )
+        if table_name and invalid_values:
+            return f"Unexpected {_pretty_identifier(invalid_values.group(1))} in {table_name}"
+        if table_name and "rating_flag is not true" in normalized_sql.lower() and "mediation_status = 'billable'" in normalized_sql.lower():
+            return f"Billable rows not flagged for rating in {table_name}"
+        null_columns = re.findall(
+            r"\b([A-Za-z_][\w]*)\s+IS\s+NULL\b",
+            normalized_sql,
+            flags=re.IGNORECASE,
+        )
+        if table_name and null_columns:
+            unique_cols = list(dict.fromkeys(col for col in null_columns if col.lower() != "null"))
+            if unique_cols:
+                if len(unique_cols) <= 3:
+                    return f"Missing {_pretty_identifier(', '.join(unique_cols))} in {table_name}"
+                return f"Missing critical fields in {table_name}"
+        for line in source_text.splitlines():
+            stripped = line.strip(" -\t")
+            if not stripped:
+                continue
+            lowered = stripped.lower()
+            if lowered.startswith(("domain:", "tables in scope:", "business reconciliation context:", "multi-table dq requirements:", "expected stewardship outputs:", "workflow expectations:")):
+                continue
+            if len(stripped) <= 120:
+                return stripped
+        if table_name:
+            return f"Custom validation for {table_name}"
+    if source_text:
+        first_line = next((line.strip(" -\t") for line in source_text.splitlines() if line.strip()), "")
+        if first_line:
+            return first_line[:120]
+    if table_name and column_name:
+        return f"{rule_type} check for {table_name}.{column_name}"
+    if table_name:
+        return f"{rule_type} check for {table_name}"
+    return rule_type.replace("_", " ").strip().title() or "Data quality rule"
+
+
 def _schema_index(schema_graph: dict[str, Any]) -> dict[str, dict[str, Any]]:
     indexed: dict[str, dict[str, Any]] = {}
     for table in schema_graph.get("tables") or []:
@@ -345,6 +432,197 @@ def _llm_rule_extraction_enabled(settings: Settings | None) -> bool:
     return bool(settings and getattr(settings, "openai_api_key", None))
 
 
+def _rule_planner_model(settings: Settings | None) -> str:
+    return os.getenv("DATA_QUALITY_RULE_PLANNER_MODEL", getattr(settings, "openai_model", "gpt-4o-mini"))
+
+
+def _rule_planner_timeout_sec() -> int:
+    return int(os.getenv("DATA_QUALITY_RULE_PLANNER_TIMEOUT_SEC", "30"))
+
+
+def _extract_business_controls(context_text: str | None) -> list[dict[str, Any]]:
+    text = str(context_text or "").strip()
+    if not text:
+        return []
+    controls: list[dict[str, Any]] = []
+    current_section = ""
+    current_tables: list[str] = []
+    in_key_controls = False
+    schemaish_lines = {
+        "tables in scope:",
+        "business reconciliation context:",
+        "multi-table dq requirements:",
+        "expected stewardship outputs:",
+        "workflow expectations:",
+    }
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            in_key_controls = False
+            continue
+        lowered = line.lower().strip()
+        if lowered.startswith("domain:"):
+            continue
+        if lowered in schemaish_lines:
+            in_key_controls = False
+            continue
+        if re.match(r"^\d+\.\s+", line):
+            current_section = re.sub(r"^\d+\.\s*", "", line).strip()
+            current_tables = re.findall(r"\b([A-Za-z_][\w]*)\b", current_section)
+            current_tables = [name for name in current_tables if "_" in name]
+            in_key_controls = False
+            continue
+        if lowered.startswith("- reconcile "):
+            current_tables = re.findall(r"\b([A-Za-z_][\w]*)\b", line)
+            current_tables = [name for name in current_tables if "_" in name]
+            in_key_controls = False
+            continue
+        if lowered.startswith("- core match intent:"):
+            controls.append(
+                {
+                    "control_key": f"ctrl_{len(controls)+1}",
+                    "title": line.lstrip("- ").strip(),
+                    "source_text": line.lstrip("- ").strip(),
+                    "section_title": current_section or None,
+                    "focus_tables": current_tables[:],
+                    "candidate_rule_types": ["custom_sql", "cross_column_consistency", "referential_integrity"],
+                    "priority": "critical",
+                }
+            )
+            in_key_controls = False
+            continue
+        if lowered.startswith("- key controls to evaluate:"):
+            in_key_controls = True
+            continue
+        if in_key_controls and line.startswith("-"):
+            control_text = line.lstrip("- ").strip()
+            if control_text:
+                candidate_types = ["custom_sql"]
+                control_lower = control_text.lower()
+                if "missing" in control_lower or "orphan" in control_lower:
+                    candidate_types.insert(0, "referential_integrity")
+                if "duplicate" in control_lower:
+                    candidate_types.insert(0, "unique")
+                if "mismatch" in control_lower or "delta" in control_lower or "anomal" in control_lower:
+                    candidate_types.insert(0, "cross_column_consistency")
+                controls.append(
+                    {
+                        "control_key": f"ctrl_{len(controls)+1}",
+                        "title": control_text[:120],
+                        "source_text": control_text,
+                        "section_title": current_section or None,
+                        "focus_tables": current_tables[:],
+                        "candidate_rule_types": list(dict.fromkeys(candidate_types)),
+                        "priority": "critical",
+                    }
+                )
+            continue
+        if any(token in lowered for token in {"must", "should", "cannot", "must not", "should not"}):
+            controls.append(
+                {
+                    "control_key": f"ctrl_{len(controls)+1}",
+                    "title": line[:120],
+                    "source_text": line,
+                    "section_title": current_section or None,
+                    "focus_tables": current_tables[:],
+                    "candidate_rule_types": ["referential_integrity", "not_null", "date_range", "custom_sql"],
+                    "priority": "warning",
+                }
+            )
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for item in controls:
+        key = (
+            str(item.get("source_text") or "").strip().lower(),
+            tuple(sorted(str(value).strip().lower() for value in (item.get("focus_tables") or []) if str(value).strip())),
+        )
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def business_context_validation_planner_tool(
+    *,
+    context_text: str | None,
+    schema_graph: dict[str, Any],
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    if _llm_rule_extraction_enabled(settings):
+        body = {
+            "model": _rule_planner_model(settings),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You decompose business context into exhaustive data-quality validation controls. "
+                        "Return JSON only with key validation_controls. "
+                        "Each item must contain control_key, title, source_text, section_title, focus_tables, candidate_rule_types, and priority. "
+                        "Break broad context into atomic validation controls so downstream rule generation can cover them explicitly. "
+                        "Use only tables present in the provided schema."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "context_text": str(context_text or "")[:12000],
+                            "schema": _schema_prompt(schema_graph),
+                            "required_response_shape": {
+                                "validation_controls": [
+                                    {
+                                        "control_key": "ctrl_1",
+                                        "title": "Mediation events missing billing rows",
+                                        "source_text": "unrated usage where mediation event should be billable but no billing row exists",
+                                        "section_title": "Mediation to Billing reconciliation",
+                                        "focus_tables": ["mediation_data", "billing_cdr_data"],
+                                        "candidate_rule_types": ["referential_integrity", "custom_sql"],
+                                        "priority": "critical",
+                                    }
+                                ]
+                            },
+                        },
+                        default=str,
+                    ),
+                },
+            ],
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+        }
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=_rule_planner_timeout_sec()) as response:
+                parsed = json.loads(response.read().decode("utf-8"))
+            content = ((parsed.get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
+            payload = json.loads(content)
+            controls = payload.get("validation_controls") or []
+            if isinstance(controls, list):
+                return {
+                    "validation_controls": [item for item in controls if isinstance(item, dict)],
+                    "control_count": len([item for item in controls if isinstance(item, dict)]),
+                    "planner_mode": "llm",
+                }
+        except Exception:
+            logger.warning("data_quality.rules.business_context_planner_failed", exc_info=True)
+            if _llm_mode() in {"required", "require", "on"}:
+                raise
+    controls = _extract_business_controls(context_text)
+    return {
+        "validation_controls": controls,
+        "control_count": len(controls),
+        "planner_mode": "deterministic",
+    }
+
+
 def _llm_sql_preview_mode() -> str:
     return os.getenv("DATA_QUALITY_RULE_SQL_PREVIEW_LLM_MODE", "auto").strip().lower()
 
@@ -483,6 +761,8 @@ def _extract_quality_rules_with_llm(
     settings: Settings | None,
     context_text: str,
     schema_graph: dict[str, Any],
+    *,
+    validation_controls: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if not _llm_rule_extraction_enabled(settings):
         return []
@@ -490,6 +770,7 @@ def _extract_quality_rules_with_llm(
     timeout_sec = int(os.getenv("DATA_QUALITY_RULE_LLM_TIMEOUT_SEC", "30"))
     payload = {
         "context_text": context_text[:12000],
+        "validation_controls": validation_controls or [],
         "schema": _schema_prompt(schema_graph),
         "allowed_rule_types": [
             "referential_integrity",
@@ -547,6 +828,8 @@ def _extract_quality_rules_with_llm(
                     "Extract executable data quality validation rules from user context. "
                     "Return JSON only. Use only table and column names from the provided schema. "
                     "Do not invent fields. If a rule cannot be mapped to the schema, omit it. "
+                    "Work from the provided validation_controls and try to cover each atomic control with one or more focused rules. "
+                    "Set source_text to the specific control text you are implementing, not the whole context blob. "
                     "Use custom_sql only when no standard rule type fits. Custom SQL must be a single read-only SELECT "
                     "that returns checked_row_count and violation_count, scoped to one provided table."
                 ),
@@ -604,6 +887,95 @@ def _dedupe_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         deduped.append(rule)
     return deduped
+
+
+def _normalized_match_text(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def build_validation_rule_coverage(
+    *,
+    validation_controls: list[dict[str, Any]],
+    rules: list[dict[str, Any]],
+    planner_mode: str,
+) -> dict[str, Any]:
+    indexed_rules = []
+    for rule in rules:
+        source_text = str(rule.get("source_text") or (rule.get("condition_json") or {}).get("source_text") or "").strip()
+        indexed_rules.append(
+            {
+                "rule": rule,
+                "source_text": _normalized_match_text(source_text),
+                "table_name": str(rule.get("table_name") or "").strip().lower(),
+                "reference_table": str(rule.get("reference_table") or "").strip().lower(),
+            }
+        )
+    controls_out: list[dict[str, Any]] = []
+    compiled = 0
+    uncovered = 0
+    for control in validation_controls:
+        control_text = _normalized_match_text(control.get("source_text") or control.get("title"))
+        focus_tables = [
+            str(item).strip().lower()
+            for item in (control.get("focus_tables") or [])
+            if str(item).strip()
+        ]
+        matched_rules: list[dict[str, Any]] = []
+        for item in indexed_rules:
+            direct_text_match = bool(control_text and item["source_text"] and (control_text in item["source_text"] or item["source_text"] in control_text))
+            focus_match = bool(
+                focus_tables
+                and (
+                    item["table_name"] in focus_tables
+                    or item["reference_table"] in focus_tables
+                )
+            )
+            if direct_text_match or focus_match:
+                matched_rules.append(
+                    {
+                        "rule_id": item["rule"].get("rule_id"),
+                        "rule_type": item["rule"].get("rule_type"),
+                        "rule_label": derive_quality_rule_label(item["rule"]),
+                        "table_name": item["rule"].get("table_name"),
+                        "column_name": item["rule"].get("column_name"),
+                        "reference_table": item["rule"].get("reference_table"),
+                        "status": item["rule"].get("status"),
+                    }
+                )
+        deduped_matches: list[dict[str, Any]] = []
+        seen_matches: set[str] = set()
+        for match in matched_rules:
+            dedupe_key = str(match.get("rule_id") or "") or f"{match.get('rule_type')}|{match.get('table_name')}|{match.get('column_name')}|{match.get('reference_table')}"
+            if dedupe_key in seen_matches:
+                continue
+            seen_matches.add(dedupe_key)
+            deduped_matches.append(match)
+        covered = bool(deduped_matches)
+        if covered:
+            compiled += 1
+        else:
+            uncovered += 1
+        controls_out.append(
+            {
+                "control_key": control.get("control_key"),
+                "title": control.get("title"),
+                "source_text": control.get("source_text"),
+                "section_title": control.get("section_title"),
+                "focus_tables": control.get("focus_tables") or [],
+                "candidate_rule_types": control.get("candidate_rule_types") or [],
+                "priority": control.get("priority"),
+                "covered": covered,
+                "matched_rule_count": len(deduped_matches),
+                "matched_rules": deduped_matches,
+            }
+        )
+    return {
+        "planner_mode": planner_mode,
+        "validation_control_count": len(validation_controls),
+        "compiled_validation_control_count": compiled,
+        "uncovered_validation_control_count": uncovered,
+        "controls": controls_out,
+    }
 
 
 def _extract_quality_rules_deterministic(context_text: str | None, schema_graph: dict[str, Any]) -> list[dict[str, Any]]:
@@ -775,17 +1147,65 @@ def extract_quality_rules_from_context(
     schema_graph: dict[str, Any],
     settings: Settings | None = None,
 ) -> list[dict[str, Any]]:
+    return plan_quality_rules_from_context(
+        context_text=context_text,
+        schema_graph=schema_graph,
+        settings=settings,
+    ).get("rules") or []
+
+
+def plan_quality_rules_from_context(
+    *,
+    context_text: str | None,
+    schema_graph: dict[str, Any],
+    settings: Settings | None = None,
+) -> dict[str, Any]:
     text = str(context_text or "").strip()
     if not text:
-        return []
+        return {
+            "planner_mode": "none",
+            "validation_controls": [],
+            "rules": [],
+            "rule_coverage": {
+                "planner_mode": "none",
+                "validation_control_count": 0,
+                "compiled_validation_control_count": 0,
+                "uncovered_validation_control_count": 0,
+                "controls": [],
+            },
+        }
+    planner = business_context_validation_planner_tool(
+        context_text=text,
+        schema_graph=schema_graph,
+        settings=settings,
+    )
+    validation_controls = list(planner.get("validation_controls") or [])
+    rules: list[dict[str, Any]] = []
     try:
-        llm_rules = _extract_quality_rules_with_llm(settings, text, schema_graph)
+        llm_rules = _extract_quality_rules_with_llm(
+            settings,
+            text,
+            schema_graph,
+            validation_controls=validation_controls,
+        )
         if llm_rules:
-            return llm_rules
+            rules = llm_rules
     except Exception:
         if _llm_mode() in {"required", "require", "on"}:
             raise
-    return _extract_quality_rules_deterministic(text, schema_graph)
+    if not rules:
+        rules = _extract_quality_rules_deterministic(text, schema_graph)
+    coverage = build_validation_rule_coverage(
+        validation_controls=validation_controls,
+        rules=rules,
+        planner_mode=str(planner.get("planner_mode") or "deterministic"),
+    )
+    return {
+        "planner_mode": str(planner.get("planner_mode") or "deterministic"),
+        "validation_controls": validation_controls,
+        "rules": rules,
+        "rule_coverage": coverage,
+    }
 
 
 def build_quality_rule_execution_plan(

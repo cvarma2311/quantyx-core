@@ -11,9 +11,12 @@ import re
 from services.ai.config import Settings
 from services.ai.connection_registry import resolve_database_credentials_cached
 from services.ai.db import run_query
+from services.ai.data_quality_anomalies import build_quality_anomaly_payload, summarize_data_quality_anomalies
 from services.ai.data_quality_remediation import derive_data_quality_remediation_plan
+from services.ai.data_quality_issues import build_quality_issue_payload, summarize_quality_issues
 from services.ai.data_quality_rules import _build_date_range_predicate_parts
 from services.ai.data_quality_stages import fetch_final_dataset_rows_tool, fetch_stage_snapshot_rows_tool, parse_lineage_id
+from services.ai.data_quality_trends import build_business_term_trend_payload, build_readiness_trend_payload, summarize_trends
 from services.ai.data_quality_store import (
     create_quality_report_metadata,
     get_quality_final_dataset_artifact,
@@ -25,9 +28,13 @@ from services.ai.data_quality_store import (
     list_quality_stage_row_outcomes,
     get_quality_run_by_run_id,
     get_quality_table_detail,
+    list_quality_anomalies,
+    list_quality_issues,
+    list_quality_trends,
     list_quality_rules,
     list_quality_tables,
 )
+from services.ai.glossary import fetch_glossary_terms
 
 EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 STYLE_DEFAULT = 0
@@ -270,6 +277,38 @@ def _fetch_table_rows(
               FROM {_qident(schema_name)}.{_qident(table_name)}
             """,
             [],
+            scoped_conn=scoped_conn,
+            statement_timeout_ms=120000,
+        )
+    except Exception:
+        return []
+
+
+def _fetch_table_rows_by_row_refs(
+    settings: Settings,
+    *,
+    connection_id: str | None,
+    schema_name: str,
+    table_name: str,
+    column_names: list[str],
+    row_refs: list[str],
+) -> list[dict[str, Any]]:
+    connection_id = str(connection_id or "").strip()
+    if not connection_id or not column_names or not row_refs:
+        return []
+    scoped_conn = resolve_database_credentials_cached(settings, connection_id, schema_name)
+    if not scoped_conn:
+        return []
+    select_columns = ['ctid::text AS "__row_ref"'] + [f"{_qident(col)} AS {_qident(col)}" for col in column_names]
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT {", ".join(select_columns)}
+              FROM {_qident(schema_name)}.{_qident(table_name)}
+             WHERE ctid::text = ANY(%s)
+            """,
+            [row_refs],
             scoped_conn=scoped_conn,
             statement_timeout_ms=120000,
         )
@@ -526,6 +565,104 @@ def _all_data_sheets(
                 ]
             )
         sheets.append((f"All Data {table_name}", rows))
+    return sheets
+
+
+def _failed_rule_detail_sheets(
+    settings: Settings,
+    *,
+    run_row: dict[str, Any],
+    table_details: list[dict[str, Any]],
+    failed_rules: list[dict[str, Any]],
+) -> list[tuple[str, list[list[Any]]]]:
+    connection_id = str(run_row.get("connection_id") or "").strip()
+    schema_name = str(run_row.get("schema_name") or "public").strip() or "public"
+    if not connection_id:
+        return []
+    table_detail_map = {
+        str(detail.get("table_name") or "").strip(): detail
+        for detail in table_details
+        if str(detail.get("table_name") or "").strip()
+    }
+    sheets: list[tuple[str, list[list[Any]]]] = []
+    for index, rule in enumerate(failed_rules, start=1):
+        table_name = str(rule.get("table_name") or "").strip()
+        if not table_name:
+            continue
+        detail = table_detail_map.get(table_name) or {}
+        column_names = [
+            str(row.get("column_name") or "").strip()
+            for row in (detail.get("columns") or [])
+            if str(row.get("column_name") or "").strip()
+        ]
+        if not column_names:
+            continue
+        sql, params = _build_rule_failure_row_ref_query(rule, schema_name)
+        if not sql:
+            continue
+        scoped_conn = resolve_database_credentials_cached(settings, connection_id, schema_name)
+        if not scoped_conn:
+            continue
+        try:
+            failure_rows = run_query(
+                settings,
+                sql,
+                params,
+                scoped_conn=scoped_conn,
+                statement_timeout_ms=120000,
+            )
+        except Exception:
+            continue
+        row_refs = [str(row.get("__row_ref") or "").strip() for row in failure_rows if str(row.get("__row_ref") or "").strip()]
+        if not row_refs:
+            continue
+        source_rows = _fetch_table_rows_by_row_refs(
+            settings,
+            connection_id=connection_id,
+            schema_name=schema_name,
+            table_name=table_name,
+            column_names=column_names,
+            row_refs=row_refs,
+        )
+        if not source_rows:
+            continue
+        source_row_map = {str(row.get("__row_ref") or "").strip(): row for row in source_rows if str(row.get("__row_ref") or "").strip()}
+        affected_columns = set(_rule_failure_column_map(rule))
+        rule_label = str(rule.get("rule_label") or rule.get("rule_type") or "rule").strip() or "rule"
+        sheet_rows: list[list[Any]] = [
+            _header_row(["Rule Field", "Value"]),
+            ["Rule ID", rule.get("rule_id")],
+            ["Rule Label", rule_label],
+            ["Rule Type", rule.get("rule_type")],
+            ["Severity", rule.get("severity")],
+            ["Table", table_name],
+            ["Column", rule.get("column_name")],
+            ["Reference Table", rule.get("reference_table")],
+            ["Reference Column", rule.get("reference_column")],
+            ["Violation Count", rule.get("violation_count")],
+            ["Violation %", rule.get("violation_pct")],
+            ["Source Text", rule.get("source_text")],
+            ["Rule Detail", _flatten_mapping(rule.get("condition_json") or {})],
+            [],
+            _header_row(["Row Ref", *column_names]),
+        ]
+        for row_ref in row_refs:
+            source_row = source_row_map.get(row_ref)
+            if not source_row:
+                continue
+            sheet_rows.append(
+                [
+                    row_ref,
+                    *[
+                        _cell(source_row.get(column_name), STYLE_VALIDATION_FAILED)
+                        if column_name in affected_columns
+                        else source_row.get(column_name)
+                        for column_name in column_names
+                    ],
+                ]
+            )
+        sheet_title = f"Rule {index:02d} {rule_label}"
+        sheets.append((sheet_title, sheet_rows))
     return sheets
 
 
@@ -892,6 +1029,20 @@ def build_data_quality_excel_report(
     stage_row_outcomes = list_quality_stage_row_outcomes(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000)
     final_dataset = get_quality_final_dataset_artifact(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id) or {}
     opportunities = list_quality_enrichment_opportunities(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    trends = list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000)
+    try:
+        glossary_terms = fetch_glossary_terms(settings, tenant_id, domain_id)
+    except Exception:
+        glossary_terms = []
+    business_term_trends = build_business_term_trend_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trends=trends,
+        glossary_terms=glossary_terms,
+    )
+    anomalies = list_quality_anomalies(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    issues = list_quality_issues(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
     staged_artifacts = _list_staged_overlay_artifacts(settings, run_id)
     published_sheets = _published_enrichment_sheets(settings, run_row=run, staged_artifacts=staged_artifacts)
     stage_snapshot_sheets = _stage_snapshot_sheets(settings, run_row=run, dataset_stages=dataset_stages)
@@ -908,6 +1059,12 @@ def build_data_quality_excel_report(
         table_details=table_details,
         failed_rules=failed_rules,
     )
+    failed_rule_detail_sheets = _failed_rule_detail_sheets(
+        settings,
+        run_row=run,
+        table_details=table_details,
+        failed_rules=failed_rules,
+    )
     remediation_plan = derive_data_quality_remediation_plan(
         tenant_id=tenant_id,
         domain_id=domain_id,
@@ -919,8 +1076,34 @@ def build_data_quality_excel_report(
         opportunities=opportunities,
         dataset_stages=dataset_stages,
         row_outcomes=stage_row_outcomes,
+        trends=trends,
         limit=50,
     )
+    trend_summary = summarize_trends(trends)
+    anomaly_summary = summarize_data_quality_anomalies(anomalies)
+    anomaly_rows = [build_quality_anomaly_payload(row) for row in anomalies]
+    issue_summary = summarize_quality_issues(issues)
+    issue_rows = [build_quality_issue_payload(row) for row in issues]
+    readiness_summary = build_readiness_trend_payload(
+        run_id=run_id,
+        baseline_run_id=str(run.get("baseline_run_id") or (run.get("summary_json") or {}).get("baseline_run_id") or "").strip() or None,
+        final_dataset=final_dataset,
+        trends=trends,
+        issues=issues,
+        anomalies=anomalies,
+    )
+    steward_queue_rows = [
+        row for row in issue_rows if str(row.get("status") or "").strip().lower() in {"open", "in_progress", "deferred"}
+    ]
+    steward_queue_rows.sort(
+        key=lambda row: (
+            0 if row.get("overdue") else 1,
+            0 if str(row.get("severity") or "") == "critical" else 1 if str(row.get("severity") or "") == "high" else 2,
+            -(int(row.get("age_days") or 0)),
+            str(row.get("owner_id") or ""),
+        )
+    )
+    overdue_issue_rows = [row for row in steward_queue_rows if row.get("overdue")]
     freshness_rows = []
     for row in tables:
         summary_json = row.get("summary_json") or {}
@@ -994,8 +1177,21 @@ def build_data_quality_excel_report(
         "published_enrichment_sheet_count": len(published_sheets),
         "stage_snapshot_sheet_count": len(stage_snapshot_sheets),
         "all_data_sheet_count": len(all_data_sheets),
+        "failed_rule_detail_sheet_count": len(failed_rule_detail_sheets),
+        "trend_row_count": trend_summary.get("trend_row_count", 0),
+        "improved_metric_count": trend_summary.get("improved_metric_count", 0),
+        "worsened_metric_count": trend_summary.get("worsened_metric_count", 0),
+        "business_term_group_count": (business_term_trends.get("summary") or {}).get("business_term_group_count", 0),
+        "worsened_business_term_count": (business_term_trends.get("summary") or {}).get("worsened_business_term_count", 0),
+        "anomaly_count": anomaly_summary.get("anomaly_count", 0),
+        "critical_anomaly_count": anomaly_summary.get("critical_anomaly_count", 0),
+        "certification_blocker_count": readiness_summary.get("certification_blocker_count", 0),
+        "readiness_trend_status": readiness_summary.get("readiness_trend_status"),
         "remediation_action_count": (remediation_plan.get("summary") or {}).get("action_count", 0),
         "critical_remediation_action_count": (remediation_plan.get("summary") or {}).get("critical_action_count", 0),
+        "issue_count": issue_summary.get("issue_count", 0),
+        "open_issue_count": issue_summary.get("open_issue_count", 0),
+        "overdue_issue_count": issue_summary.get("overdue_issue_count", 0),
     }
     sheets = [
         (
@@ -1032,6 +1228,8 @@ def build_data_quality_excel_report(
                 ["Join Exceptions", len(join_exceptions)],
                 ["Final Dataset Rows", final_dataset.get("final_row_count")],
                 ["Final Dataset Readiness", final_dataset.get("readiness_status")],
+                ["Readiness Trend", readiness_summary.get("readiness_trend_status")],
+                ["Certification Blockers", readiness_summary.get("certification_blocker_count", 0)],
                 ["Stale Tables", len([row for row in freshness_rows if row.get("freshness_status") == "stale"])],
                 ["Stability Issues", len([row for row in freshness_rows if row.get("stability_status") == "changed"])],
                 ["Staged Overlay Artifacts", len(staged_artifacts)],
@@ -1040,9 +1238,329 @@ def build_data_quality_excel_report(
                 ["Published Enrichment Sheets", len(published_sheets)],
                 ["Stage Snapshot Sheets", len(stage_snapshot_sheets)],
                 ["All Data Sheets", len(all_data_sheets)],
+                ["Failed Rule Detail Sheets", len(failed_rule_detail_sheets)],
+                ["Trend Rows", trend_summary.get("trend_row_count", 0)],
+                ["Improved Metrics", trend_summary.get("improved_metric_count", 0)],
+                ["Worsened Metrics", trend_summary.get("worsened_metric_count", 0)],
+                ["Business Term Groups", (business_term_trends.get("summary") or {}).get("business_term_group_count", 0)],
+                ["Worsened Business Terms", (business_term_trends.get("summary") or {}).get("worsened_business_term_count", 0)],
+                ["Anomalies", anomaly_summary.get("anomaly_count", 0)],
+                ["Critical Anomalies", anomaly_summary.get("critical_anomaly_count", 0)],
+                ["Open Issues", issue_summary.get("open_issue_count", 0)],
+                ["Overdue Issues", issue_summary.get("overdue_issue_count", 0)],
                 ["Recommended Actions", (remediation_plan.get("summary") or {}).get("action_count", 0)],
                 ["Critical Recommended Actions", (remediation_plan.get("summary") or {}).get("critical_action_count", 0)],
                 ["Workflow Status", (run.get("summary_json") or {}).get("workflow_status") or run.get("status")],
+            ],
+        ),
+        (
+            "Certification Summary",
+            [
+                _header_row(["Metric", "Value"]),
+                ["Current Readiness Status", readiness_summary.get("current_readiness_status")],
+                ["Previous Readiness Status", readiness_summary.get("previous_readiness_status")],
+                ["Readiness Trend Status", readiness_summary.get("readiness_trend_status")],
+                ["Baseline Run ID", readiness_summary.get("baseline_run_id")],
+                ["Certification Blocker Count", readiness_summary.get("certification_blocker_count", 0)],
+                ["Open Issue Count", readiness_summary.get("open_issue_count", 0)],
+                ["Residual Anomaly Count", readiness_summary.get("residual_anomaly_count", 0)],
+                ["Critical Anomaly Count", readiness_summary.get("critical_anomaly_count", 0)],
+            ],
+        ),
+        (
+            "Publish Readiness",
+            [
+                _header_row(["Field", "Value", "Note"]),
+                ["Current Readiness", readiness_summary.get("current_readiness_status"), f"baseline: {readiness_summary.get('previous_readiness_status') or 'n/a'}"],
+                ["Readiness Trend", readiness_summary.get("readiness_trend_status"), f"baseline run: {readiness_summary.get('baseline_run_id') or 'n/a'}"],
+                ["Current Final Rows", readiness_summary.get("current_final_row_count"), None],
+                ["Previous Final Rows", readiness_summary.get("previous_final_row_count"), None],
+                ["Final Row Delta", readiness_summary.get("final_row_count_delta"), readiness_summary.get("final_row_count_delta_pct")],
+                ["Certification Blockers", readiness_summary.get("certification_blocker_count", 0), _flatten_sequence(readiness_summary.get("blocker_titles") or [])],
+                ["Residual Anomalies", readiness_summary.get("residual_anomaly_count", 0), f"{readiness_summary.get('critical_anomaly_count', 0)} critical"],
+            ],
+        ),
+        (
+            "Quality Trends",
+            [
+                _header_row([
+                    "Object Type",
+                    "Object Key",
+                    "Object Name",
+                    "Metric",
+                    "Previous Value",
+                    "Current Value",
+                    "Delta",
+                    "Delta %",
+                    "Trend Status",
+                    "Directionality",
+                ]),
+                *[
+                    [
+                        row.get("object_type"),
+                        row.get("object_key"),
+                        row.get("object_name"),
+                        row.get("metric_name"),
+                        row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
+                        row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
+                        row.get("delta_value"),
+                        row.get("delta_pct"),
+                        row.get("trend_status"),
+                        row.get("directionality"),
+                    ]
+                    for row in trends
+                ],
+            ],
+        ),
+        (
+            "Business Term Trends",
+            [
+                _header_row([
+                    "Business Term",
+                    "Definition",
+                    "Trend Rows",
+                    "Worsened",
+                    "Improved",
+                    "Affected Objects",
+                    "Top Metrics",
+                    "Evidence Path",
+                ]),
+                *[
+                    [
+                        row.get("business_term"),
+                        row.get("definition"),
+                        row.get("trend_row_count"),
+                        row.get("worsened_metric_count"),
+                        row.get("improved_metric_count"),
+                        row.get("affected_objects"),
+                        row.get("top_metrics"),
+                        row.get("evidence_path"),
+                    ]
+                    for row in (business_term_trends.get("rows") or [])
+                ],
+            ],
+        ),
+        (
+            "Rule Trends",
+            [
+                _header_row([
+                    "Rule Key",
+                    "Rule Name",
+                    "Metric",
+                    "Previous Value",
+                    "Current Value",
+                    "Delta",
+                    "Delta %",
+                    "Trend Status",
+                ]),
+                *[
+                    [
+                        row.get("object_key"),
+                        row.get("object_name"),
+                        row.get("metric_name"),
+                        row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
+                        row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
+                        row.get("delta_value"),
+                        row.get("delta_pct"),
+                        row.get("trend_status"),
+                    ]
+                    for row in trends
+                    if str(row.get("object_type") or "") == "rule"
+                ],
+            ],
+        ),
+        (
+            "Stage Trends",
+            [
+                _header_row([
+                    "Stage Key",
+                    "Stage Name",
+                    "Metric",
+                    "Previous Value",
+                    "Current Value",
+                    "Delta",
+                    "Delta %",
+                    "Trend Status",
+                ]),
+                *[
+                    [
+                        row.get("object_key"),
+                        row.get("object_name"),
+                        row.get("metric_name"),
+                        row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
+                        row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
+                        row.get("delta_value"),
+                        row.get("delta_pct"),
+                        row.get("trend_status"),
+                    ]
+                    for row in trends
+                    if str(row.get("object_type") or "") == "stage"
+                ],
+            ],
+        ),
+        (
+            "Final Dataset Trends",
+            [
+                _header_row([
+                    "Metric",
+                    "Previous Value",
+                    "Current Value",
+                    "Delta",
+                    "Delta %",
+                    "Trend Status",
+                ]),
+                *[
+                    [
+                        row.get("metric_name"),
+                        row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
+                        row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
+                        row.get("delta_value"),
+                        row.get("delta_pct"),
+                        row.get("trend_status"),
+                    ]
+                    for row in trends
+                    if str(row.get("object_type") or "") == "final_dataset"
+                ],
+            ],
+        ),
+        (
+            "Anomaly Summary",
+            [
+                _header_row(["Metric", "Value"]),
+                ["Anomaly Count", anomaly_summary.get("anomaly_count", 0)],
+                ["Critical Anomaly Count", anomaly_summary.get("critical_anomaly_count", 0)],
+                ["High Anomaly Count", anomaly_summary.get("high_anomaly_count", 0)],
+                ["Repeated Anomaly Count", anomaly_summary.get("repeated_anomaly_count", 0)],
+            ],
+        ),
+        (
+            "Anomalies",
+            [
+                _header_row([
+                    "Anomaly ID",
+                    "Anomaly Type",
+                    "Title",
+                    "Severity",
+                    "Object Type",
+                    "Object Key",
+                    "Object Name",
+                    "Baseline Run ID",
+                    "Previous Value",
+                    "Current Value",
+                    "Delta",
+                    "Delta %",
+                    "Evidence Path",
+                ]),
+                *[
+                    [
+                        row.get("anomaly_id"),
+                        row.get("anomaly_type"),
+                        row.get("title"),
+                        row.get("severity"),
+                        row.get("object_type"),
+                        row.get("object_key"),
+                        row.get("object_name"),
+                        row.get("baseline_run_id"),
+                        row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
+                        row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
+                        row.get("delta_value"),
+                        row.get("delta_pct"),
+                        row.get("evidence_path"),
+                    ]
+                    for row in anomaly_rows
+                ],
+            ],
+        ),
+        (
+            "Issue Register",
+            [
+                _header_row([
+                    "Issue ID",
+                    "Issue Type",
+                    "Title",
+                    "Severity",
+                    "Status",
+                    "Owner",
+                    "Age Days",
+                    "Due At",
+                    "Overdue",
+                    "Table",
+                    "Column",
+                    "Stage ID",
+                    "Recommendation",
+                    "Evidence Path",
+                ]),
+                *[
+                    [
+                        row.get("issue_id"),
+                        row.get("issue_type"),
+                        row.get("title"),
+                        row.get("severity"),
+                        row.get("status"),
+                        row.get("owner_id"),
+                        row.get("age_days"),
+                        row.get("due_at"),
+                        row.get("overdue"),
+                        row.get("table_name"),
+                        row.get("column_name"),
+                        row.get("stage_id"),
+                        row.get("recommendation"),
+                        row.get("evidence_path"),
+                    ]
+                    for row in issue_rows
+                ],
+            ],
+        ),
+        (
+            "Steward Work Queue",
+            [
+                _header_row([
+                    "Owner",
+                    "Severity",
+                    "Issue",
+                    "Status",
+                    "Age Days",
+                    "Due At",
+                    "Overdue",
+                    "Evidence Path",
+                ]),
+                *[
+                    [
+                        row.get("owner_id"),
+                        row.get("severity"),
+                        row.get("title"),
+                        row.get("status"),
+                        row.get("age_days"),
+                        row.get("due_at"),
+                        row.get("overdue"),
+                        row.get("evidence_path"),
+                    ]
+                    for row in steward_queue_rows
+                ],
+            ],
+        ),
+        (
+            "SLA Breaches",
+            [
+                _header_row([
+                    "Owner",
+                    "Severity",
+                    "Issue",
+                    "Age Days",
+                    "Due At",
+                    "Evidence Path",
+                ]),
+                *[
+                    [
+                        row.get("owner_id"),
+                        row.get("severity"),
+                        row.get("title"),
+                        row.get("age_days"),
+                        row.get("due_at"),
+                        row.get("evidence_path"),
+                    ]
+                    for row in overdue_issue_rows
+                ],
             ],
         ),
         (
@@ -1286,6 +1804,7 @@ def build_data_quality_excel_report(
                 ],
             ],
         ),
+        *failed_rule_detail_sheets,
         (
             "Freshness",
             [

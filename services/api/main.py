@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 
 from services.ai.catalog import Dimension, Metric, MetricCatalog, load_catalog_with_registry, resolve_ref
@@ -176,6 +176,8 @@ from services.ai.agentic_store import (
     append_plan_summary,
     upsert_agent_event_artifact,
 )
+from services.ai.agentic_lineage import build_run_lineage_graph_payload
+from services.ai.agentic_agents import build_schema_graph
 from services.ai.agentic_orchestrator import run_agentic_workflow
 from services.ai.agentic_artifacts_registry import (
     get_schema_graph_artifact,
@@ -196,6 +198,8 @@ from services.ai.data_quality_api_payloads import (
     build_data_quality_run_hydration_payload,
     build_data_quality_run_summary_payload,
 )
+from services.ai.data_quality_anomalies import build_quality_anomaly_payload, summarize_data_quality_anomalies
+from services.ai.data_quality_issues import build_quality_issue_list_payload, build_quality_issue_payload
 from services.ai.data_quality_orchestrator import resume_data_quality_agentic_workflow_after_rule_review
 from services.ai.data_quality_evidence import (
     fetch_duplicate_evidence,
@@ -216,25 +220,51 @@ from services.ai.data_quality_rule_review import (
     get_quality_rule_for_review,
     get_quality_rule_review_queue,
 )
+from services.ai.data_quality_rules import derive_quality_rule_label
 from services.ai.data_quality_remediation import build_data_quality_remediation_plan
+from services.ai.data_quality_trends import (
+    build_business_term_trend_payload,
+    build_readiness_trend_payload,
+    build_object_metric_snapshots,
+    build_run_metric_snapshots,
+    build_trend_api_payload,
+    build_trend_rows,
+    build_trend_rule_payload,
+    build_trend_table_payload,
+    infer_trend_scope_key,
+    summarize_trends,
+)
+from services.ai.glossary import fetch_glossary_terms
 from services.ai.data_quality_store import (
     get_quality_final_dataset_artifact,
     get_quality_dataset_stage,
     get_quality_join_artifact,
     get_quality_rule,
     create_quality_enrichment_proposal,
+    assign_quality_issue,
     list_quality_dataset_stages,
     list_quality_duplicate_candidates,
+    list_quality_anomalies,
+    list_quality_issues,
     list_quality_stage_row_outcomes,
     get_quality_enrichment_opportunity,
     get_quality_enrichment_proposal,
+    get_quality_issue,
+    get_quality_anomaly,
     get_latest_quality_enrichment_proposal_for_opportunity,
     list_quality_enrichment_opportunities,
     list_quality_join_artifacts,
     get_quality_run_by_run_id,
     get_quality_table_detail,
+    list_quality_object_metric_snapshots,
     list_quality_rules,
+    list_quality_run_metric_snapshots,
     list_quality_tables,
+    list_quality_trends,
+    replace_quality_object_metric_snapshots,
+    replace_quality_run_metric_snapshots,
+    replace_quality_trends,
+    update_quality_issue_status,
     update_quality_enrichment_opportunity_status,
     update_quality_enrichment_proposal,
 )
@@ -301,6 +331,7 @@ from services.ai.jobs_store import (
     claim_next_job,
     create_job,
     get_job,
+    get_latest_agentic_job_payload_for_run,
     get_job_result as fetch_job_result,
     list_jobs as fetch_jobs,
     update_job_progress,
@@ -385,17 +416,20 @@ from services.ai.workspace_store import (
     STATUS_ACTIVE as WORKSPACE_STATUS_ACTIVE,
     STATUS_ARCHIVED as WORKSPACE_STATUS_ARCHIVED,
     STATUS_DELETED as WORKSPACE_STATUS_DELETED,
+    create_run_lineage_edge,
     create_workspace_conversation,
     create_workspace_message,
     finalize_canonical_deployment,
     generate_conversation_title,
     generate_run_display_name,
     get_current_deployment,
+    get_deployment_run,
     get_workspace_conversation,
     get_workspace_memory,
     get_workspace_message,
     initialize_run_metadata,
     list_deployments,
+    list_run_lineage_edges,
     list_workspace_conversations,
     list_workspace_conversations_for_tenant,
     list_workspace_messages,
@@ -1758,7 +1792,12 @@ def _job_worker_loop() -> None:
     poll_seconds = float(os.getenv("JOB_WORKER_POLL_SEC", "2"))
     logger.info("Job worker started (poll=%ss)", poll_seconds)
     while not _job_worker_stop.is_set():
-        job = claim_next_job(settings)
+        try:
+            job = claim_next_job(settings)
+        except Exception:  # noqa: BLE001
+            logger.exception("Job worker failed while claiming next job")
+            _job_worker_stop.wait(poll_seconds)
+            continue
         if not job:
             logger.debug("Job worker idle (no queued jobs)")
             _job_worker_stop.wait(poll_seconds)
@@ -1789,7 +1828,10 @@ def _job_worker_loop() -> None:
             logger.info("Job completed | job_id=%s job_type=%s", job_id, job_type)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Job failed: %s", job_id)
-            update_job_status(settings, job_id, "failed", result_payload=None, error_message=str(exc))
+            try:
+                update_job_status(settings, job_id, "failed", result_payload=None, error_message=str(exc))
+            except Exception:  # noqa: BLE001
+                logger.exception("Job worker failed while marking job as failed | job_id=%s", job_id)
     logger.info("Job worker stopped")
 
 
@@ -8770,10 +8812,43 @@ def workspace_current_deployment(tenant_id: str, domain_id: str | None = None) -
     return current
 
 
+def _build_workspace_run_history_payload(tenant_id: str, domain_id: str, rows: list[dict]) -> dict:
+    runs = [
+        {
+            "run_id": row.get("run_id"),
+            "status": row.get("status"),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "completed_at": row.get("completed_at"),
+            "display_name": row.get("display_name"),
+            "version_no": row.get("version_no"),
+            "trend_mode": row.get("trend_mode"),
+            "trend_scope_key": row.get("trend_scope_key"),
+            "trend_scope_label": row.get("trend_scope_label"),
+            "parent_run_id": row.get("parent_run_id"),
+            "rerun_root_run_id": row.get("rerun_root_run_id"),
+        }
+        for row in rows
+    ]
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_count": len(runs),
+        "runs": runs,
+        "deployments": rows,
+    }
+
+
 @app.get(
     "/workspace/deployments",
     tags=["workspace"],
-    summary="List deployment history",
+    summary="List deployment runs for a tenant/domain",
+    description=(
+        "Return all deployment runs for the selected tenant/domain. "
+        "Use the `runs` array as the primary UI contract when you need run ids, timestamps, "
+        "status, versioning, and rerun lineage metadata for history pickers, monitor reruns, "
+        "and lineage/trend graphs. The legacy `deployments` array is preserved for backward compatibility."
+    ),
     openapi_extra={
         "responses": {
             "200": {
@@ -8785,10 +8860,44 @@ def workspace_current_deployment(tenant_id: str, domain_id: str | None = None) -
                                 "value": {
                                     "tenant_id": "VC_101",
                                     "domain_id": "lpg_production_distribution",
+                                    "run_count": 2,
+                                    "runs": [
+                                        {
+                                            "run_id": "run_1a0f427c86ec",
+                                            "status": "completed",
+                                            "created_at": "2026-03-06T21:49:12.112901Z",
+                                            "updated_at": "2026-03-06T21:54:18.326901Z",
+                                            "completed_at": "2026-03-06T21:54:18.326901Z",
+                                            "display_name": "Lpg Production Distribution Deployment v4",
+                                            "version_no": 4,
+                                            "trend_mode": "monitor",
+                                            "trend_scope_key": "lpg_distribution_primary",
+                                            "trend_scope_label": "LPG Distribution Primary",
+                                            "parent_run_id": "run_fa9d1b1aa021",
+                                            "rerun_root_run_id": "run_82ef8af00b19"
+                                        },
+                                        {
+                                            "run_id": "run_fa9d1b1aa021",
+                                            "status": "completed",
+                                            "created_at": "2026-03-01T18:20:04.991201Z",
+                                            "updated_at": "2026-03-01T18:25:55.210112Z",
+                                            "completed_at": "2026-03-01T18:25:55.210112Z",
+                                            "display_name": "Lpg Production Distribution Deployment v3",
+                                            "version_no": 3,
+                                            "trend_mode": "monitor",
+                                            "trend_scope_key": "lpg_distribution_primary",
+                                            "trend_scope_label": "LPG Distribution Primary",
+                                            "parent_run_id": "run_82ef8af00b19",
+                                            "rerun_root_run_id": "run_82ef8af00b19"
+                                        }
+                                    ],
                                     "deployments": [
                                         {
                                             "run_id": "run_1a0f427c86ec",
                                             "status": "completed",
+                                            "created_at": "2026-03-06T21:49:12.112901Z",
+                                            "updated_at": "2026-03-06T21:54:18.326901Z",
+                                            "completed_at": "2026-03-06T21:54:18.326901Z",
                                             "version_no": 4,
                                             "display_name": "Lpg Production Distribution Deployment v4",
                                         }
@@ -8805,7 +8914,7 @@ def workspace_current_deployment(tenant_id: str, domain_id: str | None = None) -
 def workspace_list_deployments(tenant_id: str, domain_id: str | None = None, limit: int = 50) -> dict:
     resolved_domain = _resolve_domain_id(tenant_id, domain_id)
     rows = list_deployments(settings, tenant_id, resolved_domain, limit=limit)
-    return {"tenant_id": tenant_id, "domain_id": resolved_domain, "deployments": rows}
+    return _build_workspace_run_history_payload(tenant_id, resolved_domain, rows)
 
 
 def _start_workspace_deployment(payload: dict) -> dict:
@@ -8831,6 +8940,62 @@ def _start_workspace_deployment(payload: dict) -> dict:
         schema_payload = load_latest_scan_for_scope(settings, tenant_id, domain_id, connection_id, database, schema)
     if not schema_payload:
         raise HTTPException(status_code=400, detail="schema_payload is required")
+    source_run = None
+    source_run_id = str(payload.get("source_run_id") or "").strip() or None
+    if source_run_id:
+        source_run = get_deployment_run(settings, source_run_id)
+    schema_graph = build_schema_graph(schema_payload or {})
+    table_names = [
+        str(item.get("name") or "").strip()
+        for item in (schema_graph.get("tables") or [])
+        if str(item.get("name") or "").strip()
+    ]
+    trend_mode = str(payload.get("trend_mode") or "ad_hoc").strip().lower() or "ad_hoc"
+    requested_trend_scope_key = str(payload.get("trend_scope_key") or "").strip() or None
+    requested_trend_scope_label = str(payload.get("trend_scope_label") or "").strip() or None
+    prior_runs = list_deployments(settings, tenant_id, domain_id, limit=50)
+    inferred_trend_scope_key, inferred_trend_scope_label = infer_trend_scope_key(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        connection_id=str(payload.get("connection_id") or connection_id or "").strip() or None,
+        database_name=str(payload.get("database") or database or "").strip() or None,
+        schema_name=str(payload.get("schema_name") or schema or "").strip() or None,
+        table_names=table_names,
+        context_text=str(payload.get("context_text") or "").strip() or None,
+        trend_mode=trend_mode,
+        settings=settings,
+        previous_runs=prior_runs,
+        source_run=source_run,
+    )
+    trend_scope_key = requested_trend_scope_key or inferred_trend_scope_key
+    trend_scope_label = requested_trend_scope_label or inferred_trend_scope_label
+    parent_run_id = str(payload.get("parent_run_id") or source_run_id or "").strip() or None
+    rerun_root_run_id = (
+        str(payload.get("rerun_root_run_id") or (source_run or {}).get("rerun_root_run_id") or parent_run_id or "").strip()
+        or None
+    )
+    rerun_reason = str(payload.get("rerun_reason") or "").strip() or None
+    deployment_payload_json = {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "connection_id": payload.get("connection_id") or connection_id,
+        "database": payload.get("database") or database,
+        "schema_name": payload.get("schema_name") or schema,
+        "schema_payload": schema_payload,
+        "schema_ids": payload.get("schema_ids") or [],
+        "context_text": payload.get("context_text"),
+        "context_ids": payload.get("context_ids") or [],
+        "runtime_tuning": payload.get("runtime_tuning") or {},
+        "mode": payload.get("mode") or "full",
+        "pause_for_rule_review": bool(payload.get("pause_for_rule_review", True)),
+        "trend_mode": trend_mode,
+        "trend_scope_key": trend_scope_key,
+        "trend_scope_label": trend_scope_label,
+        "source_run_id": source_run_id,
+        "parent_run_id": parent_run_id,
+        "rerun_root_run_id": rerun_root_run_id,
+        "rerun_reason": rerun_reason,
+    }
     scan_payload = _workspace_schema_scan_payload(
         payload.get("connection_id") or connection_id,
         payload.get("database") or database,
@@ -8896,7 +9061,36 @@ def _start_workspace_deployment(payload: dict) -> dict:
         version_no=version_no,
         display_name=display_name,
         is_canonical=False,
+        trend_mode=trend_mode,
+        trend_scope_key=trend_scope_key,
+        trend_scope_label=trend_scope_label,
+        parent_run_id=parent_run_id,
+        rerun_root_run_id=rerun_root_run_id,
+        rerun_reason=rerun_reason,
+        deployment_payload_json=deployment_payload_json,
     )
+    if parent_run_id:
+        edge_type = (
+            "baseline_reset"
+            if trend_mode == "baseline_reset"
+            else "rerun_monitor"
+            if trend_mode == "monitor"
+            else "rerun"
+        )
+        create_run_lineage_edge(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            parent_run_id=parent_run_id,
+            child_run_id=run_id,
+            edge_type=edge_type,
+            trend_scope_key=trend_scope_key,
+            summary_json={
+                "trend_mode": trend_mode,
+                "rerun_reason": rerun_reason or trend_mode,
+                "baseline_reset": trend_mode == "baseline_reset",
+            },
+        )
     append_agent_run_event(
         settings,
         run_id,
@@ -8918,6 +9112,9 @@ def _start_workspace_deployment(payload: dict) -> dict:
         "database_name": payload.get("database") or database,
         "runtime_tuning": payload.get("runtime_tuning") or {},
         "pause_for_rule_review": bool(payload.get("pause_for_rule_review", True)),
+        "trend_mode": trend_mode,
+        "trend_scope_key": trend_scope_key,
+        "trend_scope_label": trend_scope_label,
         "scoped_conn": (_sc2 := _resolve_scoped_conn(tenant_id, domain_id)) and _sc2.to_dict(),
     }
     job = create_job(
@@ -8940,12 +9137,62 @@ def _start_workspace_deployment(payload: dict) -> dict:
         "display_name": display_name,
         "version_no": version_no,
         "status": "queued",
+        "trend_mode": trend_mode,
+        "trend_scope_key": trend_scope_key,
+        "trend_scope_label": trend_scope_label,
+        "parent_run_id": parent_run_id,
+        "rerun_root_run_id": rerun_root_run_id,
         "workflow_kind": "data_quality"
         if str(domain_id or "").strip().lower() == "data_quality_observability"
         or str(payload.get("workflow_mode") or "").strip().lower() == "data_quality"
         else "standard",
         "job_id": job.get("job_id"),
     }
+
+
+def _build_rerun_deployment_payload(source_run_id: str, payload: dict) -> dict:
+    source_run = get_deployment_run(settings, source_run_id)
+    if not source_run:
+        raise HTTPException(status_code=404, detail="Source deployment run not found")
+    stored = dict(source_run.get("deployment_payload_json") or {})
+    if not stored:
+        latest_job = get_latest_agentic_job_payload_for_run(settings, source_run_id) or {}
+        request_payload = dict(latest_job.get("request_payload") or {})
+        initial_state = dict(request_payload.get("initial_state") or {})
+        stored = {
+            "tenant_id": source_run.get("tenant_id"),
+            "domain_id": source_run.get("domain_id"),
+            "connection_id": initial_state.get("connection_id"),
+            "database": initial_state.get("database_name"),
+            "schema_name": initial_state.get("schema_name"),
+            "schema_payload": initial_state.get("schema_payload") or {},
+            "schema_ids": initial_state.get("schema_ids") or [],
+            "context_text": initial_state.get("context_text"),
+            "context_ids": initial_state.get("context_ids") or [],
+            "runtime_tuning": initial_state.get("runtime_tuning") or {},
+            "pause_for_rule_review": bool(initial_state.get("pause_for_rule_review", True)),
+            "mode": "full",
+        }
+    rerun_payload = dict(stored)
+    rerun_payload["tenant_id"] = source_run.get("tenant_id")
+    rerun_payload["domain_id"] = source_run.get("domain_id")
+    rerun_payload["source_run_id"] = source_run_id
+    rerun_payload["parent_run_id"] = source_run_id
+    rerun_payload["rerun_root_run_id"] = (
+        str(source_run.get("rerun_root_run_id") or source_run_id).strip() or source_run_id
+    )
+    trend_mode = str(payload.get("trend_mode") or "monitor").strip().lower() or "monitor"
+    rerun_payload["trend_mode"] = trend_mode
+    rerun_payload["rerun_reason"] = str(payload.get("rerun_reason") or ("trend_monitor" if trend_mode == "monitor" else trend_mode)).strip()
+    if payload.get("trend_scope_key"):
+        rerun_payload["trend_scope_key"] = payload.get("trend_scope_key")
+    if payload.get("trend_scope_label"):
+        rerun_payload["trend_scope_label"] = payload.get("trend_scope_label")
+    if "pause_for_rule_review" in payload:
+        rerun_payload["pause_for_rule_review"] = bool(payload.get("pause_for_rule_review"))
+    if "runtime_tuning" in payload:
+        rerun_payload["runtime_tuning"] = payload.get("runtime_tuning") or {}
+    return rerun_payload
 
 
 DQ_RUN_SUMMARY_EXAMPLE = {
@@ -8973,6 +9220,24 @@ DQ_RUN_SUMMARY_EXAMPLE = {
     "rule_review_required": False,
     "review_queue_pending_count": 0,
     "workflow_status": "completed",
+    "trend_mode": "monitor",
+    "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+    "trend_scope_label": "Primary CDR Reconciliation",
+    "baseline_run_id": "run_dq_000",
+    "trend_row_count": 14,
+    "improved_metric_count": 8,
+    "worsened_metric_count": 2,
+    "business_term_group_count": 4,
+    "worsened_business_term_count": 1,
+    "readiness_trend_status": "improved",
+    "baseline_readiness_status": "warning",
+    "certification_blocker_count": 1,
+    "residual_anomaly_count": 3,
+    "anomaly_count": 3,
+    "critical_anomaly_count": 1,
+    "issue_count": 6,
+    "open_issue_count": 4,
+    "overdue_issue_count": 1,
     "dataset_stage_count": 6,
     "join_stage_count": 2,
     "filter_stage_count": 1,
@@ -8990,10 +9255,15 @@ DQ_RUN_SUMMARY_EXAMPLE = {
         "run_summary": "/data-quality/runs/run_dq_001",
         "dashboard": "/data-quality/runs/run_dq_001/dashboard",
         "excel_report": "/data-quality/reports/run_dq_001/excel?tenant_id=VC_101&domain_id=data_quality_observability",
+        "trends": "/data-quality/trends?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "business_term_trends": "/data-quality/trends/business-terms?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "anomalies": "/data-quality/anomalies?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "issues": "/data-quality/issues?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         "stages": "/data-quality/stages?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         "joins": "/data-quality/joins?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         "rejected_records": "/data-quality/rejected-records?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         "final_dataset": "/data-quality/final-dataset?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+        "run_lineage": "/agentic/runs/run_dq_001/lineage",
         "tables": "/data-quality/tables?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         "rules": "/data-quality/rules?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
         "rule_review_queue": "/data-quality/rules/review-queue?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
@@ -9044,6 +9314,24 @@ DQ_RUN_HYDRATION_EXAMPLE = {
         "rule_review_required": True,
         "review_queue_pending_count": 2,
         "workflow_status": "awaiting_rule_review",
+        "trend_mode": "monitor",
+        "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+        "trend_scope_label": "Primary CDR Reconciliation",
+        "baseline_run_id": "run_dq_000",
+        "trend_row_count": 0,
+        "improved_metric_count": 0,
+        "worsened_metric_count": 0,
+        "business_term_group_count": 0,
+        "worsened_business_term_count": 0,
+        "readiness_trend_status": "baseline",
+        "baseline_readiness_status": None,
+        "certification_blocker_count": 1,
+        "residual_anomaly_count": 2,
+        "anomaly_count": 2,
+        "critical_anomaly_count": 1,
+        "issue_count": 3,
+        "open_issue_count": 3,
+        "overdue_issue_count": 1,
         "dataset_stage_count": 5,
         "join_stage_count": 1,
         "filter_stage_count": 1,
@@ -9059,10 +9347,15 @@ DQ_RUN_HYDRATION_EXAMPLE = {
         "critical_remediation_action_count": 2,
         "artifacts": {
             "run_summary": "/data-quality/runs/run_dq_001",
+            "trends": "/data-quality/trends?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+            "business_term_trends": "/data-quality/trends/business-terms?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+            "anomalies": "/data-quality/anomalies?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+            "issues": "/data-quality/issues?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
             "stages": "/data-quality/stages?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
             "joins": "/data-quality/joins?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
             "rejected_records": "/data-quality/rejected-records?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
             "final_dataset": "/data-quality/final-dataset?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+            "run_lineage": "/agentic/runs/run_dq_001/lineage",
             "rule_review_queue": "/data-quality/rules/review-queue?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
             "resume_after_rule_review": "/data-quality/runs/run_dq_001/resume-after-rule-review",
             "enrichment_questions": "/data-quality/enrichment/questions?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
@@ -9125,6 +9418,97 @@ DQ_RUN_HYDRATION_EXAMPLE = {
                 }
             ],
         },
+        "trends": {
+            "trend_row_count": 9,
+            "improved_metric_count": 3,
+            "worsened_metric_count": 2,
+            "baseline_metric_count": 0,
+            "top_items": [
+                {
+                    "object_type": "table",
+                    "object_key": "orders",
+                    "object_name": "orders",
+                    "metric_name": "trust_score",
+                    "previous_value_num": 76.2,
+                    "current_value_num": 71.4,
+                    "delta_value": -4.8,
+                    "delta_pct": -6.3,
+                    "trend_status": "worsened",
+                    "directionality": "higher_is_better",
+                    "evidence_path": "/data-quality/trends/tables/orders?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+                }
+            ],
+        },
+        "business_terms": {
+            "business_term_group_count": 2,
+            "worsened_business_term_count": 1,
+            "improved_business_term_count": 1,
+            "unmatched_trend_row_count": 1,
+            "top_items": [
+                {
+                    "business_term": "Subscriber Identity",
+                    "normalized_term": "subscriber identity",
+                    "trend_row_count": 3,
+                    "worsened_metric_count": 1,
+                    "improved_metric_count": 1,
+                    "affected_object_count": 2,
+                    "top_metrics": "trust_score, violation_count",
+                    "evidence_path": "/data-quality/trends/business-terms?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&term=subscriber%20identity",
+                }
+            ],
+        },
+        "readiness": {
+            "run_id": "run_dq_001",
+            "baseline_run_id": "run_dq_000",
+            "current_readiness_status": "warning",
+            "previous_readiness_status": "blocked",
+            "readiness_trend_status": "improved",
+            "current_final_row_count": 12110,
+            "previous_final_row_count": 11840,
+            "final_row_count_delta": 270,
+            "final_row_count_delta_pct": 2.28,
+            "certification_blocker_count": 1,
+            "open_issue_count": 3,
+            "residual_anomaly_count": 2,
+            "critical_anomaly_count": 1,
+            "blocker_titles": ["Join exceptions detected in primary_cdr_reconciliation"],
+            "evidence_path_template": "/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id=run_dq_001",
+        },
+        "anomalies": {
+            "anomaly_count": 2,
+            "critical_anomaly_count": 1,
+            "high_anomaly_count": 1,
+            "repeated_anomaly_count": 2,
+            "top_items": [
+                {
+                    "anomaly_id": "dqanom_001",
+                    "title": "Overall trust score dropped materially",
+                    "severity": "critical",
+                    "object_type": "run",
+                    "object_key": "__run__",
+                    "anomaly_type": "trust_score_drop",
+                    "evidence_path": "/data-quality/trends?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&object_type=run&object_key=__run__",
+                }
+            ],
+        },
+        "issues": {
+            "issue_count": 3,
+            "open_issue_count": 3,
+            "overdue_issue_count": 1,
+            "critical_issue_count": 1,
+            "top_items": [
+                {
+                    "issue_id": "dqissue_001",
+                    "title": "Join exceptions detected in primary_cdr_reconciliation",
+                    "severity": "critical",
+                    "status": "open",
+                    "owner_id": "domain_owner",
+                    "age_days": 4,
+                    "overdue": True,
+                    "evidence_path": "/data-quality/evidence/joins/dqjoin_001?tenant_id=VC_101&domain_id=data_quality_observability",
+                }
+            ],
+        },
         "remediation": {
             "summary": {"action_count": 5, "critical_action_count": 2},
             "top_actions": [{"priority": "critical", "title": "Backfill missing values in customer.email"}],
@@ -9134,6 +9518,44 @@ DQ_RUN_HYDRATION_EXAMPLE = {
         "run_summary": "/data-quality/runs/run_dq_001",
         "dashboard": "/data-quality/runs/run_dq_001/dashboard",
     },
+}
+
+DQ_ANOMALIES_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "summary": {
+        "anomaly_count": 2,
+        "critical_anomaly_count": 1,
+        "high_anomaly_count": 1,
+        "repeated_anomaly_count": 2,
+    },
+    "anomalies": [
+        {
+            "anomaly_id": "dqanom_001",
+            "anomaly_key": "VC_101|data_quality_observability|cdr_primary_reconciliation_f8a1c3b0d2|run|__run__|trust_score_drop",
+            "quality_run_id": "dqrun_001",
+            "run_id": "run_dq_001",
+            "tenant_id": "VC_101",
+            "domain_id": "data_quality_observability",
+            "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+            "baseline_run_id": "run_dq_000",
+            "object_type": "run",
+            "object_key": "__run__",
+            "object_name": "Run Summary",
+            "anomaly_type": "trust_score_drop",
+            "title": "Overall trust score dropped materially",
+            "severity": "critical",
+            "evidence_path": "/data-quality/trends?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&object_type=run&object_key=__run__",
+            "current_value_num": 82.4,
+            "current_value_text": None,
+            "previous_value_num": 91.1,
+            "previous_value_text": None,
+            "delta_value": -8.7,
+            "delta_pct": -9.55,
+            "summary": {},
+        }
+    ],
 }
 
 DQ_TABLES_EXAMPLE = {
@@ -9216,6 +9638,40 @@ DQ_RULE_REVIEW_DETAIL_EXAMPLE = {
     "confidence": 0.62,
     "rule_status": "needs_review",
     "result": None,
+}
+
+DQ_RULE_COVERAGE_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_001",
+    "planner_mode": "llm",
+    "validation_control_count": 3,
+    "compiled_validation_control_count": 2,
+    "uncovered_validation_control_count": 1,
+    "controls": [
+        {
+            "control_key": "ctrl_1",
+            "title": "Mediation events missing billing rows",
+            "source_text": "unrated usage where mediation event should be billable but no billing row exists",
+            "section_title": "Mediation to Billing reconciliation",
+            "focus_tables": ["mediation_data", "billing_cdr_data"],
+            "candidate_rule_types": ["referential_integrity", "custom_sql"],
+            "priority": "critical",
+            "covered": True,
+            "matched_rule_count": 1,
+            "matched_rules": [
+                {
+                    "rule_id": "dqr_931a01c1fb1d",
+                    "rule_type": "custom_sql",
+                    "rule_label": "Billable rows not flagged for rating in mediation_data",
+                    "table_name": "mediation_data",
+                    "column_name": None,
+                    "reference_table": None,
+                    "status": "needs_review",
+                }
+            ],
+        }
+    ],
 }
 
 DQ_TABLE_DETAIL_EXAMPLE = {
@@ -9763,6 +10219,11 @@ DQ_DASHBOARD_EXAMPLE = {
             "critical_issue_count": 7,
             "failed_rule_count": 5,
             "duplicate_candidate_count": 18,
+            "anomaly_count": 3,
+            "open_issue_count": 4,
+            "overdue_issue_count": 1,
+            "business_term_group_count": 2,
+            "worsened_business_term_count": 1,
             "recommended_action_count": 9,
             "critical_recommended_action_count": 3,
             "run_id": "run_dq_001",
@@ -9783,6 +10244,13 @@ DQ_DASHBOARD_EXAMPLE = {
                 "note": "validation rules with violations",
                 "evidence_path": "/data-quality/rules?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&status=failed",
             },
+            {
+                "metric_key": "anomalies",
+                "label": "Anomalies",
+                "value": 3,
+                "note": "material regressions detected from trend deltas",
+                "evidence_path": "/data-quality/anomalies?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+            },
         ],
     },
     "chart_plan": [
@@ -9796,6 +10264,11 @@ DQ_DASHBOARD_EXAMPLE = {
                 "critical_issue_count": 7,
                 "failed_rule_count": 5,
                 "duplicate_candidate_count": 18,
+                "anomaly_count": 3,
+                "open_issue_count": 4,
+                "overdue_issue_count": 1,
+                "business_term_group_count": 2,
+                "worsened_business_term_count": 1,
                 "recommended_action_count": 9,
                 "critical_recommended_action_count": 3,
                 "run_id": "run_dq_001",
@@ -9816,6 +10289,102 @@ DQ_DASHBOARD_EXAMPLE = {
                     "note": "quality gate failed",
                     "evidence_path": None,
                 },
+                {
+                    "metric_key": "anomalies",
+                    "label": "Anomalies",
+                    "value": 3,
+                    "note": "material regressions detected from trend deltas",
+                    "evidence_path": "/data-quality/anomalies?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
+                },
+            ],
+        },
+        {
+            "title": "Anomaly Summary",
+            "chart_key": "anomaly_summary",
+            "chart_type": "table",
+            "data_source": "quantyx_data_quality_anomalies",
+            "summary": {
+                "anomaly_count": 3,
+                "critical_anomaly_count": 1,
+                "high_anomaly_count": 2,
+                "repeated_anomaly_count": 2,
+            },
+            "display_columns": [
+                {"field": "title", "label": "Anomaly"},
+                {"field": "severity", "label": "Severity"},
+                {"field": "object_name", "label": "Object"},
+                {"field": "delta_pct", "label": "Delta %"},
+                {"field": "evidence_path", "label": "Evidence Path"},
+            ],
+            "rows": [
+                {
+                    "anomaly_id": "dqanom_001",
+                    "anomaly_type": "trust_score_drop",
+                    "title": "Overall trust score dropped materially",
+                    "severity": "critical",
+                    "object_type": "run",
+                    "object_key": "__run__",
+                    "object_name": "Run Summary",
+                    "baseline_run_id": "run_dq_000",
+                    "previous_value_num": 91.1,
+                    "current_value_num": 82.4,
+                    "delta_value": -8.7,
+                    "delta_pct": -9.55,
+                    "evidence_path": "/data-quality/trends?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&object_type=run&object_key=__run__",
+                }
+            ],
+        },
+        {
+            "title": "Business Term Trend Groups",
+            "chart_key": "business_term_trends",
+            "chart_type": "table",
+            "data_source": "quantyx_glossary_terms + quantyx_data_quality_trends",
+            "summary": {
+                "business_term_group_count": 2,
+                "worsened_business_term_count": 1,
+                "improved_business_term_count": 1,
+                "unmatched_trend_row_count": 1,
+            },
+            "display_columns": [
+                {"field": "business_term", "label": "Business Term"},
+                {"field": "trend_row_count", "label": "Trend Rows"},
+                {"field": "worsened_metric_count", "label": "Worsened"},
+                {"field": "improved_metric_count", "label": "Improved"},
+                {"field": "affected_object_count", "label": "Affected Objects"},
+                {"field": "top_metrics", "label": "Top Metrics"},
+                {"field": "evidence_path", "label": "Evidence Path"},
+            ],
+            "rows": [
+                {
+                    "business_term": "Subscriber Identity",
+                    "trend_row_count": 3,
+                    "worsened_metric_count": 1,
+                    "improved_metric_count": 1,
+                    "affected_object_count": 2,
+                    "top_metrics": "trust_score, violation_count",
+                    "evidence_path": "/data-quality/trends/business-terms?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&term=subscriber%20identity",
+                }
+            ],
+        },
+        {
+            "title": "Open Issues by Severity",
+            "chart_key": "issue_register",
+            "chart_type": "bar",
+            "data_source": "quantyx_data_quality_issues",
+            "summary": {
+                "issue_count": 4,
+                "open_issue_count": 4,
+                "overdue_issue_count": 1,
+                "severity_counts": {"critical": 1, "high": 2, "medium": 1},
+            },
+            "display_columns": [
+                {"field": "severity", "label": "Severity"},
+                {"field": "issue_count", "label": "Open Issues"},
+            ],
+            "rows": [
+                {"severity": "critical", "issue_count": 1},
+                {"severity": "high", "issue_count": 2},
+                {"severity": "medium", "issue_count": 1},
             ],
         },
         {
@@ -10015,6 +10584,191 @@ DQ_STAGED_ARTIFACT_EXAMPLE = {
     "raw_json": {"approved_rows": [], "deferred_rows": []},
 }
 
+WORKSPACE_RERUN_REQUEST_EXAMPLE = {"trend_mode": "monitor"}
+WORKSPACE_RERUN_RESPONSE_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "source_run_id": "run_dq_001",
+    "run_id": "run_dq_002",
+    "display_name": "Data Quality Observability Deployment v4",
+    "version_no": 4,
+    "status": "queued",
+    "workflow_kind": "data_quality",
+    "trend_mode": "monitor",
+    "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+    "trend_scope_label": "Data Quality Reconciliation Network Cdr Data Mediation Data",
+    "parent_run_id": "run_dq_001",
+    "rerun_root_run_id": "run_dq_001",
+    "job_id": "job_rerun_001",
+}
+
+RUN_LINEAGE_EXAMPLE = {
+    "run_id": "run_dq_002",
+    "graph": {
+        "root_run_id": "run_dq_001",
+        "focus_run_id": "run_dq_002",
+        "node_count": 2,
+        "edge_count": 1,
+        "trend_scope_keys": ["cdr_primary_reconciliation_f8a1c3b0d2"],
+    },
+    "nodes": [
+        {
+            "run_id": "run_dq_001",
+            "display_name": "Data Quality Observability Deployment v3",
+            "status": "completed",
+            "version_no": 3,
+            "trend_mode": "monitor",
+            "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+            "trend_scope_label": "Primary CDR Reconciliation",
+            "parent_run_id": None,
+            "rerun_root_run_id": "run_dq_001",
+            "created_at": "2026-04-24T12:00:00Z",
+            "is_focus_run": False,
+            "is_root_run": True,
+        },
+        {
+            "run_id": "run_dq_002",
+            "display_name": "Data Quality Observability Deployment v4",
+            "status": "completed",
+            "version_no": 4,
+            "trend_mode": "monitor",
+            "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+            "trend_scope_label": "Primary CDR Reconciliation",
+            "parent_run_id": "run_dq_001",
+            "rerun_root_run_id": "run_dq_001",
+            "created_at": "2026-04-25T12:00:00Z",
+            "is_focus_run": True,
+            "is_root_run": False,
+        },
+    ],
+    "edges": [
+        {
+            "lineage_edge_id": "runedge_001",
+            "tenant_id": "VC_101",
+            "domain_id": "data_quality_observability",
+            "parent_run_id": "run_dq_001",
+            "child_run_id": "run_dq_002",
+            "edge_type": "rerun",
+            "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+            "summary_json": {"trend_mode": "monitor", "rerun_reason": "trend_monitor"},
+            "created_at": "2026-04-25T12:00:00Z",
+        }
+    ],
+}
+
+DQ_TRENDS_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_002",
+    "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+    "baseline_run_id": "run_dq_001",
+    "summary": {
+        "trend_row_count": 6,
+        "improved_metric_count": 3,
+        "worsened_metric_count": 1,
+        "baseline_metric_count": 0,
+    },
+    "trends": [
+        {
+            "object_type": "run",
+            "object_key": "__run__",
+            "object_name": "Run Summary",
+            "metric_name": "overall_trust_score",
+            "previous_value_num": 74.58,
+            "previous_value_text": None,
+            "current_value_num": 79.11,
+            "current_value_text": None,
+            "delta_value": 4.53,
+            "delta_pct": 6.074,
+            "trend_status": "improved",
+            "directionality": "higher_better",
+        }
+    ],
+}
+
+DQ_BUSINESS_TERM_TRENDS_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_002",
+    "term": None,
+    "summary": {
+        "business_term_group_count": 2,
+        "worsened_business_term_count": 1,
+        "improved_business_term_count": 1,
+        "unmatched_trend_row_count": 1,
+    },
+    "rows": [
+        {
+            "business_term": "Subscriber Identity",
+            "normalized_term": "subscriber identity",
+            "definition": "Subscriber identity and identifier quality across operational systems.",
+            "trend_row_count": 3,
+            "improved_metric_count": 1,
+            "worsened_metric_count": 1,
+            "baseline_metric_count": 0,
+            "affected_object_count": 2,
+            "affected_objects": "customer, Invalid customer email",
+            "top_metrics": "trust_score, violation_count",
+            "evidence_path": "/data-quality/trends/business-terms?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_002&term=subscriber%20identity",
+        }
+    ],
+    "matched_trends": [],
+}
+
+DQ_ISSUES_EXAMPLE = {
+    "tenant_id": "VC_101",
+    "domain_id": "data_quality_observability",
+    "run_id": "run_dq_002",
+    "summary": {
+        "issue_count": 4,
+        "open_issue_count": 3,
+        "overdue_issue_count": 1,
+        "critical_issue_count": 1,
+        "high_issue_count": 1,
+        "medium_issue_count": 1,
+        "low_issue_count": 0,
+        "severity_counts": {"critical": 1, "high": 1, "medium": 1},
+        "status_counts": {"open": 2, "in_progress": 1, "resolved": 1},
+        "owner_workload": {"domain_owner": 2, "data_steward": 1},
+    },
+    "issues": [
+        {
+            "issue_id": "dqissue_001",
+            "issue_key": "dqissuekey_001",
+            "tenant_id": "VC_101",
+            "domain_id": "data_quality_observability",
+            "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+            "run_id": "run_dq_002",
+            "quality_run_id": "dqrun_002",
+            "first_seen_run_id": "run_dq_001",
+            "last_seen_run_id": "run_dq_002",
+            "issue_type": "join_exception",
+            "title": "Join exceptions detected in primary_cdr_reconciliation",
+            "severity": "critical",
+            "object_type": "join",
+            "object_key": "primary_cdr_reconciliation_exceptions",
+            "table_name": "mediation_data",
+            "column_name": None,
+            "stage_id": "dqjoin_001",
+            "owner_id": "domain_owner",
+            "status": "open",
+            "due_at": "2026-04-27T12:00:00+00:00",
+            "first_seen_at": "2026-04-23T12:00:00+00:00",
+            "last_seen_at": "2026-04-25T12:00:00+00:00",
+            "age_days": 2,
+            "overdue": False,
+            "evidence_path": "/data-quality/evidence/joins/dqjoin_001?tenant_id=VC_101&domain_id=data_quality_observability",
+            "recommendation": "Investigate key mismatches and reference-table completeness before trusting the reconciled output.",
+            "recommendation_json": {"text": "Investigate key mismatches and reference-table completeness before trusting the reconciled output."},
+            "summary": {"unmatched_left_row_count": 274, "unmatched_right_row_count": 0},
+            "related_run_ids": ["run_dq_001", "run_dq_002"],
+        }
+    ],
+}
+
+DQ_ISSUE_ASSIGN_REQUEST_EXAMPLE = {"owner_id": "data_steward", "assigned_by": "ui:user"}
+DQ_ISSUE_STATUS_REQUEST_EXAMPLE = {"status": "in_progress", "updated_by": "ui:user", "note": "Assigned to steward queue"}
+
 DQ_RESUME_REQUEST_EXAMPLE = {"requested_by": "ui:user"}
 DQ_RESUME_RESPONSE_EXAMPLE = {
     "run_id": "run_dq_001",
@@ -10130,13 +10884,341 @@ def get_data_quality_run_hydration(run_id: str) -> dict:
         )
     except Exception:
         lineage_overview = {"summary": {}, "rows": []}
+    try:
+        trend_overview = build_trend_api_payload(
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            trend_scope_key=str(row.get("trend_scope_key") or (row.get("summary_json") or {}).get("trend_scope_key") or "").strip() or None,
+            baseline_run_id=str(row.get("baseline_run_id") or (row.get("summary_json") or {}).get("baseline_run_id") or "").strip() or None,
+            trends=list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50),
+        )
+    except Exception:
+        trend_overview = {"summary": {}, "trends": []}
+    try:
+        business_term_overview = build_business_term_trend_payload(
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            trends=list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50),
+            glossary_terms=fetch_glossary_terms(settings, tenant_id, domain_id),
+        )
+    except Exception:
+        business_term_overview = {"summary": {}, "rows": []}
+    try:
+        anomaly_rows = list_quality_anomalies(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50)
+        anomaly_overview = {
+            "summary": summarize_data_quality_anomalies(anomaly_rows),
+            "anomalies": [build_quality_anomaly_payload(row) for row in anomaly_rows],
+        }
+    except Exception:
+        anomaly_overview = {"summary": {}, "anomalies": []}
+    try:
+        issue_overview = build_quality_issue_list_payload(
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            issues=list_quality_issues(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50),
+        )
+    except Exception:
+        issue_overview = {"summary": {}, "issues": []}
+    try:
+        readiness_overview = build_readiness_trend_payload(
+            run_id=run_id,
+            baseline_run_id=str(row.get("baseline_run_id") or (row.get("summary_json") or {}).get("baseline_run_id") or "").strip() or None,
+            final_dataset=get_quality_final_dataset_artifact(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id) or {},
+            trends=list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50),
+            issues=list_quality_issues(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50),
+            anomalies=list_quality_anomalies(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50),
+        )
+    except Exception:
+        readiness_overview = {}
     return build_data_quality_run_hydration_payload(
         row=row,
         remediation_plan=remediation_plan,
         rule_review_queue=rule_review_queue,
         enrichment_question_queue=enrichment_question_queue,
         lineage_overview=lineage_overview,
+        trend_overview=trend_overview,
+        business_term_overview=business_term_overview,
+        anomaly_overview=anomaly_overview,
+        issue_overview=issue_overview,
+        readiness_overview=readiness_overview,
     )
+
+
+@app.get(
+    "/data-quality/trends",
+    tags=["data-quality"],
+    summary="Get data quality trends for a run",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {"application/json": {"examples": {"trends": {"value": DQ_TRENDS_EXAMPLE}}}}
+            }
+        }
+    },
+)
+def get_data_quality_trends(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    object_type: str | None = None,
+    object_key: str | None = None,
+) -> dict:
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    trend_scope_key = str(row.get("trend_scope_key") or (row.get("summary_json") or {}).get("trend_scope_key") or "").strip() or None
+    baseline_run_id = str(row.get("baseline_run_id") or (row.get("summary_json") or {}).get("baseline_run_id") or "").strip() or None
+    trends = list_quality_trends(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        object_type=object_type,
+        object_key=object_key,
+        limit=4000,
+    )
+    return build_trend_api_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trend_scope_key=trend_scope_key,
+        baseline_run_id=baseline_run_id,
+        trends=trends,
+    )
+
+
+@app.get(
+    "/data-quality/trends/business-terms",
+    tags=["data-quality"],
+    summary="Get business-term grouped data quality trends",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {"application/json": {"examples": {"business_term_trends": {"value": DQ_BUSINESS_TERM_TRENDS_EXAMPLE}}}}
+            }
+        }
+    },
+)
+def get_data_quality_business_term_trends(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    term: str | None = None,
+) -> dict:
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    return build_business_term_trend_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trends=list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000),
+        glossary_terms=fetch_glossary_terms(settings, tenant_id, domain_id),
+        term=term,
+    )
+
+
+@app.get(
+    "/data-quality/anomalies",
+    tags=["data-quality"],
+    summary="List data quality anomalies",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {"application/json": {"examples": {"anomalies": {"value": DQ_ANOMALIES_EXAMPLE}}}}
+            }
+        }
+    },
+)
+def get_data_quality_anomalies(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    severity: str | None = None,
+) -> dict:
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    anomaly_rows = list_quality_anomalies(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        severity=severity,
+        limit=4000,
+    )
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "summary": summarize_data_quality_anomalies(anomaly_rows),
+        "anomalies": [build_quality_anomaly_payload(row) for row in anomaly_rows],
+    }
+
+
+@app.get("/data-quality/anomalies/{anomaly_id}", tags=["data-quality"], summary="Get data quality anomaly detail")
+def get_data_quality_anomaly_detail(anomaly_id: str, tenant_id: str | None = None) -> dict:
+    row = get_quality_anomaly(settings, anomaly_id=anomaly_id, tenant_id=tenant_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality anomaly not found")
+    return build_quality_anomaly_payload(row)
+
+
+@app.get("/data-quality/trends/tables/{table_name}", tags=["data-quality"], summary="Get table-level trends")
+def get_data_quality_table_trends(
+    table_name: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+) -> dict:
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    trends = list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, object_type="table", object_key=table_name, limit=4000)
+    return build_trend_table_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trend_scope_key=str(row.get("trend_scope_key") or (row.get("summary_json") or {}).get("trend_scope_key") or "").strip() or None,
+        table_name=table_name,
+        trends=trends,
+    )
+
+
+@app.get("/data-quality/trends/rules/{rule_logical_key}", tags=["data-quality"], summary="Get rule-level trends")
+def get_data_quality_rule_trends(
+    rule_logical_key: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+) -> dict:
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    trends = list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, object_type="rule", object_key=rule_logical_key, limit=4000)
+    return build_trend_rule_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trend_scope_key=str(row.get("trend_scope_key") or (row.get("summary_json") or {}).get("trend_scope_key") or "").strip() or None,
+        rule_key=rule_logical_key,
+        trends=trends,
+    )
+
+
+@app.get(
+    "/data-quality/issues",
+    tags=["data-quality"],
+    summary="List data quality issues",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {"application/json": {"examples": {"issues": {"value": DQ_ISSUES_EXAMPLE}}}}
+            }
+        }
+    },
+)
+def get_data_quality_issues(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+    status: str | None = None,
+    owner_id: str | None = None,
+) -> dict:
+    rows = list_quality_issues(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        status=status,
+        owner_id=owner_id,
+        limit=4000,
+    )
+    return build_quality_issue_list_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        issues=rows,
+    )
+
+
+@app.get("/data-quality/issues/{issue_id}", tags=["data-quality"], summary="Get data quality issue detail")
+def get_data_quality_issue_detail(issue_id: str) -> dict:
+    row = get_quality_issue(settings, issue_id=issue_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality issue not found")
+    return build_quality_issue_payload(row)
+
+
+@app.post(
+    "/data-quality/issues/{issue_id}/assign",
+    tags=["data-quality"],
+    summary="Assign a data quality issue",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {"assign": {"value": DQ_ISSUE_ASSIGN_REQUEST_EXAMPLE}}
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {"application/json": {"examples": {"issue": {"value": DQ_ISSUES_EXAMPLE["issues"][0]}}}}
+            }
+        },
+    },
+)
+def assign_data_quality_issue(issue_id: str, body: dict = Body(default_factory=dict)) -> dict:
+    owner_id = str(body.get("owner_id") or "").strip() or None
+    row = assign_quality_issue(settings, issue_id=issue_id, owner_id=owner_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality issue not found")
+    return build_quality_issue_payload(row)
+
+
+@app.post(
+    "/data-quality/issues/{issue_id}/status",
+    tags=["data-quality"],
+    summary="Update data quality issue status",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {"status": {"value": DQ_ISSUE_STATUS_REQUEST_EXAMPLE}}
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {"application/json": {"examples": {"issue": {"value": DQ_ISSUES_EXAMPLE["issues"][0]}}}}
+            }
+        },
+    },
+)
+def update_data_quality_issue(issue_id: str, body: dict = Body(default_factory=dict)) -> dict:
+    try:
+        row = update_quality_issue_status(
+            settings,
+            issue_id=issue_id,
+            status=str(body.get("status") or ""),
+            note=str(body.get("note") or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality issue not found")
+    return build_quality_issue_payload(row)
 
 
 @app.post(
@@ -10337,6 +11419,7 @@ def list_data_quality_rules(
                 "quality_run_id": row.get("quality_run_id"),
                 "run_id": row.get("run_id"),
                 "rule_type": row.get("rule_type"),
+                "rule_label": derive_quality_rule_label(row),
                 "severity": row.get("severity"),
                 "table_name": row.get("table_name"),
                 "column_name": row.get("column_name"),
@@ -10370,6 +11453,50 @@ def list_data_quality_rules(
             }
             for row in rows
         ],
+    }
+
+
+@app.get(
+    "/data-quality/rule-coverage",
+    tags=["data-quality"],
+    summary="Get business-context validation coverage for a data quality run",
+    description="Return planned validation controls from business context and which executable rules were generated for each control.",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "coverage": {
+                                "summary": "Business-context validation coverage",
+                                "value": DQ_RULE_COVERAGE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def get_data_quality_rule_coverage(
+    tenant_id: str,
+    run_id: str,
+    domain_id: str = "data_quality_observability",
+) -> dict:
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row or str(row.get("tenant_id") or "") != str(tenant_id):
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    summary = dict(row.get("summary_json") or {})
+    coverage = dict(summary.get("rule_coverage") or {})
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "planner_mode": coverage.get("planner_mode") or summary.get("rule_validation_planner_mode"),
+        "validation_control_count": coverage.get("validation_control_count", summary.get("validation_control_count", 0)),
+        "compiled_validation_control_count": coverage.get("compiled_validation_control_count", summary.get("compiled_validation_control_count", 0)),
+        "uncovered_validation_control_count": coverage.get("uncovered_validation_control_count", summary.get("uncovered_validation_control_count", 0)),
+        "controls": coverage.get("controls") or [],
     }
 
 
@@ -10448,6 +11575,7 @@ def get_data_quality_rule_review_detail(
         "tenant_id": row.get("tenant_id"),
         "domain_id": row.get("domain_id"),
         "rule_type": row.get("rule_type"),
+        "rule_label": derive_quality_rule_label(row),
         "severity": row.get("severity"),
         "table_name": row.get("table_name"),
         "column_name": row.get("column_name"),
@@ -12146,6 +13274,7 @@ def get_data_quality_enrichment_staged_artifact(proposal_id: str, tenant_id: str
                                 "schema_name": "public",
                                 "mode": "full",
                                 "pause_for_rule_review": True,
+                                "trend_mode": "ad_hoc",
                                 "context_text": (
                                     "Validate orders.customer_id against customer.customer_id. "
                                     "Customer email must be present and valid."
@@ -12206,6 +13335,11 @@ def get_data_quality_enrichment_staged_artifact(proposal_id: str, tenant_id: str
                                     "version_no": 3,
                                     "status": "queued",
                                     "workflow_kind": "data_quality",
+                                    "trend_mode": "ad_hoc",
+                                    "trend_scope_key": "data_quality_reconciliation_orders_customer_3b71f0a5e1",
+                                    "trend_scope_label": "Data Quality Reconciliation Orders Customer",
+                                    "parent_run_id": None,
+                                    "rerun_root_run_id": None,
                                     "job_id": "job_001",
                                 },
                             },
@@ -12238,6 +13372,47 @@ def get_data_quality_enrichment_staged_artifact(proposal_id: str, tenant_id: str
 )
 def workspace_create_deployment(payload: dict) -> dict:
     return _start_workspace_deployment(payload)
+
+
+@app.post(
+    "/workspace/deployments/{run_id}/rerun",
+    tags=["workspace"],
+    summary="Rerun an existing deployment",
+    description="Creates a new run by cloning the stored deployment definition for the source run. Preferred path for monitoring reruns and trend analysis.",
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "monitor_rerun": {
+                            "summary": "Rerun as monitor",
+                            "value": WORKSPACE_RERUN_REQUEST_EXAMPLE,
+                        }
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "queued": {
+                                "summary": "Rerun queued",
+                                "value": WORKSPACE_RERUN_RESPONSE_EXAMPLE,
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    },
+)
+def workspace_rerun_deployment(run_id: str, payload: dict) -> dict:
+    rerun_payload = _build_rerun_deployment_payload(run_id, payload or {})
+    result = _start_workspace_deployment(rerun_payload)
+    result["source_run_id"] = run_id
+    return result
 
 
 @app.put(
@@ -12290,6 +13465,39 @@ def workspace_update_deployment(run_id: str, payload: dict) -> dict:
     if not updated:
         raise HTTPException(status_code=404, detail="Deployment run not found")
     return updated
+
+
+@app.get(
+    "/agentic/runs/{run_id}/lineage",
+    tags=["agentic"],
+    summary="Get run lineage",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {"application/json": {"examples": {"lineage": {"value": RUN_LINEAGE_EXAMPLE}}}}
+            }
+        }
+    },
+)
+def get_agent_run_lineage(run_id: str) -> dict:
+    edges = list_run_lineage_edges(settings, run_id=run_id, limit=4000)
+    return build_run_lineage_graph_payload(
+        run_id=run_id,
+        edges=edges,
+        fetch_run=lambda node_run_id: get_deployment_run(settings, node_run_id),
+    )
+
+
+@app.get("/agentic/runs/lineage", tags=["agentic"], summary="List run lineage edges")
+def list_agent_run_lineage(tenant_id: str, domain_id: str) -> dict:
+    edges = list_run_lineage_edges(settings, tenant_id=tenant_id, domain_id=domain_id, limit=4000)
+    return build_run_lineage_graph_payload(
+        run_id=None,
+        edges=edges,
+        fetch_run=lambda node_run_id: get_deployment_run(settings, node_run_id),
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+    )
 
 
 @app.get(

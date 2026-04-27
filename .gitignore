@@ -15,6 +15,7 @@ build/
 *.pem
 
 # dbt
+dbt_projects/
 target/
 dbt_packages/
 logs/

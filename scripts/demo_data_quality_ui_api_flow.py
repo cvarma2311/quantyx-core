@@ -24,8 +24,19 @@ Typical usage:
 
   python3 scripts/demo_data_quality_ui_api_flow.py \
     --scenario all \
-    --run-id run_123 \
+    --tenant-id VC_101 \
+    --connection-id conn_lpg \
+    --database analytics \
+    --schema-name public \
     --download-dir /tmp/dq_demo
+
+  python3 scripts/demo_data_quality_ui_api_flow.py \
+    --scenario all \
+    --tenant-id VC_101 \
+    --connection-id conn_lpg \
+    --database analytics \
+    --schema-name public \
+    --include-rerun-monitor
 
 Safe defaults:
 - read-only where possible
@@ -367,6 +378,47 @@ def start_or_reuse_run(client: ApiClient, args: argparse.Namespace) -> str:
     raise RuntimeError("Unable to determine run_id from deployment response")
 
 
+def scenario_run_history(
+    client: ApiClient,
+    args: argparse.Namespace,
+    *,
+    tenant_id: str,
+    domain_id: str,
+) -> dict[str, Any]:
+    outputs: dict[str, Any] = {}
+    _, payload = client.request_json(
+        "GET",
+        f"/workspace/deployments?{urllib.parse.urlencode({'tenant_id': tenant_id, 'domain_id': domain_id, 'limit': args.run_history_limit})}",
+        expected={200},
+    )
+    outputs["run_history"] = payload
+    return outputs
+
+
+def start_rerun_monitor(
+    client: ApiClient,
+    args: argparse.Namespace,
+    *,
+    source_run_id: str,
+) -> tuple[str, dict[str, Any]]:
+    payload = {"trend_mode": "monitor"}
+    code, response = client.request_json(
+        "POST",
+        f"/workspace/deployments/{_quote(source_run_id)}/rerun",
+        payload=payload,
+        expected={200, 409},
+    )
+    if code == 200:
+        rerun_id = str(response.get("run_id") or "").strip()
+        if not rerun_id:
+            raise RuntimeError("Rerun response did not contain run_id")
+        return rerun_id, response
+    detail = response.get("detail") if isinstance(response, dict) else None
+    if isinstance(detail, dict) and detail.get("run_id"):
+        return str(detail["run_id"]), response
+    raise RuntimeError("Unable to determine rerun run_id from rerun response")
+
+
 def scenario_reload(client: ApiClient, args: argparse.Namespace, run_id: str) -> dict[str, Any]:
     client.request_json("GET", f"/agentic/runs/{_quote(run_id)}/events?limit={args.events_limit}", expected={200})
     client.request_json("GET", f"/agentic/runs/{_quote(run_id)}/chat?limit={args.chat_limit}", expected={200})
@@ -532,6 +584,34 @@ def scenario_summary_and_surfaces(
         expected={200},
     )
     outputs["remediation"] = remediation
+
+    _, trends = client.request_json(
+        "GET",
+        f"/data-quality/trends?{urllib.parse.urlencode({'tenant_id': tenant_id, 'domain_id': domain_id, 'run_id': run_id, 'limit': args.list_limit})}",
+        expected={200},
+    )
+    outputs["trends"] = trends
+
+    _, business_term_trends = client.request_json(
+        "GET",
+        f"/data-quality/trends/business-terms?{urllib.parse.urlencode({'tenant_id': tenant_id, 'domain_id': domain_id, 'run_id': run_id})}",
+        expected={200},
+    )
+    outputs["business_term_trends"] = business_term_trends
+
+    _, anomalies = client.request_json(
+        "GET",
+        f"/data-quality/anomalies?{urllib.parse.urlencode({'tenant_id': tenant_id, 'domain_id': domain_id, 'run_id': run_id, 'limit': args.list_limit})}",
+        expected={200},
+    )
+    outputs["anomalies"] = anomalies
+
+    _, issues = client.request_json(
+        "GET",
+        f"/data-quality/issues?{urllib.parse.urlencode({'tenant_id': tenant_id, 'domain_id': domain_id, 'run_id': run_id, 'limit': args.list_limit})}",
+        expected={200},
+    )
+    outputs["issues"] = issues
 
     _, dashboard = client.request_json(
         "GET",
@@ -834,6 +914,7 @@ def run_scenario(client: ApiClient, args: argparse.Namespace) -> int:
     hydration: dict[str, Any] = {}
     summary_outputs: dict[str, Any] = {}
     enrichment_outputs: dict[str, Any] = {}
+    history_outputs: dict[str, Any] = {}
 
     if args.scenario in {"reload", "all", "completed", "review", "enrichment", "evidence"}:
         client.logger.section("RELOAD FLOW")
@@ -906,18 +987,120 @@ def run_scenario(client: ApiClient, args: argparse.Namespace) -> int:
         client.logger.section("SUMMARY AND SURFACES")
         summary_outputs = scenario_summary_and_surfaces(client, args, run_id)
 
+    summary = summary_outputs.get("summary") or (hydration.get("run") if isinstance(hydration, dict) else {}) or {}
+    tenant_id = str(summary.get("tenant_id") or args.tenant_id)
+    domain_id = str(summary.get("domain_id") or args.domain_id)
+
+    if args.scenario in {"completed", "all"}:
+        client.logger.section("RUN HISTORY")
+        history_outputs = scenario_run_history(client, args, tenant_id=tenant_id, domain_id=domain_id)
+
     if args.scenario in {"enrichment", "all"}:
         client.logger.section("ENRICHMENT FLOW")
         enrichment_outputs = scenario_enrichment(
             client,
             args,
             run_id,
-            summary=summary_outputs.get("summary") or (hydration.get("run") if isinstance(hydration, dict) else None),
+            summary=summary,
         )
 
     if args.scenario in {"evidence", "all"}:
         client.logger.section("EVIDENCE FLOW")
         scenario_evidence(client, args, run_id, summary_outputs, enrichment_outputs)
+
+    if args.include_rerun_monitor:
+        client.logger.section("RERUN AS MONITOR FLOW")
+        history = history_outputs.get("run_history") or {}
+        runs = (history.get("runs") or history.get("deployments") or [])
+        source_run_id = str(args.rerun_source_run_id or run_id).strip()
+        if not args.rerun_source_run_id and runs:
+            latest = runs[0]
+            latest_run_id = str(latest.get("run_id") or "").strip()
+            if latest_run_id:
+                source_run_id = latest_run_id
+        client.logger.json({"source_run_id": source_run_id})
+        rerun_id, rerun_response = start_rerun_monitor(client, args, source_run_id=source_run_id)
+        client.logger.section("RERUN IDENTIFIER")
+        client.logger.json({"run_id": rerun_id, "response": rerun_response})
+        if args.wait_for_state:
+            client.logger.section("WAIT FOR RERUN STATE")
+            rerun_agentic_state = wait_for_agentic_run_state(
+                client,
+                rerun_id,
+                timeout_seconds=args.wait_timeout_seconds,
+                poll_seconds=args.poll_seconds,
+            )
+            rerun_status = str((rerun_agentic_state or {}).get("status") or "").strip().lower()
+            if rerun_status in {"failed", "cancelled", "canceled"}:
+                log_recent_run_events(client, rerun_id, limit=args.events_limit)
+                return 1
+            wait_for_data_quality_run_visibility(
+                client,
+                rerun_id,
+                timeout_seconds=args.wait_timeout_seconds,
+                poll_seconds=args.poll_seconds,
+            )
+        client.logger.section("RERUN RELOAD FLOW")
+        rerun_hydration = scenario_reload(client, args, rerun_id)
+        rerun_review_outputs: dict[str, Any] = {}
+        if args.auto_handle_rerun_review:
+            client.logger.section("RERUN RULE REVIEW FLOW")
+            rerun_review_outputs = scenario_rule_review(
+                client,
+                args,
+                rerun_id,
+                summary=(rerun_hydration.get("run") if isinstance(rerun_hydration, dict) else None),
+            )
+            if args.auto_resume and args.wait_after_resume:
+                resume_job_id = str((rerun_review_outputs.get("resume") or {}).get("job_id") or "").strip()
+                if resume_job_id:
+                    client.logger.section("WAIT FOR RERUN RESUME JOB")
+                    rerun_job_state = wait_for_job_state(
+                        client,
+                        resume_job_id,
+                        timeout_seconds=args.wait_timeout_seconds,
+                        poll_seconds=args.poll_seconds,
+                    )
+                    rerun_job_status = str((rerun_job_state or {}).get("status") or "").strip().lower()
+                    log_job_result(client, resume_job_id)
+                    if rerun_job_status in {"failed", "canceled", "cancelled"}:
+                        log_recent_run_events(client, rerun_id)
+                        return 1
+                client.logger.section("WAIT AFTER RERUN RESUME")
+                rerun_completed_state = wait_for_agentic_run_state(
+                    client,
+                    rerun_id,
+                    timeout_seconds=args.wait_timeout_seconds,
+                    poll_seconds=args.poll_seconds,
+                )
+                rerun_completed_status = str((rerun_completed_state or {}).get("status") or "").strip().lower()
+                if rerun_completed_status not in {"completed", "failed", "cancelled"}:
+                    log_recent_run_events(client, rerun_id)
+                    return 1
+                if rerun_completed_status in {"failed", "cancelled"}:
+                    log_recent_run_events(client, rerun_id)
+                    return 1
+                log_recent_run_events(client, rerun_id, limit=args.events_limit)
+        client.logger.section("RERUN SUMMARY AND SURFACES")
+        rerun_summary_outputs = scenario_summary_and_surfaces(client, args, rerun_id)
+        client.logger.section("RERUN LINEAGE GRAPH")
+        client.request_json("GET", f"/agentic/runs/{_quote(rerun_id)}/lineage", expected={200})
+        client.logger.section("RERUN HISTORY AFTER MONITOR")
+        scenario_run_history(client, args, tenant_id=tenant_id, domain_id=domain_id)
+        rerun_summary = rerun_summary_outputs.get("summary") or {}
+        rerun_tenant_id = str(rerun_summary.get("tenant_id") or tenant_id)
+        rerun_domain_id = str(rerun_summary.get("domain_id") or domain_id)
+        client.logger.section("RERUN TREND SURFACES")
+        client.request_json(
+            "GET",
+            f"/data-quality/trends?{urllib.parse.urlencode({'tenant_id': rerun_tenant_id, 'domain_id': rerun_domain_id, 'run_id': rerun_id, 'limit': args.list_limit})}",
+            expected={200},
+        )
+        client.request_json(
+            "GET",
+            f"/data-quality/trends/business-terms?{urllib.parse.urlencode({'tenant_id': rerun_tenant_id, 'domain_id': rerun_domain_id, 'run_id': rerun_id})}",
+            expected={200},
+        )
 
     return 0
 
@@ -947,6 +1130,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--events-limit", type=int, default=200, help="Event replay limit for reload flow.")
     parser.add_argument("--chat-limit", type=int, default=50, help="Chat replay limit for reload flow.")
     parser.add_argument("--list-limit", type=int, default=25, help="List API limit for summary/evidence/enrichment APIs.")
+    parser.add_argument("--run-history-limit", type=int, default=100, help="Run history limit for /workspace/deployments.")
     parser.add_argument("--download-dir", default="/tmp/dq_ui_demo", help="Directory for downloaded Excel reports.")
     parser.add_argument("--log-file", help="Optional file to also write all logs to.")
 
@@ -974,6 +1158,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--approval-scope", choices=["deterministic_only", "high_confidence", "all"], default="high_confidence")
     parser.add_argument("--min-confidence", type=float, default=0.85, help="Confidence threshold for staged application.")
     parser.add_argument("--staging-reason", help="Optional reason for staged overlay approval.")
+    parser.add_argument("--include-rerun-monitor", action="store_true", help="After the fresh run flow, fetch run history and rerun an existing run with trend_mode=monitor.")
+    parser.add_argument("--rerun-source-run-id", help="Optional source run id for rerun-as-monitor. Defaults to the latest run from run history, or the current run.")
+    parser.add_argument(
+        "--auto-handle-rerun-review",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When the rerun pauses for rule review, auto-approve and resume it using the same review flow.",
+    )
     return parser
 
 

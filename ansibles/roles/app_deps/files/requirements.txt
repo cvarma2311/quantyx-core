@@ -9,3 +9,4 @@ statsmodels
 pydantic
 python-dotenv
 pyyaml
+langgraph

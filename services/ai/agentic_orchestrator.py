@@ -3902,7 +3902,7 @@ def run_agentic_workflow(
     event_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if StateGraph is None:
-        raise RuntimeError("LangGraph is not available")
+        raise RuntimeError("LangGraph is not available. Install the 'langgraph' package in the active runtime environment.")
 
     logger = logging.getLogger(__name__)
     if is_data_quality_workflow(initial_state.get("domain_id"), initial_state):

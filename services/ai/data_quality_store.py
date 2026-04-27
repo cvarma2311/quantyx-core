@@ -50,20 +50,29 @@ def create_or_update_quality_run(
     status: str = "running",
     overall_trust_score: float | None = None,
     summary_json: dict[str, Any] | None = None,
+    trend_mode: str | None = None,
+    trend_scope_key: str | None = None,
+    trend_scope_label: str | None = None,
+    baseline_run_id: str | None = None,
     completed: bool = False,
 ) -> str | None:
     quality_run_id = quality_run_id_for(run_id)
     sql = """
         INSERT INTO public.quantyx_data_quality_runs (
           quality_run_id, run_id, tenant_id, domain_id, connection_id, database_name, schema_name,
-          status, overall_trust_score, summary_json, created_at, completed_at
+          status, overall_trust_score, summary_json, trend_mode, trend_scope_key, trend_scope_label, baseline_run_id,
+          created_at, completed_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now(), CASE WHEN %s THEN now() ELSE NULL END)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, now(), CASE WHEN %s THEN now() ELSE NULL END)
         ON CONFLICT (quality_run_id)
         DO UPDATE SET
           status = EXCLUDED.status,
           overall_trust_score = EXCLUDED.overall_trust_score,
           summary_json = COALESCE(EXCLUDED.summary_json, public.quantyx_data_quality_runs.summary_json),
+          trend_mode = COALESCE(EXCLUDED.trend_mode, public.quantyx_data_quality_runs.trend_mode),
+          trend_scope_key = COALESCE(EXCLUDED.trend_scope_key, public.quantyx_data_quality_runs.trend_scope_key),
+          trend_scope_label = COALESCE(EXCLUDED.trend_scope_label, public.quantyx_data_quality_runs.trend_scope_label),
+          baseline_run_id = COALESCE(EXCLUDED.baseline_run_id, public.quantyx_data_quality_runs.baseline_run_id),
           connection_id = COALESCE(EXCLUDED.connection_id, public.quantyx_data_quality_runs.connection_id),
           database_name = COALESCE(EXCLUDED.database_name, public.quantyx_data_quality_runs.database_name),
           schema_name = COALESCE(EXCLUDED.schema_name, public.quantyx_data_quality_runs.schema_name),
@@ -84,6 +93,10 @@ def create_or_update_quality_run(
                 status,
                 overall_trust_score,
                 Json(summary_json or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+                trend_mode,
+                trend_scope_key,
+                trend_scope_label,
+                baseline_run_id,
                 completed,
                 completed,
             ],
@@ -1664,3 +1677,706 @@ def get_quality_table_detail(
         return None
     table["columns"] = columns
     return table
+
+
+def replace_quality_run_metric_snapshots(
+    settings: Settings,
+    *,
+    quality_run_id: str,
+    run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    trend_scope_key: str | None,
+    snapshots: list[dict[str, Any]],
+) -> int:
+    try:
+        execute_non_query(
+            settings,
+            "DELETE FROM public.quantyx_data_quality_run_metric_snapshots WHERE quality_run_id = %s",
+            [quality_run_id],
+        )
+        inserted = 0
+        for item in snapshots:
+            execute_non_query(
+                settings,
+                """
+                INSERT INTO public.quantyx_data_quality_run_metric_snapshots (
+                  snapshot_id, quality_run_id, run_id, tenant_id, domain_id, trend_scope_key,
+                  metric_name, metric_value_num, metric_value_text, metric_unit, captured_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                """,
+                [
+                    f"dqrsnap_{uuid.uuid4().hex[:12]}",
+                    quality_run_id,
+                    run_id,
+                    tenant_id,
+                    domain_id,
+                    trend_scope_key,
+                    item.get("metric_name"),
+                    item.get("metric_value_num"),
+                    item.get("metric_value_text"),
+                    item.get("metric_unit"),
+                ],
+            )
+            inserted += 1
+        return inserted
+    except psycopg2.errors.UndefinedTable:
+        return 0
+
+
+def replace_quality_object_metric_snapshots(
+    settings: Settings,
+    *,
+    quality_run_id: str,
+    run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    trend_scope_key: str | None,
+    snapshots: list[dict[str, Any]],
+) -> int:
+    try:
+        execute_non_query(
+            settings,
+            "DELETE FROM public.quantyx_data_quality_object_metric_snapshots WHERE quality_run_id = %s",
+            [quality_run_id],
+        )
+        inserted = 0
+        for item in snapshots:
+            execute_non_query(
+                settings,
+                """
+                INSERT INTO public.quantyx_data_quality_object_metric_snapshots (
+                  object_snapshot_id, quality_run_id, run_id, tenant_id, domain_id, trend_scope_key,
+                  object_type, object_key, object_name, metric_name, metric_value_num, metric_value_text, metric_unit, captured_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                """,
+                [
+                    f"dqosnap_{uuid.uuid4().hex[:12]}",
+                    quality_run_id,
+                    run_id,
+                    tenant_id,
+                    domain_id,
+                    trend_scope_key,
+                    item.get("object_type"),
+                    item.get("object_key"),
+                    item.get("object_name"),
+                    item.get("metric_name"),
+                    item.get("metric_value_num"),
+                    item.get("metric_value_text"),
+                    item.get("metric_unit"),
+                ],
+            )
+            inserted += 1
+        return inserted
+    except psycopg2.errors.UndefinedTable:
+        return 0
+
+
+def replace_quality_trends(
+    settings: Settings,
+    *,
+    quality_run_id: str,
+    run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    trend_scope_key: str | None,
+    baseline_run_id: str | None,
+    trends: list[dict[str, Any]],
+) -> int:
+    try:
+        execute_non_query(
+            settings,
+            "DELETE FROM public.quantyx_data_quality_trends WHERE quality_run_id = %s",
+            [quality_run_id],
+        )
+        inserted = 0
+        for item in trends:
+            execute_non_query(
+                settings,
+                """
+                INSERT INTO public.quantyx_data_quality_trends (
+                  trend_id, quality_run_id, run_id, tenant_id, domain_id, trend_scope_key, baseline_run_id,
+                  object_type, object_key, object_name, metric_name,
+                  previous_value_num, previous_value_text, current_value_num, current_value_text,
+                  delta_value, delta_pct, trend_status, directionality, summary_json, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+                """,
+                [
+                    f"dqtrend_{uuid.uuid4().hex[:12]}",
+                    quality_run_id,
+                    run_id,
+                    tenant_id,
+                    domain_id,
+                    trend_scope_key,
+                    item.get("baseline_run_id") or baseline_run_id,
+                    item.get("object_type"),
+                    item.get("object_key"),
+                    item.get("object_name"),
+                    item.get("metric_name"),
+                    item.get("previous_value_num"),
+                    item.get("previous_value_text"),
+                    item.get("current_value_num"),
+                    item.get("current_value_text"),
+                    item.get("delta_value"),
+                    item.get("delta_pct"),
+                    item.get("trend_status"),
+                    item.get("directionality"),
+                    Json(item.get("summary_json") or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+                ],
+            )
+            inserted += 1
+        return inserted
+    except psycopg2.errors.UndefinedTable:
+        return 0
+
+
+def replace_quality_anomalies(
+    settings: Settings,
+    *,
+    quality_run_id: str,
+    run_id: str,
+    tenant_id: str,
+    domain_id: str,
+    trend_scope_key: str | None,
+    anomalies: list[dict[str, Any]],
+) -> int:
+    try:
+        execute_non_query(
+            settings,
+            "DELETE FROM public.quantyx_data_quality_anomalies WHERE quality_run_id = %s",
+            [quality_run_id],
+        )
+        inserted = 0
+        for item in anomalies:
+            execute_non_query(
+                settings,
+                """
+                INSERT INTO public.quantyx_data_quality_anomalies (
+                  anomaly_id, anomaly_key, quality_run_id, run_id, tenant_id, domain_id, trend_scope_key, baseline_run_id,
+                  object_type, object_key, object_name, anomaly_type, title, severity, evidence_path,
+                  current_value_num, current_value_text, previous_value_num, previous_value_text, delta_value, delta_pct,
+                  summary_json, created_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, now())
+                """,
+                [
+                    f"dqanom_{uuid.uuid4().hex[:12]}",
+                    item.get("anomaly_key"),
+                    quality_run_id,
+                    run_id,
+                    tenant_id,
+                    domain_id,
+                    trend_scope_key,
+                    item.get("baseline_run_id"),
+                    item.get("object_type"),
+                    item.get("object_key"),
+                    item.get("object_name"),
+                    item.get("anomaly_type"),
+                    item.get("title"),
+                    item.get("severity"),
+                    item.get("evidence_path"),
+                    item.get("current_value_num"),
+                    item.get("current_value_text"),
+                    item.get("previous_value_num"),
+                    item.get("previous_value_text"),
+                    item.get("delta_value"),
+                    item.get("delta_pct"),
+                    Json(item.get("summary_json") or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+                ],
+            )
+            inserted += 1
+        return inserted
+    except psycopg2.errors.UndefinedTable:
+        return 0
+
+
+def list_quality_run_metric_snapshots(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str | None = None,
+    limit: int = 1200,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [tenant_id, domain_id]
+    filters = ""
+    if run_id:
+        filters += " AND run_id = %s"
+        params.append(run_id)
+    params.append(max(1, min(int(limit or 1200), 4000)))
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_run_metric_snapshots
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               {filters}
+             ORDER BY created_at ASC, metric_name ASC
+             LIMIT %s
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def list_quality_trends(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    object_type: str | None = None,
+    object_key: str | None = None,
+    limit: int = 1200,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [tenant_id, domain_id, run_id]
+    filters = ""
+    if object_type:
+        filters += " AND object_type = %s"
+        params.append(object_type)
+    if object_key:
+        filters += " AND object_key = %s"
+        params.append(object_key)
+    params.append(max(1, min(int(limit or 1200), 4000)))
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_trends
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               AND run_id = %s
+               {filters}
+             ORDER BY object_type ASC, object_key ASC, metric_name ASC
+             LIMIT %s
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def list_quality_anomalies(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    severity: str | None = None,
+    limit: int = 1200,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [tenant_id, domain_id, run_id]
+    filters = ""
+    if severity:
+        filters += " AND severity = %s"
+        params.append(severity)
+    params.append(max(1, min(int(limit or 1200), 4000)))
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_anomalies
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               AND run_id = %s
+               {filters}
+             ORDER BY
+               CASE severity
+                 WHEN 'critical' THEN 0
+                 WHEN 'high' THEN 1
+                 WHEN 'warning' THEN 2
+                 ELSE 3
+               END ASC,
+               created_at DESC
+             LIMIT %s
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def get_quality_anomaly(
+    settings: Settings,
+    *,
+    anomaly_id: str,
+    tenant_id: str | None = None,
+) -> dict[str, Any] | None:
+    params: list[Any] = [anomaly_id]
+    filters = ""
+    if tenant_id:
+        filters += " AND tenant_id = %s"
+        params.append(tenant_id)
+    try:
+        rows = run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_anomalies
+             WHERE anomaly_id = %s
+               {filters}
+             LIMIT 1
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return None
+    return rows[0] if rows else None
+
+
+def list_quality_object_metric_snapshots(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    trend_scope_key: str,
+    object_type: str | None = None,
+    object_key: str | None = None,
+    run_id: str | None = None,
+    limit: int = 4000,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [tenant_id, domain_id, trend_scope_key]
+    filters = ""
+    if object_type:
+        filters += " AND object_type = %s"
+        params.append(object_type)
+    if object_key:
+        filters += " AND object_key = %s"
+        params.append(object_key)
+    if run_id:
+        filters += " AND run_id = %s"
+        params.append(run_id)
+    params.append(max(1, min(int(limit or 4000), 4000)))
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_object_metric_snapshots
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               AND trend_scope_key = %s
+               {filters}
+             ORDER BY captured_at DESC
+             LIMIT %s
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def upsert_quality_issues(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    trend_scope_key: str | None,
+    run_id: str,
+    quality_run_id: str,
+    issues: list[dict[str, Any]],
+) -> dict[str, int]:
+    try:
+        existing_rows = run_query(
+            settings,
+            """
+            SELECT *
+              FROM public.quantyx_data_quality_issues
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               AND COALESCE(trend_scope_key, '') = COALESCE(%s, '')
+            """,
+            [tenant_id, domain_id, trend_scope_key],
+        )
+    except psycopg2.errors.UndefinedTable:
+        return {"issue_count": 0, "open_issue_count": 0, "overdue_issue_count": 0}
+    existing_by_key = {str(row.get("issue_key") or ""): row for row in existing_rows}
+    current_keys: set[str] = set()
+    for issue in issues:
+        issue_key = str(issue.get("issue_key") or "").strip()
+        if not issue_key:
+            continue
+        current_keys.add(issue_key)
+        existing = existing_by_key.get(issue_key)
+        existing_status = str((existing or {}).get("status") or "").strip().lower()
+        related_run_ids = list((existing or {}).get("related_run_ids_json") or [])
+        if run_id not in related_run_ids:
+            related_run_ids.append(run_id)
+        if existing:
+            owner_id = str((existing or {}).get("owner_id") or "").strip() or issue.get("owner_id")
+            due_at = (existing or {}).get("due_at") or issue.get("due_at")
+            if existing_status in {"in_progress", "deferred", "accepted_risk"}:
+                status = existing_status
+            else:
+                status = "open"
+            execute_non_query(
+                settings,
+                """
+                UPDATE public.quantyx_data_quality_issues
+                   SET trend_scope_key = %s,
+                       run_id = %s,
+                       quality_run_id = %s,
+                       last_seen_run_id = %s,
+                       issue_type = %s,
+                       title = %s,
+                       severity = %s,
+                       object_type = %s,
+                       object_key = %s,
+                       table_name = %s,
+                       column_name = %s,
+                       stage_id = %s,
+                       owner_id = %s,
+                       status = %s,
+                       due_at = COALESCE(%s, due_at),
+                       last_seen_at = now(),
+                       evidence_path = %s,
+                       recommendation_json = %s::jsonb,
+                       summary_json = %s::jsonb,
+                       related_run_ids_json = %s::jsonb,
+                       updated_at = now()
+                 WHERE issue_id = %s
+                """,
+                [
+                    trend_scope_key,
+                    run_id,
+                    quality_run_id,
+                    run_id,
+                    issue.get("issue_type"),
+                    issue.get("title"),
+                    issue.get("severity"),
+                    issue.get("object_type"),
+                    issue.get("object_key"),
+                    issue.get("table_name"),
+                    issue.get("column_name"),
+                    issue.get("stage_id"),
+                    owner_id,
+                    status,
+                    due_at,
+                    issue.get("evidence_path"),
+                    Json(issue.get("recommendation_json") or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+                    Json(issue.get("summary_json") or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+                    Json(related_run_ids, dumps=lambda value: json.dumps(value, default=_json_default)),
+                    existing.get("issue_id"),
+                ],
+            )
+        else:
+            execute_non_query(
+                settings,
+                """
+                INSERT INTO public.quantyx_data_quality_issues (
+                  issue_id, issue_key, tenant_id, domain_id, trend_scope_key, run_id, quality_run_id,
+                  first_seen_run_id, last_seen_run_id, issue_type, title, severity, object_type, object_key,
+                  table_name, column_name, stage_id, owner_id, status, due_at, first_seen_at, last_seen_at,
+                  evidence_path, recommendation_json, summary_json, related_run_ids_json, created_at, updated_at
+                )
+                VALUES (
+                  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  now(), now(), %s, %s::jsonb, %s::jsonb, %s::jsonb, now(), now()
+                )
+                """,
+                [
+                    f"dqissue_{uuid.uuid4().hex[:12]}",
+                    issue_key,
+                    tenant_id,
+                    domain_id,
+                    trend_scope_key,
+                    run_id,
+                    quality_run_id,
+                    run_id,
+                    run_id,
+                    issue.get("issue_type"),
+                    issue.get("title"),
+                    issue.get("severity"),
+                    issue.get("object_type"),
+                    issue.get("object_key"),
+                    issue.get("table_name"),
+                    issue.get("column_name"),
+                    issue.get("stage_id"),
+                    issue.get("owner_id"),
+                    issue.get("status") or "open",
+                    issue.get("due_at"),
+                    issue.get("evidence_path"),
+                    Json(issue.get("recommendation_json") or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+                    Json(issue.get("summary_json") or {}, dumps=lambda value: json.dumps(value, default=_json_default)),
+                    Json([run_id], dumps=lambda value: json.dumps(value, default=_json_default)),
+                ],
+            )
+    for row in existing_rows:
+        issue_key = str(row.get("issue_key") or "").strip()
+        status = str(row.get("status") or "").strip().lower()
+        if not issue_key or issue_key in current_keys or status in {"resolved", "accepted_risk"}:
+            continue
+        summary = dict(row.get("summary_json") or {})
+        summary["resolution_source"] = "auto_not_present_in_current_run"
+        execute_non_query(
+            settings,
+            """
+            UPDATE public.quantyx_data_quality_issues
+               SET status = 'resolved',
+                   summary_json = %s::jsonb,
+                   updated_at = now()
+             WHERE issue_id = %s
+            """,
+            [
+                Json(summary, dumps=lambda value: json.dumps(value, default=_json_default)),
+                row.get("issue_id"),
+            ],
+        )
+    current_rows = list_quality_issues(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=4000,
+    )
+    open_rows = [row for row in current_rows if str(row.get("status") or "").strip().lower() in {"open", "in_progress", "deferred"}]
+    overdue_count = 0
+    now = datetime.utcnow()
+    for row in open_rows:
+        due_at = row.get("due_at")
+        if isinstance(due_at, datetime):
+            due_dt = due_at
+        else:
+            try:
+                due_dt = datetime.fromisoformat(str(due_at).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+        if due_dt.tzinfo is not None:
+            due_dt = due_dt.astimezone().replace(tzinfo=None)
+        if due_dt < now:
+            overdue_count += 1
+    return {
+        "issue_count": len(current_rows),
+        "open_issue_count": len(open_rows),
+        "overdue_issue_count": overdue_count,
+    }
+
+
+def list_quality_issues(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str | None = None,
+    status: str | None = None,
+    owner_id: str | None = None,
+    limit: int = 1200,
+) -> list[dict[str, Any]]:
+    params: list[Any] = [tenant_id, domain_id]
+    filters = ""
+    if run_id:
+        filters += " AND run_id = %s"
+        params.append(run_id)
+    if status:
+        filters += " AND status = %s"
+        params.append(status)
+    if owner_id:
+        filters += " AND owner_id = %s"
+        params.append(owner_id)
+    params.append(max(1, min(int(limit or 1200), 4000)))
+    try:
+        return run_query(
+            settings,
+            f"""
+            SELECT *
+              FROM public.quantyx_data_quality_issues
+             WHERE tenant_id = %s
+               AND domain_id = %s
+               {filters}
+             ORDER BY
+               CASE severity
+                 WHEN 'critical' THEN 0
+                 WHEN 'high' THEN 1
+                 WHEN 'medium' THEN 2
+                 WHEN 'low' THEN 3
+                 ELSE 9
+               END ASC,
+               updated_at DESC
+             LIMIT %s
+            """,
+            params,
+        )
+    except psycopg2.errors.UndefinedTable:
+        return []
+
+
+def get_quality_issue(
+    settings: Settings,
+    *,
+    issue_id: str,
+) -> dict[str, Any] | None:
+    try:
+        rows = run_query(
+            settings,
+            """
+            SELECT *
+              FROM public.quantyx_data_quality_issues
+             WHERE issue_id = %s
+             LIMIT 1
+            """,
+            [issue_id],
+        )
+    except psycopg2.errors.UndefinedTable:
+        return None
+    return rows[0] if rows else None
+
+
+def assign_quality_issue(
+    settings: Settings,
+    *,
+    issue_id: str,
+    owner_id: str | None,
+) -> dict[str, Any] | None:
+    execute_non_query(
+        settings,
+        """
+        UPDATE public.quantyx_data_quality_issues
+           SET owner_id = %s,
+               updated_at = now()
+         WHERE issue_id = %s
+        """,
+        [owner_id, issue_id],
+    )
+    return get_quality_issue(settings, issue_id=issue_id)
+
+
+def update_quality_issue_status(
+    settings: Settings,
+    *,
+    issue_id: str,
+    status: str,
+    note: str | None = None,
+) -> dict[str, Any] | None:
+    next_status = str(status or "").strip().lower()
+    if next_status not in {"open", "in_progress", "deferred", "resolved", "accepted_risk"}:
+        raise ValueError("Unsupported issue status")
+    issue = get_quality_issue(settings, issue_id=issue_id)
+    if not issue:
+        return None
+    summary = dict(issue.get("summary_json") or {})
+    if note:
+        summary["status_note"] = note
+    execute_non_query(
+        settings,
+        """
+        UPDATE public.quantyx_data_quality_issues
+           SET status = %s,
+               summary_json = %s::jsonb,
+               updated_at = now()
+         WHERE issue_id = %s
+        """,
+        [
+            next_status,
+            Json(summary, dumps=lambda value: json.dumps(value, default=_json_default)),
+            issue_id,
+        ],
+    )
+    return get_quality_issue(settings, issue_id=issue_id)

@@ -141,6 +141,7 @@ def derive_data_quality_remediation_plan(
     opportunities: list[dict[str, Any]] | None = None,
     dataset_stages: list[dict[str, Any]] | None = None,
     row_outcomes: list[dict[str, Any]] | None = None,
+    trends: list[dict[str, Any]] | None = None,
     limit: int = 25,
 ) -> dict[str, Any]:
     tables = [item for item in (tables or []) if isinstance(item, dict)]
@@ -150,6 +151,7 @@ def derive_data_quality_remediation_plan(
     opportunities = [item for item in (opportunities or []) if isinstance(item, dict)]
     dataset_stages = [item for item in (dataset_stages or []) if isinstance(item, dict)]
     row_outcomes = [item for item in (row_outcomes or []) if isinstance(item, dict)]
+    trends = [item for item in (trends or []) if isinstance(item, dict)]
 
     actions: list[dict[str, Any]] = []
     action_keys: set[str] = set()
@@ -442,7 +444,63 @@ def derive_data_quality_remediation_plan(
                     owner_hint=_component_owner(weakest_component),
                     source_refs={"table_name": table_name, "trust_component": weakest_component},
                 )
+        )
+
+    for item in trends:
+        trend_status = str(item.get("trend_status") or "").strip().lower()
+        if trend_status != "worsened":
+            continue
+        object_type = str(item.get("object_type") or "").strip()
+        object_name = str(item.get("object_name") or item.get("object_key") or "").strip()
+        metric_name = str(item.get("metric_name") or "").strip()
+        directionality = str(item.get("directionality") or "").strip()
+        delta_value = item.get("delta_value")
+        delta_pct = item.get("delta_pct")
+        title = f"Investigate worsening {metric_name} for {object_name or object_type}"
+        recommended_action = (
+            f"Review why {metric_name} worsened for {object_name or object_type} compared with the prior monitoring run "
+            f"and decide whether to remediate upstream data, tune rules, or reset the baseline."
+        )
+        evidence_path = _build_evidence_path(
+            "/data-quality/trends",
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+        )
+        if object_type == "table" and object_name:
+            evidence_path = _build_evidence_path(
+                f"/data-quality/trends/tables/{object_name}",
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
             )
+        elif object_type == "rule" and str(item.get("object_key") or "").strip():
+            evidence_path = _build_evidence_path(
+                f"/data-quality/trends/rules/{item.get('object_key')}",
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+            )
+        add_action(
+            _action(
+                key=f"trend:{object_type}:{item.get('object_key')}:{metric_name}",
+                priority="warning" if directionality != "status_transition" else "critical",
+                action_type="trend_regression_review",
+                title=title,
+                recommended_action=recommended_action,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+                table_name=object_name if object_type == "table" else None,
+                issue_summary=f"Delta={delta_value}; delta_pct={delta_pct}.",
+                metric_value=delta_pct if delta_pct is not None else delta_value,
+                metric_unit="delta_pct" if delta_pct is not None else "delta",
+                evidence_type="trend_regression",
+                evidence_path=evidence_path,
+                owner_hint="Data steward",
+                source_refs={"object_type": object_type, "object_key": item.get("object_key"), "metric_name": metric_name},
+            )
+        )
 
     for item in opportunities:
         opportunity_id = str(item.get("opportunity_id") or "").strip()

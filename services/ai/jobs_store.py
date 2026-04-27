@@ -241,6 +241,34 @@ def get_job_result(settings: Settings, job_id: str) -> dict | None:
     finally:
         conn.close()
 
+
+def get_latest_agentic_job_payload_for_run(settings: Settings, run_id: str) -> dict | None:
+    sql = """
+        SELECT request_payload
+          FROM public.quantyx_jobs
+         WHERE job_type = 'agentic_run'
+           AND request_payload->>'run_id' = %s
+         ORDER BY created_at DESC
+         LIMIT 1
+    """
+    params = [run_id]
+    conn = psycopg2.connect(
+        host=settings.db_host,
+        port=settings.db_port,
+        dbname=settings.db_name,
+        user=settings.db_user,
+        password=settings.db_password,
+    )
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+        return dict(row) if row else None
+    except psycopg2.errors.UndefinedTable:
+        return None
+    finally:
+        conn.close()
+
 def list_jobs(
     settings: Settings,
     tenant_id: str,

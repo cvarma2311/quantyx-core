@@ -4,7 +4,12 @@ from typing import Any
 
 from services.ai.config import Settings
 from services.ai.connection_registry import resolve_database_credentials_cached
-from services.ai.data_quality_rules import build_quality_rule_execution_plan, classify_quality_rule_review_status, execute_quality_rules
+from services.ai.data_quality_rules import (
+    build_quality_rule_execution_plan,
+    classify_quality_rule_review_status,
+    derive_quality_rule_label,
+    execute_quality_rules,
+)
 from services.ai.data_quality_store import get_quality_rule, list_quality_rules, update_quality_rule_review
 
 
@@ -136,7 +141,13 @@ def get_quality_rule_review_queue(
             "needs_review_count": sum(1 for row in reviewable if str(row.get("status") or "").strip().lower() == "needs_review"),
             "unsupported_count": sum(1 for row in reviewable if str(row.get("status") or "").strip().lower() == "unsupported"),
         },
-        "rules": reviewable,
+        "rules": [
+            {
+                **row,
+                "rule_label": derive_quality_rule_label(row),
+            }
+            for row in reviewable
+        ],
     }
 
 

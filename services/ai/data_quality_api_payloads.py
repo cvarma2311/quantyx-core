@@ -8,6 +8,10 @@ def build_data_quality_artifact_links(*, tenant_id: str, domain_id: str, run_id:
         "run_summary": f"/data-quality/runs/{run_id}",
         "dashboard": f"/data-quality/runs/{run_id}/dashboard",
         "excel_report": f"/data-quality/reports/{run_id}/excel?tenant_id={tenant_id}&domain_id={domain_id}",
+        "trends": f"/data-quality/trends?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "business_term_trends": f"/data-quality/trends/business-terms?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "anomalies": f"/data-quality/anomalies?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "issues": f"/data-quality/issues?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "stages": f"/data-quality/stages?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "joins": f"/data-quality/joins?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "rejected_records": f"/data-quality/rejected-records?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
@@ -15,8 +19,10 @@ def build_data_quality_artifact_links(*, tenant_id: str, domain_id: str, run_id:
         "final_dataset_rows": f"/data-quality/final-dataset/rows?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "lineage": f"/data-quality/lineage?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "lineage_base": f"/data-quality/lineage?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "run_lineage": f"/agentic/runs/{run_id}/lineage",
         "tables": f"/data-quality/tables?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "rules": f"/data-quality/rules?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        "rule_coverage": f"/data-quality/rule-coverage?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "rule_review_queue": f"/data-quality/rules/review-queue?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "resume_after_rule_review": f"/data-quality/runs/{run_id}/resume-after-rule-review",
         "duplicates": f"/data-quality/duplicates?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
@@ -68,7 +74,29 @@ def build_data_quality_run_summary_payload(
         "rejected_rule_count": summary.get("rejected_rule_count", 0),
         "rule_review_required": bool(summary.get("rule_review_required")),
         "review_queue_pending_count": summary.get("review_queue_pending_count", 0),
+        "rule_validation_planner_mode": summary.get("rule_validation_planner_mode"),
+        "validation_control_count": summary.get("validation_control_count", 0),
+        "compiled_validation_control_count": summary.get("compiled_validation_control_count", 0),
+        "uncovered_validation_control_count": summary.get("uncovered_validation_control_count", 0),
         "workflow_status": summary.get("workflow_status") or row.get("status"),
+        "trend_mode": row.get("trend_mode") or summary.get("trend_mode"),
+        "trend_scope_key": row.get("trend_scope_key") or summary.get("trend_scope_key"),
+        "trend_scope_label": row.get("trend_scope_label") or summary.get("trend_scope_label"),
+        "baseline_run_id": row.get("baseline_run_id") or summary.get("baseline_run_id"),
+        "trend_row_count": summary.get("trend_row_count", 0),
+        "improved_metric_count": summary.get("improved_metric_count", 0),
+        "worsened_metric_count": summary.get("worsened_metric_count", 0),
+        "business_term_group_count": summary.get("business_term_group_count", 0),
+        "worsened_business_term_count": summary.get("worsened_business_term_count", 0),
+        "readiness_trend_status": summary.get("readiness_trend_status"),
+        "baseline_readiness_status": summary.get("baseline_readiness_status"),
+        "certification_blocker_count": summary.get("certification_blocker_count", 0),
+        "residual_anomaly_count": summary.get("residual_anomaly_count", 0),
+        "anomaly_count": summary.get("anomaly_count", 0),
+        "critical_anomaly_count": summary.get("critical_anomaly_count", 0),
+        "issue_count": summary.get("issue_count", 0),
+        "open_issue_count": summary.get("open_issue_count", 0),
+        "overdue_issue_count": summary.get("overdue_issue_count", 0),
         "dataset_stage_count": summary.get("dataset_stage_count", 0),
         "join_stage_count": summary.get("join_stage_count", 0),
         "filter_stage_count": summary.get("filter_stage_count", 0),
@@ -96,6 +124,7 @@ def _trim_rule_review_item(row: dict[str, Any]) -> dict[str, Any]:
     execution_plan = row.get("execution_plan_json") or {}
     return {
         "rule_id": row.get("rule_id"),
+        "rule_label": row.get("rule_label"),
         "table_name": row.get("table_name"),
         "column_name": row.get("column_name"),
         "rule_type": row.get("rule_type"),
@@ -115,11 +144,29 @@ def build_data_quality_run_hydration_payload(
     rule_review_queue: dict[str, Any] | None = None,
     enrichment_question_queue: dict[str, Any] | None = None,
     lineage_overview: dict[str, Any] | None = None,
+    trend_overview: dict[str, Any] | None = None,
+    business_term_overview: dict[str, Any] | None = None,
+    anomaly_overview: dict[str, Any] | None = None,
+    issue_overview: dict[str, Any] | None = None,
+    readiness_overview: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     run_payload = build_data_quality_run_summary_payload(row=row, remediation_plan=remediation_plan)
     rule_review_queue = rule_review_queue or {"summary": {}, "rules": []}
     enrichment_question_queue = enrichment_question_queue or {"summary": {}, "questions": []}
     lineage_overview = lineage_overview or {"summary": {}, "rows": []}
+    trend_overview = trend_overview or {"summary": {}, "trends": []}
+    business_term_overview = business_term_overview or {
+        "summary": {
+            "business_term_group_count": 0,
+            "worsened_business_term_count": 0,
+            "improved_business_term_count": 0,
+            "unmatched_trend_row_count": 0,
+        },
+        "rows": [],
+    }
+    anomaly_overview = anomaly_overview or {"summary": {}, "anomalies": []}
+    issue_overview = issue_overview or {"summary": {}, "issues": []}
+    readiness_overview = readiness_overview or {}
     top_rule_review_items = [
         _trim_rule_review_item(item)
         for item in (rule_review_queue.get("rules") or [])[:5]
@@ -138,6 +185,10 @@ def build_data_quality_run_hydration_payload(
                 run_payload.get("rule_review_required")
                 or (enrichment_question_queue.get("summary") or {}).get("pending_answer_count")
                 or (enrichment_question_queue.get("summary") or {}).get("proposal_ready_count")
+                or (issue_overview.get("summary") or {}).get("open_issue_count")
+                or (issue_overview.get("summary") or {}).get("overdue_issue_count")
+                or (anomaly_overview.get("summary") or {}).get("anomaly_count")
+                or int(readiness_overview.get("certification_blocker_count") or 0) > 0
             ),
             "rule_review": {
                 **(rule_review_queue.get("summary") or {}),
@@ -152,6 +203,39 @@ def build_data_quality_run_hydration_payload(
                 "top_items": [
                     item
                     for item in (lineage_overview.get("rows") or [])[:5]
+                    if isinstance(item, dict)
+                ],
+            },
+            "trends": {
+                **(trend_overview.get("summary") or {}),
+                "top_items": [
+                    item
+                    for item in (trend_overview.get("trends") or [])[:5]
+                    if isinstance(item, dict)
+                ],
+            },
+            "business_terms": {
+                **(business_term_overview.get("summary") or {}),
+                "top_items": [
+                    item
+                    for item in (business_term_overview.get("rows") or [])[:5]
+                    if isinstance(item, dict)
+                ],
+            },
+            "readiness": readiness_overview,
+            "anomalies": {
+                **(anomaly_overview.get("summary") or {}),
+                "top_items": [
+                    item
+                    for item in (anomaly_overview.get("anomalies") or [])[:5]
+                    if isinstance(item, dict)
+                ],
+            },
+            "issues": {
+                **(issue_overview.get("summary") or {}),
+                "top_items": [
+                    item
+                    for item in (issue_overview.get("issues") or [])[:5]
                     if isinstance(item, dict)
                 ],
             },

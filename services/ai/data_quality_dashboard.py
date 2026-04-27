@@ -4,10 +4,14 @@ from collections import Counter
 from typing import Any
 
 from services.ai.config import Settings
+from services.ai.data_quality_anomalies import build_quality_anomaly_payload, summarize_data_quality_anomalies
 from services.ai.data_quality_enrichment import canonical_column_alias
+from services.ai.data_quality_issues import build_quality_issue_payload, summarize_quality_issues
 from services.ai.data_quality_remediation import derive_data_quality_remediation_plan
 from services.ai.data_quality_stages import parse_lineage_id
+from services.ai.data_quality_trends import build_business_term_trend_payload, build_readiness_trend_payload, summarize_trends
 from services.ai.dashboards_store import create_dashboard
+from services.ai.glossary import fetch_glossary_terms
 
 
 def _as_number(value: Any) -> float | None:
@@ -65,6 +69,10 @@ def build_data_quality_dashboard_spec(
     lineage_edges: list[dict[str, Any]] | None = None,
     row_outcomes: list[dict[str, Any]] | None = None,
     final_dataset: dict[str, Any] | None = None,
+    trends: list[dict[str, Any]] | None = None,
+    business_term_trends: dict[str, Any] | None = None,
+    anomalies: list[dict[str, Any]] | None = None,
+    issues: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     tables = _table_rows(profiling)
     columns = _column_rows(profiling)
@@ -79,6 +87,10 @@ def build_data_quality_dashboard_spec(
     lineage_edges = [item for item in (lineage_edges or []) if isinstance(item, dict)]
     row_outcomes = [item for item in (row_outcomes or []) if isinstance(item, dict)]
     final_dataset = dict(final_dataset or {})
+    trends = [item for item in (trends or []) if isinstance(item, dict)]
+    business_term_trends = dict(business_term_trends or {})
+    anomalies = [item for item in (anomalies or []) if isinstance(item, dict)]
+    issues = [item for item in (issues or []) if isinstance(item, dict)]
     evidence_base = f"/data-quality/evidence"
     remediation_plan = derive_data_quality_remediation_plan(
         tenant_id=tenant_id,
@@ -90,8 +102,31 @@ def build_data_quality_dashboard_spec(
         opportunities=enrichment_opportunities,
         dataset_stages=dataset_stages,
         row_outcomes=row_outcomes,
+        trends=trends,
         limit=15,
     )
+    trend_summary = summarize_trends(trends)
+    anomaly_payload_rows = [build_quality_anomaly_payload(item) for item in anomalies]
+    anomaly_summary = summarize_data_quality_anomalies(anomalies)
+    issue_payload_rows = [build_quality_issue_payload(item) for item in issues]
+    issue_summary = summarize_quality_issues(issues)
+    readiness_summary = build_readiness_trend_payload(
+        run_id=run_id,
+        baseline_run_id=quality_summary.get("baseline_run_id"),
+        final_dataset=final_dataset,
+        trends=trends,
+        issues=issues,
+        anomalies=anomalies,
+    )
+    business_term_rows = [item for item in (business_term_trends.get("rows") or []) if isinstance(item, dict)]
+    business_term_summary = dict(business_term_trends.get("summary") or {})
+    open_issue_rows = [
+        row
+        for row in issue_payload_rows
+        if str(row.get("status") or "").strip().lower() in {"open", "in_progress", "deferred"}
+    ]
+    worsened_trends = [row for row in trends if str(row.get("trend_status") or "").strip().lower() == "worsened"]
+    improved_trends = [row for row in trends if str(row.get("trend_status") or "").strip().lower() == "improved"]
     freshness_by_table = {
         str(item.get("table_name") or "").strip(): item
         for item in freshness_results
@@ -365,6 +400,30 @@ def build_data_quality_dashboard_spec(
             "evidence_path": f"/data-quality/remediation?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         },
         {
+            "metric_key": "trend_changes",
+            "label": "Trend Changes",
+            "value": trend_summary.get("trend_row_count", 0),
+            "note": (
+                f"{trend_summary.get('improved_metric_count', 0)} improved / "
+                f"{trend_summary.get('worsened_metric_count', 0)} worsened"
+            ),
+            "evidence_path": f"/data-quality/trends?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        },
+        {
+            "metric_key": "anomalies",
+            "label": "Anomalies",
+            "value": anomaly_summary.get("anomaly_count", 0),
+            "note": f"{anomaly_summary.get('critical_anomaly_count', 0)} critical",
+            "evidence_path": f"/data-quality/anomalies?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        },
+        {
+            "metric_key": "open_issues",
+            "label": "Open Issues",
+            "value": issue_summary.get("open_issue_count", 0),
+            "note": f"{issue_summary.get('overdue_issue_count', 0)} overdue",
+            "evidence_path": f"/data-quality/issues?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+        },
+        {
             "metric_key": "run_id",
             "label": "Run ID",
             "value": run_id,
@@ -518,6 +577,9 @@ def build_data_quality_dashboard_spec(
                 "critical_issue_count": quality_summary.get("critical_issue_count", 0),
                 "failed_rule_count": quality_summary.get("failed_rule_count", 0),
                 "duplicate_candidate_count": duplicate_candidate_total,
+                "current_readiness_status": readiness_summary.get("current_readiness_status"),
+                "readiness_trend_status": readiness_summary.get("readiness_trend_status"),
+                "certification_blocker_count": readiness_summary.get("certification_blocker_count", 0),
                 "recommended_action_count": remediation_summary.get("action_count", 0),
                 "critical_recommended_action_count": remediation_summary.get("critical_action_count", 0),
                 "run_id": run_id,
@@ -525,6 +587,138 @@ def build_data_quality_dashboard_spec(
             },
         },
         include_when_empty=True,
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "publish_readiness",
+            "title": "Publish Readiness",
+            "chart_type": "summary_cards",
+            "data_source": "quantyx_data_quality_final_dataset_artifacts",
+            "display_columns": [
+                _display_column("metric_key", "Metric Key"),
+                _display_column("label", "Label"),
+                _display_column("value", "Value"),
+                _display_column("note", "Note"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": [
+                {
+                    "metric_key": "current_readiness_status",
+                    "label": "Current Readiness",
+                    "value": readiness_summary.get("current_readiness_status"),
+                    "note": f"baseline: {readiness_summary.get('previous_readiness_status') or 'n/a'}",
+                    "evidence_path": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+                },
+                {
+                    "metric_key": "readiness_trend_status",
+                    "label": "Readiness Trend",
+                    "value": readiness_summary.get("readiness_trend_status"),
+                    "note": f"baseline run: {readiness_summary.get('baseline_run_id') or 'n/a'}",
+                    "evidence_path": f"/data-quality/trends?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}&object_type=final_dataset&object_key=final_dataset",
+                },
+                {
+                    "metric_key": "certification_blocker_count",
+                    "label": "Certification Blockers",
+                    "value": readiness_summary.get("certification_blocker_count"),
+                    "note": ", ".join(readiness_summary.get("blocker_titles") or []) or "no active blockers",
+                    "evidence_path": f"/data-quality/issues?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+                },
+                {
+                    "metric_key": "residual_anomaly_count",
+                    "label": "Residual Anomalies",
+                    "value": readiness_summary.get("residual_anomaly_count"),
+                    "note": f"{readiness_summary.get('critical_anomaly_count', 0)} critical",
+                    "evidence_path": f"/data-quality/anomalies?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+                },
+            ],
+            "summary": readiness_summary,
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "quality_trends",
+            "title": "Quality Trends",
+            "chart_type": "table",
+            "data_source": "quantyx_data_quality_trends",
+            "display_columns": [
+                _display_column("object_type", "Object Type"),
+                _display_column("object_name", "Object"),
+                _display_column("metric_name", "Metric"),
+                _display_column("previous_value_num", "Previous"),
+                _display_column("current_value_num", "Current"),
+                _display_column("delta_value", "Delta"),
+                _display_column("delta_pct", "Delta %"),
+                _display_column("trend_status", "Trend"),
+                _display_column("directionality", "Directionality"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": [
+                {
+                    **row,
+                    "evidence_path": (
+                        f"/data-quality/trends/tables/{row.get('object_key')}?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+                        if str(row.get("object_type") or "") == "table"
+                        else (
+                            f"/data-quality/trends/rules/{row.get('object_key')}?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+                            if str(row.get("object_type") or "") == "rule"
+                            else f"/data-quality/trends?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+                        )
+                    ),
+                }
+                for row in sorted(
+                    trends,
+                    key=lambda item: (
+                        0 if str(item.get("trend_status") or "") == "worsened" else 1,
+                        str(item.get("object_type") or ""),
+                        str(item.get("metric_name") or ""),
+                    ),
+                )[:20]
+            ],
+            "summary": trend_summary,
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "business_term_trends",
+            "title": "Business Term Trend Groups",
+            "chart_type": "table",
+            "data_source": "quantyx_glossary_terms + quantyx_data_quality_trends",
+            "display_columns": [
+                _display_column("business_term", "Business Term"),
+                _display_column("trend_row_count", "Trend Rows"),
+                _display_column("worsened_metric_count", "Worsened"),
+                _display_column("improved_metric_count", "Improved"),
+                _display_column("affected_object_count", "Affected Objects"),
+                _display_column("top_metrics", "Top Metrics"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": business_term_rows[:20],
+            "summary": business_term_summary,
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "anomaly_summary",
+            "title": "Anomaly Summary",
+            "chart_type": "table",
+            "data_source": "quantyx_data_quality_anomalies",
+            "display_columns": [
+                _display_column("title", "Anomaly"),
+                _display_column("severity", "Severity"),
+                _display_column("object_type", "Object Type"),
+                _display_column("object_name", "Object"),
+                _display_column("anomaly_type", "Anomaly Type"),
+                _display_column("delta_value", "Delta"),
+                _display_column("delta_pct", "Delta %"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": anomaly_payload_rows[:20],
+            "summary": anomaly_summary,
+        },
     )
     _append_chart_section(
         chart_plan,
@@ -707,6 +901,98 @@ def build_data_quality_dashboard_spec(
     _append_chart_section(
         chart_plan,
         {
+            "chart_key": "issue_register",
+            "title": "Open Issues by Severity",
+            "chart_type": "bar",
+            "data_source": "quantyx_data_quality_issues",
+            "display_columns": [
+                _display_column("severity", "Severity"),
+                _display_column("issue_count", "Open Issues"),
+            ],
+            "rows": [
+                {"severity": severity, "issue_count": count}
+                for severity, count in (
+                    ("critical", issue_summary.get("severity_counts", {}).get("critical", 0)),
+                    ("high", issue_summary.get("severity_counts", {}).get("high", 0)),
+                    ("medium", issue_summary.get("severity_counts", {}).get("medium", 0)),
+                    ("low", issue_summary.get("severity_counts", {}).get("low", 0)),
+                )
+                if count
+            ],
+            "summary": issue_summary,
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "issue_aging",
+            "title": "Issue Aging",
+            "chart_type": "table",
+            "data_source": "quantyx_data_quality_issues",
+            "display_columns": [
+                _display_column("title", "Issue"),
+                _display_column("severity", "Severity"),
+                _display_column("status", "Status"),
+                _display_column("owner_id", "Owner"),
+                _display_column("age_days", "Age Days"),
+                _display_column("due_at", "Due"),
+                _display_column("overdue", "Overdue"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": sorted(
+                open_issue_rows,
+                key=lambda row: (0 if row.get("overdue") else 1, -(int(row.get("age_days") or 0))),
+            )[:20],
+            "summary": {
+                "open_issue_count": issue_summary.get("open_issue_count", 0),
+                "overdue_issue_count": issue_summary.get("overdue_issue_count", 0),
+            },
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "owner_workload",
+            "title": "Owner Workload",
+            "chart_type": "table",
+            "data_source": "quantyx_data_quality_issues",
+            "display_columns": [
+                _display_column("owner_id", "Owner"),
+                _display_column("open_issue_count", "Open Issues"),
+            ],
+            "rows": [
+                {"owner_id": owner, "open_issue_count": count}
+                for owner, count in sorted(
+                    (issue_summary.get("owner_workload") or {}).items(),
+                    key=lambda item: (-int(item[1] or 0), str(item[0])),
+                )
+                if count
+            ],
+            "summary": {"owner_count": len(issue_summary.get("owner_workload") or {})},
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
+            "chart_key": "sla_breaches",
+            "title": "Overdue Issues",
+            "chart_type": "table",
+            "data_source": "quantyx_data_quality_issues",
+            "display_columns": [
+                _display_column("title", "Issue"),
+                _display_column("severity", "Severity"),
+                _display_column("owner_id", "Owner"),
+                _display_column("due_at", "Due"),
+                _display_column("age_days", "Age Days"),
+                _display_column("evidence_path", "Evidence Path"),
+            ],
+            "rows": [row for row in open_issue_rows if row.get("overdue")][:20],
+            "summary": {"overdue_issue_count": issue_summary.get("overdue_issue_count", 0)},
+        },
+    )
+    _append_chart_section(
+        chart_plan,
+        {
             "chart_key": "data_trust_scorecard",
             "title": "Data Trust Score by Table",
             "chart_type": "horizontal_bar",
@@ -881,7 +1167,16 @@ def build_data_quality_dashboard_spec(
                 "duplicate_candidate_count": duplicate_candidate_total,
                 "rejected_record_count": rejected_record_count,
                 "final_dataset_row_count": final_dataset.get("final_row_count"),
+                "current_readiness_status": readiness_summary.get("current_readiness_status"),
+                "readiness_trend_status": readiness_summary.get("readiness_trend_status"),
+                "certification_blocker_count": readiness_summary.get("certification_blocker_count", 0),
+                "business_term_group_count": business_term_summary.get("business_term_group_count", 0),
+                "worsened_business_term_count": business_term_summary.get("worsened_business_term_count", 0),
                 "lineage_row_count": len(lineage_ids),
+                "anomaly_count": anomaly_summary.get("anomaly_count", 0),
+                "critical_anomaly_count": anomaly_summary.get("critical_anomaly_count", 0),
+                "open_issue_count": issue_summary.get("open_issue_count", 0),
+                "overdue_issue_count": issue_summary.get("overdue_issue_count", 0),
                 "recommended_action_count": remediation_summary.get("action_count", 0),
                 "critical_recommended_action_count": remediation_summary.get("critical_action_count", 0),
                 "run_id": run_id,
@@ -901,8 +1196,20 @@ def build_data_quality_dashboard_spec(
             "duplicate_candidate_count": quality_summary.get("duplicate_candidate_count", 0),
             "rejected_record_count": rejected_record_count,
             "final_dataset_row_count": final_dataset.get("final_row_count"),
+            "current_readiness_status": readiness_summary.get("current_readiness_status"),
+            "readiness_trend_status": readiness_summary.get("readiness_trend_status"),
+            "certification_blocker_count": readiness_summary.get("certification_blocker_count", 0),
+            "business_term_group_count": business_term_summary.get("business_term_group_count", 0),
+            "worsened_business_term_count": business_term_summary.get("worsened_business_term_count", 0),
             "lineage_row_count": len(lineage_ids),
+            "anomaly_count": anomaly_summary.get("anomaly_count", 0),
+            "critical_anomaly_count": anomaly_summary.get("critical_anomaly_count", 0),
+            "open_issue_count": issue_summary.get("open_issue_count", 0),
+            "overdue_issue_count": issue_summary.get("overdue_issue_count", 0),
             "remediation_action_count": (remediation_plan.get("summary") or {}).get("action_count", 0),
+            "trend_row_count": trend_summary.get("trend_row_count", 0),
+            "improved_metric_count": trend_summary.get("improved_metric_count", 0),
+            "worsened_metric_count": trend_summary.get("worsened_metric_count", 0),
             "executive_summary": executive_summary_rows,
         },
     }
@@ -927,7 +1234,21 @@ def create_data_quality_dashboard(
     lineage_edges: list[dict[str, Any]] | None = None,
     row_outcomes: list[dict[str, Any]] | None = None,
     final_dataset: dict[str, Any] | None = None,
+    trends: list[dict[str, Any]] | None = None,
+    anomalies: list[dict[str, Any]] | None = None,
+    issues: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    try:
+        glossary_terms = fetch_glossary_terms(settings, tenant_id, domain_id)
+    except Exception:
+        glossary_terms = []
+    business_term_trends = build_business_term_trend_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trends=trends,
+        glossary_terms=glossary_terms,
+    )
     spec = build_data_quality_dashboard_spec(
         tenant_id=tenant_id,
         run_id=run_id,
@@ -945,6 +1266,10 @@ def create_data_quality_dashboard(
         lineage_edges=lineage_edges,
         row_outcomes=row_outcomes,
         final_dataset=final_dataset,
+        trends=trends,
+        business_term_trends=business_term_trends,
+        anomalies=anomalies,
+        issues=issues,
     )
     dashboard = create_dashboard(
         settings,
@@ -968,4 +1293,8 @@ def create_data_quality_dashboard(
         "quality_gate_passed": spec.get("quality", {}).get("gate_passed"),
         "remediation_action_count": (spec.get("summary") or {}).get("remediation_action_count", 0),
         "critical_remediation_action_count": ((spec.get("summary_view") or {}).get("summary") or {}).get("critical_recommended_action_count", 0),
+        "anomaly_count": ((spec.get("summary_view") or {}).get("summary") or {}).get("anomaly_count", 0),
+        "critical_anomaly_count": ((spec.get("summary_view") or {}).get("summary") or {}).get("critical_anomaly_count", 0),
+        "open_issue_count": ((spec.get("summary_view") or {}).get("summary") or {}).get("open_issue_count", 0),
+        "overdue_issue_count": ((spec.get("summary_view") or {}).get("summary") or {}).get("overdue_issue_count", 0),
     }

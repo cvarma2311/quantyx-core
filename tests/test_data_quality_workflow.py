@@ -3,14 +3,17 @@ from __future__ import annotations
 import pytest
 import zipfile
 from io import BytesIO
+from types import SimpleNamespace
 
 from services.ai import data_quality_api_payloads as dq_api_payloads
+from services.ai import data_quality_anomalies as dq_anomalies
 from services.ai import data_quality_dashboard as dq_dashboard
 from services.ai import data_quality_duplicates as dq_duplicates
 from services.ai import data_quality_enrichment as dq_enrichment
 from services.ai import data_quality_enrichment_questions as dq_enrichment_questions
 from services.ai import data_quality_evidence as dq_evidence
 from services.ai import data_quality_freshness as dq_freshness
+from services.ai import data_quality_issues as dq_issues
 from services.ai import data_quality_orchestrator as dq_orchestrator
 from services.ai import data_quality_rule_review as dq_rule_review
 from services.ai import data_quality_remediation as dq_remediation
@@ -19,6 +22,7 @@ from services.ai import data_quality_rules as dq_rules
 from services.ai import data_quality_stages as dq_stages
 from services.ai import data_quality_store as dq_store
 from services.ai import data_quality_trust as dq_trust
+from services.ai import data_quality_trends as dq_trends
 from services.ai import data_quality_workspace as dq_workspace
 from services.ai import agentic_store
 
@@ -142,6 +146,77 @@ def test_extract_quality_rules_from_context_resolves_known_patterns() -> None:
     assert rules[0]["reference_table"] == "customer"
     assert rules[1]["table_name"] == "customer"
     assert rules[3]["column_name"] == "amount"
+
+
+def test_derive_quality_rule_label_for_custom_sql_patterns() -> None:
+    assert dq_rules.derive_quality_rule_label(
+        {
+            "rule_type": "custom_sql",
+            "table_name": "roaming_settlement_data",
+            "condition_json": {
+                "validation_sql": "SELECT COUNT(*) AS checked_row_count, COUNT(*) FILTER (WHERE charged_amount < 0) AS violation_count FROM roaming_settlement_data"
+            },
+        }
+    ) == "Negative charged amount in roaming_settlement_data"
+    assert dq_rules.derive_quality_rule_label(
+        {
+            "rule_type": "custom_sql",
+            "table_name": "billing_cdr_data",
+            "condition_json": {
+                "validation_sql": "SELECT COUNT(*) AS checked_row_count, COUNT(*) FILTER (WHERE billing_status NOT IN ('BILLED', 'PENDING')) AS violation_count FROM billing_cdr_data"
+            },
+        }
+    ) == "Unexpected billing status in billing_cdr_data"
+
+
+def test_business_context_validation_planner_tool_extracts_atomic_controls() -> None:
+    schema_graph = {
+        "tables": [
+            {"name": "network_cdr_data", "columns": [{"name": "call_id"}, {"name": "msisdn"}]},
+            {"name": "mediation_data", "columns": [{"name": "cdr_id"}, {"name": "rating_flag"}]},
+            {"name": "billing_cdr_data", "columns": [{"name": "billing_status"}, {"name": "cdr_id"}]},
+        ]
+    }
+    result = dq_rules.business_context_validation_planner_tool(
+        context_text=(
+            "1. Network CDR to Mediation reconciliation\n"
+            "- Reconcile network_cdr_data to mediation_data.\n"
+            "- Key controls to evaluate:\n"
+            "  - records present in network_cdr_data but missing in mediation_data\n"
+            "  - duplicate records in either layer\n"
+            "2. Mediation to Billing reconciliation\n"
+            "- Reconcile mediation_data to billing_cdr_data.\n"
+            "- Key controls to evaluate:\n"
+            "  - unrated usage where mediation event should be billable but no billing row exists\n"
+        ),
+        schema_graph=schema_graph,
+    )
+    controls = result["validation_controls"]
+    assert result["control_count"] >= 3
+    assert any("missing in mediation_data" in str(item.get("source_text")) for item in controls)
+    assert any("duplicate records in either layer" in str(item.get("source_text")) for item in controls)
+    assert any("billable but no billing row exists" in str(item.get("source_text")) for item in controls)
+
+
+def test_plan_quality_rules_from_context_returns_coverage() -> None:
+    schema_graph = {
+        "tables": [
+            {"name": "billing_cdr_data", "columns": [{"name": "billing_status"}]},
+        ]
+    }
+    plan = dq_rules.plan_quality_rules_from_context(
+        context_text=(
+            "Mediation to Billing reconciliation\n"
+            "- Key controls to evaluate:\n"
+            "  - rows not flagged for rating when business logic suggests they should be\n"
+            "  - invalid billing status values\n"
+        ),
+        schema_graph=schema_graph,
+    )
+    assert "validation_controls" in plan
+    assert "rules" in plan
+    assert "rule_coverage" in plan
+    assert plan["rule_coverage"]["validation_control_count"] >= 2
 
 
 def test_infer_stage_plan_tool_builds_sources_joins_filters_and_final_stage() -> None:
@@ -1609,6 +1684,7 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         lambda *args, **kwargs: [
             {
                 "rule_id": "rule_1",
+                "rule_label": "Invalid customer email",
                 "rule_type": "email_pattern",
                 "severity": "warning",
                 "table_name": "customer",
@@ -1781,6 +1857,78 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
     )
     monkeypatch.setattr(
         dq_report,
+        "list_quality_trends",
+        lambda *args, **kwargs: [
+            {
+                "object_type": "table",
+                "object_key": "customer",
+                "object_name": "customer",
+                "metric_name": "trust_score",
+                "previous_value_num": 78.0,
+                "current_value_num": 80.0,
+                "delta_value": 2.0,
+                "delta_pct": 2.56,
+                "trend_status": "improved",
+                "directionality": "higher_is_better",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_anomalies",
+        lambda *args, **kwargs: [
+            {
+                "anomaly_id": "dqanom_1",
+                "anomaly_key": "tenant|data_quality_observability|scope|run|__run__|trust_score_drop",
+                "tenant_id": "tenant",
+                "domain_id": "data_quality_observability",
+                "run_id": "run_1",
+                "quality_run_id": "dqrun_1",
+                "trend_scope_key": "scope",
+                "baseline_run_id": "run_prev",
+                "object_type": "run",
+                "object_key": "__run__",
+                "object_name": "Run Summary",
+                "anomaly_type": "trust_score_drop",
+                "title": "Overall trust score dropped materially",
+                "severity": "critical",
+                "current_value_num": 82.5,
+                "previous_value_num": 91.0,
+                "delta_value": -8.5,
+                "delta_pct": -9.34,
+                "evidence_path": "/data-quality/trends?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1&object_type=run&object_key=__run__",
+                "summary_json": {},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_issues",
+        lambda *args, **kwargs: [
+            {
+                "issue_id": "dqissue_1",
+                "issue_key": "dqissuekey_1",
+                "tenant_id": "tenant",
+                "domain_id": "data_quality_observability",
+                "run_id": "run_1",
+                "quality_run_id": "dqrun_1",
+                "issue_type": "join_exception",
+                "title": "Join exceptions detected in customer_join_region",
+                "severity": "critical",
+                "owner_id": "domain_owner",
+                "status": "open",
+                "first_seen_at": "2026-04-20T10:00:00+00:00",
+                "last_seen_at": "2026-04-25T10:00:00+00:00",
+                "due_at": "2026-04-22T10:00:00+00:00",
+                "evidence_path": "/data-quality/evidence/joins/dqjoin_1?tenant_id=tenant&domain_id=data_quality_observability",
+                "recommendation_json": {"text": "Investigate missing join keys."},
+                "summary_json": {"unmatched_left_row_count": 2},
+                "related_run_ids_json": ["run_1"],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
         "_list_staged_overlay_artifacts",
         lambda settings, run_id: [
             {
@@ -1828,6 +1976,11 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
     monkeypatch.setattr(dq_report, "resolve_database_credentials_cached", lambda *args, **kwargs: object())
     monkeypatch.setattr(
         dq_report,
+        "run_query",
+        lambda *args, **kwargs: [{"__row_ref": "(0,1)"}] if "__row_ref" in str(args[1]) else [],
+    )
+    monkeypatch.setattr(
+        dq_report,
         "fetch_stage_snapshot_rows_tool",
         lambda *args, **kwargs: [{"__row_ref": "(0,1)", "customer_id": "C001", "row_lineage_id": "dqlin_source_c001"}],
     )
@@ -1843,6 +1996,11 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
             {"__row_ref": "(0,1)", "email": "bad@example"},
             {"__row_ref": "(0,2)", "email": "good@example.com"},
         ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "_fetch_table_rows_by_row_refs",
+        lambda *args, **kwargs: [{"__row_ref": "(0,1)", "email": "bad@example"}],
     )
     monkeypatch.setattr(
         dq_report,
@@ -1873,9 +2031,15 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
     assert summary["final_dataset_row_count"] == 8
     assert summary["approved_enrichment_row_count"] == 1
     assert summary["deferred_enrichment_row_count"] == 1
+    assert summary["anomaly_count"] == 1
+    assert summary["critical_anomaly_count"] == 1
     assert summary["published_enrichment_sheet_count"] == 1
     assert summary["stage_snapshot_sheet_count"] == 3
     assert summary["all_data_sheet_count"] == 1
+    assert summary["failed_rule_detail_sheet_count"] == 1
+    assert summary["issue_count"] == 1
+    assert summary["open_issue_count"] == 1
+    assert summary["overdue_issue_count"] == 1
     assert summary["remediation_action_count"] >= 2
     with zipfile.ZipFile(BytesIO(workbook)) as archive:
         sheet_texts = [
@@ -1892,9 +2056,20 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         assert "Join Health" in sheet_names
         assert "Lineage Overview" in sheet_names
         assert "Filter Impact" in sheet_names
+        assert "Quality Trends" in sheet_names
+        assert "Business Term Trends" in sheet_names
+        assert "Anomaly Summary" in sheet_names
+        assert "Anomalies" in sheet_names
+        assert "Issue Register" in sheet_names
+        assert "Steward Work Queue" in sheet_names
+        assert "SLA Breaches" in sheet_names
+        assert "Rule Trends" in sheet_names
+        assert "Stage Trends" in sheet_names
+        assert "Final Dataset Trends" in sheet_names
         assert "Rejected Records" in sheet_names
         assert "Final Dataset" in sheet_names
         assert "Join Exceptions" in sheet_names
+        assert "Rule 01 Invalid customer email" in sheet_names
         assert "Stage 1 source_profile_customer" in sheet_names
         assert "Stage 2 customer_join_region" in sheet_names
         assert "Stage 3 filter_1" in sheet_names
@@ -1908,6 +2083,7 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         assert any("join_matched" in text and "Lineage Overview" not in text for text in sheet_texts)
         assert any("560001" in text and "India" in text and "Karnataka" in text for text in sheet_texts)
         assert any("bad@example" in text and 's=\"6\"' in text for text in sheet_texts)
+        assert any("Invalid customer email" in text and "bad@example" in text for text in sheet_texts)
         assert any("postal_code" in text for text in sheet_texts)
         assert any("customer_join_region" in text and "C001" in text for text in sheet_texts)
         assert any("dqlin_final_c001" in text for text in sheet_texts)
@@ -1946,14 +2122,34 @@ def test_build_data_quality_excel_report_flattens_source_json_values(monkeypatch
             ],
         },
     )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_trends",
+        lambda *args, **kwargs: [
+            {
+                "object_type": "table",
+                "object_key": "customer",
+                "object_name": "customer",
+                "metric_name": "trust_score",
+                "previous_value_num": 78.0,
+                "current_value_num": 80.0,
+                "delta_value": 2.0,
+                "delta_pct": 2.56,
+                "trend_status": "improved",
+                "directionality": "higher_is_better",
+            }
+        ],
+    )
     monkeypatch.setattr(dq_report, "list_quality_rules", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "list_quality_duplicate_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_trends", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "list_quality_dataset_stages", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "list_quality_join_artifacts", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "list_quality_lineage_edges", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "list_quality_stage_row_outcomes", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "get_quality_final_dataset_artifact", lambda *args, **kwargs: None)
     monkeypatch.setattr(dq_report, "list_quality_enrichment_opportunities", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_issues", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "_list_staged_overlay_artifacts", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "resolve_database_credentials_cached", lambda *args, **kwargs: object())
     monkeypatch.setattr(
@@ -2190,6 +2386,431 @@ def test_build_data_quality_dashboard_spec_skips_empty_sections() -> None:
 
     chart_keys = [item["chart_key"] for item in spec["chart_plan"]]
     assert chart_keys == ["executive_summary", "data_trust_scorecard"]
+
+
+def test_build_data_quality_dashboard_spec_includes_quality_trends_when_present() -> None:
+    spec = dq_dashboard.build_data_quality_dashboard_spec(
+        run_id="run_1",
+        domain_id="data_quality_observability",
+        profiling={"tables": []},
+        quality_summary={"average_table_trust_score": 72.5, "critical_issue_count": 0, "failed_rule_count": 0},
+        trends=[
+            {
+                "object_type": "table",
+                "object_key": "customer",
+                "object_name": "customer",
+                "metric_name": "trust_score",
+                "previous_value_num": 81.0,
+                "current_value_num": 76.0,
+                "delta_value": -5.0,
+                "delta_pct": -6.17,
+                "trend_status": "worsened",
+                "directionality": "higher_is_better",
+            }
+        ],
+    )
+
+    quality_trends = next(item for item in spec["chart_plan"] if item["chart_key"] == "quality_trends")
+    assert quality_trends["rows"][0]["object_key"] == "customer"
+    assert quality_trends["summary"]["worsened_metric_count"] == 1
+
+
+def test_build_business_term_trend_payload_groups_rows_by_glossary_term() -> None:
+    result = dq_trends.build_business_term_trend_payload(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        trends=[
+            {
+                "object_type": "table",
+                "object_key": "customer",
+                "object_name": "Customer",
+                "metric_name": "trust_score",
+                "trend_status": "worsened",
+            },
+            {
+                "object_type": "rule",
+                "object_key": "rule_1",
+                "object_name": "Invalid customer email",
+                "metric_name": "violation_count",
+                "trend_status": "improved",
+            },
+        ],
+        glossary_terms=[
+            {
+                "term": "Customer",
+                "normalized_term": "customer",
+                "definition": "Customer master and subscriber identity domain.",
+                "synonyms": ["subscriber"],
+                "abbreviations": [],
+            }
+        ],
+    )
+
+    assert result["summary"]["business_term_group_count"] == 1
+    assert result["summary"]["worsened_business_term_count"] == 1
+    assert result["rows"][0]["business_term"] == "Customer"
+    assert result["rows"][0]["trend_row_count"] == 2
+
+
+def test_build_data_quality_dashboard_spec_includes_business_term_trends_when_present() -> None:
+    spec = dq_dashboard.build_data_quality_dashboard_spec(
+        run_id="run_1",
+        domain_id="data_quality_observability",
+        profiling={"tables": []},
+        quality_summary={"average_table_trust_score": 72.5, "critical_issue_count": 0, "failed_rule_count": 0},
+        trends=[],
+        business_term_trends={
+            "summary": {
+                "business_term_group_count": 1,
+                "worsened_business_term_count": 1,
+                "improved_business_term_count": 0,
+                "unmatched_trend_row_count": 0,
+            },
+            "rows": [
+                {
+                    "business_term": "Customer",
+                    "trend_row_count": 2,
+                    "worsened_metric_count": 1,
+                    "improved_metric_count": 0,
+                    "affected_object_count": 2,
+                    "top_metrics": "trust_score, violation_count",
+                    "evidence_path": "/data-quality/trends/business-terms?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1&term=customer",
+                }
+            ],
+        },
+    )
+
+    business_terms = next(item for item in spec["chart_plan"] if item["chart_key"] == "business_term_trends")
+    assert business_terms["rows"][0]["business_term"] == "Customer"
+    assert business_terms["summary"]["business_term_group_count"] == 1
+
+
+def test_derive_data_quality_anomalies_detects_core_regressions() -> None:
+    anomalies = dq_anomalies.derive_data_quality_anomalies(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        quality_run_id="dqrun_1",
+        trend_scope_key="scope_1",
+        baseline_run_id="run_prev",
+        trends=[
+            {
+                "object_type": "run",
+                "object_key": "__run__",
+                "metric_name": "overall_trust_score",
+                "trend_status": "worsened",
+                "current_value_num": 70.0,
+                "previous_value_num": 82.0,
+                "delta_value": -12.0,
+                "delta_pct": -14.6,
+            },
+            {
+                "object_type": "table",
+                "object_key": "customer",
+                "object_name": "customer",
+                "metric_name": "row_count",
+                "trend_status": "worsened",
+                "current_value_num": 800.0,
+                "previous_value_num": 1200.0,
+                "delta_value": -400.0,
+                "delta_pct": -33.33,
+            },
+            {
+                "object_type": "rule",
+                "object_key": "rulekey_1",
+                "object_name": "Invalid customer email",
+                "metric_name": "violation_count",
+                "trend_status": "worsened",
+                "current_value_num": 40.0,
+                "previous_value_num": 20.0,
+                "delta_value": 20.0,
+                "delta_pct": 100.0,
+            },
+        ],
+    )
+
+    anomaly_types = {row["anomaly_type"] for row in anomalies}
+    assert "trust_score_drop" in anomaly_types
+    assert "row_count_drift" in anomaly_types
+    assert "rule_violation_spike" in anomaly_types
+
+
+def test_build_data_quality_dashboard_spec_includes_anomaly_summary_when_present() -> None:
+    spec = dq_dashboard.build_data_quality_dashboard_spec(
+        run_id="run_1",
+        domain_id="data_quality_observability",
+        profiling={"tables": []},
+        quality_summary={"average_table_trust_score": 72.5, "critical_issue_count": 0, "failed_rule_count": 0},
+        anomalies=[
+            {
+                "anomaly_id": "dqanom_1",
+                "anomaly_type": "trust_score_drop",
+                "title": "Overall trust score dropped materially",
+                "severity": "critical",
+                "object_type": "run",
+                "object_key": "__run__",
+                "baseline_run_id": "run_prev",
+                "current_value_num": 82.5,
+                "previous_value_num": 91.0,
+                "delta_value": -8.5,
+                "delta_pct": -9.34,
+                "evidence_path": "/data-quality/trends?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1&object_type=run&object_key=__run__",
+            }
+        ],
+    )
+
+    anomaly_chart = next(item for item in spec["chart_plan"] if item["chart_key"] == "anomaly_summary")
+    assert anomaly_chart["summary"]["anomaly_count"] == 1
+    assert anomaly_chart["rows"][0]["anomaly_type"] == "trust_score_drop"
+
+
+def test_build_readiness_trend_payload_summarizes_publish_readiness() -> None:
+    payload = dq_trends.build_readiness_trend_payload(
+        run_id="run_1",
+        baseline_run_id="run_prev",
+        final_dataset={"readiness_status": "warning", "final_row_count": 120},
+        trends=[
+            {
+                "object_type": "final_dataset",
+                "object_key": "final_dataset",
+                "metric_name": "readiness_status",
+                "previous_value_text": "blocked",
+                "current_value_text": "warning",
+                "trend_status": "improved",
+            },
+            {
+                "object_type": "final_dataset",
+                "object_key": "final_dataset",
+                "metric_name": "final_row_count",
+                "previous_value_num": 100.0,
+                "current_value_num": 120.0,
+                "delta_value": 20.0,
+                "delta_pct": 20.0,
+                "trend_status": "improved",
+            },
+        ],
+        issues=[
+            {
+                "issue_type": "publish_readiness_blocker",
+                "title": "Final dataset readiness is warning",
+                "severity": "high",
+                "status": "open",
+            }
+        ],
+        anomalies=[{"severity": "critical"}],
+    )
+
+    assert payload["current_readiness_status"] == "warning"
+    assert payload["previous_readiness_status"] == "blocked"
+    assert payload["readiness_trend_status"] == "improved"
+    assert payload["certification_blocker_count"] == 1
+    assert payload["residual_anomaly_count"] == 1
+
+
+def test_build_data_quality_dashboard_spec_includes_publish_readiness_when_present() -> None:
+    spec = dq_dashboard.build_data_quality_dashboard_spec(
+        run_id="run_1",
+        domain_id="data_quality_observability",
+        profiling={"tables": []},
+        quality_summary={"average_table_trust_score": 72.5, "critical_issue_count": 0, "failed_rule_count": 0, "baseline_run_id": "run_prev"},
+        final_dataset={"readiness_status": "warning", "final_row_count": 120, "total_rejected_row_count": 12},
+        trends=[
+            {
+                "object_type": "final_dataset",
+                "object_key": "final_dataset",
+                "metric_name": "readiness_status",
+                "previous_value_text": "blocked",
+                "current_value_text": "warning",
+                "trend_status": "improved",
+            }
+        ],
+        issues=[
+            {
+                "issue_id": "dqissue_1",
+                "issue_key": "dqissuekey_1",
+                "issue_type": "publish_readiness_blocker",
+                "title": "Final dataset readiness is warning",
+                "severity": "high",
+                "status": "open",
+            }
+        ],
+        anomalies=[{"severity": "critical"}],
+    )
+
+    chart = next(item for item in spec["chart_plan"] if item["chart_key"] == "publish_readiness")
+    assert chart["summary"]["current_readiness_status"] == "warning"
+    assert chart["summary"]["certification_blocker_count"] == 1
+
+
+def test_derive_data_quality_issues_covers_core_issue_types() -> None:
+    issues = dq_issues.derive_data_quality_issues(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        trend_scope_key="cdr_primary_reconciliation",
+        quality_summary={},
+        rules=[
+            {
+                "rule_id": "rule_1",
+                "rule_label": "Invalid customer email",
+                "rule_type": "email_pattern",
+                "severity": "error",
+                "table_name": "customer",
+                "column_name": "email",
+                "result_status": "failed",
+                "violation_count": 12,
+                "violation_pct": 10.0,
+            }
+        ],
+        duplicate_candidates=[
+            {"candidate_id": "dup_1", "table_name": "customer"},
+            {"candidate_id": "dup_2", "table_name": "customer"},
+        ],
+        freshness_results=[
+            {"table_name": "customer", "freshness_status": "stale", "freshness_lag_days": 6},
+            {"table_name": "customer", "stability_status": "changed", "row_count_change_pct": 25.0},
+        ],
+        dataset_stages=[
+            {
+                "stage_id": "stage_1",
+                "stage_type": "filter",
+                "stage_name": "filter_billable",
+                "output_dataset": "mediation_data",
+                "input_row_count": 1000,
+                "rejected_row_count": 300,
+                "expression": {"expression_text": "billable_flag = true"},
+            }
+        ],
+        join_artifacts=[
+            {
+                "join_artifact_id": "join_1",
+                "join_name": "network_to_mediation",
+                "left_table": "network_cdr_data",
+                "right_table": "mediation_data",
+                "unmatched_left_row_count": 40,
+                "unmatched_right_row_count": 0,
+                "duplicate_match_count": 0,
+            }
+        ],
+        final_dataset={"readiness_status": "blocked", "final_row_count": 600},
+        trends=[
+            {
+                "object_type": "run",
+                "object_key": "__run__",
+                "metric_name": "overall_trust_score",
+                "trend_status": "worsened",
+                "delta_value": -5.0,
+                "delta_pct": -6.0,
+                "baseline_run_id": "run_0",
+            }
+        ],
+    )
+
+    issue_types = {row["issue_type"] for row in issues}
+    assert "failed_rule" in issue_types
+    assert "duplicate_risk" in issue_types
+    assert "stale_dataset" in issue_types
+    assert "stability_change" in issue_types
+    assert "filter_loss_concentration" in issue_types
+    assert "join_exception" in issue_types
+    assert "publish_readiness_blocker" in issue_types
+    assert "trend_regression" in issue_types
+
+
+def test_build_data_quality_dashboard_spec_includes_issue_sections_when_present() -> None:
+    spec = dq_dashboard.build_data_quality_dashboard_spec(
+        run_id="run_1",
+        domain_id="data_quality_observability",
+        profiling={"tables": []},
+        quality_summary={"average_table_trust_score": 72.5, "critical_issue_count": 1, "failed_rule_count": 1},
+        issues=[
+            {
+                "issue_id": "dqissue_1",
+                "issue_key": "dqissuekey_1",
+                "issue_type": "join_exception",
+                "title": "Join exceptions detected",
+                "severity": "critical",
+                "owner_id": "domain_owner",
+                "status": "open",
+                "first_seen_at": "2026-04-20T10:00:00+00:00",
+                "due_at": "2026-04-22T10:00:00+00:00",
+                "evidence_path": "/data-quality/evidence/joins/join_1?tenant_id=tenant&domain_id=data_quality_observability",
+            }
+        ],
+    )
+
+    chart_keys = [item["chart_key"] for item in spec["chart_plan"]]
+    assert "issue_register" in chart_keys
+    assert "issue_aging" in chart_keys
+    assert "owner_workload" in chart_keys
+    assert "sla_breaches" in chart_keys
+
+
+def test_build_data_quality_run_hydration_payload_includes_issue_card() -> None:
+    response = dq_api_payloads.build_data_quality_run_hydration_payload(
+        row={
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "status": "completed",
+            "summary_json": {"workflow_status": "completed"},
+        },
+        remediation_plan={"summary": {}, "actions": []},
+        issue_overview={
+            "summary": {"issue_count": 2, "open_issue_count": 1, "overdue_issue_count": 1},
+            "issues": [{"issue_id": "dqissue_1", "title": "Blocked publish", "severity": "critical"}],
+        },
+    )
+
+    assert response["pending_tasks"]["issues"]["issue_count"] == 2
+    assert response["pending_tasks"]["issues"]["top_items"][0]["issue_id"] == "dqissue_1"
+
+
+def test_build_data_quality_run_hydration_payload_includes_anomaly_card() -> None:
+    response = dq_api_payloads.build_data_quality_run_hydration_payload(
+        row={
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "status": "completed",
+            "summary_json": {"workflow_status": "completed"},
+        },
+        remediation_plan={"summary": {}, "actions": []},
+        anomaly_overview={
+            "summary": {"anomaly_count": 2, "critical_anomaly_count": 1, "high_anomaly_count": 1},
+            "anomalies": [{"anomaly_id": "dqanom_1", "title": "Trust score drop", "severity": "critical"}],
+        },
+    )
+
+    assert response["pending_tasks"]["anomalies"]["anomaly_count"] == 2
+    assert response["pending_tasks"]["anomalies"]["top_items"][0]["anomaly_id"] == "dqanom_1"
+
+
+def test_build_data_quality_run_hydration_payload_includes_readiness_card() -> None:
+    response = dq_api_payloads.build_data_quality_run_hydration_payload(
+        row={
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "status": "completed",
+            "summary_json": {"workflow_status": "completed"},
+        },
+        remediation_plan={"summary": {}, "actions": []},
+        readiness_overview={
+            "current_readiness_status": "warning",
+            "previous_readiness_status": "blocked",
+            "readiness_trend_status": "improved",
+            "certification_blocker_count": 1,
+            "residual_anomaly_count": 2,
+        },
+    )
+
+    assert response["pending_tasks"]["readiness"]["current_readiness_status"] == "warning"
+    assert response["pending_tasks"]["readiness"]["certification_blocker_count"] == 1
 
 
 def test_derive_data_quality_remediation_plan_prioritizes_explainable_actions() -> None:
@@ -2958,6 +3579,18 @@ def test_run_data_quality_agentic_workflow_minimal(monkeypatch) -> None:
     monkeypatch.setattr(dq_orchestrator, "replace_quality_join_artifacts", lambda *args, **kwargs: len(kwargs.get("joins") or []))
     monkeypatch.setattr(dq_orchestrator, "replace_quality_stage_row_outcomes", lambda *args, **kwargs: len(kwargs.get("row_outcomes") or []))
     monkeypatch.setattr(dq_orchestrator, "upsert_quality_final_dataset_artifact", lambda *args, **kwargs: "dqfinal_1")
+    monkeypatch.setattr(dq_orchestrator, "list_quality_trends", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "list_quality_issues", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "_persist_trend_artifacts",
+        lambda *args, **kwargs: {"baseline_run_id": None, "trends": [], "summary": {"trend_row_count": 0, "improved_metric_count": 0, "worsened_metric_count": 0}},
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "_persist_issue_artifacts",
+        lambda *args, **kwargs: {"issues": [], "summary": {"issue_count": 0, "open_issue_count": 0, "overdue_issue_count": 0}},
+    )
     monkeypatch.setattr(dq_orchestrator, "replace_quality_rules", lambda *args, **kwargs: 0)
     monkeypatch.setattr(dq_orchestrator, "execute_quality_rules", lambda *args, **kwargs: {"rules_executed": 0, "failed_rules": 0, "passed_rules": 0, "error_rules": 0, "results": []})
     monkeypatch.setattr(
@@ -3037,6 +3670,8 @@ def test_run_data_quality_agentic_workflow_minimal(monkeypatch) -> None:
         "DataEnrichmentOpportunityAgent",
         "DataEnrichmentOpportunityAgent",
         "DataTrustScoringAgent",
+        "TrendAnalysisAgent",
+        "TrendAnalysisAgent",
         "DataQualityDashboardAgent",
         "DataQualityDashboardAgent",
     ]
@@ -3251,11 +3886,29 @@ def test_resume_data_quality_agentic_workflow_after_rule_review_completes(monkey
     monkeypatch.setattr(dq_orchestrator, "list_quality_join_artifacts", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_orchestrator, "list_quality_lineage_edges", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_orchestrator, "list_quality_stage_row_outcomes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "list_quality_trends", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "list_quality_issues", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_orchestrator, "get_quality_final_dataset_artifact", lambda *args, **kwargs: {})
     monkeypatch.setattr(
         dq_orchestrator,
+        "_persist_trend_artifacts",
+        lambda *args, **kwargs: {"baseline_run_id": None, "trends": [], "summary": {"trend_row_count": 0, "improved_metric_count": 0, "worsened_metric_count": 0}},
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "_persist_issue_artifacts",
+        lambda *args, **kwargs: {"issues": [], "summary": {"issue_count": 0, "open_issue_count": 0, "overdue_issue_count": 0}},
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
         "create_data_quality_dashboard",
-        lambda *args, **kwargs: {"dashboard_id": "db_dq_1", "dashboard_title": "DQ Dashboard", "chart_plan": [{"chart_key": "data_trust_scorecard"}]},
+        lambda *args, **kwargs: {
+            "dashboard_id": "db_dq_1",
+            "dashboard_title": "DQ Dashboard",
+            "chart_plan": [{"chart_key": "data_trust_scorecard"}],
+            "open_issue_count": 0,
+            "overdue_issue_count": 0,
+        },
     )
 
     result = dq_orchestrator.resume_data_quality_agentic_workflow_after_rule_review(
@@ -3277,6 +3930,10 @@ def test_resume_data_quality_agentic_workflow_after_rule_review_completes(monkey
         "DataEnrichmentOpportunityAgent",
         "DataTrustScoringAgent",
         "DataTrustScoringAgent",
+        "TrendAnalysisAgent",
+        "TrendAnalysisAgent",
+        "IssueRegisterAgent",
+        "IssueRegisterAgent",
         "DataQualityDashboardAgent",
         "DataQualityDashboardAgent",
     ]
@@ -3387,6 +4044,10 @@ def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommend
                 "join_stage_count": 1,
                 "filter_stage_count": 1,
                 "lineage_edge_count": 2,
+                "rule_validation_planner_mode": "llm",
+                "validation_control_count": 9,
+                "compiled_validation_control_count": 6,
+                "uncovered_validation_control_count": 3,
                 "total_rejected_row_count": 2,
                 "final_dataset_row_count": 10,
                 "final_dataset_readiness_status": "ready",
@@ -3413,6 +4074,7 @@ def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommend
     assert response["artifacts"]["final_dataset"].endswith("run_id=run_1")
     assert response["artifacts"]["lineage_base"].endswith("run_id=run_1")
     assert response["artifacts"]["rule_review_queue"].endswith("run_id=run_1")
+    assert response["artifacts"]["rule_coverage"].endswith("run_id=run_1")
     assert response["artifacts"]["resume_after_rule_review"] == "/data-quality/runs/run_1/resume-after-rule-review"
     assert response["artifacts"]["enrichment_questions"].endswith("run_id=run_1")
     assert response["active_rule_count"] == 3
@@ -3423,6 +4085,10 @@ def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommend
     assert response["join_stage_count"] == 1
     assert response["filter_stage_count"] == 1
     assert response["lineage_edge_count"] == 2
+    assert response["rule_validation_planner_mode"] == "llm"
+    assert response["validation_control_count"] == 9
+    assert response["compiled_validation_control_count"] == 6
+    assert response["uncovered_validation_control_count"] == 3
     assert response["total_rejected_row_count"] == 2
     assert response["final_dataset_row_count"] == 10
     assert response["final_dataset_readiness_status"] == "ready"
@@ -3509,6 +4175,23 @@ def test_build_data_quality_run_hydration_payload_includes_pending_cards() -> No
                 }
             ],
         },
+        trend_overview={
+            "summary": {
+                "trend_row_count": 4,
+                "improved_metric_count": 1,
+                "worsened_metric_count": 2,
+            },
+            "trends": [
+                {
+                    "object_type": "table",
+                    "object_key": "orders",
+                    "object_name": "orders",
+                    "metric_name": "trust_score",
+                    "trend_status": "worsened",
+                    "evidence_path": "/data-quality/trends/tables/orders?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1",
+                }
+            ],
+        },
     )
 
     assert response["run"]["workflow_status"] == "awaiting_rule_review"
@@ -3519,7 +4202,43 @@ def test_build_data_quality_run_hydration_payload_includes_pending_cards() -> No
     assert response["pending_tasks"]["enrichment_questions"]["top_items"][0]["question_id"] == "dqeo_1"
     assert response["pending_tasks"]["lineage"]["lineage_row_count"] == 3
     assert response["pending_tasks"]["lineage"]["top_items"][0]["row_lineage_id"] == "dqlin_1"
+    assert response["pending_tasks"]["trends"]["trend_row_count"] == 4
+    assert response["pending_tasks"]["trends"]["top_items"][0]["object_key"] == "orders"
+    assert response["pending_tasks"]["business_terms"]["business_term_group_count"] == 0
     assert response["artifact_links"]["enrichment_questions"].endswith("run_id=run_1")
+
+
+def test_build_data_quality_run_hydration_payload_includes_business_term_card() -> None:
+    response = dq_api_payloads.build_data_quality_run_hydration_payload(
+        row={
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "status": "completed",
+            "summary_json": {},
+        },
+        business_term_overview={
+            "summary": {
+                "business_term_group_count": 2,
+                "worsened_business_term_count": 1,
+                "improved_business_term_count": 1,
+                "unmatched_trend_row_count": 0,
+            },
+            "rows": [
+                {
+                    "business_term": "Customer",
+                    "trend_row_count": 2,
+                    "worsened_metric_count": 1,
+                    "improved_metric_count": 1,
+                    "evidence_path": "/data-quality/trends/business-terms?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1&term=customer",
+                }
+            ],
+        },
+    )
+
+    assert response["pending_tasks"]["business_terms"]["business_term_group_count"] == 2
+    assert response["pending_tasks"]["business_terms"]["top_items"][0]["business_term"] == "Customer"
 
 
 def test_build_data_quality_workspace_response_missingness(monkeypatch) -> None:
@@ -3662,3 +4381,236 @@ def test_build_data_quality_workspace_response_freshness(monkeypatch) -> None:
     assert payload["chart_title"] == "Freshness and Stability"
     assert payload["rows"][0]["freshness_status"] == "stale"
     assert "1 stale tables and 1 tables with stability changes" in assistant_text
+
+
+def test_infer_trend_scope_key_reuses_source_run_scope() -> None:
+    key, label = dq_trends.infer_trend_scope_key(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        connection_id="1",
+        database_name="analytics",
+        schema_name="public",
+        table_names=["network_cdr_data", "mediation_data"],
+        context_text="reconcile network and mediation records",
+        trend_mode="monitor",
+        source_run={
+            "trend_scope_key": "cdr_primary_reconciliation",
+            "trend_scope_label": "Primary CDR Reconciliation",
+        },
+    )
+
+    assert key == "cdr_primary_reconciliation"
+    assert label == "Primary CDR Reconciliation"
+
+
+def test_infer_trend_scope_key_reuses_existing_monitor_scope_from_llm(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_trends,
+        "_trend_scope_llm_json",
+        lambda *args, **kwargs: {
+            "decision": "reuse_existing",
+            "selected_existing_scope_key": "cdr_primary_reconciliation",
+            "selected_existing_scope_label": "Primary CDR Reconciliation",
+        },
+    )
+
+    key, label = dq_trends.infer_trend_scope_key(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        connection_id="1",
+        database_name="analytics",
+        schema_name="public",
+        table_names=["network_cdr_data", "mediation_data", "billing_cdr_data"],
+        context_text="Daily reconciliation across network, mediation, and billing CDR datasets.",
+        trend_mode="monitor",
+        settings=SimpleNamespace(openai_api_key="test-key", openai_model="gpt-4o-mini"),
+        previous_runs=[
+            {
+                "run_id": "run_prev",
+                "trend_scope_key": "cdr_primary_reconciliation",
+                "trend_scope_label": "Primary CDR Reconciliation",
+                "trend_mode": "monitor",
+                "deployment_payload_json": {
+                    "connection_id": "1",
+                    "database": "analytics",
+                    "schema_name": "public",
+                    "context_text": "Prior primary reconciliation run",
+                },
+            }
+        ],
+    )
+
+    assert key == "cdr_primary_reconciliation"
+    assert label == "Primary CDR Reconciliation"
+
+
+def test_infer_trend_scope_key_accepts_llm_proposed_scope(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_trends,
+        "_trend_scope_llm_json",
+        lambda *args, **kwargs: {
+            "decision": "create_new",
+            "proposed_scope_key": "Billing Readiness Daily",
+            "proposed_scope_label": "Billing Readiness Daily",
+        },
+    )
+
+    key, label = dq_trends.infer_trend_scope_key(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        connection_id="1",
+        database_name="analytics",
+        schema_name="public",
+        table_names=["billing_cdr_data"],
+        context_text="Monitor final billing publish readiness every day.",
+        trend_mode="monitor",
+        settings=SimpleNamespace(openai_api_key="test-key", openai_model="gpt-4o-mini"),
+        previous_runs=[],
+    )
+
+    assert key == "billing_readiness_daily"
+    assert label == "Billing Readiness Daily"
+
+
+def test_build_trend_rows_compares_previous_snapshots() -> None:
+    trends = dq_trends.build_trend_rows(
+        current_run_id="run_new",
+        baseline_run_id="run_old",
+        current_snapshots=[
+            {
+                "object_type": "table",
+                "object_key": "billing_cdr_data",
+                "object_name": "billing_cdr_data",
+                "metric_name": "trust_score",
+                "metric_value_num": 82.0,
+                "metric_unit": "score",
+            }
+        ],
+        previous_snapshots=[
+            {
+                "object_type": "table",
+                "object_key": "billing_cdr_data",
+                "object_name": "billing_cdr_data",
+                "metric_name": "trust_score",
+                "metric_value_num": 74.0,
+                "metric_unit": "score",
+            }
+        ],
+    )
+
+    assert len(trends) == 1
+    assert trends[0]["baseline_run_id"] == "run_old"
+    assert trends[0]["trend_status"] == "improved"
+    assert trends[0]["delta_value"] == 8.0
+
+
+def test_select_trend_baseline_run_ignores_runs_before_latest_reset() -> None:
+    baseline = dq_trends.select_trend_baseline_run(
+        trend_mode="monitor",
+        previous_runs=[
+            {"run_id": "run_post_reset_2", "trend_mode": "monitor"},
+            {"run_id": "run_post_reset_1", "trend_mode": "monitor"},
+            {"run_id": "run_reset", "trend_mode": "baseline_reset"},
+            {"run_id": "run_old", "trend_mode": "monitor"},
+        ],
+    )
+
+    assert baseline["run_id"] == "run_post_reset_2"
+
+
+def test_select_trend_baseline_run_returns_none_for_baseline_reset_mode() -> None:
+    baseline = dq_trends.select_trend_baseline_run(
+        trend_mode="baseline_reset",
+        previous_runs=[{"run_id": "run_old", "trend_mode": "monitor"}],
+    )
+
+    assert baseline is None
+
+
+def test_build_data_quality_run_summary_payload_includes_trend_fields() -> None:
+    response = dq_api_payloads.build_data_quality_run_summary_payload(
+        row={
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "status": "completed",
+            "trend_mode": "monitor",
+            "trend_scope_key": "cdr_primary_reconciliation",
+            "trend_scope_label": "Primary CDR Reconciliation",
+            "baseline_run_id": "run_0",
+            "summary_json": {
+                "workflow_status": "completed",
+                "trend_row_count": 9,
+                "improved_metric_count": 4,
+                "worsened_metric_count": 1,
+            },
+        },
+        remediation_plan={"summary": {}, "actions": []},
+    )
+
+    assert response["trend_mode"] == "monitor"
+    assert response["trend_scope_key"] == "cdr_primary_reconciliation"
+    assert response["baseline_run_id"] == "run_0"
+    assert response["trend_row_count"] == 9
+    assert response["artifacts"]["trends"].endswith("/data-quality/trends?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1")
+    assert response["artifacts"]["run_lineage"] == "/agentic/runs/run_1/lineage"
+
+
+def test_build_run_lineage_graph_payload_shapes_nodes_and_edges() -> None:
+    from services.ai import agentic_lineage
+
+    def _fake_get_deployment_run(_settings, run_id: str) -> dict:
+        rows = {
+            "run_1": {
+                "run_id": "run_1",
+                "display_name": "Data Quality Observability Deployment v3",
+                "status": "completed",
+                "version_no": 3,
+                "trend_mode": "monitor",
+                "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+                "trend_scope_label": "Primary CDR Reconciliation",
+                "parent_run_id": None,
+                "rerun_root_run_id": "run_1",
+                "created_at": "2026-04-24T12:00:00Z",
+                "updated_at": "2026-04-24T12:30:00Z",
+            },
+            "run_2": {
+                "run_id": "run_2",
+                "display_name": "Data Quality Observability Deployment v4",
+                "status": "completed",
+                "version_no": 4,
+                "trend_mode": "monitor",
+                "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+                "trend_scope_label": "Primary CDR Reconciliation",
+                "parent_run_id": "run_1",
+                "rerun_root_run_id": "run_1",
+                "created_at": "2026-04-25T12:00:00Z",
+                "updated_at": "2026-04-25T12:30:00Z",
+            },
+        }
+        return rows[run_id]
+
+    response = agentic_lineage.build_run_lineage_graph_payload(
+        run_id="run_2",
+        edges=[
+            {
+                "lineage_edge_id": "runedge_001",
+                "parent_run_id": "run_1",
+                "child_run_id": "run_2",
+                "edge_type": "rerun_monitor",
+                "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
+            }
+        ],
+        fetch_run=lambda node_run_id: _fake_get_deployment_run(None, node_run_id),
+    )
+
+    assert response["graph"]["root_run_id"] == "run_1"
+    assert response["graph"]["focus_run_id"] == "run_2"
+    assert response["graph"]["node_count"] == 2
+    assert response["graph"]["edge_count"] == 1
+    assert response["graph"]["trend_scope_keys"] == ["cdr_primary_reconciliation_f8a1c3b0d2"]
+    assert response["edges"][0]["edge_type"] == "rerun_monitor"
+    assert response["nodes"][0]["is_root_run"] is True
+    assert response["nodes"][1]["is_focus_run"] is True
+    assert response["nodes"][1]["trend_scope_label"] == "Primary CDR Reconciliation"
