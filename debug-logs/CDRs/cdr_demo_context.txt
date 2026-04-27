@@ -1,0 +1,88 @@
+Domain: Data Quality Observability for telecom CDR reconciliation and settlement controls.
+
+Tables in scope:
+- network_cdr_data
+- mediation_data
+- roaming_settlement_data
+- billing_cdr_data
+
+Use these tables as one multi-table data quality flow with joins, filters, lineage, final dataset reporting, dashboard generation, Excel reporting, evidence drill-through, and row-journey explainability.
+
+Business reconciliation context:
+
+1. Network CDR to Mediation reconciliation
+- Reconcile network_cdr_data to mediation_data.
+- Core match intent: same call/session identity using call_id, msisdn, and time logic.
+- Key controls to evaluate:
+  - records present in network_cdr_data but missing in mediation_data
+  - records present in mediation_data but missing in network_cdr_data
+  - duplicate records in either layer
+  - corrupted key fields
+  - timestamp mismatches beyond tolerance
+  - partial session loss signals
+
+2. Mediation to Billing reconciliation
+- Reconcile mediation_data to billing_cdr_data.
+- Core match intent: mediation usage event to billing row by cdr_id and billing eligibility.
+- Key controls to evaluate:
+  - unrated usage where mediation event should be billable but no billing row exists
+  - rows not flagged for rating when business logic suggests they should be
+  - rating failures and duplicate billing cdr_id integrity issues
+  - incorrect tariff application heuristics
+  - zone / time-of-day heuristic anomalies
+  - orphan billing rows not present in mediation
+
+3. Billing to Roaming Settlement reconciliation
+- Reconcile billing_cdr_data to roaming_settlement_data.
+- Core match intent: billing rating_timestamp to roaming_settlement_data event_time inside the reconciliation window, with subscriber correlation and partner context.
+- Match window: 900 seconds.
+- Key controls to evaluate:
+  - missing roaming settlement records on either side
+  - partner / routing tag mismatches
+  - currency conversion / FX review issues
+  - settlement dispute amount deltas
+  - duration mismatch checks where applicable
+
+Multi-table DQ requirements:
+- Build the run as a multi-stage flow, not as isolated table profiling only.
+- Persist and expose:
+  - source table quality
+  - join health
+  - filter impact
+  - rejected records
+  - final dataset summary
+  - final surviving rows
+  - lineage overview
+  - lineage journey per row
+- Include row lineage ids across measured stages.
+- Include explainable evidence for every aggregate metric.
+- Do not write back to source data.
+- Enrichment, if any, should remain staged only.
+
+Expected stewardship outputs:
+- Dashboard sections for:
+  - executive summary
+  - source table quality
+  - join health
+  - stage waterfall
+  - filter impact
+  - final dataset quality
+  - lineage overview
+  - recommended actions
+- Excel workbook with:
+  - legend
+  - executive summary
+  - stage waterfall
+  - join health
+  - filter impact
+  - rejected records
+  - final dataset
+  - join exceptions
+  - lineage overview
+  - one all-data sheet per source table
+  - one stage sheet per measured stage
+
+Workflow expectations:
+- Pause before first rule execution when review is required.
+- During demo runs, allow the script to approve reviewable rules and resume automatically.
+- Generate dashboard and Excel only from persisted artifacts.
