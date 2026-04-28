@@ -228,8 +228,11 @@ from services.ai.data_quality_trends import (
     build_object_metric_snapshots,
     build_run_metric_snapshots,
     build_trend_api_payload,
+    build_trend_final_dataset_payload,
     build_trend_rows,
     build_trend_rule_payload,
+    build_trend_run_summary_payload,
+    build_trend_stage_payload,
     build_trend_table_payload,
     infer_trend_scope_key,
     summarize_trends,
@@ -10699,25 +10702,175 @@ DQ_TRENDS_EXAMPLE = {
     "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
     "baseline_run_id": "run_dq_001",
     "summary": {
-        "trend_row_count": 6,
-        "improved_metric_count": 3,
-        "worsened_metric_count": 1,
+        "trend_row_count": 3,
+        "improved_metric_count": 1,
+        "worsened_metric_count": 0,
         "baseline_metric_count": 0,
+        "unchanged_metric_count": 2,
+        "changed_metric_count": 0,
+    },
+    "cards": [
+        {
+            "card_key": "trend_scope",
+            "title": "Trend Scope",
+            "value": 3,
+            "subtitle": "Tracked Metrics",
+            "note": "Baseline run linked",
+            "trend_status": "unchanged",
+            "evidence_path": None,
+        },
+        {
+            "card_key": "overall_trust_score",
+            "title": "Overall Trust Score",
+            "value": 79.48,
+            "subtitle": "Run Summary",
+            "note": 78.62,
+            "delta_value": 0.86,
+            "delta_pct": 1.0939,
+            "trend_status": "improved",
+            "evidence_path": "/data-quality/trends?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_002&object_type=run&object_key=__run__&metric_name=overall_trust_score",
+        },
+        {
+            "card_key": "publish_readiness",
+            "title": "Publish Readiness",
+            "value": "ready",
+            "subtitle": "Certification",
+            "note": "ready",
+            "trend_status": "unchanged",
+            "evidence_path": "/data-quality/final-dataset?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_002",
+        },
+    ],
+    "chart_plan": [
+        {
+            "chart_key": "trend_status_distribution",
+            "chart_type": "column",
+            "title": "Trend Status Distribution",
+            "subtitle": "Metric rows grouped by trend status",
+            "summary": {"total_count": 3, "largest_bucket": 2},
+            "x_field": "category",
+            "y_field": "value",
+            "series_fields": ["value"],
+            "rows": [
+                {
+                    "category": "improved",
+                    "value": 1,
+                    "evidence_path": "/data-quality/trends?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_002&trend_status=improved",
+                },
+                {
+                    "category": "worsened",
+                    "value": 0,
+                    "evidence_path": "/data-quality/trends?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_002&trend_status=worsened",
+                },
+            ],
+        },
+        {
+            "chart_key": "top_improved_deltas",
+            "chart_type": "bar",
+            "title": "Top Improved Deltas",
+            "subtitle": "Largest positive changes for the selected run",
+            "summary": {"row_count": 1, "largest_delta": 0.86},
+            "x_field": "label",
+            "y_field": "value",
+            "series_fields": ["value"],
+            "rows": [
+                {
+                    "label": "billing_cdr_data - trust_score",
+                    "value": 0.86,
+                    "delta_pct": 1.0939,
+                    "object_type": "table",
+                    "object_key": "billing_cdr_data",
+                    "metric_name": "trust_score",
+                    "evidence_path": "/data-quality/trends/tables/billing_cdr_data?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_002",
+                }
+            ],
+        },
+        {
+            "chart_key": "publish_readiness",
+            "chart_type": "summary_cards",
+            "title": "Publish Readiness",
+            "subtitle": "Current certification state against the previous comparable run",
+            "summary": {
+                "current_readiness_status": "ready",
+                "previous_readiness_status": "ready",
+                "certification_blocker_count": 0,
+                "residual_anomaly_count": 0,
+            },
+            "rows": [
+                {
+                    "metric_key": "current_readiness_status",
+                    "label": "Current Readiness",
+                    "value": "ready",
+                    "note": "ready",
+                    "trend_status": "unchanged",
+                    "evidence_path": "/data-quality/final-dataset?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_002",
+                }
+            ],
+        },
+        {
+            "chart_key": "business_term_trends",
+            "chart_type": "table",
+            "title": "Business Term Trends",
+            "subtitle": "Glossary-grouped trend coverage for the current run",
+            "summary": {
+                "business_term_group_count": 1,
+                "worsened_business_term_count": 0,
+                "improved_business_term_count": 1,
+                "unmatched_trend_row_count": 0,
+            },
+            "columns": [
+                {"field": "business_term", "label": "Business Term"},
+                {"field": "trend_row_count", "label": "Trend Rows"},
+                {"field": "improved_metric_count", "label": "Improved"},
+                {"field": "worsened_metric_count", "label": "Worsened"},
+                {"field": "baseline_metric_count", "label": "Baseline"},
+                {"field": "affected_object_count", "label": "Affected Objects"},
+                {"field": "evidence_path", "label": "Evidence"},
+            ],
+            "rows": [
+                {
+                    "business_term": "Subscriber Identity",
+                    "normalized_term": "subscriber identity",
+                    "definition": "Subscriber identity and identifier quality across operational systems.",
+                    "trend_row_count": 1,
+                    "improved_metric_count": 1,
+                    "worsened_metric_count": 0,
+                    "baseline_metric_count": 0,
+                    "affected_object_count": 1,
+                    "affected_objects": "billing_cdr_data",
+                    "top_metrics": "trust_score",
+                    "evidence_path": "/data-quality/trends/business-terms?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_002&term=subscriber%20identity",
+                }
+            ],
+        },
+    ],
+    "groups": {
+        "run_final_dataset": {"count": 1, "summary": {"trend_row_count": 1, "improved_metric_count": 0, "worsened_metric_count": 0, "baseline_metric_count": 0, "unchanged_metric_count": 1, "changed_metric_count": 0}, "rows": []},
+        "tables": {"count": 1, "summary": {"trend_row_count": 1, "improved_metric_count": 1, "worsened_metric_count": 0, "baseline_metric_count": 0, "unchanged_metric_count": 0, "changed_metric_count": 0}, "rows": []},
+        "rules": {"count": 1, "summary": {"trend_row_count": 1, "improved_metric_count": 0, "worsened_metric_count": 0, "baseline_metric_count": 0, "unchanged_metric_count": 1, "changed_metric_count": 0}, "rows": []},
+        "stages": {"count": 0, "summary": {"trend_row_count": 0, "improved_metric_count": 0, "worsened_metric_count": 0, "baseline_metric_count": 0, "unchanged_metric_count": 0, "changed_metric_count": 0}, "rows": []},
+        "improved": {"count": 1, "summary": {"trend_row_count": 1, "improved_metric_count": 1, "worsened_metric_count": 0, "baseline_metric_count": 0, "unchanged_metric_count": 0, "changed_metric_count": 0}, "rows": []},
+        "worsened": {"count": 0, "summary": {"trend_row_count": 0, "improved_metric_count": 0, "worsened_metric_count": 0, "baseline_metric_count": 0, "unchanged_metric_count": 0, "changed_metric_count": 0}, "rows": []},
+        "baseline": {"count": 0, "summary": {"trend_row_count": 0, "improved_metric_count": 0, "worsened_metric_count": 0, "baseline_metric_count": 0, "unchanged_metric_count": 0, "changed_metric_count": 0}, "rows": []},
+        "changed": {"count": 0, "summary": {"trend_row_count": 0, "improved_metric_count": 0, "worsened_metric_count": 0, "baseline_metric_count": 0, "unchanged_metric_count": 0, "changed_metric_count": 0}, "rows": []},
+        "unchanged": {"count": 2, "summary": {"trend_row_count": 2, "improved_metric_count": 0, "worsened_metric_count": 0, "baseline_metric_count": 0, "unchanged_metric_count": 2, "changed_metric_count": 0}, "rows": []},
     },
     "trends": [
         {
-            "object_type": "run",
-            "object_key": "__run__",
-            "object_name": "Run Summary",
-            "metric_name": "overall_trust_score",
-            "previous_value_num": 74.58,
+            "object_type": "table",
+            "object_key": "billing_cdr_data",
+            "object_name": "billing_cdr_data",
+            "metric_name": "trust_score",
+            "previous_value_num": 78.62,
             "previous_value_text": None,
-            "current_value_num": 79.11,
+            "previous_display_value": 78.62,
+            "current_value_num": 79.48,
             "current_value_text": None,
-            "delta_value": 4.53,
-            "delta_pct": 6.074,
+            "current_display_value": 79.48,
+            "delta_value": 0.86,
+            "delta_pct": 1.0939,
             "trend_status": "improved",
             "directionality": "higher_better",
+            "evidence_path": "/data-quality/trends/tables/billing_cdr_data?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_002",
         }
     ],
 }
@@ -10989,6 +11142,13 @@ def get_data_quality_run_hydration(run_id: str) -> dict:
     "/data-quality/trends",
     tags=["data-quality"],
     summary="Get data quality trends for a run",
+    description=(
+        "Return the chart-ready trend contract for a completed data-quality run. "
+        "The response includes backend-computed summary counts, cards, chart_plan, grouped slices, "
+        "and detailed trend rows so the UI can render without additional aggregation. "
+        "Use the optional query filters to fetch only the subset the UI wants to render, "
+        "for example only worsened table metrics or only improved rule rows."
+    ),
     openapi_extra={
         "responses": {
             "200": {
@@ -11003,6 +11163,8 @@ def get_data_quality_trends(
     run_id: str | None = None,
     object_type: str | None = None,
     object_key: str | None = None,
+    trend_status: str | None = None,
+    metric_name: str | None = None,
 ) -> dict:
     if not run_id:
         raise HTTPException(status_code=400, detail="run_id is required")
@@ -11017,7 +11179,45 @@ def get_data_quality_trends(
         run_id=run_id,
         object_type=object_type,
         object_key=object_key,
+        trend_status=trend_status,
+        metric_name=metric_name,
         limit=4000,
+    )
+    anomaly_rows = list_quality_anomalies(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=4000,
+    )
+    issue_rows = list_quality_issues(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=4000,
+    )
+    final_dataset = get_quality_final_dataset_artifact(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+    ) or {}
+    business_term_overview = build_business_term_trend_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trends=trends,
+        glossary_terms=fetch_glossary_terms(settings, tenant_id, domain_id),
+        term=None,
+    )
+    readiness_overview = build_readiness_trend_payload(
+        run_id=run_id,
+        baseline_run_id=trend_meta.get("baseline_run_id"),
+        final_dataset=final_dataset,
+        trends=trends,
+        issues=issue_rows,
+        anomalies=anomaly_rows,
     )
     return build_trend_api_payload(
         tenant_id=tenant_id,
@@ -11026,6 +11226,8 @@ def get_data_quality_trends(
         trend_scope_key=trend_meta.get("trend_scope_key"),
         baseline_run_id=trend_meta.get("baseline_run_id"),
         trends=trends,
+        readiness_overview=readiness_overview,
+        business_term_overview=business_term_overview,
     )
 
 
@@ -11151,6 +11353,74 @@ def get_data_quality_rule_trends(
         run_id=run_id,
         trend_scope_key=trend_meta.get("trend_scope_key"),
         rule_key=rule_logical_key,
+        trends=trends,
+    )
+
+
+@app.get("/data-quality/trends/stages/{stage_logical_key}", tags=["data-quality"], summary="Get stage-level trends")
+def get_data_quality_stage_trends(
+    stage_logical_key: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+) -> dict:
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    trend_meta = _resolve_run_trend_metadata(row, get_deployment_run(settings, run_id) or {})
+    trends = list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, object_type="stage", object_key=stage_logical_key, limit=4000)
+    return build_trend_stage_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trend_scope_key=trend_meta.get("trend_scope_key"),
+        stage_key=stage_logical_key,
+        trends=trends,
+    )
+
+
+@app.get("/data-quality/trends/run-summary", tags=["data-quality"], summary="Get run-summary trends")
+def get_data_quality_run_summary_trends(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+) -> dict:
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    trend_meta = _resolve_run_trend_metadata(row, get_deployment_run(settings, run_id) or {})
+    trends = list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, object_type="run", limit=4000)
+    return build_trend_run_summary_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trend_scope_key=trend_meta.get("trend_scope_key"),
+        trends=trends,
+    )
+
+
+@app.get("/data-quality/trends/final-dataset", tags=["data-quality"], summary="Get final-dataset trends")
+def get_data_quality_final_dataset_trends(
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    run_id: str | None = None,
+) -> dict:
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    row = get_quality_run_by_run_id(settings, run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Data quality run not found")
+    trend_meta = _resolve_run_trend_metadata(row, get_deployment_run(settings, run_id) or {})
+    trends = list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, object_type="final_dataset", limit=4000)
+    return build_trend_final_dataset_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trend_scope_key=trend_meta.get("trend_scope_key"),
         trends=trends,
     )
 

@@ -374,7 +374,7 @@ python3 scripts/demo_data_quality_ui_api_flow.py \
 
 python3 scripts/demo_data_quality_ui_api_flow.py \
     --api-base http://localhost:8787 \
-    --tenant-id demo-rerun-02 \
+    --tenant-id demo-rern-01 \
     --domain-id data_quality_observability \
     --connection-id 1 \
     --database datafusion \

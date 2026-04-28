@@ -301,6 +301,7 @@ def _persist_trend_artifacts(settings, run_id: str, state: dict[str, Any]) -> di
                 settings,
                 tenant_id=scope["tenant_id"],
                 domain_id=scope["domain_id"],
+                trend_scope_key=trend_scope_key,
                 run_id=baseline_run_id,
                 limit=4000,
             )

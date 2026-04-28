@@ -656,7 +656,6 @@ Example response:
   "tenant_id": "VC_101",
   "domain_id": "data_quality_observability",
   "run_id": "run_dq_001",
-  "trend_mode": "monitor",
   "trend_scope_key": "cdr_primary_reconciliation_f8a1c3b0d2",
   "baseline_run_id": "run_dq_000",
   "summary": {
@@ -664,20 +663,71 @@ Example response:
     "improved_metric_count": 8,
     "worsened_metric_count": 2,
     "unchanged_metric_count": 4,
-    "baseline_metric_count": 0
+    "baseline_metric_count": 0,
+    "changed_metric_count": 0
   },
-  "rows": [
+  "cards": [
+    {
+      "card_key": "overall_trust_score",
+      "title": "Overall Trust Score",
+      "value": 71.4,
+      "note": 76.2,
+      "delta_value": -4.8,
+      "delta_pct": -6.3,
+      "trend_status": "worsened",
+      "evidence_path": "/data-quality/trends?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&object_type=run&object_key=__run__&metric_name=overall_trust_score"
+    }
+  ],
+  "chart_plan": [
+    {
+      "chart_key": "trend_status_distribution",
+      "chart_type": "column",
+      "title": "Trend Status Distribution",
+      "subtitle": "Metric rows grouped by trend status",
+      "summary": {
+        "total_count": 14,
+        "largest_bucket": 8
+      },
+      "x_field": "category",
+      "y_field": "value",
+      "series_fields": ["value"],
+      "rows": [
+        {
+          "category": "improved",
+          "value": 8,
+          "evidence_path": "/data-quality/trends?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001&trend_status=improved"
+        }
+      ]
+    }
+  ],
+  "groups": {
+    "tables": {
+      "count": 4,
+      "summary": {
+        "trend_row_count": 4,
+        "improved_metric_count": 2,
+        "worsened_metric_count": 1,
+        "baseline_metric_count": 0,
+        "unchanged_metric_count": 1,
+        "changed_metric_count": 0
+      },
+      "rows": []
+    }
+  },
+  "trends": [
     {
       "object_type": "table",
       "object_key": "network_cdr_data",
       "object_name": "network_cdr_data",
       "metric_name": "trust_score",
       "previous_value_num": 76.2,
+      "previous_display_value": 76.2,
       "current_value_num": 71.4,
+      "current_display_value": 71.4,
       "delta_value": -4.8,
       "delta_pct": -6.3,
       "trend_status": "worsened",
-      "directionality": "higher_is_better",
+      "directionality": "higher_better",
       "evidence_path": "/data-quality/trends/tables/network_cdr_data?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001"
     }
   ]
@@ -686,10 +736,19 @@ Example response:
 
 Use this for:
 
-- trend tables
-- top improved / worsened lists
 - trend summary cards
-- anomaly correlation
+- status and object-type charts
+- top improved / worsened delta charts
+- grouped table / rule / stage sections
+- filtered drill-through views
+- anomaly and readiness correlation
+
+The UI should treat this as the primary chart-ready contract:
+
+- `cards` -> summary cards
+- `chart_plan` -> render directly with the chart component layer
+- `groups` -> tab or panel slices without client-side regrouping
+- `trends` -> detail rows and modals
 
 ### 6B.2 Table-specific trend view
 

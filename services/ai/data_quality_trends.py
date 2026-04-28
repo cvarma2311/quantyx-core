@@ -11,6 +11,7 @@ import urllib.request
 from urllib.parse import quote
 
 from services.ai.config import Settings
+from services.ai.data_quality_rules import derive_quality_rule_label
 from services.ai.data_quality_store import (
     list_quality_dataset_stages,
     list_quality_rules,
@@ -302,7 +303,10 @@ def build_object_metric_snapshots(
             )
     for rule in rules:
         key = rule_logical_key(rule)
-        label = str(rule.get("rule_label") or rule.get("rule_type") or key)
+        label = str(rule.get("rule_label") or "").strip()
+        if not label:
+            label = derive_quality_rule_label(rule)
+        label = label or str(rule.get("rule_type") or key)
         snapshots.extend(
             [
                 {
@@ -495,6 +499,462 @@ def summarize_trends(trends: list[dict[str, Any]]) -> dict[str, Any]:
         "improved_metric_count": sum(1 for item in trends if str(item.get("trend_status")) == "improved"),
         "worsened_metric_count": sum(1 for item in trends if str(item.get("trend_status")) == "worsened"),
         "baseline_metric_count": sum(1 for item in trends if str(item.get("trend_status")) == "baseline"),
+        "unchanged_metric_count": sum(1 for item in trends if str(item.get("trend_status")) == "unchanged"),
+        "changed_metric_count": sum(1 for item in trends if str(item.get("trend_status")) == "changed"),
+    }
+
+
+def _trend_display_value(row: dict[str, Any], prefix: str) -> Any:
+    numeric = row.get(f"{prefix}_value_num")
+    if numeric is not None:
+        return numeric
+    return row.get(f"{prefix}_value_text")
+
+
+def _normalized_trend_row(
+    *,
+    row: dict[str, Any],
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+) -> dict[str, Any]:
+    def _evidence_path(item: dict[str, Any]) -> str:
+        object_type = str(item.get("object_type") or "").strip()
+        object_key = str(item.get("object_key") or "").strip()
+        if object_type == "table" and object_key:
+            return (
+                f"/data-quality/trends/tables/{quote(object_key)}"
+                f"?tenant_id={quote(str(tenant_id))}&domain_id={quote(str(domain_id))}&run_id={quote(str(run_id))}"
+            )
+        if object_type == "rule" and object_key:
+            return (
+                f"/data-quality/trends/rules/{quote(object_key)}"
+                f"?tenant_id={quote(str(tenant_id))}&domain_id={quote(str(domain_id))}&run_id={quote(str(run_id))}"
+            )
+        if object_type == "stage" and object_key:
+            return (
+                f"/data-quality/trends/stages/{quote(object_key)}"
+                f"?tenant_id={quote(str(tenant_id))}&domain_id={quote(str(domain_id))}&run_id={quote(str(run_id))}"
+            )
+        if object_type == "run":
+            return (
+                f"/data-quality/trends/run-summary"
+                f"?tenant_id={quote(str(tenant_id))}&domain_id={quote(str(domain_id))}&run_id={quote(str(run_id))}"
+            )
+        if object_type == "final_dataset":
+            return (
+                f"/data-quality/trends/final-dataset"
+                f"?tenant_id={quote(str(tenant_id))}&domain_id={quote(str(domain_id))}&run_id={quote(str(run_id))}"
+            )
+        base = (
+            f"/data-quality/trends?tenant_id={quote(str(tenant_id))}"
+            f"&domain_id={quote(str(domain_id))}&run_id={quote(str(run_id))}"
+        )
+        if object_type:
+            base += f"&object_type={quote(object_type)}"
+        if object_key:
+            base += f"&object_key={quote(object_key)}"
+        metric_name = str(item.get("metric_name") or "").strip()
+        if metric_name:
+            base += f"&metric_name={quote(metric_name)}"
+        return base
+
+    previous_display = _trend_display_value(row, "previous")
+    current_display = _trend_display_value(row, "current")
+    return {
+        "object_type": row.get("object_type"),
+        "object_key": row.get("object_key"),
+        "object_name": row.get("object_name"),
+        "metric_name": row.get("metric_name"),
+        "previous_value_num": row.get("previous_value_num"),
+        "previous_value_text": row.get("previous_value_text"),
+        "previous_display_value": previous_display,
+        "current_value_num": row.get("current_value_num"),
+        "current_value_text": row.get("current_value_text"),
+        "current_display_value": current_display,
+        "delta_value": row.get("delta_value"),
+        "delta_pct": row.get("delta_pct"),
+        "trend_status": row.get("trend_status"),
+        "directionality": row.get("directionality"),
+        "evidence_path": _evidence_path(row),
+    }
+
+
+def _sort_trend_rows_for_delta(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        rows,
+        key=lambda item: (
+            -abs(_as_float(item.get("delta_value")) or 0.0),
+            str(item.get("object_name") or item.get("object_key") or ""),
+            str(item.get("metric_name") or ""),
+        ),
+    )
+
+
+def _build_trend_cards(
+    *,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+    baseline_run_id: str | None,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    readiness_overview: dict[str, Any] | None = None,
+    business_term_overview: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    run_trust = next(
+        (
+            item
+            for item in rows
+            if str(item.get("object_type") or "") == "run"
+            and str(item.get("metric_name") or "") == "overall_trust_score"
+        ),
+        None,
+    )
+    final_readiness = next(
+        (
+            item
+            for item in rows
+            if str(item.get("object_type") or "") == "final_dataset"
+            and str(item.get("metric_name") or "") == "readiness_status"
+        ),
+        None,
+    )
+    final_rows = next(
+        (
+            item
+            for item in rows
+            if str(item.get("object_type") or "") == "final_dataset"
+            and str(item.get("metric_name") or "") == "final_row_count"
+        ),
+        None,
+    )
+    cards = [
+        {
+            "card_key": "trend_scope",
+            "title": "Trend Scope",
+            "value": summary.get("trend_row_count", 0),
+            "subtitle": "Tracked Metrics",
+            "note": "Baseline run linked" if baseline_run_id else "Baseline run not available yet",
+            "trend_status": "baseline" if baseline_run_id is None else "unchanged",
+            "evidence_path": None,
+        },
+        {
+            "card_key": "overall_trust_score",
+            "title": "Overall Trust Score",
+            "value": run_trust.get("current_display_value") if run_trust else None,
+            "subtitle": "Run Summary",
+            "note": run_trust.get("previous_display_value") if run_trust else None,
+            "delta_value": run_trust.get("delta_value") if run_trust else None,
+            "delta_pct": run_trust.get("delta_pct") if run_trust else None,
+            "trend_status": run_trust.get("trend_status") if run_trust else "baseline",
+            "evidence_path": run_trust.get("evidence_path") if run_trust else None,
+        },
+        {
+            "card_key": "final_dataset_readiness",
+            "title": "Final Dataset Readiness",
+            "value": final_readiness.get("current_display_value") if final_readiness else None,
+            "subtitle": "Final Dataset",
+            "note": final_readiness.get("previous_display_value") if final_readiness else None,
+            "trend_status": final_readiness.get("trend_status") if final_readiness else "baseline",
+            "evidence_path": final_readiness.get("evidence_path") if final_readiness else None,
+        },
+        {
+            "card_key": "final_row_count",
+            "title": "Final Row Count",
+            "value": final_rows.get("current_display_value") if final_rows else None,
+            "subtitle": "Final Dataset",
+            "note": final_rows.get("previous_display_value") if final_rows else None,
+            "delta_value": final_rows.get("delta_value") if final_rows else None,
+            "delta_pct": final_rows.get("delta_pct") if final_rows else None,
+            "trend_status": final_rows.get("trend_status") if final_rows else "baseline",
+            "evidence_path": final_rows.get("evidence_path") if final_rows else None,
+        },
+    ]
+    readiness_overview = dict(readiness_overview or {})
+    if readiness_overview:
+        readiness_path = str(readiness_overview.get("evidence_path_template") or "").replace(
+            "{tenant_id}", quote(str(tenant_id))
+        ).replace("{domain_id}", quote(str(domain_id)))
+        cards.append(
+            {
+                "card_key": "publish_readiness",
+                "title": "Publish Readiness",
+                "value": readiness_overview.get("current_readiness_status"),
+                "subtitle": "Certification",
+                "note": readiness_overview.get("previous_readiness_status") or "No previous readiness state",
+                "trend_status": readiness_overview.get("readiness_trend_status") or "baseline",
+                "evidence_path": readiness_path,
+            }
+        )
+    business_term_overview = dict(business_term_overview or {})
+    business_term_summary = dict(business_term_overview.get("summary") or {})
+    if business_term_summary:
+        cards.append(
+            {
+                "card_key": "business_term_groups",
+                "title": "Business Term Groups",
+                "value": business_term_summary.get("business_term_group_count", 0),
+                "subtitle": "Glossary Trend Coverage",
+                "note": f"{business_term_summary.get('worsened_business_term_count', 0)} worsened groups",
+                "trend_status": "worsened" if int(business_term_summary.get("worsened_business_term_count") or 0) > 0 else "unchanged",
+                "evidence_path": f"/data-quality/trends/business-terms?tenant_id={quote(str(tenant_id))}&domain_id={quote(str(domain_id))}&run_id={quote(str(run_id))}",
+            }
+        )
+    return cards
+
+
+def _build_trend_chart_plan(
+    *,
+    rows: list[dict[str, Any]],
+    summary: dict[str, Any],
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    readiness_overview: dict[str, Any] | None = None,
+    business_term_overview: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    base_trend_path = (
+        f"/data-quality/trends?tenant_id={quote(str(tenant_id))}"
+        f"&domain_id={quote(str(domain_id))}&run_id={quote(str(run_id))}"
+    )
+    status_chart_rows: list[dict[str, Any]] = []
+    for status in ["improved", "worsened", "baseline", "unchanged", "changed"]:
+        count = int(summary.get(f"{status}_metric_count") or 0)
+        status_chart_rows.append(
+            {
+                "category": status,
+                "value": count,
+                "evidence_path": f"{base_trend_path}&trend_status={quote(status)}",
+            }
+        )
+
+    object_type_counts: dict[str, int] = {}
+    for row in rows:
+        object_type = str(row.get("object_type") or "unknown")
+        object_type_counts[object_type] = object_type_counts.get(object_type, 0) + 1
+    object_type_rows = [
+        {
+            "category": object_type,
+            "value": count,
+            "evidence_path": f"{base_trend_path}&object_type={quote(object_type)}",
+        }
+        for object_type, count in sorted(object_type_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+    improved_rows = _sort_trend_rows_for_delta(
+        [row for row in rows if str(row.get("trend_status") or "") == "improved" and _as_float(row.get("delta_value")) is not None]
+    )[:10]
+    worsened_rows = _sort_trend_rows_for_delta(
+        [row for row in rows if str(row.get("trend_status") or "") == "worsened" and _as_float(row.get("delta_value")) is not None]
+    )[:10]
+
+    def _delta_chart_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "label": f"{item.get('object_name') or item.get('object_key')} - {item.get('metric_name')}",
+                "value": _as_float(item.get("delta_value")),
+                "delta_pct": item.get("delta_pct"),
+                "object_type": item.get("object_type"),
+                "object_key": item.get("object_key"),
+                "metric_name": item.get("metric_name"),
+                "evidence_path": item.get("evidence_path"),
+            }
+            for item in items
+        ]
+
+    chart_plan = [
+        {
+            "chart_key": "trend_status_distribution",
+            "chart_type": "column",
+            "title": "Trend Status Distribution",
+            "subtitle": "Metric rows grouped by trend status",
+            "summary": {
+                "total_count": int(summary.get("trend_row_count") or 0),
+                "largest_bucket": max((row.get("value") or 0 for row in status_chart_rows), default=0),
+            },
+            "x_field": "category",
+            "y_field": "value",
+            "series_fields": ["value"],
+            "rows": status_chart_rows,
+        },
+        {
+            "chart_key": "object_type_distribution",
+            "chart_type": "pie",
+            "title": "Trend Rows by Object Type",
+            "subtitle": "Distribution across run, table, rule, and stage metrics",
+            "summary": {
+                "object_type_count": len(object_type_rows),
+                "largest_bucket": max((row.get("value") or 0 for row in object_type_rows), default=0),
+            },
+            "x_field": "category",
+            "y_field": "value",
+            "series_fields": ["value"],
+            "rows": object_type_rows,
+        },
+        {
+            "chart_key": "top_improved_deltas",
+            "chart_type": "bar",
+            "title": "Top Improved Deltas",
+            "subtitle": "Largest positive changes for the selected run",
+            "summary": {
+                "row_count": len(improved_rows),
+                "largest_delta": max((_as_float(row.get("delta_value")) or 0.0 for row in improved_rows), default=0.0),
+            },
+            "x_field": "label",
+            "y_field": "value",
+            "series_fields": ["value"],
+            "rows": _delta_chart_rows(improved_rows),
+        },
+        {
+            "chart_key": "top_worsened_deltas",
+            "chart_type": "bar",
+            "title": "Top Worsened Deltas",
+            "subtitle": "Largest regressions for the selected run",
+            "summary": {
+                "row_count": len(worsened_rows),
+                "largest_delta": max((abs(_as_float(row.get("delta_value")) or 0.0) for row in worsened_rows), default=0.0),
+            },
+            "x_field": "label",
+            "y_field": "value",
+            "series_fields": ["value"],
+            "rows": _delta_chart_rows(worsened_rows),
+        },
+    ]
+
+    readiness_overview = dict(readiness_overview or {})
+    if readiness_overview:
+        chart_plan.append(
+            {
+                "chart_key": "publish_readiness",
+                "chart_type": "summary_cards",
+                "title": "Publish Readiness",
+                "subtitle": "Current certification state against the previous comparable run",
+                "summary": {
+                    "current_readiness_status": readiness_overview.get("current_readiness_status"),
+                    "previous_readiness_status": readiness_overview.get("previous_readiness_status"),
+                    "certification_blocker_count": readiness_overview.get("certification_blocker_count"),
+                    "residual_anomaly_count": readiness_overview.get("residual_anomaly_count"),
+                },
+                "rows": [
+                    {
+                        "metric_key": "current_readiness_status",
+                        "label": "Current Readiness",
+                        "value": readiness_overview.get("current_readiness_status"),
+                        "note": readiness_overview.get("previous_readiness_status"),
+                        "trend_status": readiness_overview.get("readiness_trend_status"),
+                        "evidence_path": str(readiness_overview.get("evidence_path_template") or "").replace(
+                            "{tenant_id}", quote(str(tenant_id))
+                        ).replace("{domain_id}", quote(str(domain_id))),
+                    },
+                    {
+                        "metric_key": "final_row_count_delta",
+                        "label": "Final Row Delta",
+                        "value": readiness_overview.get("final_row_count_delta"),
+                        "note": readiness_overview.get("final_row_count_delta_pct"),
+                        "trend_status": readiness_overview.get("readiness_trend_status"),
+                        "evidence_path": str(readiness_overview.get("evidence_path_template") or "").replace(
+                            "{tenant_id}", quote(str(tenant_id))
+                        ).replace("{domain_id}", quote(str(domain_id))),
+                    },
+                    {
+                        "metric_key": "certification_blocker_count",
+                        "label": "Certification Blockers",
+                        "value": readiness_overview.get("certification_blocker_count"),
+                        "note": readiness_overview.get("open_issue_count"),
+                        "trend_status": "worsened" if int(readiness_overview.get("certification_blocker_count") or 0) > 0 else "unchanged",
+                        "evidence_path": str(readiness_overview.get("evidence_path_template") or "").replace(
+                            "{tenant_id}", quote(str(tenant_id))
+                        ).replace("{domain_id}", quote(str(domain_id))),
+                    },
+                    {
+                        "metric_key": "residual_anomaly_count",
+                        "label": "Residual Anomalies",
+                        "value": readiness_overview.get("residual_anomaly_count"),
+                        "note": readiness_overview.get("critical_anomaly_count"),
+                        "trend_status": "worsened" if int(readiness_overview.get("critical_anomaly_count") or 0) > 0 else "unchanged",
+                        "evidence_path": str(readiness_overview.get("evidence_path_template") or "").replace(
+                            "{tenant_id}", quote(str(tenant_id))
+                        ).replace("{domain_id}", quote(str(domain_id))),
+                    },
+                ],
+            }
+        )
+
+    business_term_overview = dict(business_term_overview or {})
+    business_term_rows = [row for row in (business_term_overview.get("rows") or []) if isinstance(row, dict)]
+    business_term_summary = dict(business_term_overview.get("summary") or {})
+    if business_term_rows or business_term_summary:
+        chart_plan.append(
+            {
+                "chart_key": "business_term_trends",
+                "chart_type": "table",
+                "title": "Business Term Trends",
+                "subtitle": "Glossary-grouped trend coverage for the current run",
+                "summary": business_term_summary,
+                "columns": [
+                    {"field": "business_term", "label": "Business Term"},
+                    {"field": "trend_row_count", "label": "Trend Rows"},
+                    {"field": "improved_metric_count", "label": "Improved"},
+                    {"field": "worsened_metric_count", "label": "Worsened"},
+                    {"field": "baseline_metric_count", "label": "Baseline"},
+                    {"field": "affected_object_count", "label": "Affected Objects"},
+                    {"field": "evidence_path", "label": "Evidence"},
+                ],
+                "rows": business_term_rows,
+            }
+        )
+
+    return chart_plan
+
+
+def _build_trend_groups(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def _slice(*, status: str | None = None, object_type: str | None = None, limit: int = 50) -> dict[str, Any]:
+        filtered = [
+            row
+            for row in rows
+            if (status is None or str(row.get("trend_status") or "") == status)
+            and (object_type is None or str(row.get("object_type") or "") == object_type)
+        ]
+        ordered = _sort_trend_rows_for_delta(filtered)
+        return {
+            "count": len(filtered),
+            "summary": summarize_trends(filtered),
+            "rows": ordered[:limit],
+        }
+
+    return {
+        "run_final_dataset": {
+            "count": len(
+                [
+                    row
+                    for row in rows
+                    if str(row.get("object_type") or "") in {"run", "final_dataset"}
+                ]
+            ),
+            "summary": summarize_trends(
+                [
+                    row
+                    for row in rows
+                    if str(row.get("object_type") or "") in {"run", "final_dataset"}
+                ]
+            ),
+            "rows": _sort_trend_rows_for_delta(
+                [
+                    row
+                    for row in rows
+                    if str(row.get("object_type") or "") in {"run", "final_dataset"}
+                ]
+            )[:20],
+        },
+        "tables": _slice(object_type="table"),
+        "rules": _slice(object_type="rule"),
+        "stages": _slice(object_type="stage"),
+        "improved": _slice(status="improved"),
+        "worsened": _slice(status="worsened"),
+        "baseline": _slice(status="baseline"),
+        "changed": _slice(status="changed"),
+        "unchanged": _slice(status="unchanged"),
     }
 
 
@@ -736,31 +1196,41 @@ def build_trend_api_payload(
     trend_scope_key: str | None,
     baseline_run_id: str | None,
     trends: list[dict[str, Any]],
+    readiness_overview: dict[str, Any] | None = None,
+    business_term_overview: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rows = [
-        {
-            "object_type": row.get("object_type"),
-            "object_key": row.get("object_key"),
-            "object_name": row.get("object_name"),
-            "metric_name": row.get("metric_name"),
-            "previous_value_num": row.get("previous_value_num"),
-            "previous_value_text": row.get("previous_value_text"),
-            "current_value_num": row.get("current_value_num"),
-            "current_value_text": row.get("current_value_text"),
-            "delta_value": row.get("delta_value"),
-            "delta_pct": row.get("delta_pct"),
-            "trend_status": row.get("trend_status"),
-            "directionality": row.get("directionality"),
-        }
+        _normalized_trend_row(row=row, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id)
         for row in trends
     ]
+    summary = summarize_trends(trends)
     return {
         "tenant_id": tenant_id,
         "domain_id": domain_id,
         "run_id": run_id,
         "trend_scope_key": trend_scope_key,
         "baseline_run_id": baseline_run_id,
-        "summary": summarize_trends(trends),
+        "summary": summary,
+        "cards": _build_trend_cards(
+            rows=rows,
+            summary=summary,
+            baseline_run_id=baseline_run_id,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            readiness_overview=readiness_overview,
+            business_term_overview=business_term_overview,
+        ),
+        "chart_plan": _build_trend_chart_plan(
+            rows=rows,
+            summary=summary,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            readiness_overview=readiness_overview,
+            business_term_overview=business_term_overview,
+        ),
+        "groups": _build_trend_groups(rows),
         "trends": rows,
     }
 
@@ -829,7 +1299,89 @@ def build_trend_table_payload(
         baseline_run_id=rows[0].get("baseline_run_id") if rows else None,
         trends=rows,
     )
+    payload["focus"] = {
+        "focus_type": "table",
+        "focus_key": table_name,
+        "focus_label": table_name,
+    }
     payload["table_name"] = table_name
+    return payload
+
+
+def build_trend_stage_payload(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    trend_scope_key: str | None,
+    stage_key: str,
+    trends: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rows = [row for row in trends if row.get("object_type") == "stage" and str(row.get("object_key") or "") == stage_key]
+    payload = build_trend_api_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trend_scope_key=trend_scope_key,
+        baseline_run_id=rows[0].get("baseline_run_id") if rows else None,
+        trends=rows,
+    )
+    payload["focus"] = {
+        "focus_type": "stage",
+        "focus_key": stage_key,
+        "focus_label": rows[0].get("object_name") if rows else stage_key,
+    }
+    payload["stage_logical_key"] = stage_key
+    return payload
+
+
+def build_trend_run_summary_payload(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    trend_scope_key: str | None,
+    trends: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rows = [row for row in trends if row.get("object_type") == "run"]
+    payload = build_trend_api_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trend_scope_key=trend_scope_key,
+        baseline_run_id=rows[0].get("baseline_run_id") if rows else None,
+        trends=rows,
+    )
+    payload["focus"] = {
+        "focus_type": "run",
+        "focus_key": "__run__",
+        "focus_label": "Run Summary",
+    }
+    return payload
+
+
+def build_trend_final_dataset_payload(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    trend_scope_key: str | None,
+    trends: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rows = [row for row in trends if row.get("object_type") == "final_dataset"]
+    payload = build_trend_api_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trend_scope_key=trend_scope_key,
+        baseline_run_id=rows[0].get("baseline_run_id") if rows else None,
+        trends=rows,
+    )
+    payload["focus"] = {
+        "focus_type": "final_dataset",
+        "focus_key": "final_dataset",
+        "focus_label": "Final Dataset",
+    }
     return payload
 
 
@@ -851,5 +1403,10 @@ def build_trend_rule_payload(
         baseline_run_id=rows[0].get("baseline_run_id") if rows else None,
         trends=rows,
     )
+    payload["focus"] = {
+        "focus_type": "rule",
+        "focus_key": rule_key,
+        "focus_label": rows[0].get("object_name") if rows else rule_key,
+    }
     payload["rule_logical_key"] = rule_key
     return payload

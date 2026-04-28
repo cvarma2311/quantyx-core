@@ -1548,7 +1548,7 @@ def list_quality_rules(
         params.append(rule_status)
     params.append(max(1, min(int(limit or 1200), 4000)))
     try:
-        return run_query(
+        rows = run_query(
             settings,
             f"""
             SELECT r.*,
@@ -1576,6 +1576,12 @@ def list_quality_rules(
             """,
             params,
         )
+        from services.ai.data_quality_rules import derive_quality_rule_label
+
+        for row in rows:
+            if not str(row.get("rule_label") or "").strip():
+                row["rule_label"] = derive_quality_rule_label(row)
+        return rows
     except psycopg2.errors.UndefinedTable:
         return []
 
@@ -1933,6 +1939,8 @@ def list_quality_trends(
     run_id: str,
     object_type: str | None = None,
     object_key: str | None = None,
+    trend_status: str | None = None,
+    metric_name: str | None = None,
     limit: int = 1200,
 ) -> list[dict[str, Any]]:
     params: list[Any] = [tenant_id, domain_id, run_id]
@@ -1943,6 +1951,12 @@ def list_quality_trends(
     if object_key:
         filters += " AND object_key = %s"
         params.append(object_key)
+    if trend_status:
+        filters += " AND trend_status = %s"
+        params.append(trend_status)
+    if metric_name:
+        filters += " AND metric_name = %s"
+        params.append(metric_name)
     params.append(max(1, min(int(limit or 1200), 4000)))
     try:
         return run_query(

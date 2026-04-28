@@ -4523,6 +4523,353 @@ def test_build_trend_rows_compares_previous_snapshots() -> None:
     assert trends[0]["delta_value"] == 8.0
 
 
+def test_build_object_metric_snapshots_uses_business_rule_label() -> None:
+    snapshots = dq_trends.build_object_metric_snapshots(
+        tables=[],
+        rules=[
+            {
+                "rule_type": "custom_sql",
+                "table_name": "billing_cdr_data",
+                "condition_json": {
+                    "validation_sql": "SELECT COUNT(*) FILTER (WHERE charged_amount < 0) AS violation_count FROM billing_cdr_data"
+                },
+            }
+        ],
+        stages=[],
+        final_dataset=None,
+    )
+
+    rule_rows = [row for row in snapshots if row.get("object_type") == "rule"]
+    assert rule_rows
+    assert all(row["object_name"] == "Negative charged amount in billing_cdr_data" for row in rule_rows)
+
+
+def test_list_quality_trends_supports_presentation_filters(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_query(settings, sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(dq_store, "run_query", fake_run_query)
+
+    dq_store.list_quality_trends(
+        None,
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        object_type="table",
+        object_key="billing_cdr_data",
+        trend_status="improved",
+        metric_name="trust_score",
+        limit=1200,
+    )
+
+    assert "AND object_type = %s" in str(captured["sql"])
+    assert "AND object_key = %s" in str(captured["sql"])
+    assert "AND trend_status = %s" in str(captured["sql"])
+    assert "AND metric_name = %s" in str(captured["sql"])
+    assert captured["params"] == [
+        "tenant",
+        "data_quality_observability",
+        "run_1",
+        "table",
+        "billing_cdr_data",
+        "improved",
+        "trust_score",
+        1200,
+    ]
+
+
+def test_build_trend_api_payload_adds_evidence_paths() -> None:
+    payload = dq_trends.build_trend_api_payload(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        trend_scope_key="scope_1",
+        baseline_run_id="run_0",
+        readiness_overview={
+            "current_readiness_status": "ready",
+            "previous_readiness_status": "warning",
+            "readiness_trend_status": "improved",
+            "certification_blocker_count": 0,
+            "residual_anomaly_count": 0,
+            "critical_anomaly_count": 0,
+            "evidence_path_template": "/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id=run_1",
+        },
+        business_term_overview={
+            "summary": {
+                "business_term_group_count": 1,
+                "worsened_business_term_count": 0,
+                "improved_business_term_count": 1,
+                "unmatched_trend_row_count": 0,
+            },
+            "rows": [
+                {
+                    "business_term": "Orders",
+                    "trend_row_count": 1,
+                    "improved_metric_count": 1,
+                    "worsened_metric_count": 0,
+                    "baseline_metric_count": 0,
+                    "affected_object_count": 1,
+                    "evidence_path": "/data-quality/trends/business-terms?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1&term=orders",
+                }
+            ],
+        },
+        trends=[
+            {
+                "object_type": "table",
+                "object_key": "orders",
+                "object_name": "orders",
+                "metric_name": "trust_score",
+                "previous_value_num": 70.0,
+                "current_value_num": 75.0,
+                "delta_value": 5.0,
+                "delta_pct": 7.14,
+                "trend_status": "improved",
+                "directionality": "higher_better",
+            },
+            {
+                "object_type": "rule",
+                "object_key": "rule_123",
+                "object_name": "Invalid customer email",
+                "metric_name": "violation_count",
+                "previous_value_num": 12.0,
+                "current_value_num": 3.0,
+                "delta_value": -9.0,
+                "delta_pct": -75.0,
+                "trend_status": "improved",
+                "directionality": "lower_better",
+            },
+            {
+                "object_type": "run",
+                "object_key": "__run__",
+                "object_name": "Run Summary",
+                "metric_name": "overall_trust_score",
+                "previous_value_num": 70.0,
+                "current_value_num": 75.0,
+                "delta_value": 5.0,
+                "delta_pct": 7.14,
+                "trend_status": "improved",
+                "directionality": "higher_better",
+            },
+            {
+                "object_type": "final_dataset",
+                "object_key": "final_dataset",
+                "object_name": "Final Dataset",
+                "metric_name": "final_row_count",
+                "previous_value_num": 10.0,
+                "current_value_num": 12.0,
+                "delta_value": 2.0,
+                "delta_pct": 20.0,
+                "trend_status": "improved",
+                "directionality": "higher_better",
+            },
+            {
+                "object_type": "stage",
+                "object_key": "stage_123",
+                "object_name": "Source Profile Orders",
+                "metric_name": "output_row_count",
+                "previous_value_num": 10.0,
+                "current_value_num": 12.0,
+                "delta_value": 2.0,
+                "delta_pct": 20.0,
+                "trend_status": "improved",
+                "directionality": "higher_better",
+            },
+        ],
+    )
+
+    assert payload["trends"][0]["evidence_path"] == "/data-quality/trends/tables/orders?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1"
+    assert payload["trends"][1]["evidence_path"] == "/data-quality/trends/rules/rule_123?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1"
+    assert payload["trends"][2]["evidence_path"] == "/data-quality/trends/run-summary?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1"
+    assert payload["trends"][3]["evidence_path"] == "/data-quality/trends/final-dataset?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1"
+    assert payload["trends"][4]["evidence_path"] == "/data-quality/trends/stages/stage_123?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1"
+    assert payload["summary"]["unchanged_metric_count"] == 0
+    assert payload["summary"]["changed_metric_count"] == 0
+    assert payload["cards"][0]["card_key"] == "trend_scope"
+    assert payload["cards"][1]["card_key"] == "overall_trust_score"
+    assert payload["cards"][4]["card_key"] == "publish_readiness"
+    assert payload["cards"][5]["card_key"] == "business_term_groups"
+    assert payload["chart_plan"][0]["chart_key"] == "trend_status_distribution"
+    assert payload["chart_plan"][1]["chart_key"] == "object_type_distribution"
+    assert payload["chart_plan"][0]["x_field"] == "category"
+    assert payload["chart_plan"][0]["y_field"] == "value"
+    assert payload["chart_plan"][0]["series_fields"] == ["value"]
+    assert payload["chart_plan"][4]["chart_key"] == "publish_readiness"
+    assert payload["chart_plan"][5]["chart_key"] == "business_term_trends"
+    assert payload["groups"]["tables"]["count"] == 1
+    assert payload["groups"]["rules"]["count"] == 1
+    assert payload["groups"]["run_final_dataset"]["count"] == 2
+    assert payload["groups"]["tables"]["summary"]["trend_row_count"] == 1
+    assert payload["trends"][0]["previous_display_value"] == 70.0
+    assert payload["trends"][0]["current_display_value"] == 75.0
+
+
+def test_build_trend_table_payload_returns_chart_ready_sections() -> None:
+    payload = dq_trends.build_trend_table_payload(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        trend_scope_key="scope_1",
+        table_name="orders",
+        trends=[
+            {
+                "baseline_run_id": "run_0",
+                "object_type": "table",
+                "object_key": "orders",
+                "object_name": "orders",
+                "metric_name": "trust_score",
+                "previous_value_num": 70.0,
+                "current_value_num": 75.0,
+                "delta_value": 5.0,
+                "delta_pct": 7.14,
+                "trend_status": "improved",
+                "directionality": "higher_better",
+            }
+        ],
+    )
+
+    assert payload["focus"] == {
+        "focus_type": "table",
+        "focus_key": "orders",
+        "focus_label": "orders",
+    }
+    assert payload["chart_plan"][2]["chart_key"] == "top_improved_deltas"
+    assert payload["groups"]["tables"]["count"] == 1
+
+
+def test_build_stage_and_run_final_trend_payloads_return_focus_blocks() -> None:
+    stage_payload = dq_trends.build_trend_stage_payload(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        trend_scope_key="scope_1",
+        stage_key="stage_abc",
+        trends=[
+            {
+                "baseline_run_id": "run_0",
+                "object_type": "stage",
+                "object_key": "stage_abc",
+                "object_name": "Stage ABC",
+                "metric_name": "output_row_count",
+                "previous_value_num": 10.0,
+                "current_value_num": 12.0,
+                "delta_value": 2.0,
+                "delta_pct": 20.0,
+                "trend_status": "improved",
+                "directionality": "higher_better",
+            }
+        ],
+    )
+    run_payload = dq_trends.build_trend_run_summary_payload(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        trend_scope_key="scope_1",
+        trends=[
+            {
+                "baseline_run_id": "run_0",
+                "object_type": "run",
+                "object_key": "__run__",
+                "object_name": "Run Summary",
+                "metric_name": "overall_trust_score",
+                "previous_value_num": 70.0,
+                "current_value_num": 75.0,
+                "delta_value": 5.0,
+                "delta_pct": 7.14,
+                "trend_status": "improved",
+                "directionality": "higher_better",
+            }
+        ],
+    )
+    final_payload = dq_trends.build_trend_final_dataset_payload(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        trend_scope_key="scope_1",
+        trends=[
+            {
+                "baseline_run_id": "run_0",
+                "object_type": "final_dataset",
+                "object_key": "final_dataset",
+                "object_name": "Final Dataset",
+                "metric_name": "final_row_count",
+                "previous_value_num": 10.0,
+                "current_value_num": 12.0,
+                "delta_value": 2.0,
+                "delta_pct": 20.0,
+                "trend_status": "improved",
+                "directionality": "higher_better",
+            }
+        ],
+    )
+
+    assert stage_payload["focus"]["focus_type"] == "stage"
+    assert stage_payload["stage_logical_key"] == "stage_abc"
+    assert run_payload["focus"]["focus_type"] == "run"
+    assert final_payload["focus"]["focus_type"] == "final_dataset"
+
+
+def test_persist_trend_artifacts_reads_baseline_object_snapshots_with_scope_key(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "_resolved_trend_metadata",
+        lambda *args, **kwargs: {
+            "trend_mode": "monitor",
+            "trend_scope_key": "scope_1",
+            "trend_scope_label": "Scope 1",
+            "baseline_run_id": None,
+        },
+    )
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_run_metric_snapshots", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_object_metric_snapshots", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "list_quality_tables", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "list_quality_rules", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "list_quality_dataset_stages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_orchestrator, "get_quality_final_dataset_artifact", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "list_runs_by_trend_scope",
+        lambda *args, **kwargs: [{"run_id": "run_old", "trend_mode": "monitor"}],
+    )
+    monkeypatch.setattr(
+        dq_orchestrator,
+        "select_trend_baseline_run",
+        lambda *args, **kwargs: {"run_id": "run_old", "trend_mode": "monitor"},
+    )
+    monkeypatch.setattr(dq_orchestrator, "list_quality_run_metric_snapshots", lambda *args, **kwargs: [])
+
+    def fake_list_quality_object_metric_snapshots(*args, **kwargs):
+        captured["trend_scope_key"] = kwargs.get("trend_scope_key")
+        captured["run_id"] = kwargs.get("run_id")
+        return []
+
+    monkeypatch.setattr(dq_orchestrator, "list_quality_object_metric_snapshots", fake_list_quality_object_metric_snapshots)
+    monkeypatch.setattr(dq_orchestrator, "replace_quality_trends", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_orchestrator, "build_business_term_trend_payload", lambda *args, **kwargs: {"summary": {}, "rows": []})
+    monkeypatch.setattr(dq_orchestrator, "fetch_glossary_terms", lambda *args, **kwargs: [])
+
+    state = {
+        "tenant_id": "tenant",
+        "domain_id": "data_quality_observability",
+        "quality_run_id": "dqrun_1",
+        "quality_summary": {},
+        "quality_tables": [],
+        "quality_rule_rows": [],
+        "dataset_stages": [],
+        "final_dataset": {},
+    }
+
+    dq_orchestrator._persist_trend_artifacts(None, "run_1", state)
+
+    assert captured["trend_scope_key"] == "scope_1"
+    assert captured["run_id"] == "run_old"
+
+
 def test_select_trend_baseline_run_ignores_runs_before_latest_reset() -> None:
     baseline = dq_trends.select_trend_baseline_run(
         trend_mode="monitor",
