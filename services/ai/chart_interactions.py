@@ -95,6 +95,19 @@ def _sql_alias_to_column(sql: str) -> dict[str, str]:
     return mapping
 
 
+def _resolve_filter_aliases(filters: list[dict[str, Any]], alias_map: dict[str, str]) -> list[dict[str, Any]]:
+    if not filters or not alias_map:
+        return filters
+    resolved: list[dict[str, Any]] = []
+    for flt in filters:
+        if not isinstance(flt, dict):
+            continue
+        field = str(flt.get("field") or "").strip()
+        physical_field = alias_map.get(field.lower()) if field else None
+        resolved.append({**flt, "field": physical_field or field})
+    return resolved
+
+
 def _normalized_dimensions(chart_row: dict[str, Any]) -> list[str]:
     query_payload = chart_row.get("query_payload") or {}
     source_dims = [str(v) for v in (query_payload.get("source_dimensions") or []) if str(v).strip()]
@@ -555,7 +568,9 @@ def _inject_where_into_sql(
     """
     if not extra_filters:
         return original_sql, []
-    clauses, params = _compile_where(_normalize_filters(extra_filters), alias)
+    alias_map = _sql_alias_to_column(original_sql)
+    filters = _resolve_filter_aliases(_normalize_filters(extra_filters), alias_map)
+    clauses, params = _compile_where(filters, alias)
     if not clauses:
         return original_sql, []
     extra_sql = " AND ".join(clauses)
@@ -625,8 +640,10 @@ def compile_chart_query(
         order_parts.append(f"{_qident(dim)} ASC")
         output_dims.append(dim)
     select_parts.append(f"{expression} AS value")
-    filters = _normalize_filters(interaction_context.get("filters") or [])
-    filters.extend(_normalize_filters(appended_filters))
+    original_sql = str(chart_row.get("sql") or "")
+    alias_map = _sql_alias_to_column(original_sql)
+    filters = _resolve_filter_aliases(_normalize_filters(interaction_context.get("filters") or []), alias_map)
+    filters.extend(_resolve_filter_aliases(_normalize_filters(appended_filters), alias_map))
     where_clauses, sql_params = _compile_where(filters, "t")
     if time_dimension:
         where_clauses.insert(0, f"t.{_qident(time_dimension)} IS NOT NULL")
