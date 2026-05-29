@@ -2588,6 +2588,7 @@ class UpdateDashboardRequest(BaseModel):
 
 class AddChartToDashboardRequest(BaseModel):
     chart_id: str
+    title: Optional[str] = None            # persisted to quantyx_chart_requests.title
     position: Optional[int] = None
     title_override: Optional[str] = None   # display title for this slot
     added_by: Optional[str] = None

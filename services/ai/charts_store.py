@@ -167,6 +167,7 @@ def update_chart_request(
     params: list | None = None,
     rows_json: list | dict | None = None,
     chart_type: str | None = None,
+    title: str | None = None,
     chart_payload: dict | None = None,
     chart_data: list | dict | None = None,
     error_message: str | None = None,
@@ -201,6 +202,9 @@ def update_chart_request(
     if chart_type is not None:
         updates.append("chart_type = %s")
         values.append(chart_type)
+    if title is not None:
+        updates.append("title = %s")
+        values.append(title)
     if chart_payload is not None:
         updates.append("chart_payload = %s::jsonb")
         values.append(_serialize_payload(chart_payload))
