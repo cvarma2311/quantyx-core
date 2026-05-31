@@ -26588,8 +26588,14 @@ def add_chart_endpoint(dashboard_id: str, body: AddChartToDashboardRequest) -> d
         "SELECT chart_id FROM public.quantyx_chart_requests WHERE chart_id = %s LIMIT 1",
         [body.chart_id],
     )
+
     if not chart_row:
         raise HTTPException(status_code=404, detail=f"Chart {body.chart_id!r} not found")
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="title cannot be blank")
+        update_chart_request(settings, body.chart_id, title=title)
     try:
         entry = _ds_add_chart(
             settings,
