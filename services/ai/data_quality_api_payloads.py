@@ -8,6 +8,7 @@ def build_data_quality_artifact_links(*, tenant_id: str, domain_id: str, run_id:
         "run_summary": f"/data-quality/runs/{run_id}",
         "dashboard": f"/data-quality/runs/{run_id}/dashboard",
         "excel_report": f"/data-quality/reports/{run_id}/excel?tenant_id={tenant_id}&domain_id={domain_id}",
+        "csv_report": f"/data-quality/reports/{run_id}/csv?tenant_id={tenant_id}&domain_id={domain_id}",
         "trends": f"/data-quality/trends?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "business_term_trends": f"/data-quality/trends/business-terms?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "anomalies": f"/data-quality/anomalies?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",

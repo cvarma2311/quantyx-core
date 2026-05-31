@@ -388,3 +388,21 @@ python3 scripts/demo_data_quality_ui_api_flow.py \
     --include-rerun-monitor \
     --download-dir /tmp/dq_ui_demo \
     --log-file "debug-logs/dq-cdr-rerun-$(date +%H%M%S).log"
+
+
+python3 scripts/demo_data_quality_ui_api_flow.py \
+    --api-base http://localhost:8787 \
+    --tenant-id oth-dq-demo-01 \
+    --domain-id data_quality_observability \
+    --connection-id 1 \
+    --database datafusion \
+    --schema-name public \
+    --tables gl_data_oth swift_data_oth nostro_mapping \
+    --context-file debug-logs/oth_reconciliation_context.txt \
+    --scenario all \
+    --auto-bootstrap \
+    --pause-for-rule-review \
+    --wait-for-state \
+    --include-rerun-monitor \
+    --download-dir /tmp/dq_ui_demo \
+    --log-file "debug-logs/oth-dq-all-$(date +%H%M%S).log"

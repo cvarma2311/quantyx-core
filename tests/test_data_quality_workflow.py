@@ -2033,9 +2033,17 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         domain_id="data_quality_observability",
         run_id="run_1",
     )
+    csv_archive, csv_file_name, csv_summary = dq_report.build_data_quality_csv_report(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+    )
 
     assert file_name == "data_quality_run_1.xlsx"
     assert summary["report_id"] == "dqreport_1"
+    assert csv_file_name == "data_quality_run_1_csv_sheets.zip"
+    assert csv_summary["report_id"] == "dqreport_1"
     assert summary["table_count"] == 1
     assert summary["column_count"] == 1
     assert summary["failed_rule_count"] == 1
@@ -2105,6 +2113,17 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         assert any("postal_code" in text for text in sheet_texts)
         assert any("customer_join_region" in text and "C001" in text for text in sheet_texts)
         assert any("dqlin_final_c001" in text for text in sheet_texts)
+    with zipfile.ZipFile(BytesIO(csv_archive)) as archive:
+        names = set(archive.namelist())
+        assert "01_Legend.csv" in names
+        assert "02_Executive_Summary.csv" in names
+        assert any(name.endswith("Quality_Trends.csv") for name in names)
+        assert any(name.endswith("Published_customer.csv") for name in names)
+        legend_csv = archive.read("01_Legend.csv").decode("utf-8")
+        assert "Validation Failure" in legend_csv
+        assert "light orange" in legend_csv
+        assert any("Invalid customer email" in archive.read(name).decode("utf-8") for name in names)
+        assert any("560001" in archive.read(name).decode("utf-8") for name in names)
 
 
 def test_build_data_quality_excel_report_flattens_source_json_values(monkeypatch) -> None:
@@ -4037,6 +4056,7 @@ def test_build_data_quality_workspace_response_summary(monkeypatch) -> None:
     assert summary_json["data_quality"]["quality_run_id"] == "dqrun_1"
     assert payload["artifact_lineage"]["remediation"].startswith("/data-quality/remediation")
     assert inference_json["artifact_lineage"]["excel_report"].startswith("/data-quality/reports/run_1/excel")
+    assert inference_json["artifact_lineage"]["csv_report"].startswith("/data-quality/reports/run_1/csv")
 
 
 def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommended_actions() -> None:
@@ -4087,6 +4107,7 @@ def test_build_data_quality_run_summary_payload_includes_artifacts_and_recommend
     )
 
     assert response["artifacts"]["dashboard"] == "/data-quality/runs/run_1/dashboard"
+    assert response["artifacts"]["csv_report"].startswith("/data-quality/reports/run_1/csv")
     assert response["artifacts"]["stages"].endswith("run_id=run_1")
     assert response["artifacts"]["joins"].endswith("run_id=run_1")
     assert response["artifacts"]["rejected_records"].endswith("run_id=run_1")

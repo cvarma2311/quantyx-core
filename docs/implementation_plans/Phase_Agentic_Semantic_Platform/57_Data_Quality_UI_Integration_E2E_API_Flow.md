@@ -441,7 +441,8 @@ GET /data-quality/runs/{run_id}/hydration
   "artifact_links": {
     "run_summary": "/data-quality/runs/run_dq_001",
     "dashboard": "/data-quality/runs/run_dq_001/dashboard",
-    "excel_report": "/data-quality/reports/run_dq_001/excel?tenant_id=VC_101&domain_id=data_quality_observability"
+    "excel_report": "/data-quality/reports/run_dq_001/excel?tenant_id=VC_101&domain_id=data_quality_observability",
+    "csv_report": "/data-quality/reports/run_dq_001/csv?tenant_id=VC_101&domain_id=data_quality_observability"
   }
 }
 ```
@@ -530,6 +531,7 @@ GET /data-quality/runs/{run_id}
     "run_summary": "/data-quality/runs/run_dq_001",
     "dashboard": "/data-quality/runs/run_dq_001/dashboard",
     "excel_report": "/data-quality/reports/run_dq_001/excel?tenant_id=VC_101&domain_id=data_quality_observability",
+    "csv_report": "/data-quality/reports/run_dq_001/csv?tenant_id=VC_101&domain_id=data_quality_observability",
     "stages": "/data-quality/stages?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
     "joins": "/data-quality/joins?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
     "rejected_records": "/data-quality/rejected-records?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001",
@@ -762,7 +764,25 @@ GET /data-quality/trends/tables/network_cdr_data?tenant_id=VC_101&domain_id=data
 GET /data-quality/trends/rules/{rule_logical_key}?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
 ```
 
-### 6B.4 Business-term grouped trends
+### 6B.4 Stage-specific trend view
+
+```http
+GET /data-quality/trends/stages/{stage_logical_key}?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+### 6B.5 Run-summary trend view
+
+```http
+GET /data-quality/trends/run-summary?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+### 6B.6 Final-dataset trend view
+
+```http
+GET /data-quality/trends/final-dataset?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
+```
+
+### 6B.7 Business-term grouped trends
 
 ```http
 GET /data-quality/trends/business-terms?tenant_id=VC_101&domain_id=data_quality_observability&run_id=run_dq_001
@@ -2151,6 +2171,7 @@ Example response:
    - `GET /data-quality/runs/{run_id}`
    - `GET /data-quality/runs/{run_id}/dashboard`
    - `GET /data-quality/reports/{run_id}/excel?...`
+   - `GET /data-quality/reports/{run_id}/csv?...`
 6. lazy on click:
    - tables
    - rules
@@ -2254,6 +2275,7 @@ Example response:
 - `GET /data-quality/enrichment/proposals/{proposal_id}`
 - `GET /data-quality/enrichment/proposals/{proposal_id}/staged-artifact`
 - `GET /data-quality/reports/{run_id}/excel`
+- `GET /data-quality/reports/{run_id}/csv`
 
 ## 15. Run Lineage Graph
 
@@ -2362,12 +2384,12 @@ Implemented:
 - dashboard API
 - issue register APIs
 - Excel export
+- CSV-per-sheet export
 - question-centric enrichment
 - proposal review and staged overlay artifact flow
 
 Still deferred or later:
 
 - uploaded rule files
-- CSV-per-sheet exports
 - source-table writeback
 - latitude/longitude enrichment from full address

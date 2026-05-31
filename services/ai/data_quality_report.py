@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import csv
 from datetime import date, datetime
 from decimal import Decimal
-from io import BytesIO
+from io import BytesIO, StringIO
 from typing import Any
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -37,6 +38,7 @@ from services.ai.data_quality_store import (
 from services.ai.glossary import fetch_glossary_terms
 
 EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+CSV_ZIP_MIME_TYPE = "application/zip"
 STYLE_DEFAULT = 0
 STYLE_HEADER = 1
 STYLE_ENRICH_APPROVED_DETERMINISTIC = 2
@@ -225,6 +227,21 @@ def build_xlsx_workbook(sheets: list[tuple[str, list[list[Any]]]]) -> bytes:
         archive.writestr("xl/styles.xml", _styles_xml())
         for idx, (_, rows) in enumerate(named_sheets, start=1):
             archive.writestr(f"xl/worksheets/sheet{idx}.xml", _worksheet_xml(rows))
+    return buffer.getvalue()
+
+
+def build_csv_zip_bundle(sheets: list[tuple[str, list[list[Any]]]]) -> bytes:
+    used_names: set[str] = set()
+    named_sheets = [(_sheet_name(name, used_names), rows or [["No data"]]) for name, rows in sheets]
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+        for idx, (sheet_name, rows) in enumerate(named_sheets, start=1):
+            csv_buffer = StringIO()
+            writer = csv.writer(csv_buffer, lineterminator="\n")
+            for row in rows:
+                writer.writerow([_trim_cell(_cell_parts(value)[0]) for value in row])
+            file_name = f"{idx:02d}_{_safe_file_part(sheet_name)}.csv"
+            archive.writestr(file_name, csv_buffer.getvalue().encode("utf-8"))
     return buffer.getvalue()
 
 
@@ -1007,13 +1024,13 @@ def _lineage_overview_rows(
     )
 
 
-def build_data_quality_excel_report(
+def _build_data_quality_report_sheet_bundle(
     settings: Settings,
     *,
     tenant_id: str,
     domain_id: str,
     run_id: str,
-) -> tuple[bytes, str, dict[str, Any]]:
+) -> tuple[list[tuple[str, list[list[Any]]]], dict[str, Any]]:
     run = get_quality_run_by_run_id(settings, run_id)
     if not run:
         raise ValueError("Data quality run not found")
@@ -2008,11 +2025,27 @@ def build_data_quality_excel_report(
         *all_data_sheets,
         *published_sheets,
     ]
+    return sheets, summary
+
+
+def build_data_quality_excel_report(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+) -> tuple[bytes, str, dict[str, Any]]:
+    sheets, summary = _build_data_quality_report_sheet_bundle(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+    )
     workbook = build_xlsx_workbook(sheets)
     file_name = f"data_quality_{_safe_file_part(run_id)}.xlsx"
     report_id = create_quality_report_metadata(
         settings,
-        quality_run_id=str(run.get("quality_run_id")),
+        quality_run_id=str(summary.get("quality_run_id") or ""),
         run_id=run_id,
         tenant_id=tenant_id,
         domain_id=domain_id,
@@ -2021,6 +2054,39 @@ def build_data_quality_excel_report(
         mime_type=EXCEL_MIME_TYPE,
         summary_json=summary,
     )
+    summary_with_report = dict(summary)
     if report_id:
-        summary["report_id"] = report_id
-    return workbook, file_name, summary
+        summary_with_report["report_id"] = report_id
+    return workbook, file_name, summary_with_report
+
+
+def build_data_quality_csv_report(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+) -> tuple[bytes, str, dict[str, Any]]:
+    sheets, summary = _build_data_quality_report_sheet_bundle(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+    )
+    archive = build_csv_zip_bundle(sheets)
+    file_name = f"data_quality_{_safe_file_part(run_id)}_csv_sheets.zip"
+    report_id = create_quality_report_metadata(
+        settings,
+        quality_run_id=str(summary.get("quality_run_id") or ""),
+        run_id=run_id,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        report_type="csv_zip",
+        file_name=file_name,
+        mime_type=CSV_ZIP_MIME_TYPE,
+        summary_json=summary,
+    )
+    summary_with_report = dict(summary)
+    if report_id:
+        summary_with_report["report_id"] = report_id
+    return archive, file_name, summary_with_report

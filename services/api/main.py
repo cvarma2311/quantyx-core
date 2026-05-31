@@ -271,7 +271,12 @@ from services.ai.data_quality_store import (
     update_quality_enrichment_opportunity_status,
     update_quality_enrichment_proposal,
 )
-from services.ai.data_quality_report import EXCEL_MIME_TYPE, build_data_quality_excel_report
+from services.ai.data_quality_report import (
+    CSV_ZIP_MIME_TYPE,
+    EXCEL_MIME_TYPE,
+    build_data_quality_csv_report,
+    build_data_quality_excel_report,
+)
 from services.ai.data_quality_workspace import build_data_quality_workspace_response
 from services.ai.langsmith_forwarder import LangSmithEventForwarder
 from services.ai.ontology_mapper import llm_map_entities
@@ -12941,6 +12946,60 @@ def download_data_quality_excel_report(
     return Response(
         content=workbook,
         media_type=EXCEL_MIME_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+    )
+
+
+@app.get(
+    "/data-quality/reports/{run_id}/csv",
+    tags=["data-quality"],
+    summary="Download data quality CSV-per-sheet export",
+    description=(
+        "Generate a zipped CSV bundle from the same persisted data-quality report sheets used by the Excel export. "
+        "Each workbook sheet is emitted as a separate CSV file inside the archive."
+    ),
+    openapi_extra={
+        "responses": {
+            "200": {
+                "description": "ZIP archive containing one CSV per report sheet",
+                "content": {
+                    "application/zip": {
+                        "schema": {"type": "string", "format": "binary"}
+                    }
+                },
+                "headers": {
+                    "Content-Disposition": {
+                        "description": "Attachment file name",
+                        "schema": {"type": "string"},
+                        "example": 'attachment; filename="data_quality_run_dq_001_csv_sheets.zip"',
+                    },
+                    "X-CSV-Sheets": {
+                        "description": "Illustrative CSV sheet set for this export shape.",
+                        "schema": {"type": "string"},
+                        "example": "01_Legend.csv, 02_Executive_Summary.csv, 03_Trust_Scorecard.csv",
+                    },
+                },
+            }
+        }
+    },
+)
+def download_data_quality_csv_report(
+    run_id: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+) -> Response:
+    try:
+        archive, file_name, _summary = build_data_quality_csv_report(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=archive,
+        media_type=CSV_ZIP_MIME_TYPE,
         headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
     )
 
