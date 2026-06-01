@@ -8,6 +8,7 @@ from services.ai.config import Settings
 from services.ai.connection_registry import resolve_database_credentials_cached
 from services.ai.db import ScopedConnection, run_query
 from services.ai.data_quality_enrichment import canonical_column_alias, canonical_column_aliases
+from services.ai.data_quality_rules import _build_date_range_predicate_parts
 from services.ai.data_quality_stages import fetch_final_dataset_rows_tool
 from services.ai.data_quality_store import (
     get_quality_final_dataset_artifact,
@@ -134,6 +135,169 @@ def fetch_rule_evidence(
             "reference_column_alias": canonical_column_alias(rule.get("reference_column")),
         },
         "evidence_rows": evidence_rows[: _safe_limit(limit)],
+    }
+
+
+def _rule_record_query_plan(
+    *,
+    rule: dict[str, Any],
+    run_row: dict[str, Any],
+    outcome: str,
+) -> tuple[str | None, list[Any], str | None]:
+    rule_type = str(rule.get("rule_type") or "").strip().lower()
+    condition = rule.get("condition_json") or {}
+    schema_name = str(run_row.get("schema_name") or "public").strip() or "public"
+    table_name = str(rule.get("table_name") or "").strip()
+    column_name = str(rule.get("column_name") or "").strip()
+    q_schema = _qident(schema_name)
+    q_table = _qident(table_name)
+    q_col = _qident(column_name) if column_name else None
+    failed = outcome == "failed"
+
+    if not table_name:
+        return None, [], "rule_has_no_primary_table"
+
+    if rule_type == "referential_integrity":
+        ref_table = _qident(rule.get("reference_table"))
+        ref_col = _qident(rule.get("reference_column"))
+        predicate = (
+            f"child.{q_col} IS NOT NULL AND parent.{ref_col} IS NULL"
+            if failed
+            else f"child.{q_col} IS NULL OR parent.{ref_col} IS NOT NULL"
+        )
+        sql = (
+            f"SELECT child.ctid::text AS __row_ref, child.* "
+            f"FROM {q_schema}.{q_table} child "
+            f"LEFT JOIN {q_schema}.{ref_table} parent ON child.{q_col} = parent.{ref_col} "
+            f"WHERE {predicate}"
+        )
+        return sql, [], None
+    if rule_type == "not_null":
+        predicate = f"{q_col} IS NULL" if failed else f"{q_col} IS NOT NULL"
+        return f"SELECT ctid::text AS __row_ref, * FROM {q_schema}.{q_table} WHERE {predicate}", [], None
+    if rule_type == "not_blank":
+        predicate = f"({q_col} IS NULL OR btrim({q_col}::text) = '')" if failed else f"({q_col} IS NOT NULL AND btrim({q_col}::text) <> '')"
+        return f"SELECT ctid::text AS __row_ref, * FROM {q_schema}.{q_table} WHERE {predicate}", [], None
+    if rule_type == "email_pattern":
+        pattern = r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$"
+        predicate = f"{q_col} IS NOT NULL AND {q_col}::text !~ %s" if failed else f"{q_col} IS NOT NULL AND {q_col}::text ~ %s"
+        return f"SELECT ctid::text AS __row_ref, * FROM {q_schema}.{q_table} WHERE {predicate}", [pattern], None
+    if rule_type == "numeric_min":
+        predicate = f"{q_col} IS NOT NULL AND {q_col} < %s" if failed else f"{q_col} IS NULL OR {q_col} >= %s"
+        return f"SELECT ctid::text AS __row_ref, * FROM {q_schema}.{q_table} WHERE {predicate}", [condition.get("min_value", 0)], None
+    if rule_type == "numeric_max":
+        predicate = f"{q_col} IS NOT NULL AND {q_col} > %s" if failed else f"{q_col} IS NULL OR {q_col} <= %s"
+        return f"SELECT ctid::text AS __row_ref, * FROM {q_schema}.{q_table} WHERE {predicate}", [condition.get("max_value")], None
+    if rule_type == "numeric_range":
+        predicate = (
+            f"{q_col} IS NOT NULL AND ({q_col} < %s OR {q_col} > %s)"
+            if failed
+            else f"{q_col} IS NULL OR ({q_col} >= %s AND {q_col} <= %s)"
+        )
+        return f"SELECT ctid::text AS __row_ref, * FROM {q_schema}.{q_table} WHERE {predicate}", [condition.get("min_value"), condition.get("max_value")], None
+    if rule_type == "allowed_values":
+        allowed = [str(item) for item in (condition.get("allowed_values") or [])]
+        predicate = (
+            f"{q_col} IS NOT NULL AND NOT ({q_col}::text = ANY(%s))"
+            if failed
+            else f"{q_col} IS NULL OR ({q_col}::text = ANY(%s))"
+        )
+        return f"SELECT ctid::text AS __row_ref, * FROM {q_schema}.{q_table} WHERE {predicate}", [allowed], None
+    if rule_type == "regex_pattern":
+        predicate = f"{q_col} IS NOT NULL AND {q_col}::text !~ %s" if failed else f"{q_col} IS NOT NULL AND {q_col}::text ~ %s"
+        return f"SELECT ctid::text AS __row_ref, * FROM {q_schema}.{q_table} WHERE {predicate}", [condition.get("pattern")], None
+    if rule_type == "unique":
+        comparison = "> 1" if failed else "= 1"
+        sql = (
+            f"SELECT t.ctid::text AS __row_ref, t.* "
+            f"FROM {q_schema}.{q_table} t "
+            f"WHERE t.{q_col} IS NOT NULL "
+            f"AND t.{q_col} IN ("
+            f"SELECT {q_col} FROM {q_schema}.{q_table} WHERE {q_col} IS NOT NULL GROUP BY {q_col} HAVING COUNT(*) {comparison}"
+            f")"
+        )
+        return sql, [], None
+    if rule_type == "cross_column_consistency":
+        left = _qident(condition.get("left_column"))
+        right = _qident(condition.get("right_column"))
+        operator = condition.get("operator")
+        predicate = (
+            f"{left} IS NOT NULL AND {right} IS NOT NULL AND NOT ({left} {operator} {right})"
+            if failed
+            else f"{left} IS NULL OR {right} IS NULL OR ({left} {operator} {right})"
+        )
+        return f"SELECT ctid::text AS __row_ref, * FROM {q_schema}.{q_table} WHERE {predicate}", [], None
+    if rule_type == "date_range":
+        predicates, _notes = _build_date_range_predicate_parts(q_col, condition)
+        if not predicates:
+            return None, [], "rule_has_no_row_level_date_predicate"
+        failed_predicate = " OR ".join(f"({item})" for item in predicates)
+        predicate = failed_predicate if failed else f"NOT ({failed_predicate})"
+        return f"SELECT ctid::text AS __row_ref, * FROM {q_schema}.{q_table} WHERE {predicate}", [], None
+    if rule_type == "custom_sql":
+        if not failed:
+            return None, [], "passed_records_not_supported_for_custom_sql"
+        execution_plan = rule.get("execution_plan_json") or {}
+        sample_sql = str(execution_plan.get("sample_sql") or "").strip()
+        if sample_sql and ":" not in sample_sql and "<" not in sample_sql and sample_sql.lower().startswith("select"):
+            return sample_sql, [], None
+        return None, [], "custom_sql_failed_records_require_safe_sample_sql"
+    return None, [], f"row_level_evidence_not_supported_for_{rule_type}"
+
+
+def fetch_rule_records(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    rule_id: str,
+    outcome: str,
+    limit: int,
+    offset: int,
+) -> dict[str, Any]:
+    if outcome not in {"failed", "passed"}:
+        raise HTTPException(status_code=400, detail="Unsupported rule record outcome")
+    rule = _get_rule_row(settings, tenant_id=tenant_id, domain_id=domain_id, rule_id=rule_id)
+    if str(rule.get("run_id") or "") != str(run_id):
+        raise HTTPException(status_code=404, detail="Data quality rule not found for run")
+    run_row = load_quality_run(settings, run_id=run_id, tenant_id=tenant_id, domain_id=domain_id)
+    scoped_conn = resolve_quality_run_scoped_conn(settings, run_row)
+    if not scoped_conn:
+        raise HTTPException(status_code=500, detail="Failed to resolve source connection")
+    sql, params, unsupported_reason = _rule_record_query_plan(rule=rule, run_row=run_row, outcome=outcome)
+    if not sql:
+        return {
+            "rule_id": rule_id,
+            "run_id": run_id,
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "outcome": outcome,
+            "supported": False,
+            "unsupported_reason": unsupported_reason,
+            "affected_row_count": None,
+            "rows": [],
+            "limit": _safe_limit(limit),
+            "offset": _safe_offset(offset),
+            "rule": rule,
+        }
+    limited_sql = f"SELECT * FROM ({sql}) dq_rule_rows LIMIT {_safe_limit(limit)} OFFSET {_safe_offset(offset)}"
+    count_sql = f"SELECT COUNT(*) AS affected_row_count FROM ({sql}) dq_rule_rows"
+    count_row = (run_query(settings, count_sql, params, scoped_conn=scoped_conn) or [{}])[0]
+    rows = run_query(settings, limited_sql, params, scoped_conn=scoped_conn) or []
+    return {
+        "rule_id": rule_id,
+        "run_id": run_id,
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "outcome": outcome,
+        "supported": True,
+        "unsupported_reason": None,
+        "affected_row_count": int(count_row.get("affected_row_count") or 0),
+        "rows": rows,
+        "limit": _safe_limit(limit),
+        "offset": _safe_offset(offset),
+        "rule": rule,
     }
 
 

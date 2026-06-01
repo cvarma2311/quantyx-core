@@ -15,6 +15,23 @@ from services.ai.db import ScopedConnection, run_query
 logger = logging.getLogger(__name__)
 
 
+def _rule_log_entry(rule: dict[str, Any]) -> dict[str, Any]:
+    condition = rule.get("condition_json") if isinstance(rule.get("condition_json"), dict) else {}
+    return {
+        "rule_type": str(rule.get("rule_type") or "").strip() or None,
+        "severity": str(rule.get("severity") or "").strip() or None,
+        "table_name": str(rule.get("table_name") or "").strip() or None,
+        "column_name": str(rule.get("column_name") or "").strip() or None,
+        "rule_label": str(rule.get("rule_label") or derive_quality_rule_label(rule) or "").strip() or None,
+        "status": str(rule.get("status") or "").strip() or None,
+        "source_text_preview": str(
+            rule.get("source_text")
+            or condition.get("source_text")
+            or ""
+        ).strip()[:180] or None,
+    }
+
+
 def data_quality_rule_auto_approve_all_enabled() -> bool:
     value = str(os.getenv("DATA_QUALITY_RULE_AUTO_APPROVE_ALL", "")).strip().lower()
     return value in {"1", "true", "yes", "y", "on"}
@@ -105,6 +122,62 @@ def _norm(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
 
+_CONTEXT_HEADING_PREFIXES = (
+    "domain:",
+    "table in scope:",
+    "tables in scope:",
+    "validation rules to apply",
+    "reporting expectations:",
+    "workflow expectations:",
+    "business reconciliation context:",
+    "multi-table dq requirements:",
+    "expected stewardship outputs:",
+)
+
+
+def _looks_like_context_heading(text: str | None) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(lowered.startswith(prefix) for prefix in _CONTEXT_HEADING_PREFIXES)
+
+
+def _rule_source_text(rule: dict[str, Any]) -> str:
+    condition = rule.get("condition_json") if isinstance(rule.get("condition_json"), dict) else {}
+    return str(rule.get("source_text") or condition.get("source_text") or "").strip()
+
+
+def _is_context_blob_rule(rule: dict[str, Any], *, context_text: str | None = None) -> bool:
+    source_text = _rule_source_text(rule)
+    if not source_text:
+        return False
+    if _looks_like_context_heading(source_text):
+        return True
+    lowered = source_text.lower()
+    if "\n" in source_text and any(prefix in lowered for prefix in _CONTEXT_HEADING_PREFIXES):
+        return True
+    if len(source_text) > 500:
+        return True
+    full_context = str(context_text or "").strip()
+    return bool(full_context and source_text == full_context)
+
+
+def _prefer_deterministic_rule(llm_rule: dict[str, Any], deterministic_rule: dict[str, Any]) -> bool:
+    llm_source = _rule_source_text(llm_rule)
+    deterministic_source = _rule_source_text(deterministic_rule)
+    if _is_context_blob_rule(llm_rule):
+        return True
+    if deterministic_source and not llm_source:
+        return True
+    if deterministic_source and len(llm_source) > 400:
+        return True
+    llm_column = str(llm_rule.get("column_name") or "").strip()
+    deterministic_column = str(deterministic_rule.get("column_name") or "").strip()
+    if deterministic_column and not llm_column:
+        return True
+    return False
+
+
 def _pretty_identifier(value: str | None) -> str:
     text = str(value or "").strip()
     if not text:
@@ -148,6 +221,10 @@ def derive_quality_rule_label(rule: dict[str, Any]) -> str:
         return f"{table_name}.{column_name} allowed values check"
     if rule_type == "custom_sql":
         normalized_sql = " ".join(validation_sql.split())
+        if table_name and "distinct_target_count" in normalized_sql.lower() and "mapping_key" in normalized_sql.lower():
+            return f"{table_name}.{column_name or 'mapping_key'} must map to a single target"
+        if table_name and "derived_age" in normalized_sql.lower():
+            return f"Derived age range check in {table_name}"
         if table_name and re.search(r"\bcharged_amount\s*<\s*0\b", normalized_sql, flags=re.IGNORECASE):
             return f"Negative charged amount in {table_name}"
         invalid_values = re.search(
@@ -175,7 +252,7 @@ def derive_quality_rule_label(rule: dict[str, Any]) -> str:
             if not stripped:
                 continue
             lowered = stripped.lower()
-            if lowered.startswith(("domain:", "tables in scope:", "business reconciliation context:", "multi-table dq requirements:", "expected stewardship outputs:", "workflow expectations:")):
+            if _looks_like_context_heading(stripped):
                 continue
             if len(stripped) <= 120:
                 return stripped
@@ -860,7 +937,7 @@ def _extract_quality_rules_with_llm(
             if not isinstance(raw_rule, dict):
                 continue
             validated = _validate_llm_rule(raw_rule, schema_graph)
-            if validated:
+            if validated and not _is_context_blob_rule(validated, context_text=context_text):
                 rules.append(validated)
         return _dedupe_rules(rules)
     except Exception:
@@ -887,6 +964,46 @@ def _dedupe_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         deduped.append(rule)
     return deduped
+
+
+def _merge_quality_rules(llm_rules: list[dict[str, Any]], deterministic_rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def semantic_key(rule: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            rule.get("rule_type"),
+            rule.get("table_name"),
+            rule.get("column_name"),
+            rule.get("reference_table"),
+            rule.get("reference_column"),
+        )
+
+    deterministic_by_key = {
+        semantic_key(rule): rule
+        for rule in _dedupe_rules(deterministic_rules)
+    }
+    merged_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for rule in _dedupe_rules(llm_rules):
+        key = semantic_key(rule)
+        deterministic = deterministic_by_key.get(key)
+        if deterministic and _prefer_deterministic_rule(rule, deterministic):
+            merged_by_key[key] = deterministic
+            continue
+        merged_by_key[key] = rule
+    for key, rule in deterministic_by_key.items():
+        merged_by_key.setdefault(key, rule)
+    return list(merged_by_key.values())
+
+
+def _extract_quality_rules_from_validation_controls(
+    validation_controls: list[dict[str, Any]] | None,
+    schema_graph: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rules: list[dict[str, Any]] = []
+    for control in validation_controls or []:
+        source_text = str(control.get("source_text") or control.get("title") or "").strip()
+        if not source_text:
+            continue
+        rules.extend(_extract_quality_rules_deterministic(source_text, schema_graph))
+    return _dedupe_rules(rules)
 
 
 def _normalized_match_text(value: str | None) -> str:
@@ -1022,10 +1139,30 @@ def _extract_quality_rules_deterministic(context_text: str | None, schema_graph:
                 }
             )
 
-    for sentence in re.split(r"[\n.;]+", text):
+    for sentence in re.split(r"[\n;]+|(?<=\S)\.(?=\s|$)", text):
         sent = sentence.strip()
         if not sent:
             continue
+        email_pattern_match = re.search(
+            r"\b([A-Za-z_][\w]*)(?:\.|\s+)?([A-Za-z_][\w]*email[A-Za-z_][\w]*|email)\s+(?:must|should)\s+(?:match|follow|satisfy)\s+(?:a\s+)?(?:basic\s+)?email\s+pattern\b",
+            sent,
+            flags=re.IGNORECASE,
+        )
+        if email_pattern_match:
+            table_name, col_name = _resolve_table_column(schema_graph, email_pattern_match.group(1), email_pattern_match.group(2))
+            if table_name and col_name:
+                add(
+                    {
+                        "rule_type": "email_pattern",
+                        "severity": "warning",
+                        "table_name": table_name,
+                        "column_name": col_name,
+                        "condition_json": {"source_text": sent, "pattern": "basic_email"},
+                        "source": "context_text",
+                        "confidence": 0.88,
+                        "status": "active",
+                    }
+                )
         present_match = re.search(
             r"\b([A-Za-z_][\w]*)(?:\.|\s+)([A-Za-z_][\w]*)\s+(?:must|should)\s+be\s+(?:present|required|not\s+null)\b",
             sent,
@@ -1079,6 +1216,28 @@ def _extract_quality_rules_deterministic(context_text: str | None, schema_graph:
                         "status": "active",
                     }
                 )
+        allowed_values_match = re.search(
+            r"\b([A-Za-z_][\w]*)(?:\.|\s+)([A-Za-z_][\w]*)\s+(?:must|should)\s+be\s+one\s+of[:\s]+(.+)$",
+            sent,
+            flags=re.IGNORECASE,
+        )
+        if allowed_values_match:
+            table_name, col_name = _resolve_table_column(schema_graph, allowed_values_match.group(1), allowed_values_match.group(2))
+            raw_values = re.split(r",|\bor\b", str(allowed_values_match.group(3) or ""), flags=re.IGNORECASE)
+            allowed_values = [str(item).strip(" .\"'") for item in raw_values if str(item).strip(" .\"'")]
+            if table_name and col_name and allowed_values:
+                add(
+                    {
+                        "rule_type": "allowed_values",
+                        "severity": "warning",
+                        "table_name": table_name,
+                        "column_name": col_name,
+                        "condition_json": {"source_text": sent, "allowed_values": allowed_values},
+                        "source": "context_text",
+                        "confidence": 0.9,
+                        "status": "active",
+                    }
+                )
         unique_match = re.search(
             r"\b([A-Za-z_][\w]*)(?:\.|\s+)([A-Za-z_][\w]*)\s+(?:must|should)\s+be\s+unique\b",
             sent,
@@ -1094,6 +1253,100 @@ def _extract_quality_rules_deterministic(context_text: str | None, schema_graph:
                         "table_name": table_name,
                         "column_name": col_name,
                         "condition_json": {"source_text": sent},
+                        "source": "context_text",
+                        "confidence": 0.88,
+                        "status": "active",
+                    }
+                )
+        account_mapping_match = re.search(
+            r"\beach\s+([A-Za-z_][\w]*)(?:\.|\s+)?([A-Za-z_][\w]*)\s+(?:must|should)\s+map\s+to\s+only\s+one\s+([A-Za-z_][\w]*)(?:\.|\s+)?([A-Za-z_][\w]*)\b",
+            sent,
+            flags=re.IGNORECASE,
+        )
+        if account_mapping_match:
+            table_name, left_col = _resolve_table_column(schema_graph, account_mapping_match.group(1), account_mapping_match.group(2))
+            right_table_name, right_col = _resolve_table_column(schema_graph, account_mapping_match.group(3), account_mapping_match.group(4))
+            if table_name and left_col and right_col and (not right_table_name or right_table_name == table_name):
+                table_sql = _qident(table_name)
+                left_sql = _qident(left_col)
+                right_sql = _qident(right_col)
+                validation_sql = (
+                    "WITH grouped AS ("
+                    f"SELECT {left_sql} AS mapping_key, COUNT(DISTINCT {right_sql}) AS distinct_target_count, COUNT(*) AS row_count "
+                    f"FROM {table_sql} "
+                    f"WHERE {left_sql} IS NOT NULL AND {right_sql} IS NOT NULL "
+                    f"GROUP BY {left_sql}"
+                    ") "
+                    "SELECT "
+                    "COALESCE((SELECT SUM(row_count) FROM grouped), 0) AS checked_row_count, "
+                    "COALESCE((SELECT SUM(row_count) FROM grouped WHERE distinct_target_count > 1), 0) AS violation_count"
+                )
+                sample_sql = (
+                    f"SELECT {left_sql} AS mapping_key, COUNT(DISTINCT {right_sql}) AS distinct_target_count, COUNT(*) AS affected_row_count "
+                    f"FROM {table_sql} "
+                    f"WHERE {left_sql} IS NOT NULL AND {right_sql} IS NOT NULL "
+                    f"GROUP BY {left_sql} HAVING COUNT(DISTINCT {right_sql}) > 1 LIMIT 25"
+                )
+                add(
+                    {
+                        "rule_type": "custom_sql",
+                        "severity": "critical",
+                        "table_name": table_name,
+                        "column_name": left_col,
+                        "condition_json": {
+                            "source_text": sent,
+                            "validation_sql": validation_sql,
+                            "sample_sql": sample_sql,
+                        },
+                        "source": "context_text",
+                        "confidence": 0.9,
+                        "status": "active",
+                    }
+                )
+        age_range_match = re.search(
+            r"\b([A-Za-z_][\w]*)?\s*age\s+(?:must|should)\s+be\s+between\s+(\d+(?:\.\d+)?)\s+and\s+(\d+(?:\.\d+)?)(?:.*calculated\s+using\s+([A-Za-z_][\w]*)\s+and\s+([A-Za-z_][\w]*))?",
+            sent,
+            flags=re.IGNORECASE,
+        )
+        if age_range_match:
+            min_age = float(age_range_match.group(2))
+            max_age = float(age_range_match.group(3))
+            source_col_a = age_range_match.group(4) or "dob"
+            source_col_b = age_range_match.group(5) or "created_date"
+            table_hint = age_range_match.group(1)
+            table_name, dob_col = _resolve_table_column(schema_graph, table_hint, source_col_a)
+            created_col = _resolve_column(schema_graph, table_name, source_col_b)
+            if table_name and dob_col and created_col:
+                table_sql = _qident(table_name)
+                dob_sql = _qident(dob_col)
+                created_sql = _qident(created_col)
+                validation_sql = (
+                    "SELECT "
+                    f"COUNT(*) FILTER (WHERE {dob_sql} IS NOT NULL AND {created_sql} IS NOT NULL) AS checked_row_count, "
+                    f"COUNT(*) FILTER (WHERE {dob_sql} IS NOT NULL AND {created_sql} IS NOT NULL "
+                    f"AND (DATE_PART('year', AGE({created_sql}::date, {dob_sql}::date)) < {min_age} "
+                    f"OR DATE_PART('year', AGE({created_sql}::date, {dob_sql}::date)) > {max_age})) AS violation_count "
+                    f"FROM {table_sql}"
+                )
+                sample_sql = (
+                    f"SELECT {dob_sql} AS dob_value, {created_sql} AS created_date_value, "
+                    f"DATE_PART('year', AGE({created_sql}::date, {dob_sql}::date)) AS derived_age "
+                    f"FROM {table_sql} "
+                    f"WHERE {dob_sql} IS NOT NULL AND {created_sql} IS NOT NULL "
+                    f"AND (DATE_PART('year', AGE({created_sql}::date, {dob_sql}::date)) < {min_age} "
+                    f"OR DATE_PART('year', AGE({created_sql}::date, {dob_sql}::date)) > {max_age}) LIMIT 25"
+                )
+                add(
+                    {
+                        "rule_type": "custom_sql",
+                        "severity": "warning",
+                        "table_name": table_name,
+                        "column_name": dob_col,
+                        "condition_json": {
+                            "source_text": sent,
+                            "validation_sql": validation_sql,
+                            "sample_sql": sample_sql,
+                        },
                         "source": "context_text",
                         "confidence": 0.88,
                         "status": "active",
@@ -1162,6 +1415,7 @@ def plan_quality_rules_from_context(
 ) -> dict[str, Any]:
     text = str(context_text or "").strip()
     if not text:
+        logger.warning("data_quality.rules.plan.empty_context")
         return {
             "planner_mode": "none",
             "validation_controls": [],
@@ -1180,7 +1434,7 @@ def plan_quality_rules_from_context(
         settings=settings,
     )
     validation_controls = list(planner.get("validation_controls") or [])
-    rules: list[dict[str, Any]] = []
+    llm_rules: list[dict[str, Any]] = []
     try:
         llm_rules = _extract_quality_rules_with_llm(
             settings,
@@ -1188,17 +1442,36 @@ def plan_quality_rules_from_context(
             schema_graph,
             validation_controls=validation_controls,
         )
-        if llm_rules:
-            rules = llm_rules
     except Exception:
         if _llm_mode() in {"required", "require", "on"}:
             raise
-    if not rules:
-        rules = _extract_quality_rules_deterministic(text, schema_graph)
+    deterministic_context_rules = _extract_quality_rules_deterministic(text, schema_graph)
+    deterministic_control_rules = _extract_quality_rules_from_validation_controls(validation_controls, schema_graph)
+    deterministic_rules = _dedupe_rules(deterministic_context_rules + deterministic_control_rules)
+    rules = _merge_quality_rules(llm_rules, deterministic_rules) if llm_rules else deterministic_rules
+    blob_rules = [rule for rule in rules if _is_context_blob_rule(rule, context_text=text)]
+    if blob_rules:
+        logger.warning(
+            "data_quality.rules.plan.context_blob_rules_filtered | filtered_count=%s | filtered_rules=%s",
+            len(blob_rules),
+            json.dumps([_rule_log_entry(rule) for rule in blob_rules], default=str),
+        )
+    rules = [rule for rule in rules if not _is_context_blob_rule(rule, context_text=text)]
     coverage = build_validation_rule_coverage(
         validation_controls=validation_controls,
         rules=rules,
         planner_mode=str(planner.get("planner_mode") or "deterministic"),
+    )
+    logger.warning(
+        "data_quality.rules.plan.summary | planner_mode=%s | validation_control_count=%s | llm_rule_count=%s | deterministic_context_rule_count=%s | deterministic_control_rule_count=%s | merged_rule_count=%s | final_rule_count=%s | rules=%s",
+        str(planner.get("planner_mode") or "deterministic"),
+        len(validation_controls),
+        len(llm_rules),
+        len(deterministic_context_rules),
+        len(deterministic_control_rules),
+        len(blob_rules) + len(rules),
+        len(rules),
+        json.dumps([_rule_log_entry(rule) for rule in rules], default=str),
     )
     return {
         "planner_mode": str(planner.get("planner_mode") or "deterministic"),

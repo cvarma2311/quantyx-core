@@ -10,18 +10,38 @@ import re
 import urllib.request
 from urllib.parse import quote
 
+from services.ai.agentic_agents import build_schema_graph
 from services.ai.config import Settings
+from services.ai.connection_registry import resolve_database_credentials_cached
+from services.ai.db import run_query
+from services.ai.data_quality_evidence import fetch_final_dataset_rows, fetch_rule_records, fetch_stage_evidence
 from services.ai.data_quality_rules import derive_quality_rule_label
 from services.ai.data_quality_store import (
+    get_quality_run_by_run_id,
     list_quality_dataset_stages,
     list_quality_rules,
     list_quality_tables,
     list_quality_trends,
 )
-from services.ai.workspace_store import list_runs_by_trend_scope
+from services.ai.glossary import upsert_glossary_terms
+from services.ai.workspace_store import get_deployment_run, list_runs_by_trend_scope
 
 
 logger = logging.getLogger(__name__)
+
+
+def _business_term_summary_path(*, tenant_id: str, domain_id: str, run_id: str, normalized_term: str) -> str:
+    return (
+        f"/data-quality/trends/business-terms?tenant_id={tenant_id}&domain_id={domain_id}"
+        f"&run_id={run_id}&term={quote(normalized_term)}"
+    )
+
+
+def _business_term_records_path(*, tenant_id: str, domain_id: str, run_id: str, normalized_term: str) -> str:
+    return (
+        f"/data-quality/trends/business-terms/records?tenant_id={tenant_id}&domain_id={domain_id}"
+        f"&run_id={run_id}&term={quote(normalized_term)}"
+    )
 
 
 def _as_float(value: Any) -> float | None:
@@ -47,6 +67,21 @@ def normalize_trend_scope_key(value: str | None) -> str | None:
 
 def _trend_scope_llm_enabled(settings: Settings | None) -> bool:
     return bool(settings and getattr(settings, "openai_api_key", None))
+
+
+def _business_term_llm_enabled(settings: Settings | None) -> bool:
+    mode = os.getenv("DATA_QUALITY_BUSINESS_TERM_LLM_MODE", "auto").strip().lower()
+    if mode == "off":
+        return False
+    return bool(settings and getattr(settings, "openai_api_key", None))
+
+
+def _business_term_llm_timeout_sec() -> int:
+    return max(10, int(os.getenv("DATA_QUALITY_BUSINESS_TERM_LLM_TIMEOUT_SEC", "45")))
+
+
+def _business_term_llm_model(settings: Settings) -> str:
+    return os.getenv("DATA_QUALITY_BUSINESS_TERM_LLM_MODEL", getattr(settings, "openai_model", "gpt-4o-mini"))
 
 
 def _trend_scope_llm_json(
@@ -82,6 +117,50 @@ def _trend_scope_llm_json(
         return json.loads(body["choices"][0]["message"]["content"])
     except Exception as exc:
         logger.warning("data_quality_trends trend scope llm failed: %s", exc)
+        return None
+
+
+def _business_term_llm_json(
+    settings: Settings | None,
+    *,
+    user_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not _business_term_llm_enabled(settings):
+        return None
+    payload = {
+        "model": _business_term_llm_model(settings),
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You infer stable business glossary terms for enterprise data-quality reporting. "
+                    "Return JSON only with key business_terms. "
+                    "Each item must include: term, definition, synonyms, abbreviations. "
+                    "Prefer reusable business nouns and data concepts over rule phrases. "
+                    "Use the supplied glossary if present. Add aliases that map technical column and rule names to the business term. "
+                    "Do not emit duplicates, table names without business meaning, or more than 12 terms."
+                ),
+            },
+            {"role": "user", "content": json.dumps(user_payload)},
+        ],
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"},
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_business_term_llm_timeout_sec()) as response:
+            body = json.loads(response.read().decode("utf-8"))
+        return json.loads(body["choices"][0]["message"]["content"])
+    except Exception as exc:
+        logger.warning("data_quality_trends business term llm failed: %s", exc)
         return None
 
 
@@ -1011,18 +1090,15 @@ def _trend_business_term_match(
     return best_match[1] if best_match else None
 
 
-def build_business_term_trend_payload(
+def _group_business_term_trends(
     *,
     tenant_id: str,
     domain_id: str,
     run_id: str,
-    trends: list[dict[str, Any]] | None,
-    glossary_terms: list[dict[str, Any]] | None,
-    term: str | None = None,
-) -> dict[str, Any]:
-    trend_rows = [row for row in (trends or []) if isinstance(row, dict)]
-    glossary_rows = [row for row in (glossary_terms or []) if isinstance(row, dict)]
-    filtered_term = _normalize_term_phrase(term) if term else None
+    trend_rows: list[dict[str, Any]],
+    glossary_rows: list[dict[str, Any]],
+    filtered_term: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     grouped: dict[str, dict[str, Any]] = {}
     unmatched_trend_count = 0
     matched_trends: list[dict[str, Any]] = []
@@ -1088,9 +1164,17 @@ def build_business_term_trend_payload(
                 "affected_object_count": len(bucket["affected_objects"]),
                 "affected_objects": ", ".join(sorted(bucket["affected_objects"]))[:240],
                 "top_metrics": ", ".join(sorted(bucket["top_metrics"]))[:240],
-                "evidence_path": (
-                    f"/data-quality/trends/business-terms?tenant_id={tenant_id}&domain_id={domain_id}"
-                    f"&run_id={run_id}&term={quote(normalized_term)}"
+                "evidence_path": _business_term_records_path(
+                    tenant_id=tenant_id,
+                    domain_id=domain_id,
+                    run_id=run_id,
+                    normalized_term=normalized_term,
+                ),
+                "detail_evidence_path": _business_term_summary_path(
+                    tenant_id=tenant_id,
+                    domain_id=domain_id,
+                    run_id=run_id,
+                    normalized_term=normalized_term,
                 ),
             }
         )
@@ -1101,6 +1185,438 @@ def build_business_term_trend_payload(
             str(row.get("business_term") or ""),
         )
     )
+    return rows, matched_trends, unmatched_trend_count
+
+
+def _rule_trend_outcome(trend: dict[str, Any]) -> str | None:
+    metric_name = str(trend.get("metric_name") or "").strip()
+    current_text = str(trend.get("current_value_text") or "").strip().lower()
+    current_num = _as_float(trend.get("current_value_num"))
+    if metric_name == "result_status":
+        if current_text in {"failed", "error"}:
+            return "failed"
+        if current_text == "passed":
+            return "passed"
+        return None
+    if metric_name in {"violation_count", "violation_pct"}:
+        if current_num is None:
+            return None
+        return "failed" if current_num > 0 else "passed"
+    return None
+
+
+def _build_business_term_record_groups(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    matched_trends: list[dict[str, Any]],
+    limit: int,
+    offset: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    quality_rules = list_quality_rules(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    dataset_stages = list_quality_dataset_stages(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    rules_by_key = {rule_logical_key(row): row for row in quality_rules if str(rule_logical_key(row)).strip()}
+    stages_by_key = {stage_logical_key(row): row for row in dataset_stages if str(stage_logical_key(row)).strip()}
+
+    record_groups: list[dict[str, Any]] = []
+    unsupported_trends: list[dict[str, Any]] = []
+    seen_sources: set[str] = set()
+
+    for trend in matched_trends:
+        object_type = str(trend.get("object_type") or "").strip()
+        object_key = str(trend.get("object_key") or "").strip()
+        metric_name = str(trend.get("metric_name") or "").strip()
+
+        if object_type == "rule":
+            rule = rules_by_key.get(object_key)
+            if not rule:
+                unsupported_trends.append({**trend, "unsupported_reason": "rule_not_found_for_logical_key"})
+                continue
+            outcome = _rule_trend_outcome(trend)
+            if not outcome:
+                unsupported_trends.append({**trend, "unsupported_reason": "trend_metric_has_no_rule_record_outcome"})
+                continue
+            rule_id = str(rule.get("rule_id") or "").strip()
+            dedupe_key = f"rule:{rule_id}:{outcome}"
+            if dedupe_key in seen_sources:
+                continue
+            seen_sources.add(dedupe_key)
+            payload = fetch_rule_records(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+                rule_id=rule_id,
+                outcome=outcome,
+                limit=limit,
+                offset=offset,
+            )
+            record_groups.append(
+                {
+                    "source_type": f"rule_{outcome}_records",
+                    "source_key": rule_id,
+                    "source_label": str(rule.get("rule_label") or derive_quality_rule_label(rule) or object_key).strip(),
+                    "trend_metric_name": metric_name,
+                    "trend_status": trend.get("trend_status"),
+                    "evidence_path": (
+                        f"/data-quality/runs/{run_id}/rules/{rule_id}/{outcome}-records"
+                        f"?tenant_id={tenant_id}&domain_id={domain_id}"
+                    ),
+                    "detail_evidence_path": (
+                        f"/data-quality/trends/rules/{object_key}"
+                        f"?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+                    ),
+                    "supported": bool(payload.get("supported", True)),
+                    "unsupported_reason": payload.get("unsupported_reason"),
+                    "affected_row_count": payload.get("affected_row_count"),
+                    "rows": payload.get("rows") or [],
+                    "summary": {
+                        "rule_id": rule_id,
+                        "rule_type": rule.get("rule_type"),
+                        "severity": rule.get("severity"),
+                        "outcome": outcome,
+                    },
+                }
+            )
+            continue
+
+        if object_type == "stage":
+            stage = stages_by_key.get(object_key)
+            if not stage:
+                unsupported_trends.append({**trend, "unsupported_reason": "stage_not_found_for_logical_key"})
+                continue
+            stage_id = str(stage.get("stage_id") or "").strip()
+            dedupe_key = f"stage:{stage_id}"
+            if dedupe_key in seen_sources:
+                continue
+            seen_sources.add(dedupe_key)
+            payload = fetch_stage_evidence(
+                settings,
+                stage_id=stage_id,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                limit=limit,
+                offset=offset,
+            )
+            summary = dict(payload.get("summary") or {})
+            record_groups.append(
+                {
+                    "source_type": "stage_evidence",
+                    "source_key": stage_id,
+                    "source_label": str(stage.get("stage_name") or object_key).strip(),
+                    "trend_metric_name": metric_name,
+                    "trend_status": trend.get("trend_status"),
+                    "evidence_path": f"/data-quality/evidence/stages/{stage_id}?tenant_id={tenant_id}&domain_id={domain_id}",
+                    "detail_evidence_path": (
+                        f"/data-quality/trends/stages/{object_key}"
+                        f"?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+                    ),
+                    "supported": True,
+                    "unsupported_reason": None,
+                    "affected_row_count": summary.get("rejected_row_count", len(payload.get("rows") or [])),
+                    "rows": payload.get("rows") or [],
+                    "summary": summary,
+                }
+            )
+            continue
+
+        if object_type == "final_dataset" and metric_name in {"final_row_count", "final_dataset_row_count"}:
+            dedupe_key = "final_dataset_rows"
+            if dedupe_key in seen_sources:
+                continue
+            seen_sources.add(dedupe_key)
+            payload = fetch_final_dataset_rows(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+                limit=limit,
+                offset=offset,
+            )
+            record_groups.append(
+                {
+                    "source_type": "final_dataset_rows",
+                    "source_key": "final_dataset",
+                    "source_label": "Final Dataset",
+                    "trend_metric_name": metric_name,
+                    "trend_status": trend.get("trend_status"),
+                    "evidence_path": (
+                        f"/data-quality/final-dataset/rows?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+                    ),
+                    "detail_evidence_path": (
+                        f"/data-quality/trends/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+                    ),
+                    "supported": True,
+                    "unsupported_reason": None,
+                    "affected_row_count": len(payload.get("rows") or []),
+                    "rows": payload.get("rows") or [],
+                    "summary": {
+                        "basis_stage": payload.get("basis_stage") or {},
+                        "final_dataset": payload.get("final_dataset") or {},
+                    },
+                }
+            )
+            continue
+
+        unsupported_trends.append({**trend, "unsupported_reason": "record_drill_not_available_for_trend_object"})
+
+    return record_groups, unsupported_trends
+
+
+def _business_term_inference_threshold() -> float:
+    try:
+        return max(0.0, min(float(os.getenv("DATA_QUALITY_BUSINESS_TERM_UNMATCHED_RATIO", "0.6")), 1.0))
+    except (TypeError, ValueError):
+        return 0.6
+
+
+def _should_infer_business_terms(*, trend_row_count: int, grouped_count: int, unmatched_count: int) -> bool:
+    if trend_row_count <= 0:
+        return False
+    if grouped_count <= 0:
+        return True
+    return (unmatched_count / max(trend_row_count, 1)) >= _business_term_inference_threshold()
+
+
+def _qident(name: str | None) -> str:
+    return '"' + str(name or "").replace('"', '""') + '"'
+
+
+def _schema_table_context(schema_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(schema_payload, dict) or not schema_payload:
+        return []
+    table_context: list[dict[str, Any]] = []
+    schema_graph = build_schema_graph(schema_payload)
+    for table in schema_graph.get("tables") or []:
+        table_name = str(table.get("name") or "").strip()
+        if not table_name:
+            continue
+        columns = []
+        for column in table.get("columns") or []:
+            column_name = str(column.get("name") or "").strip()
+            if column_name:
+                columns.append(column_name)
+        table_context.append({"table_name": table_name, "columns": columns})
+    return table_context
+
+
+def _fetch_business_term_sample_rows(
+    settings: Settings,
+    *,
+    run_row: dict[str, Any] | None,
+    table_names: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    if not run_row:
+        return {}
+    connection_id = str(run_row.get("connection_id") or "").strip()
+    schema_name = str(run_row.get("schema_name") or "public").strip() or "public"
+    if not connection_id or not table_names:
+        return {}
+    scoped_conn = resolve_database_credentials_cached(settings, connection_id, schema_name)
+    if scoped_conn is None:
+        return {}
+    max_tables = max(1, int(os.getenv("DATA_QUALITY_BUSINESS_TERM_SAMPLE_TABLES", "4")))
+    sample_rows = max(1, int(os.getenv("DATA_QUALITY_BUSINESS_TERM_SAMPLE_ROWS", "3")))
+    samples: dict[str, list[dict[str, Any]]] = {}
+    for table_name in [str(item).strip() for item in table_names if str(item).strip()][:max_tables]:
+        try:
+            rows = run_query(
+                settings,
+                f'SELECT * FROM {_qident(schema_name)}.{_qident(table_name)} LIMIT {sample_rows}',
+                [],
+                scoped_conn=scoped_conn,
+            ) or []
+            samples[table_name] = [dict(row) for row in rows]
+        except Exception as exc:
+            logger.warning("data_quality_trends sample rows failed | table=%s err=%s", table_name, exc)
+    return samples
+
+
+def _sanitize_inferred_business_terms(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in ((payload or {}).get("business_terms") or []):
+        if not isinstance(item, dict):
+            continue
+        term = str(item.get("term") or "").strip()
+        normalized = _normalize_term_phrase(item.get("normalized_term") or term)
+        if not term or not normalized:
+            continue
+        synonyms = []
+        for value in item.get("synonyms") or []:
+            cleaned = str(value or "").strip()
+            if cleaned:
+                synonyms.append(cleaned)
+        abbreviations = []
+        for value in item.get("abbreviations") or []:
+            cleaned = str(value or "").strip()
+            if cleaned:
+                abbreviations.append(cleaned)
+        rows.append(
+            {
+                "term": term,
+                "normalized_term": normalized,
+                "definition": str(item.get("definition") or "").strip() or None,
+                "synonyms": list(dict.fromkeys(synonyms)),
+                "abbreviations": list(dict.fromkeys(abbreviations)),
+            }
+        )
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in rows:
+        normalized = str(item.get("normalized_term") or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(item)
+    return deduped[:12]
+
+
+def _infer_business_terms_for_run(
+    settings: Settings | None,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    trend_rows: list[dict[str, Any]],
+    glossary_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not _business_term_llm_enabled(settings):
+        return []
+    deployment_run = get_deployment_run(settings, run_id) or {}
+    deployment_payload = dict(deployment_run.get("deployment_payload_json") or {})
+    run_row = get_quality_run_by_run_id(settings, run_id) or {}
+    schema_payload = deployment_payload.get("schema_payload") or {}
+    schema_tables = _schema_table_context(schema_payload)
+    quality_rules = list_quality_rules(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=200)
+    table_names = list(
+        dict.fromkeys(
+            [str(item.get("table_name") or "").strip() for item in schema_tables]
+            + [str(rule.get("table_name") or "").strip() for rule in quality_rules]
+            + [str(row.get("object_key") or "").strip() for row in trend_rows if str(row.get("object_type") or "") == "table"]
+        )
+    )
+    sample_rows = _fetch_business_term_sample_rows(
+        settings,
+        run_row=run_row,
+        table_names=[item for item in table_names if item],
+    )
+    result = _business_term_llm_json(
+        settings,
+        user_payload={
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "run_id": run_id,
+            "deployment_context": str(deployment_payload.get("context_text") or "")[:12000],
+            "schema_tables": schema_tables[:8],
+            "sample_rows": sample_rows,
+            "rules": [
+                {
+                    "rule_label": str(rule.get("rule_label") or derive_quality_rule_label(rule) or "").strip(),
+                    "rule_type": str(rule.get("rule_type") or "").strip(),
+                    "table_name": str(rule.get("table_name") or "").strip() or None,
+                    "column_name": str(rule.get("column_name") or "").strip() or None,
+                    "source_text": str(rule.get("source_text") or "").strip() or None,
+                }
+                for rule in quality_rules[:80]
+            ],
+            "trend_rows": [
+                {
+                    "object_type": row.get("object_type"),
+                    "object_name": row.get("object_name"),
+                    "object_key": row.get("object_key"),
+                    "metric_name": row.get("metric_name"),
+                    "trend_status": row.get("trend_status"),
+                }
+                for row in trend_rows[:200]
+            ],
+            "existing_glossary_terms": [
+                {
+                    "term": entry.get("term"),
+                    "normalized_term": entry.get("normalized_term"),
+                    "definition": entry.get("definition"),
+                    "synonyms": entry.get("synonyms") or [],
+                    "abbreviations": entry.get("abbreviations") or [],
+                }
+                for entry in glossary_rows[:80]
+            ],
+        },
+    )
+    inferred_terms = _sanitize_inferred_business_terms(result)
+    if not inferred_terms:
+        return []
+    source_context_id = None
+    context_ids = deployment_payload.get("context_ids") or []
+    if context_ids:
+        source_context_id = str(context_ids[0] or "").strip() or None
+    try:
+        upsert_glossary_terms(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            terms=inferred_terms,
+            lifecycle_status="suggested",
+            source_context_id=source_context_id,
+        )
+    except Exception:
+        logger.exception("data_quality_trends inferred glossary persist failed | run_id=%s", run_id)
+    return inferred_terms
+
+
+def build_business_term_trend_payload(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    trends: list[dict[str, Any]] | None,
+    glossary_terms: list[dict[str, Any]] | None,
+    term: str | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    trend_rows = [row for row in (trends or []) if isinstance(row, dict)]
+    glossary_rows = [row for row in (glossary_terms or []) if isinstance(row, dict)]
+    filtered_term = _normalize_term_phrase(term) if term else None
+    rows, matched_trends, unmatched_trend_count = _group_business_term_trends(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trend_rows=trend_rows,
+        glossary_rows=glossary_rows,
+        filtered_term=filtered_term,
+    )
+    if _should_infer_business_terms(
+        trend_row_count=len(trend_rows),
+        grouped_count=len(rows),
+        unmatched_count=unmatched_trend_count,
+    ):
+        inferred_terms = _infer_business_terms_for_run(
+            settings,
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            trend_rows=trend_rows,
+            glossary_rows=glossary_rows,
+        )
+        if inferred_terms:
+            glossary_rows = glossary_rows + [
+                {
+                    "term": item.get("term"),
+                    "normalized_term": item.get("normalized_term"),
+                    "definition": item.get("definition"),
+                    "synonyms": item.get("synonyms") or [],
+                    "abbreviations": item.get("abbreviations") or [],
+                }
+                for item in inferred_terms
+            ]
+            rows, matched_trends, unmatched_trend_count = _group_business_term_trends(
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+                trend_rows=trend_rows,
+                glossary_rows=glossary_rows,
+                filtered_term=filtered_term,
+            )
     return {
         "tenant_id": tenant_id,
         "domain_id": domain_id,
@@ -1114,6 +1630,71 @@ def build_business_term_trend_payload(
         },
         "rows": rows,
         "matched_trends": matched_trends if filtered_term else [],
+    }
+
+
+def build_business_term_record_payload(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    term: str,
+    trends: list[dict[str, Any]] | None,
+    glossary_terms: list[dict[str, Any]] | None,
+    settings: Settings,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    overview = build_business_term_trend_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        trends=trends,
+        glossary_terms=glossary_terms,
+        term=term,
+        settings=settings,
+    )
+    filtered_term = str(overview.get("term") or "").strip()
+    matched_trends = [row for row in (overview.get("matched_trends") or []) if isinstance(row, dict)]
+    rows = [row for row in (overview.get("rows") or []) if isinstance(row, dict)]
+    business_term = str((rows[0] if rows else {}).get("business_term") or filtered_term).strip() or filtered_term
+    record_groups, unsupported_trends = _build_business_term_record_groups(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        matched_trends=matched_trends,
+        limit=limit,
+        offset=offset,
+    )
+    total_record_count = 0
+    for item in record_groups:
+        try:
+            total_record_count += int(item.get("affected_row_count") or 0)
+        except (TypeError, ValueError):
+            continue
+    return {
+        "tenant_id": tenant_id,
+        "domain_id": domain_id,
+        "run_id": run_id,
+        "term": filtered_term or _normalize_term_phrase(term),
+        "business_term": business_term,
+        "detail_evidence_path": _business_term_summary_path(
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+            normalized_term=filtered_term or _normalize_term_phrase(term),
+        ),
+        "summary": {
+            "matched_trend_row_count": len(matched_trends),
+            "record_group_count": len(record_groups),
+            "supported_record_group_count": sum(1 for item in record_groups if bool(item.get("supported", True))),
+            "unsupported_trend_row_count": len(unsupported_trends),
+            "total_record_count": total_record_count,
+        },
+        "record_groups": record_groups,
+        "unsupported_trends": unsupported_trends,
+        "matched_trends": matched_trends,
     }
 
 

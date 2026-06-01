@@ -921,6 +921,37 @@ def _parse_filter_expression(expression: str | None) -> dict[str, Any] | None:
     if not text:
         return None
     match = re.match(
+        r"^(?:(?P<table>[A-Za-z_][\w]*)\.)?(?P<column>[A-Za-z_][\w]*)\s+must\s+be\s+one\s+of\s+(?P<values>.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        raw_values = str(match.group("values") or "").strip().rstrip(".")
+        values = [
+            item.strip().strip("'").strip('"')
+            for item in re.split(r",|\bor\b", raw_values, flags=re.IGNORECASE)
+            if item.strip().strip("'").strip('"')
+        ]
+        return {
+            "table_name": match.group("table"),
+            "column_name": match.group("column"),
+            "operator": "IN",
+            "value": values,
+        }
+    match = re.match(
+        r"^(?P<label>.+?)\s+age\s+(?:must|should)\s+be\s+between\s+(?P<min>\d+(?:\.\d+)?)\s+and\s+(?P<max>\d+(?:\.\d+)?)(?:.*using\s+(?P<dob>[A-Za-z_][\w]*)\s+and\s+(?P<created>[A-Za-z_][\w]*))?$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return {
+            "table_name": None,
+            "column_name": match.group("dob") or "dob",
+            "reference_column": match.group("created") or "created_date",
+            "operator": "AGE BETWEEN",
+            "value": [float(match.group("min")), float(match.group("max"))],
+        }
+    match = re.match(
         r"^(?:(?P<table>[A-Za-z_][\w]*)\.)?(?P<column>[A-Za-z_][\w]*)\s*(?P<op>=|!=|<>|>=|<=|>|<)\s*(?P<value>.+)$",
         text,
         flags=re.IGNORECASE,
@@ -960,6 +991,30 @@ def _build_filter_predicate(parsed_filter: dict[str, Any] | None) -> tuple[str |
         return f"{q_col} IS NULL", []
     if operator == "is_not_null":
         return f"{q_col} IS NOT NULL", []
+    if operator == "like":
+        value = parsed_filter.get("value")
+        if value is None:
+            return None, []
+        return f"{q_col}::text LIKE %s", [str(value)]
+    if operator == "in":
+        value = parsed_filter.get("value")
+        if not isinstance(value, list) or not value:
+            return None, []
+        placeholders = ", ".join(["%s"] * len(value))
+        return f"{q_col}::text IN ({placeholders})", [str(item) for item in value]
+    if operator == "age between":
+        value = parsed_filter.get("value")
+        if not isinstance(value, list) or len(value) != 2:
+            return None, []
+        min_age, max_age = value
+        reference_column = str(parsed_filter.get("reference_column") or parsed_filter.get("derived_reference_column") or "created_date").strip()
+        if not reference_column:
+            return None, []
+        q_ref_col = _qident(reference_column)
+        return (
+            f"DATE_PART('year', AGE({q_ref_col}::date, {q_col}::date)) BETWEEN %s AND %s",
+            [min_age, max_age],
+        )
     sql_operator = "<>" if operator == "!=" else operator
     value = parsed_filter.get("value")
     if value is None:

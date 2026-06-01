@@ -2252,6 +2252,8 @@ Example response:
 - `GET /data-quality/tables`
 - `GET /data-quality/tables/{table_name}`
 - `GET /data-quality/rules`
+- `GET /data-quality/runs/{run_id}/rules/{rule_id}/failed-records`
+- `GET /data-quality/runs/{run_id}/rules/{rule_id}/passed-records`
 - `GET /data-quality/duplicates`
 - `GET /data-quality/freshness`
 - `GET /data-quality/trends`
@@ -2272,6 +2274,8 @@ Example response:
 ### Call only for drill-through or export
 
 - evidence APIs
+- `GET /data-quality/runs/{run_id}/rules/{rule_id}/failed-records`
+- `GET /data-quality/runs/{run_id}/rules/{rule_id}/passed-records`
 - `GET /data-quality/enrichment/proposals/{proposal_id}`
 - `GET /data-quality/enrichment/proposals/{proposal_id}/staged-artifact`
 - `GET /data-quality/reports/{run_id}/excel`

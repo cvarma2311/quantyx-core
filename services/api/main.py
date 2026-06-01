@@ -195,6 +195,7 @@ from services.ai.data_quality_enrichment import (
 )
 from services.ai.data_quality_enrichment_questions import build_enrichment_question_queue
 from services.ai.data_quality_api_payloads import (
+    build_data_quality_rule_outcome_payload,
     build_data_quality_run_hydration_payload,
     build_data_quality_run_summary_payload,
 )
@@ -212,6 +213,7 @@ from services.ai.data_quality_evidence import (
     fetch_lineage_trace,
     fetch_missingness_evidence,
     fetch_rule_evidence,
+    fetch_rule_records,
     fetch_stage_evidence,
     load_quality_run,
 )
@@ -223,6 +225,7 @@ from services.ai.data_quality_rule_review import (
 from services.ai.data_quality_rules import derive_quality_rule_label
 from services.ai.data_quality_remediation import build_data_quality_remediation_plan
 from services.ai.data_quality_trends import (
+    build_business_term_record_payload,
     build_business_term_trend_payload,
     build_readiness_trend_payload,
     build_object_metric_snapshots,
@@ -11098,6 +11101,7 @@ def get_data_quality_run_hydration(run_id: str) -> dict:
             run_id=run_id,
             trends=list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=50),
             glossary_terms=fetch_glossary_terms(settings, tenant_id, domain_id),
+            settings=settings,
         )
     except Exception:
         business_term_overview = {"summary": {}, "rows": []}
@@ -11215,6 +11219,7 @@ def get_data_quality_trends(
         trends=trends,
         glossary_terms=fetch_glossary_terms(settings, tenant_id, domain_id),
         term=None,
+        settings=settings,
     )
     readiness_overview = build_readiness_trend_payload(
         run_id=run_id,
@@ -11263,6 +11268,33 @@ def get_data_quality_business_term_trends(
         trends=list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000),
         glossary_terms=fetch_glossary_terms(settings, tenant_id, domain_id),
         term=term,
+        settings=settings,
+    )
+
+
+@app.get(
+    "/data-quality/trends/business-terms/records",
+    tags=["data-quality"],
+    summary="Get record-level evidence for a business-term trend group",
+)
+def get_data_quality_business_term_records(
+    tenant_id: str,
+    run_id: str,
+    term: str,
+    domain_id: str = "data_quality_observability",
+    limit: int = 200,
+    offset: int = 0,
+) -> dict:
+    return build_business_term_record_payload(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        term=term,
+        trends=list_quality_trends(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=4000),
+        glossary_terms=fetch_glossary_terms(settings, tenant_id, domain_id),
+        settings=settings,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -11728,43 +11760,11 @@ def list_data_quality_rules(
         "domain_id": domain_id,
         "run_id": run_id,
         "rules": [
-            {
-                "rule_id": row.get("rule_id"),
-                "quality_run_id": row.get("quality_run_id"),
-                "run_id": row.get("run_id"),
-                "rule_type": row.get("rule_type"),
-                "rule_label": derive_quality_rule_label(row),
-                "severity": row.get("severity"),
-                "table_name": row.get("table_name"),
-                "column_name": row.get("column_name"),
-                "reference_table": row.get("reference_table"),
-                "reference_column": row.get("reference_column"),
-                "source_text": row.get("source_text") or (row.get("condition_json") or {}).get("source_text"),
-                "executor_kind": row.get("executor_kind"),
-                "execution_plan": row.get("execution_plan_json") or {},
-                "sql_preview": (row.get("execution_plan_json") or {}).get("sql_preview") or {},
-                "sql_preview_status": (row.get("execution_plan_json") or {}).get("sql_preview_status"),
-                "sql_preview_source": (row.get("execution_plan_json") or {}).get("sql_preview_source"),
-                "condition_json": row.get("condition_json") or {},
-                "source": row.get("source"),
-                "confidence": row.get("confidence"),
-                "rule_status": row.get("status"),
-                "reviewed_by": row.get("reviewed_by"),
-                "reviewed_at": row.get("reviewed_at"),
-                "review_notes": row.get("review_notes"),
-                "result": {
-                    "result_id": row.get("result_id"),
-                    "status": row.get("result_status"),
-                    "checked_row_count": row.get("checked_row_count"),
-                    "violation_count": row.get("violation_count"),
-                    "violation_pct": row.get("violation_pct"),
-                    "sample_rows_json": row.get("sample_rows_json") or [],
-                    "error_message": row.get("error_message"),
-                    "executed_at": row.get("executed_at"),
-                }
-                if row.get("result_id")
-                else None,
-            }
+            build_data_quality_rule_outcome_payload(
+                row={**row, "rule_label": derive_quality_rule_label(row)},
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+            )
             for row in rows
         ],
     }
@@ -11883,42 +11883,13 @@ def get_data_quality_rule_review_detail(
     if not row:
         raise HTTPException(status_code=404, detail="Data quality rule not found")
     return {
-        "rule_id": row.get("rule_id"),
-        "quality_run_id": row.get("quality_run_id"),
-        "run_id": row.get("run_id"),
         "tenant_id": row.get("tenant_id"),
         "domain_id": row.get("domain_id"),
-        "rule_type": row.get("rule_type"),
-        "rule_label": derive_quality_rule_label(row),
-        "severity": row.get("severity"),
-        "table_name": row.get("table_name"),
-        "column_name": row.get("column_name"),
-        "reference_table": row.get("reference_table"),
-        "reference_column": row.get("reference_column"),
-        "source_text": row.get("source_text") or (row.get("condition_json") or {}).get("source_text"),
-        "condition_json": row.get("condition_json") or {},
-        "executor_kind": row.get("executor_kind"),
-        "execution_plan": row.get("execution_plan_json") or {},
-        "sql_preview": (row.get("execution_plan_json") or {}).get("sql_preview") or {},
-        "sql_preview_status": (row.get("execution_plan_json") or {}).get("sql_preview_status"),
-        "sql_preview_source": (row.get("execution_plan_json") or {}).get("sql_preview_source"),
-        "confidence": row.get("confidence"),
-        "rule_status": row.get("status"),
-        "reviewed_by": row.get("reviewed_by"),
-        "reviewed_at": row.get("reviewed_at"),
-        "review_notes": row.get("review_notes"),
-        "result": {
-            "result_id": row.get("result_id"),
-            "status": row.get("result_status"),
-            "checked_row_count": row.get("checked_row_count"),
-            "violation_count": row.get("violation_count"),
-            "violation_pct": row.get("violation_pct"),
-            "sample_rows_json": row.get("sample_rows_json") or [],
-            "error_message": row.get("error_message"),
-            "executed_at": row.get("executed_at"),
-        }
-        if row.get("result_id")
-        else None,
+        **build_data_quality_rule_outcome_payload(
+            row={**row, "rule_label": derive_quality_rule_label(row)},
+            tenant_id=str(row.get("tenant_id") or tenant_id or ""),
+            domain_id=str(row.get("domain_id") or "data_quality_observability"),
+        ),
     }
 
 
@@ -12705,6 +12676,58 @@ def get_data_quality_rule_evidence(
         domain_id=domain_id,
         rule_id=rule_id,
         limit=limit,
+    )
+
+
+@app.get(
+    "/data-quality/runs/{run_id}/rules/{rule_id}/failed-records",
+    tags=["data-quality"],
+    summary="Get failed records for a data quality rule",
+    description="Return rule-level failed records when the rule type supports row-level evidence extraction.",
+)
+def get_data_quality_rule_failed_records(
+    run_id: str,
+    rule_id: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    limit: int = 1200,
+    offset: int = 0,
+) -> dict:
+    return fetch_rule_records(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        rule_id=rule_id,
+        outcome="failed",
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get(
+    "/data-quality/runs/{run_id}/rules/{rule_id}/passed-records",
+    tags=["data-quality"],
+    summary="Get passed records for a data quality rule",
+    description="Return rule-level passed records when the rule type supports row-level evidence extraction.",
+)
+def get_data_quality_rule_passed_records(
+    run_id: str,
+    rule_id: str,
+    tenant_id: str,
+    domain_id: str = "data_quality_observability",
+    limit: int = 1200,
+    offset: int = 0,
+) -> dict:
+    return fetch_rule_records(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        rule_id=rule_id,
+        outcome="passed",
+        limit=limit,
+        offset=offset,
     )
 
 

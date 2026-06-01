@@ -3,6 +3,21 @@ from __future__ import annotations
 from typing import Any
 
 
+def derive_data_quality_rule_dimension(rule: dict[str, Any]) -> str:
+    rule_type = str(rule.get("rule_type") or "").strip().lower()
+    if rule_type in {"not_null", "not_blank", "null_pct_threshold"}:
+        return "completeness"
+    if rule_type in {"unique", "composite_unique"}:
+        return "uniqueness"
+    if rule_type in {"referential_integrity", "cross_column_consistency"}:
+        return "consistency"
+    if rule_type in {"email_pattern", "allowed_values", "regex_pattern", "date_range", "length"}:
+        return "validity"
+    if rule_type in {"numeric_min", "numeric_max", "numeric_range", "custom_sql"}:
+        return "accuracy"
+    return "other"
+
+
 def build_data_quality_artifact_links(*, tenant_id: str, domain_id: str, run_id: str) -> dict[str, str]:
     return {
         "run_summary": f"/data-quality/runs/{run_id}",
@@ -30,6 +45,89 @@ def build_data_quality_artifact_links(*, tenant_id: str, domain_id: str, run_id:
         "remediation": f"/data-quality/remediation?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "enrichment_opportunities": f"/data-quality/enrichment/opportunities?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         "enrichment_questions": f"/data-quality/enrichment/questions?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+    }
+
+
+def build_data_quality_rule_evidence_links(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    rule_id: str,
+) -> dict[str, str]:
+    base_q = f"tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+    return {
+        "review_detail": f"/data-quality/rules/{rule_id}/review?tenant_id={tenant_id}",
+        "rule_evidence": f"/data-quality/evidence/rules/{rule_id}?tenant_id={tenant_id}&domain_id={domain_id}",
+        "failed_records": f"/data-quality/runs/{run_id}/rules/{rule_id}/failed-records?{base_q}",
+        "passed_records": f"/data-quality/runs/{run_id}/rules/{rule_id}/passed-records?{base_q}",
+    }
+
+
+def build_data_quality_rule_outcome_payload(
+    *,
+    row: dict[str, Any],
+    tenant_id: str,
+    domain_id: str,
+) -> dict[str, Any]:
+    run_id = str(row.get("run_id") or "")
+    rule_id = str(row.get("rule_id") or "")
+    checked_row_count = int(row.get("checked_row_count") or 0)
+    failed_row_count = int(row.get("violation_count") or 0)
+    passed_row_count = max(checked_row_count - failed_row_count, 0)
+    try:
+        pass_pct = round((passed_row_count / checked_row_count) * 100.0, 4) if checked_row_count else None
+    except Exception:
+        pass_pct = None
+    evidence = build_data_quality_rule_evidence_links(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        rule_id=rule_id,
+    )
+    return {
+        "rule_id": row.get("rule_id"),
+        "quality_run_id": row.get("quality_run_id"),
+        "run_id": row.get("run_id"),
+        "rule_type": row.get("rule_type"),
+        "rule_label": row.get("rule_label"),
+        "dimension": derive_data_quality_rule_dimension(row),
+        "severity": row.get("severity"),
+        "table_name": row.get("table_name"),
+        "column_name": row.get("column_name"),
+        "reference_table": row.get("reference_table"),
+        "reference_column": row.get("reference_column"),
+        "source_text": row.get("source_text") or (row.get("condition_json") or {}).get("source_text"),
+        "executor_kind": row.get("executor_kind"),
+        "execution_plan": row.get("execution_plan_json") or {},
+        "sql_preview": (row.get("execution_plan_json") or {}).get("sql_preview") or {},
+        "sql_preview_status": (row.get("execution_plan_json") or {}).get("sql_preview_status"),
+        "sql_preview_source": (row.get("execution_plan_json") or {}).get("sql_preview_source"),
+        "condition_json": row.get("condition_json") or {},
+        "source": row.get("source"),
+        "confidence": row.get("confidence"),
+        "rule_status": row.get("status"),
+        "reviewed_by": row.get("reviewed_by"),
+        "reviewed_at": row.get("reviewed_at"),
+        "review_notes": row.get("review_notes"),
+        "result": {
+            "result_id": row.get("result_id"),
+            "status": row.get("result_status"),
+            "result_status": row.get("result_status"),
+            "checked_row_count": checked_row_count,
+            "failed_row_count": failed_row_count,
+            "passed_row_count": passed_row_count,
+            "violation_count": row.get("violation_count"),
+            "violation_pct": row.get("violation_pct"),
+            "pass_pct": pass_pct,
+            "sample_rows_json": row.get("sample_rows_json") or [],
+            "error_message": row.get("error_message"),
+            "executed_at": row.get("executed_at"),
+            "evidence": evidence,
+        }
+        if row.get("result_id")
+        else None,
+        "evidence": evidence,
     }
 
 

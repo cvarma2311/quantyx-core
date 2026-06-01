@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import logging
 
 from services.ai.config import Settings
 from services.ai.connection_registry import resolve_database_credentials_cached
@@ -11,6 +12,9 @@ from services.ai.data_quality_rules import (
     execute_quality_rules,
 )
 from services.ai.data_quality_store import get_quality_rule, list_quality_rules, update_quality_rule_review
+
+
+logger = logging.getLogger(__name__)
 
 
 def _rule_patch(rule: dict[str, Any], patch: dict[str, Any] | None) -> dict[str, Any]:
@@ -48,6 +52,20 @@ def apply_quality_rule_review_action(
 
     current = dict(rule_row)
     updated_rule = _rule_patch(current, rule_patch if action_text == "edit" else None)
+    logger.warning(
+        "data_quality.rules.review.action | rule_id=%s | action=%s | execute_after_approval=%s | current_status=%s | current_rule=%s",
+        str(current.get("rule_id") or ""),
+        action_text,
+        execute_after_approval,
+        str(current.get("status") or ""),
+        {
+            "rule_type": str(current.get("rule_type") or "").strip() or None,
+            "table_name": str(current.get("table_name") or "").strip() or None,
+            "column_name": str(current.get("column_name") or "").strip() or None,
+            "rule_label": str(current.get("rule_label") or "").strip() or None,
+            "source_text_preview": str(current.get("source_text") or "").strip()[:180] or None,
+        },
+    )
     if action_text == "reject":
         stored = update_quality_rule_review(
             settings,
@@ -92,6 +110,18 @@ def apply_quality_rule_review_action(
         executor_kind=updated_rule.get("executor_kind"),
         execution_plan_json=updated_rule.get("execution_plan_json") or {},
     )
+    logger.warning(
+        "data_quality.rules.review.stored | rule_id=%s | action=%s | stored_status=%s | stored_rule=%s",
+        str(current.get("rule_id") or ""),
+        action_text,
+        str((stored or updated_rule).get("status") or ""),
+        {
+            "rule_type": str((stored or updated_rule).get("rule_type") or "").strip() or None,
+            "table_name": str((stored or updated_rule).get("table_name") or "").strip() or None,
+            "column_name": str((stored or updated_rule).get("column_name") or "").strip() or None,
+            "rule_label": str((stored or updated_rule).get("rule_label") or "").strip() or None,
+        },
+    )
     execution = None
     if execute_after_approval and str(updated_rule.get("status") or "").strip().lower() == "active":
         scoped_conn = _resolve_rule_scoped_conn(settings, updated_rule)
@@ -100,6 +130,17 @@ def apply_quality_rule_review_action(
             rules=[updated_rule],
             schema_name=str(updated_rule.get("schema_name") or "public"),
             scoped_conn=scoped_conn,
+        )
+        logger.warning(
+            "data_quality.rules.review.executed | rule_id=%s | status=%s | execution_summary=%s",
+            str(current.get("rule_id") or ""),
+            str(updated_rule.get("status") or ""),
+            {
+                "rules_executed": int((execution or {}).get("rules_executed") or 0),
+                "failed_rules": int((execution or {}).get("failed_rules") or 0),
+                "passed_rules": int((execution or {}).get("passed_rules") or 0),
+                "error_rules": int((execution or {}).get("error_rules") or 0),
+            },
         )
     return {
         "rule_id": current.get("rule_id"),

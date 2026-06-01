@@ -4,6 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 import json
+import logging
 import uuid
 
 import psycopg2
@@ -11,6 +12,22 @@ from psycopg2.extras import Json
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, execute_returning_query, run_query
+
+
+logger = logging.getLogger(__name__)
+
+
+def _rule_log_entry(rule: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rule_id": str(rule.get("rule_id") or "").strip() or None,
+        "rule_type": str(rule.get("rule_type") or "").strip() or None,
+        "severity": str(rule.get("severity") or "").strip() or None,
+        "table_name": str(rule.get("table_name") or "").strip() or None,
+        "column_name": str(rule.get("column_name") or "").strip() or None,
+        "rule_label": str(rule.get("rule_label") or "").strip() or None,
+        "status": str(rule.get("status") or "").strip() or None,
+        "source_text_preview": str(rule.get("source_text") or "").strip()[:180] or None,
+    }
 
 
 def _json_default(value: Any) -> Any:
@@ -284,12 +301,22 @@ def replace_quality_rules(
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s, %s, now(), now())
     """
     try:
+        logger.warning(
+            "data_quality.rules.persist.start | run_id=%s | quality_run_id=%s | source=%s | incoming_rule_count=%s | incoming_rules=%s",
+            run_id,
+            quality_run_id,
+            source,
+            len(rules),
+            json.dumps([_rule_log_entry(rule) for rule in rules], default=str),
+        )
         execute_non_query(settings, delete_sql, [quality_run_id, source])
         inserted = 0
+        skipped_rules: list[dict[str, Any]] = []
         for rule in rules:
             table_name = str(rule.get("table_name") or "").strip()
             rule_type = str(rule.get("rule_type") or "").strip()
             if not table_name or not rule_type:
+                skipped_rules.append(_rule_log_entry(rule))
                 continue
             rule_source = str(rule.get("source") or source).strip() or source
             rule_id = str(rule.get("rule_id") or "").strip() or f"dqr_{uuid.uuid4().hex[:12]}"
@@ -329,6 +356,14 @@ def replace_quality_rules(
                 ],
             )
             inserted += 1
+        logger.warning(
+            "data_quality.rules.persist.completed | run_id=%s | quality_run_id=%s | inserted_rule_count=%s | skipped_rule_count=%s | skipped_rules=%s",
+            run_id,
+            quality_run_id,
+            inserted,
+            len(skipped_rules),
+            json.dumps(skipped_rules, default=str),
+        )
     except psycopg2.errors.UndefinedTable:
         return 0
     return inserted
@@ -1581,6 +1616,16 @@ def list_quality_rules(
         for row in rows:
             if not str(row.get("rule_label") or "").strip():
                 row["rule_label"] = derive_quality_rule_label(row)
+        logger.warning(
+            "data_quality.rules.list | tenant_id=%s | domain_id=%s | run_id=%s | status=%s | rule_status=%s | returned_rule_count=%s | rules=%s",
+            tenant_id,
+            domain_id,
+            run_id,
+            status,
+            rule_status,
+            len(rows),
+            json.dumps([_rule_log_entry(row) for row in rows], default=str),
+        )
         return rows
     except psycopg2.errors.UndefinedTable:
         return []

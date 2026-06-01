@@ -334,6 +334,7 @@ def _persist_trend_artifacts(settings, run_id: str, state: dict[str, Any]) -> di
             run_id=run_id,
             trends=trends,
             glossary_terms=fetch_glossary_terms(settings, scope["tenant_id"], scope["domain_id"]),
+            settings=settings,
         )
     except Exception:
         business_term_trends = {"summary": {}, "rows": []}
@@ -627,10 +628,52 @@ def resume_data_quality_agentic_workflow_after_rule_review(
         run_id=run_id,
         limit=1200,
     )
+    logger.warning(
+        "data_quality.rules.resume.loaded | run_id=%s | total_rule_count=%s | rules=%s",
+        run_id,
+        len(rules),
+        [
+            {
+                "rule_id": str(row.get("rule_id") or "").strip() or None,
+                "rule_type": str(row.get("rule_type") or "").strip() or None,
+                "table_name": str(row.get("table_name") or "").strip() or None,
+                "column_name": str(row.get("column_name") or "").strip() or None,
+                "rule_label": str(row.get("rule_label") or "").strip() or None,
+                "status": str(row.get("status") or "").strip() or None,
+            }
+            for row in rules
+        ],
+    )
     pending_review = [row for row in rules if _rule_status(row) in {"needs_review", "unsupported"}]
     if pending_review:
+        logger.warning(
+            "data_quality.rules.resume.blocked | run_id=%s | pending_review_count=%s | pending_rules=%s",
+            run_id,
+            len(pending_review),
+            [
+                {
+                    "rule_id": str(row.get("rule_id") or "").strip() or None,
+                    "rule_label": str(row.get("rule_label") or "").strip() or None,
+                    "status": str(row.get("status") or "").strip() or None,
+                }
+                for row in pending_review
+            ],
+        )
         raise ValueError("Rule review is still pending for this run")
     active_rules = [row for row in rules if _rule_status(row) == "active"]
+    logger.warning(
+        "data_quality.rules.resume.executing | run_id=%s | active_rule_count=%s | active_rules=%s",
+        run_id,
+        len(active_rules),
+        [
+            {
+                "rule_id": str(row.get("rule_id") or "").strip() or None,
+                "rule_label": str(row.get("rule_label") or "").strip() or None,
+                "rule_type": str(row.get("rule_type") or "").strip() or None,
+            }
+            for row in active_rules
+        ],
+    )
     scope = {
         "tenant_id": tenant_id,
         "domain_id": domain_id,
@@ -1267,6 +1310,23 @@ def run_data_quality_agentic_workflow(
         rules = list(planned_rules.get("rules") or [])
         rule_planner_mode = str(planned_rules.get("planner_mode") or "deterministic")
         validation_controls = list(planned_rules.get("validation_controls") or [])
+        logger.warning(
+            "data_quality.rules.node.planned | run_id=%s | planner_mode=%s | validation_control_count=%s | planned_rule_count=%s | rules=%s",
+            run_id,
+            rule_planner_mode,
+            len(validation_controls),
+            len(rules),
+            [
+                {
+                    "rule_type": str(rule.get("rule_type") or "").strip() or None,
+                    "table_name": str(rule.get("table_name") or "").strip() or None,
+                    "column_name": str(rule.get("column_name") or "").strip() or None,
+                    "rule_label": str(rule.get("rule_label") or "").strip() or None,
+                    "source_text_preview": str(rule.get("source_text") or "").strip()[:180] or None,
+                }
+                for rule in rules
+            ],
+        )
         for rule in rules:
             source_text = str(
                 rule.get("source_text")
@@ -1284,6 +1344,25 @@ def run_data_quality_agentic_workflow(
             rule["executor_kind"] = execution_plan.get("executor_kind")
             rule["execution_plan_json"] = execution_plan
             rule["status"] = classify_quality_rule_review_status(rule)
+        logger.warning(
+            "data_quality.rules.node.classified | run_id=%s | active_rule_count=%s | needs_review_rule_count=%s | unsupported_rule_count=%s | rejected_rule_count=%s | rules=%s",
+            run_id,
+            sum(1 for rule in rules if str(rule.get("status") or "") == "active"),
+            sum(1 for rule in rules if str(rule.get("status") or "") == "needs_review"),
+            sum(1 for rule in rules if str(rule.get("status") or "") == "unsupported"),
+            sum(1 for rule in rules if str(rule.get("status") or "") == "rejected"),
+            [
+                {
+                    "rule_type": str(rule.get("rule_type") or "").strip() or None,
+                    "table_name": str(rule.get("table_name") or "").strip() or None,
+                    "column_name": str(rule.get("column_name") or "").strip() or None,
+                    "rule_label": str(rule.get("rule_label") or "").strip() or None,
+                    "status": str(rule.get("status") or "").strip() or None,
+                    "executor_kind": str(rule.get("executor_kind") or "").strip() or None,
+                }
+                for rule in rules
+            ],
+        )
         rule_coverage = build_validation_rule_coverage(
             validation_controls=validation_controls,
             rules=rules,
@@ -1303,6 +1382,14 @@ def run_data_quality_agentic_workflow(
         rule_summary = _rule_summary_from_rules(rules, execution)
         rule_summary["rule_count"] = inserted
         review_pending_count = int(rule_summary.get("needs_review_rule_count", 0)) + int(rule_summary.get("unsupported_rule_count", 0))
+        logger.warning(
+            "data_quality.rules.node.persisted | run_id=%s | quality_run_id=%s | inserted_rule_count=%s | executable_rule_count=%s | review_pending_count=%s",
+            run_id,
+            quality_run_id,
+            inserted,
+            len(executable_rules),
+            review_pending_count,
+        )
         if auto_approve_all:
             rule_summary["review_required"] = False
             rule_summary["review_pending_count"] = 0

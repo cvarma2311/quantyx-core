@@ -4,6 +4,7 @@ import csv
 from datetime import date, datetime
 from decimal import Decimal
 from io import BytesIO, StringIO
+import os
 from typing import Any
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -12,10 +13,16 @@ import re
 from services.ai.config import Settings
 from services.ai.connection_registry import resolve_database_credentials_cached
 from services.ai.db import run_query
+from services.ai.data_quality_api_payloads import build_data_quality_rule_outcome_payload
 from services.ai.data_quality_anomalies import build_quality_anomaly_payload, summarize_data_quality_anomalies
+from services.ai.data_quality_evidence import fetch_rule_records
 from services.ai.data_quality_remediation import derive_data_quality_remediation_plan
 from services.ai.data_quality_issues import build_quality_issue_payload, summarize_quality_issues
-from services.ai.data_quality_rules import _build_date_range_predicate_parts
+from services.ai.data_quality_rules import (
+    _build_date_range_predicate_parts,
+    _extract_quality_rules_from_validation_controls,
+    derive_quality_rule_label,
+)
 from services.ai.data_quality_stages import fetch_final_dataset_rows_tool, fetch_stage_snapshot_rows_tool, parse_lineage_id
 from services.ai.data_quality_trends import build_business_term_trend_payload, build_readiness_trend_payload, summarize_trends
 from services.ai.data_quality_store import (
@@ -683,6 +690,309 @@ def _failed_rule_detail_sheets(
     return sheets
 
 
+def _normalized_rule_match_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _report_schema_graph(table_details: list[dict[str, Any]]) -> dict[str, Any]:
+    tables: list[dict[str, Any]] = []
+    for detail in table_details:
+        table_name = str(detail.get("table_name") or "").strip()
+        if not table_name:
+            continue
+        columns = [
+            {"name": str(column.get("column_name") or "").strip()}
+            for column in (detail.get("columns") or [])
+            if str(column.get("column_name") or "").strip()
+        ]
+        tables.append({"name": table_name, "columns": columns})
+    return {"tables": tables}
+
+
+def _rule_match_key(rule: dict[str, Any]) -> str:
+    condition = rule.get("condition_json") if isinstance(rule.get("condition_json"), dict) else {}
+    source_text = str(rule.get("source_text") or condition.get("source_text") or "").strip()
+    if source_text:
+        return f"source:{_normalized_rule_match_text(source_text)}"
+    return "|".join(
+        [
+            str(rule.get("rule_type") or "").strip().lower(),
+            str(rule.get("table_name") or "").strip().lower(),
+            str(rule.get("column_name") or "").strip().lower(),
+            str(rule.get("reference_table") or "").strip().lower(),
+            str(rule.get("reference_column") or "").strip().lower(),
+        ]
+    )
+
+
+def _report_rules_with_validation_control_fallback(
+    *,
+    run_row: dict[str, Any],
+    persisted_rules: list[dict[str, Any]],
+    table_details: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    summary_json = run_row.get("summary_json") if isinstance(run_row.get("summary_json"), dict) else {}
+    validation_controls = list(summary_json.get("validation_controls") or [])
+    if not validation_controls:
+        return persisted_rules
+
+    schema_graph = _report_schema_graph(table_details)
+    fallback_rules = _extract_quality_rules_from_validation_controls(validation_controls, schema_graph)
+    persisted_by_key = {_rule_match_key(rule): rule for rule in persisted_rules}
+    merged: list[dict[str, Any]] = []
+    used_keys: set[str] = set()
+
+    for fallback in fallback_rules:
+        key = _rule_match_key(fallback)
+        matched = persisted_by_key.get(key)
+        if matched:
+            if not str(matched.get("rule_label") or "").strip():
+                matched["rule_label"] = derive_quality_rule_label(matched)
+            merged.append(matched)
+            used_keys.add(key)
+            continue
+        synthetic = dict(fallback)
+        synthetic.setdefault("run_id", run_row.get("run_id"))
+        synthetic.setdefault("quality_run_id", run_row.get("quality_run_id"))
+        synthetic.setdefault("source", "report_validation_control_fallback")
+        synthetic.setdefault("status", "active")
+        synthetic.setdefault("rule_label", derive_quality_rule_label(synthetic))
+        merged.append(synthetic)
+        used_keys.add(key)
+
+    for rule in persisted_rules:
+        key = _rule_match_key(rule)
+        if key in used_keys:
+            continue
+        if not str(rule.get("rule_label") or "").strip():
+            rule["rule_label"] = derive_quality_rule_label(rule)
+        merged.append(rule)
+
+    return merged
+
+
+def _report_rule_outcome_payload(
+    *,
+    row: dict[str, Any],
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+) -> dict[str, Any]:
+    rule_id = str(row.get("rule_id") or "").strip()
+    if rule_id:
+        return build_data_quality_rule_outcome_payload(
+            row={
+                **row,
+                "run_id": row.get("run_id") or run_id,
+            },
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+        )
+    return {
+        "rule_id": None,
+        "quality_run_id": row.get("quality_run_id"),
+        "run_id": row.get("run_id") or run_id,
+        "rule_type": row.get("rule_type"),
+        "rule_label": row.get("rule_label") or derive_quality_rule_label(row),
+        "dimension": row.get("dimension"),
+        "severity": row.get("severity"),
+        "table_name": row.get("table_name"),
+        "column_name": row.get("column_name"),
+        "reference_table": row.get("reference_table"),
+        "reference_column": row.get("reference_column"),
+        "source_text": row.get("source_text") or (row.get("condition_json") or {}).get("source_text"),
+        "executor_kind": row.get("executor_kind"),
+        "execution_plan": row.get("execution_plan_json") or {},
+        "sql_preview": (row.get("execution_plan_json") or {}).get("sql_preview") or {},
+        "sql_preview_status": (row.get("execution_plan_json") or {}).get("sql_preview_status"),
+        "sql_preview_source": (row.get("execution_plan_json") or {}).get("sql_preview_source"),
+        "condition_json": row.get("condition_json") or {},
+        "source": row.get("source"),
+        "confidence": row.get("confidence"),
+        "rule_status": row.get("status"),
+        "reviewed_by": row.get("reviewed_by"),
+        "reviewed_at": row.get("reviewed_at"),
+        "review_notes": row.get("review_notes"),
+        "result": None,
+        "evidence": {
+            "review_detail": None,
+            "rule_evidence": None,
+            "failed_records": None,
+            "passed_records": None,
+        },
+    }
+
+
+def _is_context_provided_rule(rule: dict[str, Any]) -> bool:
+    source = str(rule.get("source") or "").strip().lower()
+    return source in {"context_text", "llm_context_text", "report_validation_control_fallback"}
+
+
+def _rule_sheet_record_columns(failed_rows: list[dict[str, Any]], passed_rows: list[dict[str, Any]]) -> list[str]:
+    preferred: list[str] = []
+    seen: set[str] = set()
+    for row in [*failed_rows, *passed_rows]:
+        if not isinstance(row, dict):
+            continue
+        for key in row.keys():
+            key_text = str(key or "").strip()
+            if not key_text or key_text in {"__row_ref"} or key_text in seen:
+                continue
+            seen.add(key_text)
+            preferred.append(key_text)
+    return preferred
+
+
+def _coerce_rule_sheet_rows(rows: Any, *, default_status: str) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            item = dict(row)
+            item.setdefault("__sheet_status", default_status)
+            normalized.append(item)
+    return normalized
+
+
+def _rule_detail_sheets(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    rules: list[dict[str, Any]],
+    rule_outcomes: list[dict[str, Any]],
+) -> list[tuple[str, list[list[Any]]]]:
+    outcome_map = {
+        str(item.get("rule_id") or ""): item
+        for item in rule_outcomes
+        if str(item.get("rule_id") or "").strip()
+    }
+    context_rules = [rule for rule in rules if _is_context_provided_rule(rule)]
+    try:
+        max_rows = max(25, int(os.getenv("DATA_QUALITY_RULE_WORKBOOK_ROW_LIMIT", "200")))
+    except Exception:
+        max_rows = 200
+    sheets: list[tuple[str, list[list[Any]]]] = []
+    for index, rule in enumerate(context_rules, start=1):
+        rule_id = str(rule.get("rule_id") or "").strip()
+        outcome_payload = outcome_map.get(rule_id) if rule_id else None
+        if outcome_payload is None and rule_id:
+            outcome_payload = _report_rule_outcome_payload(
+                row=rule,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+            )
+        if outcome_payload is None:
+            outcome_payload = {
+                "rule_id": rule_id or f"report_fallback_{index:02d}",
+                "rule_label": str(rule.get("rule_label") or derive_quality_rule_label(rule) or "").strip(),
+                "dimension": rule.get("dimension"),
+                "result": None,
+                "evidence": {
+                    "failed_records_path": None,
+                    "passed_records_path": None,
+                    "review_path": None,
+                },
+            }
+        failed_payload = (
+            fetch_rule_records(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+                rule_id=rule_id,
+                outcome="failed",
+                limit=max_rows,
+                offset=0,
+            )
+            if rule_id
+            else {"rows": [], "supported": False, "unsupported_reason": "No persisted rule row exists for this context rule in this run."}
+        )
+        passed_payload = (
+            fetch_rule_records(
+                settings,
+                tenant_id=tenant_id,
+                domain_id=domain_id,
+                run_id=run_id,
+                rule_id=rule_id,
+                outcome="passed",
+                limit=max_rows,
+                offset=0,
+            )
+            if rule_id
+            else {"rows": [], "supported": False, "unsupported_reason": "No persisted rule row exists for this context rule in this run."}
+        )
+        failed_rows = _coerce_rule_sheet_rows(failed_payload.get("rows") or [], default_status="Fail")
+        passed_rows = _coerce_rule_sheet_rows(passed_payload.get("rows") or [], default_status="Pass")
+        if not failed_rows:
+            failed_rows = _coerce_rule_sheet_rows(
+                (((outcome_payload.get("result") or {}).get("sample_rows_json")) or []),
+                default_status="Fail",
+            )
+        record_columns = _rule_sheet_record_columns(failed_rows, passed_rows)
+        rule_label = str(rule.get("rule_label") or rule.get("rule_type") or "rule").strip() or "rule"
+        sheet_rows: list[list[Any]] = [
+            _header_row(["Rule Field", "Value"]),
+            ["Rule ID", rule_id],
+            ["Rule Label", rule_label],
+            ["Rule Source", rule.get("source")],
+            ["Rule Type", rule.get("rule_type")],
+            ["Severity", rule.get("severity")],
+            ["Dimension", outcome_payload.get("dimension")],
+            ["Table", rule.get("table_name")],
+            ["Column", rule.get("column_name")],
+            ["Reference Table", rule.get("reference_table")],
+            ["Reference Column", rule.get("reference_column")],
+            ["Checked Rows", ((outcome_payload.get("result") or {}).get("checked_row_count"))],
+            ["Passed Rows", ((outcome_payload.get("result") or {}).get("passed_row_count"))],
+            ["Failed Rows", ((outcome_payload.get("result") or {}).get("failed_row_count"))],
+            ["Pass %", ((outcome_payload.get("result") or {}).get("pass_pct"))],
+            ["Result Status", (((outcome_payload.get("result") or {}).get("result_status")) or ((outcome_payload.get("result") or {}).get("status")))],
+            ["Failed Records API", (((outcome_payload.get("evidence") or {}).get("failed_records")) or ((outcome_payload.get("evidence") or {}).get("failed_records_path")))],
+            ["Passed Records API", (((outcome_payload.get("evidence") or {}).get("passed_records")) or ((outcome_payload.get("evidence") or {}).get("passed_records_path")))],
+            ["Review Detail API", (((outcome_payload.get("evidence") or {}).get("review_detail")) or ((outcome_payload.get("evidence") or {}).get("review_path")))],
+            ["Failed Records Supported", failed_payload.get("supported")],
+            ["Passed Records Supported", passed_payload.get("supported")],
+            ["Failed Records Note", failed_payload.get("unsupported_reason")],
+            ["Passed Records Note", passed_payload.get("unsupported_reason")],
+            ["Source Text", rule.get("source_text")],
+            ["Rule Detail", _flatten_mapping(rule.get("condition_json") or {})],
+            [],
+        ]
+        if record_columns:
+            sheet_rows.append(_header_row(["Row Ref", *record_columns, "Pass / Fail"]))
+            for row in failed_rows:
+                row_ref = row.get("__row_ref")
+                sheet_rows.append(
+                    [
+                        row_ref,
+                        *[row.get(column) for column in record_columns],
+                        _cell("Fail", STYLE_VALIDATION_FAILED),
+                    ]
+                )
+            for row in passed_rows:
+                row_ref = row.get("__row_ref")
+                sheet_rows.append(
+                    [
+                        row_ref,
+                        *[row.get(column) for column in record_columns],
+                        _cell("Pass", STYLE_ENRICH_APPROVED_DETERMINISTIC),
+                    ]
+                )
+        else:
+            sheet_rows.append(_header_row(["Row Ref", "Message", "Pass / Fail"]))
+            sheet_rows.append(
+                [
+                    "",
+                    "No row-level records available for this rule in the workbook. Use the evidence APIs above.",
+                    _cell("Fail", STYLE_VALIDATION_FAILED) if int((outcome_payload.get("result") or {}).get("failed_row_count") or 0) > 0 else _cell("Pass", STYLE_ENRICH_APPROVED_DETERMINISTIC),
+                ]
+            )
+        sheets.append((f"Rule {index:02d} {rule_label}", sheet_rows))
+    return sheets
+
+
 def _fetch_overlay_source_rows(
     settings: Settings,
     *,
@@ -1038,7 +1348,7 @@ def _build_data_quality_report_sheet_bundle(
         raise ValueError("Data quality run does not match tenant/domain")
 
     tables = list_quality_tables(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
-    rules = list_quality_rules(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
+    persisted_rules = list_quality_rules(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
     duplicates = list_quality_duplicate_candidates(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
     dataset_stages = list_quality_dataset_stages(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
     join_artifacts = list_quality_join_artifacts(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
@@ -1057,6 +1367,7 @@ def _build_data_quality_report_sheet_bundle(
         run_id=run_id,
         trends=trends,
         glossary_terms=glossary_terms,
+        settings=settings,
     )
     anomalies = list_quality_anomalies(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
     issues = list_quality_issues(settings, tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, limit=1200)
@@ -1068,7 +1379,25 @@ def _build_data_quality_report_sheet_bundle(
         for table in tables
         if (detail := get_quality_table_detail(settings, tenant_id=tenant_id, domain_id=domain_id, table_name=table.get("table_name"), run_id=run_id))
     ]
+    rules = _report_rules_with_validation_control_fallback(
+        run_row=run,
+        persisted_rules=persisted_rules,
+        table_details=table_details,
+    )
     columns = [column for detail in table_details for column in detail.get("columns") or []]
+    rule_outcomes = [
+        _report_rule_outcome_payload(
+            row={
+                **rule,
+                "run_id": rule.get("run_id") or run_id,
+                "quality_run_id": rule.get("quality_run_id") or run.get("quality_run_id"),
+            },
+            tenant_id=tenant_id,
+            domain_id=domain_id,
+            run_id=run_id,
+        )
+        for rule in rules
+    ]
     failed_rules = [rule for rule in rules if rule.get("result_status") == "failed"]
     all_data_sheets = _all_data_sheets(
         settings,
@@ -1076,11 +1405,13 @@ def _build_data_quality_report_sheet_bundle(
         table_details=table_details,
         failed_rules=failed_rules,
     )
-    failed_rule_detail_sheets = _failed_rule_detail_sheets(
+    rule_detail_sheets = _rule_detail_sheets(
         settings,
-        run_row=run,
-        table_details=table_details,
-        failed_rules=failed_rules,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        rules=rules,
+        rule_outcomes=rule_outcomes,
     )
     remediation_plan = derive_data_quality_remediation_plan(
         tenant_id=tenant_id,
@@ -1194,7 +1525,8 @@ def _build_data_quality_report_sheet_bundle(
         "published_enrichment_sheet_count": len(published_sheets),
         "stage_snapshot_sheet_count": len(stage_snapshot_sheets),
         "all_data_sheet_count": len(all_data_sheets),
-        "failed_rule_detail_sheet_count": len(failed_rule_detail_sheets),
+        "rule_detail_sheet_count": len(rule_detail_sheets),
+        "failed_rule_detail_sheet_count": len([rule for rule in rules if _is_context_provided_rule(rule) and str(rule.get("result_status") or "").strip().lower() == "failed"]),
         "trend_row_count": trend_summary.get("trend_row_count", 0),
         "improved_metric_count": trend_summary.get("improved_metric_count", 0),
         "worsened_metric_count": trend_summary.get("worsened_metric_count", 0),
@@ -1255,7 +1587,8 @@ def _build_data_quality_report_sheet_bundle(
                 ["Published Enrichment Sheets", len(published_sheets)],
                 ["Stage Snapshot Sheets", len(stage_snapshot_sheets)],
                 ["All Data Sheets", len(all_data_sheets)],
-                ["Failed Rule Detail Sheets", len(failed_rule_detail_sheets)],
+                ["Rule Detail Sheets", len(rule_detail_sheets)],
+                ["Failed Rule Detail Sheets", len([rule for rule in rules if _is_context_provided_rule(rule) and str(rule.get("result_status") or "").strip().lower() == "failed"])],
                 ["Trend Rows", trend_summary.get("trend_row_count", 0)],
                 ["Improved Metrics", trend_summary.get("improved_metric_count", 0)],
                 ["Worsened Metrics", trend_summary.get("worsened_metric_count", 0)],
@@ -1778,12 +2111,83 @@ def _build_data_quality_report_sheet_bundle(
             ],
         ),
         (
-            "Validation Rules",
+            "Rule Summary",
             [
-                _header_row(["Rule ID", "Type", "Severity", "Table", "Column", "Reference Table", "Reference Column", "Rule Status", "Result Status", "Checked Rows", "Violations", "Violation %", "Error", "Source Text", "Rule Detail"]),
+                _header_row([
+                    "Rule ID",
+                    "Rule Label",
+                    "Dimension",
+                    "Type",
+                    "Severity",
+                    "Table",
+                    "Column",
+                    "Rule Status",
+                    "Result Status",
+                    "Checked Rows",
+                    "Passed Rows",
+                    "Failed Rows",
+                    "Pass %",
+                    "Violation %",
+                    "Failed Records API",
+                    "Passed Records API",
+                    "Review Detail API",
+                ]),
                 *[
                     [
                         row.get("rule_id"),
+                        row.get("rule_label"),
+                        row.get("dimension"),
+                        row.get("rule_type"),
+                        row.get("severity"),
+                        row.get("table_name"),
+                        row.get("column_name"),
+                        row.get("rule_status"),
+                        (row.get("result") or {}).get("status"),
+                        (row.get("result") or {}).get("checked_row_count"),
+                        (row.get("result") or {}).get("passed_row_count"),
+                        (row.get("result") or {}).get("failed_row_count"),
+                        (row.get("result") or {}).get("pass_pct"),
+                        (row.get("result") or {}).get("violation_pct"),
+                        (row.get("evidence") or {}).get("failed_records"),
+                        (row.get("evidence") or {}).get("passed_records"),
+                        (row.get("evidence") or {}).get("review_detail"),
+                    ]
+                    for row in rule_outcomes
+                ],
+            ],
+        ),
+        (
+            "Validation Rules",
+            [
+                _header_row([
+                    "Rule ID",
+                    "Rule Label",
+                    "Dimension",
+                    "Type",
+                    "Severity",
+                    "Table",
+                    "Column",
+                    "Reference Table",
+                    "Reference Column",
+                    "Rule Status",
+                    "Result Status",
+                    "Checked Rows",
+                    "Passed Rows",
+                    "Failed Rows",
+                    "Pass %",
+                    "Violation %",
+                    "Failed Records API",
+                    "Passed Records API",
+                    "Review Detail API",
+                    "Error",
+                    "Source Text",
+                    "Rule Detail",
+                ]),
+                *[
+                    [
+                        row.get("rule_id"),
+                        row.get("rule_label"),
+                        row.get("dimension"),
                         row.get("rule_type"),
                         row.get("severity"),
                         row.get("table_name"),
@@ -1791,37 +2195,47 @@ def _build_data_quality_report_sheet_bundle(
                         row.get("reference_table"),
                         row.get("reference_column"),
                         row.get("status"),
-                        row.get("result_status"),
-                        row.get("checked_row_count"),
-                        row.get("violation_count"),
-                        row.get("violation_pct"),
-                        row.get("error_message"),
+                        (row.get("result") or {}).get("status"),
+                        (row.get("result") or {}).get("checked_row_count"),
+                        (row.get("result") or {}).get("passed_row_count"),
+                        (row.get("result") or {}).get("failed_row_count"),
+                        (row.get("result") or {}).get("pass_pct"),
+                        (row.get("result") or {}).get("violation_pct"),
+                        (row.get("evidence") or {}).get("failed_records"),
+                        (row.get("evidence") or {}).get("passed_records"),
+                        (row.get("evidence") or {}).get("review_detail"),
+                        (row.get("result") or {}).get("error_message"),
                         row.get("source_text"),
                         _flatten_mapping(row.get("condition_json") or {}),
                     ]
-                    for row in rules
+                    for row in rule_outcomes
                 ],
             ],
         ),
         (
             "Rule Violations",
             [
-                _header_row(["Rule ID", "Type", "Table", "Column", "Violation Count", "Violation %", "Sample Evidence"]),
+                _header_row(["Rule ID", "Rule Label", "Dimension", "Severity", "Table", "Column", "Failed Rows", "Passed Rows", "Violation %", "Failed Records API", "Passed Records API", "Sample Evidence"]),
                 *[
                     [
                         row.get("rule_id"),
-                        row.get("rule_type"),
+                        row.get("rule_label"),
+                        row.get("dimension"),
+                        row.get("severity"),
                         row.get("table_name"),
                         row.get("column_name"),
-                        row.get("violation_count"),
-                        row.get("violation_pct"),
-                        _sample_rows_summary(row.get("sample_rows_json") or []),
+                        (row.get("result") or {}).get("failed_row_count"),
+                        (row.get("result") or {}).get("passed_row_count"),
+                        (row.get("result") or {}).get("violation_pct"),
+                        (row.get("evidence") or {}).get("failed_records"),
+                        (row.get("evidence") or {}).get("passed_records"),
+                        _sample_rows_summary((row.get("result") or {}).get("sample_rows_json") or []),
                     ]
-                    for row in failed_rules
+                    for row in rule_outcomes
                 ],
             ],
         ),
-        *failed_rule_detail_sheets,
+        *rule_detail_sheets,
         (
             "Freshness",
             [

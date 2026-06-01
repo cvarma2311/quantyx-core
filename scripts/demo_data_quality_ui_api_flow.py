@@ -59,15 +59,26 @@ from typing import Any
 
 DEFAULT_API_BASE = os.getenv("QUANTYX_API_BASE", "http://127.0.0.1:8787")
 DEFAULT_DOMAIN_ID = "data_quality_observability"
-DEFAULT_TABLES = ["customers_dq_data"]
+DEFAULT_TABLES = ["customer_data"]
 DEFAULT_DEPLOY_CONTEXT = (
-    "Validate orders.customer_id against customer.customer_id. "
-    "Customer email must be present and valid."
+    "Perform data quality checks on customer_data. "
+    "customer_data.customer_id, customer_data.email, and customer_data.phone_number must be present. "
+    "customer_data.customer_id must be unique. "
+    "Each customer_data.account_number must map to only one customer_data.customer_id. "
+    "customer_data.email must match a basic email pattern. "
+    "Customer age must be between 18 and 80, calculated using customer_data.dob and customer_data.created_date. "
+    "customer_data.account_type must be one of Savings, Current, or Business. "
+    "customer_data.balance must not be negative."
 )
 DEFAULT_REVIEW_CONTEXT = (
-    "Validate orders.customer_id against customer.customer_id. "
-    "Order status should be valid. "
-    "Pincode should map to the correct state."
+    "Perform data quality checks on customer_data. "
+    "customer_data.customer_id, customer_data.email, and customer_data.phone_number must be present. "
+    "customer_data.customer_id must be unique. "
+    "Each customer_data.account_number must map to only one customer_data.customer_id. "
+    "customer_data.email must match a basic email pattern. "
+    "Customer age must be between 18 and 80, calculated using customer_data.dob and customer_data.created_date. "
+    "customer_data.account_type must be one of Savings, Current, or Business. "
+    "customer_data.balance must not be negative."
 )
 
 

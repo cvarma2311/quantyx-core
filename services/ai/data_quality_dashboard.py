@@ -25,6 +25,95 @@ def _display_column(field: str, label: str) -> dict[str, str]:
     return {"field": field, "label": label}
 
 
+def _rule_failed_records_path(*, tenant_id: str, domain_id: str, run_id: str, rule_id: str | None) -> str | None:
+    if not str(rule_id or "").strip():
+        return None
+    return (
+        f"/data-quality/runs/{run_id}/rules/{rule_id}"
+        f"/failed-records?tenant_id={tenant_id}&domain_id={domain_id}"
+    )
+
+
+def _rule_passed_records_path(*, tenant_id: str, domain_id: str, run_id: str, rule_id: str | None) -> str | None:
+    if not str(rule_id or "").strip():
+        return None
+    return (
+        f"/data-quality/runs/{run_id}/rules/{rule_id}"
+        f"/passed-records?tenant_id={tenant_id}&domain_id={domain_id}"
+    )
+
+
+def _rule_detail_path(*, tenant_id: str, domain_id: str, rule_id: str | None) -> str | None:
+    if not str(rule_id or "").strip():
+        return None
+    return f"/data-quality/evidence/rules/{rule_id}?tenant_id={tenant_id}&domain_id={domain_id}"
+
+
+def _final_dataset_rows_path(*, tenant_id: str, domain_id: str, run_id: str) -> str:
+    return f"/data-quality/final-dataset/rows?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+
+
+def _trend_evidence_paths(*, tenant_id: str, domain_id: str, run_id: str, row: dict[str, Any]) -> dict[str, str | None]:
+    object_type = str(row.get("object_type") or "").strip()
+    object_key = str(row.get("object_key") or "").strip()
+    metric_name = str(row.get("metric_name") or "").strip()
+    current_text = str(row.get("current_value_text") or "").strip().lower()
+    current_num = _as_number(row.get("current_value_num"))
+    failed_records_path = _rule_failed_records_path(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        rule_id=object_key if object_type == "rule" else None,
+    )
+    passed_records_path = _rule_passed_records_path(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        rule_id=object_key if object_type == "rule" else None,
+    )
+    if object_type == "table":
+        detail_path = f"/data-quality/trends/tables/{object_key}?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+        return {"evidence_path": detail_path, "detail_evidence_path": detail_path}
+    if object_type == "rule":
+        detail_path = f"/data-quality/trends/rules/{object_key}?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+        if metric_name in {"result_status", "violation_count", "violation_pct"}:
+            if current_text in {"failed", "error"} or ((current_num or 0.0) > 0.0):
+                return {
+                    "evidence_path": failed_records_path,
+                    "detail_evidence_path": detail_path,
+                    "failed_records_path": failed_records_path,
+                    "passed_records_path": passed_records_path,
+                }
+            return {
+                "evidence_path": passed_records_path,
+                "detail_evidence_path": detail_path,
+                "failed_records_path": failed_records_path,
+                "passed_records_path": passed_records_path,
+            }
+        return {
+            "evidence_path": detail_path,
+            "detail_evidence_path": detail_path,
+            "failed_records_path": failed_records_path,
+            "passed_records_path": passed_records_path,
+        }
+    if object_type == "stage":
+        detail_path = f"/data-quality/trends/stages/{object_key}?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+        return {"evidence_path": detail_path, "detail_evidence_path": detail_path}
+    if object_type == "run":
+        detail_path = f"/data-quality/trends/run-summary?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+        return {"evidence_path": detail_path, "detail_evidence_path": detail_path}
+    if object_type == "final_dataset":
+        detail_path = f"/data-quality/trends/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+        if metric_name in {"final_row_count", "final_dataset_row_count"}:
+            return {
+                "evidence_path": _final_dataset_rows_path(tenant_id=tenant_id, domain_id=domain_id, run_id=run_id),
+                "detail_evidence_path": detail_path,
+            }
+        return {"evidence_path": detail_path, "detail_evidence_path": detail_path}
+    detail_path = f"/data-quality/trends?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
+    return {"evidence_path": detail_path, "detail_evidence_path": detail_path}
+
+
 def _append_chart_section(chart_plan: list[dict[str, Any]], section: dict[str, Any], *, include_when_empty: bool = False) -> None:
     rows = section.get("rows")
     if include_when_empty:
@@ -290,7 +379,29 @@ def build_data_quality_dashboard_spec(
                     "column_alias": canonical_column_alias(rule.get("column_name")),
                     "violation_count": result.get("violation_count"),
                     "violation_pct": result.get("violation_pct"),
-                    "evidence_path": f"{evidence_base}/rules/{rule.get('rule_id')}?tenant_id={tenant_id}&domain_id={domain_id}",
+                    "evidence_path": _rule_failed_records_path(
+                        tenant_id=tenant_id,
+                        domain_id=domain_id,
+                        run_id=run_id,
+                        rule_id=rule.get("rule_id"),
+                    ),
+                    "detail_evidence_path": _rule_detail_path(
+                        tenant_id=tenant_id,
+                        domain_id=domain_id,
+                        rule_id=rule.get("rule_id"),
+                    ),
+                    "failed_records_path": _rule_failed_records_path(
+                        tenant_id=tenant_id,
+                        domain_id=domain_id,
+                        run_id=run_id,
+                        rule_id=rule.get("rule_id"),
+                    ),
+                    "passed_records_path": _rule_passed_records_path(
+                        tenant_id=tenant_id,
+                        domain_id=domain_id,
+                        run_id=run_id,
+                        rule_id=rule.get("rule_id"),
+                    ),
                 }
             )
             if str(rule.get("rule_type") or "").strip().lower() == "referential_integrity":
@@ -304,7 +415,29 @@ def build_data_quality_dashboard_spec(
                         "reference_column_alias": canonical_column_alias(rule.get("reference_column")),
                         "violation_count": result.get("violation_count"),
                         "violation_pct": result.get("violation_pct"),
-                        "evidence_path": f"{evidence_base}/rules/{rule.get('rule_id')}?tenant_id={tenant_id}&domain_id={domain_id}",
+                        "evidence_path": _rule_failed_records_path(
+                            tenant_id=tenant_id,
+                            domain_id=domain_id,
+                            run_id=run_id,
+                            rule_id=rule.get("rule_id"),
+                        ),
+                        "detail_evidence_path": _rule_detail_path(
+                            tenant_id=tenant_id,
+                            domain_id=domain_id,
+                            rule_id=rule.get("rule_id"),
+                        ),
+                        "failed_records_path": _rule_failed_records_path(
+                            tenant_id=tenant_id,
+                            domain_id=domain_id,
+                            run_id=run_id,
+                            rule_id=rule.get("rule_id"),
+                        ),
+                        "passed_records_path": _rule_passed_records_path(
+                            tenant_id=tenant_id,
+                            domain_id=domain_id,
+                            run_id=run_id,
+                            rule_id=rule.get("rule_id"),
+                        ),
                     }
                 )
     failed_rules = sorted(
@@ -383,7 +516,8 @@ def build_data_quality_dashboard_spec(
             "label": "Final Dataset Rows",
             "value": final_dataset.get("final_row_count"),
             "note": str(final_dataset.get("readiness_status") or "unknown"),
-            "evidence_path": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+            "evidence_path": _final_dataset_rows_path(tenant_id=tenant_id, domain_id=domain_id, run_id=run_id),
+            "detail_evidence_path": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
         },
         {
             "metric_key": "lineage_rows",
@@ -657,15 +791,7 @@ def build_data_quality_dashboard_spec(
             "rows": [
                 {
                     **row,
-                    "evidence_path": (
-                        f"/data-quality/trends/tables/{row.get('object_key')}?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
-                        if str(row.get("object_type") or "") == "table"
-                        else (
-                            f"/data-quality/trends/rules/{row.get('object_key')}?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
-                            if str(row.get("object_type") or "") == "rule"
-                            else f"/data-quality/trends?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
-                        )
-                    ),
+                    **_trend_evidence_paths(tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, row=row),
                 }
                 for row in sorted(
                     trends,
@@ -843,7 +969,8 @@ def build_data_quality_dashboard_spec(
                     "label": "Final Row Count",
                     "value": final_dataset.get("final_row_count"),
                     "note": final_dataset.get("final_stage_name"),
-                    "evidence_path": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+                    "evidence_path": _final_dataset_rows_path(tenant_id=tenant_id, domain_id=domain_id, run_id=run_id),
+                    "detail_evidence_path": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
                 },
                 {
                     "metric_key": "total_rejected_row_count",
@@ -857,7 +984,8 @@ def build_data_quality_dashboard_spec(
                     "label": "Readiness",
                     "value": final_dataset.get("readiness_status"),
                     "note": (final_dataset.get("summary_json") or {}).get("measurement_status"),
-                    "evidence_path": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
+                    "evidence_path": _final_dataset_rows_path(tenant_id=tenant_id, domain_id=domain_id, run_id=run_id),
+                    "detail_evidence_path": f"/data-quality/final-dataset?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}",
                 },
             ]
             if final_dataset
@@ -1248,6 +1376,7 @@ def create_data_quality_dashboard(
         run_id=run_id,
         trends=trends,
         glossary_terms=glossary_terms,
+        settings=settings,
     )
     spec = build_data_quality_dashboard_spec(
         tenant_id=tenant_id,

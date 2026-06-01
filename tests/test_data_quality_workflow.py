@@ -5,6 +5,7 @@ import pytest
 import zipfile
 from decimal import Decimal
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 from services.ai import dashboards_store
@@ -27,6 +28,7 @@ from services.ai import data_quality_store as dq_store
 from services.ai import data_quality_trust as dq_trust
 from services.ai import data_quality_trends as dq_trends
 from services.ai import data_quality_workspace as dq_workspace
+from services.ai import glossary as dq_glossary
 from services.ai import agentic_store
 
 
@@ -164,6 +166,272 @@ def test_extract_quality_rules_from_context_resolves_known_patterns() -> None:
     assert rules[0]["reference_table"] == "customer"
     assert rules[1]["table_name"] == "customer"
     assert rules[3]["column_name"] == "amount"
+
+
+def test_extract_quality_rules_from_customer_data_context_covers_nine_rules() -> None:
+    schema_graph = {
+        "tables": [
+            {
+                "name": "customer_data",
+                "columns": [
+                    {"name": "customer_id"},
+                    {"name": "email"},
+                    {"name": "phone_number"},
+                    {"name": "account_number"},
+                    {"name": "dob"},
+                    {"name": "created_date"},
+                    {"name": "account_type"},
+                    {"name": "balance"},
+                ],
+            }
+        ]
+    }
+
+    rules = dq_rules.extract_quality_rules_from_context(
+        (
+            "customer_data.customer_id must be present and not null. "
+            "customer_data.email must be present and not null. "
+            "customer_data.phone_number must be present and not null. "
+            "customer_data.customer_id must be unique. "
+            "Each customer_data.account_number must map to only one customer_data.customer_id. "
+            "customer_data.email must match a basic email pattern. "
+            "Customer age must be between 18 and 80, calculated using customer_data.dob and customer_data.created_date. "
+            "customer_data.account_type must be one of Savings, Current, or Business. "
+            "customer_data.balance must not be negative."
+        ),
+        schema_graph,
+    )
+
+    assert len(rules) == 9
+    assert [rule["rule_type"] for rule in rules] == [
+        "not_null",
+        "not_null",
+        "not_null",
+        "unique",
+        "custom_sql",
+        "email_pattern",
+        "custom_sql",
+        "allowed_values",
+        "numeric_min",
+    ]
+    assert rules[4]["column_name"] == "account_number"
+    assert rules[6]["column_name"] == "dob"
+    assert rules[7]["condition_json"]["allowed_values"] == ["Savings", "Current", "Business"]
+
+
+def test_plan_quality_rules_discards_context_blob_llm_rules_and_keeps_deterministic_controls(monkeypatch) -> None:
+    schema_graph = {
+        "tables": [
+            {
+                "name": "customer_data",
+                "columns": [
+                    {"name": "customer_id"},
+                    {"name": "email"},
+                    {"name": "phone_number"},
+                    {"name": "account_number"},
+                    {"name": "dob"},
+                    {"name": "created_date"},
+                    {"name": "account_type"},
+                    {"name": "balance"},
+                ],
+            }
+        ]
+    }
+    context_text = (
+        "Domain: Data Quality Observability for customer_data.\n\n"
+        "Table in scope:\n- customer_data: customer master records.\n\n"
+        "Validation rules to apply on customer_data:\n\n"
+        "1. customer_data.customer_id must be present and not null.\n"
+        "2. customer_data.email must be present and not null.\n"
+        "3. customer_data.phone_number must be present and not null.\n"
+        "4. customer_data.customer_id must be unique.\n"
+        "5. Each customer_data.account_number must map to only one customer_data.customer_id.\n"
+        "6. customer_data.email must match a basic email pattern.\n"
+        "7. Customer age must be between 18 and 80, calculated using customer_data.dob and customer_data.created_date.\n"
+        "8. customer_data.account_type must be one of Savings, Current, or Business.\n"
+        "9. customer_data.balance must not be negative.\n"
+    )
+
+    monkeypatch.setattr(
+        dq_rules,
+        "business_context_validation_planner_tool",
+        lambda **kwargs: {
+            "planner_mode": "llm",
+            "validation_controls": [
+                {"control_key": "ctrl_1", "source_text": "customer_data.customer_id must be present and not null."},
+                {"control_key": "ctrl_2", "source_text": "customer_data.email must be present and not null."},
+                {"control_key": "ctrl_3", "source_text": "customer_data.phone_number must be present and not null."},
+                {"control_key": "ctrl_4", "source_text": "customer_data.customer_id must be unique."},
+                {"control_key": "ctrl_5", "source_text": "Each customer_data.account_number must map to only one customer_data.customer_id."},
+                {"control_key": "ctrl_6", "source_text": "customer_data.email must match a basic email pattern."},
+                {"control_key": "ctrl_7", "source_text": "Customer age must be between 18 and 80, calculated using customer_data.dob and customer_data.created_date."},
+                {"control_key": "ctrl_8", "source_text": "customer_data.account_type must be one of Savings, Current, or Business."},
+                {"control_key": "ctrl_9", "source_text": "customer_data.balance must not be negative."},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        dq_rules,
+        "_extract_quality_rules_with_llm",
+        lambda settings, text, schema_graph, validation_controls=None: [
+            {
+                "rule_type": "not_null",
+                "table_name": "customer_data",
+                "column_name": "customer_id",
+                "severity": "critical",
+                "condition_json": {"source_text": "customer_data.customer_id must be present and not null."},
+                "source": "llm_context_text",
+                "confidence": 0.75,
+                "status": "active",
+            },
+            {
+                "rule_type": "not_null",
+                "table_name": "customer_data",
+                "column_name": "email",
+                "severity": "warning",
+                "condition_json": {"source_text": "customer_data.email must be present and not null."},
+                "source": "llm_context_text",
+                "confidence": 0.75,
+                "status": "active",
+            },
+            {
+                "rule_type": "not_null",
+                "table_name": "customer_data",
+                "column_name": "phone_number",
+                "severity": "warning",
+                "condition_json": {"source_text": "customer_data.phone_number must be present and not null."},
+                "source": "llm_context_text",
+                "confidence": 0.75,
+                "status": "active",
+            },
+            {
+                "rule_type": "unique",
+                "table_name": "customer_data",
+                "column_name": "customer_id",
+                "severity": "critical",
+                "condition_json": {"source_text": "customer_data.customer_id must be unique."},
+                "source": "llm_context_text",
+                "confidence": 0.75,
+                "status": "active",
+            },
+            {
+                "rule_type": "custom_sql",
+                "table_name": "customer_data",
+                "column_name": "dob",
+                "severity": "warning",
+                "condition_json": {
+                    "source_text": context_text,
+                    "validation_sql": "SELECT COUNT(*) AS checked_row_count, COUNT(*) FILTER (WHERE EXTRACT(YEAR FROM AGE(CURRENT_DATE, customer_data.dob)) < 18 OR EXTRACT(YEAR FROM AGE(CURRENT_DATE, customer_data.dob)) > 80) AS violation_count FROM customer_data",
+                },
+                "source": "llm_context_text",
+                "confidence": 0.75,
+                "status": "active",
+            },
+        ],
+    )
+
+    plan = dq_rules.plan_quality_rules_from_context(
+        context_text=context_text,
+        schema_graph=schema_graph,
+        settings=SimpleNamespace(openai_api_key="test-key", openai_model="gpt-4o-mini"),
+    )
+
+    labels = [dq_rules.derive_quality_rule_label(rule) for rule in plan["rules"]]
+
+    assert len(plan["rules"]) == 9
+    assert "Table in scope:" not in labels
+    assert "customer_data.account_number must map to a single target" in labels
+    assert "Validate customer_data.email email format" in labels
+    assert "customer_data.account_type allowed values check" in labels
+    assert "customer_data.balance minimum value check" in labels
+
+
+def test_plan_quality_rules_compiles_missing_rules_from_validation_controls(monkeypatch) -> None:
+    schema_graph = {
+        "tables": [
+            {
+                "name": "customer_data",
+                "columns": [
+                    {"name": "customer_id"},
+                    {"name": "email"},
+                    {"name": "phone_number"},
+                    {"name": "account_number"},
+                    {"name": "dob"},
+                    {"name": "created_date"},
+                    {"name": "account_type"},
+                    {"name": "balance"},
+                ],
+            }
+        ]
+    }
+    context_text = Path("debug-logs/customer_data_dq_context.txt").read_text(encoding="utf-8")
+    controls = [
+        {"control_key": "ctrl_1", "source_text": "customer_data.customer_id must be present and not null."},
+        {"control_key": "ctrl_2", "source_text": "customer_data.email must be present and not null."},
+        {"control_key": "ctrl_3", "source_text": "customer_data.phone_number must be present and not null."},
+        {"control_key": "ctrl_4", "source_text": "customer_data.customer_id must be unique."},
+        {"control_key": "ctrl_5", "source_text": "Each customer_data.account_number must map to only one customer_data.customer_id."},
+        {"control_key": "ctrl_6", "source_text": "customer_data.email must match a basic email pattern."},
+        {"control_key": "ctrl_7", "source_text": "Customer age must be between 18 and 80, calculated using customer_data.dob and customer_data.created_date."},
+        {"control_key": "ctrl_8", "source_text": "customer_data.account_type must be one of Savings, Current, or Business."},
+        {"control_key": "ctrl_9", "source_text": "customer_data.balance must not be negative."},
+    ]
+
+    monkeypatch.setattr(
+        dq_rules,
+        "business_context_validation_planner_tool",
+        lambda **kwargs: {"planner_mode": "llm", "validation_controls": controls},
+    )
+    monkeypatch.setattr(
+        dq_rules,
+        "_extract_quality_rules_with_llm",
+        lambda settings, text, schema_graph, validation_controls=None: [
+            {
+                "rule_type": "custom_sql",
+                "table_name": "customer_data",
+                "column_name": "customer_id",
+                "severity": "warning",
+                "condition_json": {"source_text": context_text, "validation_sql": "SELECT 1"},
+                "source": "llm_context_text",
+                "confidence": 0.4,
+                "status": "active",
+            }
+        ],
+    )
+    original = dq_rules._extract_quality_rules_deterministic
+
+    def fake_extract(text: str | None, schema: dict[str, Any]) -> list[dict[str, Any]]:
+        source = str(text or "").strip()
+        if source == context_text.strip():
+            return original(
+                "\n".join(
+                    [
+                        "customer_data.customer_id must be present and not null.",
+                        "customer_data.email must be present and not null.",
+                        "customer_data.phone_number must be present and not null.",
+                        "customer_data.customer_id must be unique.",
+                    ]
+                ),
+                schema,
+            )
+        return original(text, schema)
+
+    monkeypatch.setattr(dq_rules, "_extract_quality_rules_deterministic", fake_extract)
+
+    plan = dq_rules.plan_quality_rules_from_context(
+        context_text=context_text,
+        schema_graph=schema_graph,
+        settings=SimpleNamespace(openai_api_key="test-key", openai_model="gpt-4o-mini"),
+    )
+
+    labels = [dq_rules.derive_quality_rule_label(rule) for rule in plan["rules"]]
+
+    assert len(plan["rules"]) == 9
+    assert "Table in scope:" not in labels
+    assert "customer_data.account_number must map to a single target" in labels
+    assert "Validate customer_data.email email format" in labels
+    assert "customer_data.account_type allowed values check" in labels
+    assert "customer_data.balance minimum value check" in labels
 
 
 def test_derive_quality_rule_label_for_custom_sql_patterns() -> None:
@@ -472,7 +740,7 @@ def test_extract_quality_rules_uses_llm_first_when_available(monkeypatch) -> Non
     monkeypatch.setattr(
         dq_rules,
         "_extract_quality_rules_with_llm",
-        lambda settings, text, schema: [
+        lambda settings, text, schema, validation_controls=None: [
             {
                 "rule_type": "not_null",
                 "severity": "critical",
@@ -496,6 +764,39 @@ def test_extract_quality_rules_uses_llm_first_when_available(monkeypatch) -> Non
     assert len(rules) == 1
     assert rules[0]["source"] == "llm_context_text"
     assert rules[0]["condition_json"] == {"source": "llm"}
+
+
+def test_extract_quality_rules_merges_partial_llm_and_deterministic_results(monkeypatch) -> None:
+    class Settings:
+        openai_api_key = "key"
+        openai_model = "model"
+
+    monkeypatch.setenv("DATA_QUALITY_RULE_LLM_MODE", "auto")
+    monkeypatch.setattr(
+        dq_rules,
+        "_extract_quality_rules_with_llm",
+        lambda settings, text, schema_graph, validation_controls=None: [
+            {
+                "rule_type": "not_null",
+                "severity": "critical",
+                "table_name": "customer_data",
+                "column_name": "customer_id",
+                "condition_json": {"source_text": "customer_data.customer_id must be present"},
+                "source": "llm_context_text",
+                "confidence": 0.95,
+                "status": "active",
+            }
+        ],
+    )
+    schema_graph = {"tables": [{"name": "customer_data", "columns": [{"name": "customer_id"}, {"name": "balance"}]}]}
+
+    rules = dq_rules.extract_quality_rules_from_context(
+        "customer_data.customer_id must be present. customer_data.balance must not be negative.",
+        schema_graph,
+        settings=Settings(),
+    )
+
+    assert [rule["rule_type"] for rule in rules] == ["not_null", "numeric_min"]
 
 
 def test_build_quality_rule_execution_plan_for_referential_integrity() -> None:
@@ -1704,6 +2005,7 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
                 "rule_id": "rule_1",
                 "rule_label": "Invalid customer email",
                 "rule_type": "email_pattern",
+                "source": "context_text",
                 "severity": "warning",
                 "table_name": "customer",
                 "column_name": "email",
@@ -2017,13 +2319,23 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
     )
     monkeypatch.setattr(
         dq_report,
-        "_fetch_table_rows_by_row_refs",
-        lambda *args, **kwargs: [{"__row_ref": "(0,1)", "email": "bad@example"}],
+        "_build_validation_failure_map",
+        lambda *args, **kwargs: {"customer": {"(0,1)": {"email"}}},
     )
     monkeypatch.setattr(
         dq_report,
-        "_build_validation_failure_map",
-        lambda *args, **kwargs: {"customer": {"(0,1)": {"email"}}},
+        "fetch_rule_records",
+        lambda settings, *, tenant_id, domain_id, run_id, rule_id, outcome, limit, offset: {
+            "supported": True,
+            "unsupported_reason": None,
+            "rows": (
+                [{"__row_ref": "(0,1)", "email": "bad@example"}]
+                if outcome == "failed"
+                else [{"__row_ref": "(0,2)", "email": "good@example.com"}]
+            ),
+            "affected_row_count": 1,
+            "rule": {"rule_id": rule_id},
+        },
     )
     monkeypatch.setattr(dq_report, "create_quality_report_metadata", lambda *args, **kwargs: "dqreport_1")
 
@@ -2062,6 +2374,7 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
     assert summary["published_enrichment_sheet_count"] == 1
     assert summary["stage_snapshot_sheet_count"] == 3
     assert summary["all_data_sheet_count"] == 1
+    assert summary["rule_detail_sheet_count"] == 1
     assert summary["failed_rule_detail_sheet_count"] == 1
     assert summary["issue_count"] == 1
     assert summary["open_issue_count"] == 1
@@ -2109,10 +2422,14 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         assert any("join_matched" in text and "Lineage Overview" not in text for text in sheet_texts)
         assert any("560001" in text and "India" in text and "Karnataka" in text for text in sheet_texts)
         assert any("bad@example" in text and 's=\"6\"' in text for text in sheet_texts)
-        assert any("Invalid customer email" in text and "bad@example" in text for text in sheet_texts)
+        assert any("Invalid customer email" in text and "bad@example" in text and "Pass / Fail" in text for text in sheet_texts)
+        assert any("good@example.com" in text and "Pass" in text for text in sheet_texts)
         assert any("postal_code" in text for text in sheet_texts)
         assert any("customer_join_region" in text and "C001" in text for text in sheet_texts)
         assert any("dqlin_final_c001" in text for text in sheet_texts)
+        assert any("/data-quality/runs/run_1/rules/rule_1/failed-records" in text for text in sheet_texts)
+        assert any("/data-quality/runs/run_1/rules/rule_1/passed-records" in text for text in sheet_texts)
+        assert any("Rule Label" in text and "Passed Rows" in text for text in sheet_texts)
     with zipfile.ZipFile(BytesIO(csv_archive)) as archive:
         names = set(archive.namelist())
         assert "01_Legend.csv" in names
@@ -2124,6 +2441,7 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         assert "light orange" in legend_csv
         assert any("Invalid customer email" in archive.read(name).decode("utf-8") for name in names)
         assert any("560001" in archive.read(name).decode("utf-8") for name in names)
+        assert any("/data-quality/runs/run_1/rules/rule_1/failed-records" in archive.read(name).decode("utf-8") for name in names)
 
 
 def test_build_data_quality_excel_report_flattens_source_json_values(monkeypatch) -> None:
@@ -2186,6 +2504,7 @@ def test_build_data_quality_excel_report_flattens_source_json_values(monkeypatch
     monkeypatch.setattr(dq_report, "list_quality_stage_row_outcomes", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "get_quality_final_dataset_artifact", lambda *args, **kwargs: None)
     monkeypatch.setattr(dq_report, "list_quality_enrichment_opportunities", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_anomalies", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "list_quality_issues", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "_list_staged_overlay_artifacts", lambda *args, **kwargs: [])
     monkeypatch.setattr(dq_report, "resolve_database_credentials_cached", lambda *args, **kwargs: object())
@@ -2212,6 +2531,81 @@ def test_build_data_quality_excel_report_flattens_source_json_values(monkeypatch
         ]
         assert any("city=Dublin; codes=IE, DUB" in text for text in sheet_texts)
         assert all('{"city"' not in text for text in sheet_texts)
+
+
+def test_build_data_quality_excel_report_adds_rule_sheets_from_validation_controls_when_rules_missing(monkeypatch) -> None:
+    controls = [
+        {"control_key": "ctrl_1", "source_text": "customer_data.customer_id must be present and not null."},
+        {"control_key": "ctrl_2", "source_text": "customer_data.email must be present and not null."},
+        {"control_key": "ctrl_3", "source_text": "customer_data.phone_number must be present and not null."},
+    ]
+    monkeypatch.setattr(
+        dq_report,
+        "get_quality_run_by_run_id",
+        lambda settings, run_id: {
+            "quality_run_id": "dqrun_1",
+            "run_id": run_id,
+            "tenant_id": "tenant",
+            "domain_id": "data_quality_observability",
+            "connection_id": "conn_1",
+            "schema_name": "public",
+            "status": "completed",
+            "overall_trust_score": 82.5,
+            "summary_json": {"profiled_tables": 1, "validation_controls": controls},
+        },
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "list_quality_tables",
+        lambda *args, **kwargs: [
+            {"quality_run_id": "dqrun_1", "run_id": "run_1", "table_name": "customer_data", "row_count": 1, "trust_score": 80, "summary_json": {}}
+        ],
+    )
+    monkeypatch.setattr(
+        dq_report,
+        "get_quality_table_detail",
+        lambda *args, **kwargs: {
+            "table_name": "customer_data",
+            "columns": [
+                {"table_name": "customer_data", "column_name": "customer_id", "data_type": "text", "null_pct": 0, "completeness_score": 100},
+                {"table_name": "customer_data", "column_name": "email", "data_type": "text", "null_pct": 0, "completeness_score": 100},
+                {"table_name": "customer_data", "column_name": "phone_number", "data_type": "text", "null_pct": 0, "completeness_score": 100},
+            ],
+        },
+    )
+    monkeypatch.setattr(dq_report, "list_quality_rules", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_duplicate_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_trends", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_dataset_stages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_join_artifacts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_lineage_edges", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_stage_row_outcomes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "get_quality_final_dataset_artifact", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dq_report, "list_quality_enrichment_opportunities", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_anomalies", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "list_quality_issues", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "_list_staged_overlay_artifacts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "resolve_database_credentials_cached", lambda *args, **kwargs: object())
+    monkeypatch.setattr(dq_report, "_fetch_table_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(dq_report, "_build_validation_failure_map", lambda *args, **kwargs: {})
+    monkeypatch.setattr(dq_report, "create_quality_report_metadata", lambda *args, **kwargs: "dqreport_1")
+
+    workbook, _, summary = dq_report.build_data_quality_excel_report(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+    )
+
+    assert summary["rule_count"] == 3
+    assert summary["rule_detail_sheet_count"] == 3
+
+    with zipfile.ZipFile(BytesIO(workbook)) as archive:
+        workbook_xml = archive.read("xl/workbook.xml").decode("utf-8")
+        assert "Rule Summary" in workbook_xml
+        assert "Rule 01 customer_data.customer_" in workbook_xml
+        assert "Rule 02 customer_data.email is " in workbook_xml
+        assert "Rule 03 customer_data.phone_num" in workbook_xml
 
 
 def test_build_data_quality_dashboard_spec_shapes_quality_views() -> None:
@@ -2356,30 +2750,28 @@ def test_build_data_quality_dashboard_spec_shapes_quality_views() -> None:
     )
 
     assert spec["title"] == "Data Quality Observability Data Quality Dashboard"
-    assert len(spec["chart_plan"]) == 13
+    assert len(spec["chart_plan"]) == 14
     assert spec["summary_view"]["title"] == "Executive Summary"
     assert spec["summary_view"]["rows"][0]["metric_key"] == "quality_score"
-    assert spec["chart_plan"][0]["chart_key"] == "executive_summary"
-    assert spec["chart_plan"][0]["rows"][0]["metric_key"] == "quality_score"
-    assert spec["chart_plan"][1]["chart_key"] == "filter_impact"
-    assert spec["chart_plan"][2]["chart_key"] == "join_health"
-    assert spec["chart_plan"][3]["chart_key"] == "stage_waterfall"
-    assert spec["chart_plan"][4]["chart_key"] == "final_dataset_quality"
-    assert spec["chart_plan"][5]["chart_key"] == "lineage_overview"
-    assert spec["chart_plan"][6]["chart_key"] == "data_trust_scorecard"
-    assert spec["chart_plan"][1]["rows"][0]["rejected_row_count"] == 2
-    assert spec["chart_plan"][5]["rows"][0]["final_state"] == "join_matched"
-    assert spec["chart_plan"][7]["display_columns"][1] == {"field": "column_name", "label": "Physical Column"}
-    assert spec["chart_plan"][7]["display_columns"][2] == {"field": "column_alias", "label": "Semantic Alias"}
-    assert spec["chart_plan"][6]["rows"][0]["trust_score"] == 68.0
-    assert spec["chart_plan"][7]["rows"][0]["column_alias"] == "email"
-    assert "/data-quality/evidence/missingness" in str(spec["chart_plan"][7]["rows"][0]["evidence_path"])
-    assert spec["chart_plan"][9]["rows"][0]["reference_table"] == "customer"
-    assert spec["chart_plan"][9]["rows"][0]["column_alias"] == "customer_id"
-    assert "/data-quality/evidence/rules/" in str(spec["chart_plan"][9]["rows"][0]["evidence_path"])
-    assert spec["chart_plan"][10]["rows"][0]["duplicate_candidate_count"] == 1
-    assert "/data-quality/evidence/duplicates/" in str(spec["chart_plan"][10]["rows"][0]["evidence_path"])
-    assert spec["chart_plan"][12]["chart_key"] == "recommended_actions"
+    chart_by_key = {item["chart_key"]: item for item in spec["chart_plan"]}
+    assert chart_by_key["executive_summary"]["rows"][0]["metric_key"] == "quality_score"
+    assert chart_by_key["filter_impact"]["rows"][0]["rejected_row_count"] == 2
+    assert chart_by_key["lineage_overview"]["rows"][0]["final_state"] == "join_matched"
+    assert chart_by_key["missingness_heatmap"]["display_columns"][1] == {"field": "column_name", "label": "Physical Column"}
+    assert chart_by_key["missingness_heatmap"]["display_columns"][2] == {"field": "column_alias", "label": "Semantic Alias"}
+    assert chart_by_key["data_trust_scorecard"]["rows"][0]["trust_score"] == 68.0
+    assert chart_by_key["missingness_heatmap"]["rows"][0]["column_alias"] == "email"
+    assert "/data-quality/evidence/missingness" in str(chart_by_key["missingness_heatmap"]["rows"][0]["evidence_path"])
+    assert chart_by_key["referential_integrity"]["rows"][0]["reference_table"] == "customer"
+    assert chart_by_key["referential_integrity"]["rows"][0]["column_alias"] == "customer_id"
+    assert "/data-quality/runs/run_1/rules/rule_1/failed-records" in str(chart_by_key["referential_integrity"]["rows"][0]["evidence_path"])
+    assert "/data-quality/evidence/rules/rule_1" in str(chart_by_key["referential_integrity"]["rows"][0]["detail_evidence_path"])
+    assert chart_by_key["duplicate_risk"]["rows"][0]["duplicate_candidate_count"] == 1
+    assert "/data-quality/evidence/duplicates/" in str(chart_by_key["duplicate_risk"]["rows"][0]["evidence_path"])
+    assert "recommended_actions" in chart_by_key
+    final_dataset_quality = chart_by_key["final_dataset_quality"]
+    assert "/data-quality/final-dataset/rows" in str(final_dataset_quality["rows"][0]["evidence_path"])
+    assert "/data-quality/final-dataset?tenant_id=tenant" in str(final_dataset_quality["rows"][0]["detail_evidence_path"])
 
 
 def test_build_data_quality_dashboard_spec_skips_empty_sections() -> None:
@@ -2433,6 +2825,15 @@ def test_build_data_quality_dashboard_spec_includes_quality_trends_when_present(
         quality_summary={"average_table_trust_score": 72.5, "critical_issue_count": 0, "failed_rule_count": 0},
         trends=[
             {
+                "object_type": "rule",
+                "object_key": "rule_1",
+                "object_name": "customer.email is required",
+                "metric_name": "violation_count",
+                "current_value_num": 12.0,
+                "trend_status": "worsened",
+                "directionality": "lower_better",
+            },
+            {
                 "object_type": "table",
                 "object_key": "customer",
                 "object_name": "customer",
@@ -2448,8 +2849,12 @@ def test_build_data_quality_dashboard_spec_includes_quality_trends_when_present(
     )
 
     quality_trends = next(item for item in spec["chart_plan"] if item["chart_key"] == "quality_trends")
-    assert quality_trends["rows"][0]["object_key"] == "customer"
-    assert quality_trends["summary"]["worsened_metric_count"] == 1
+    rule_row = next(row for row in quality_trends["rows"] if row["object_type"] == "rule")
+    table_row = next(row for row in quality_trends["rows"] if row["object_type"] == "table")
+    assert table_row["object_key"] == "customer"
+    assert quality_trends["summary"]["worsened_metric_count"] == 2
+    assert "/data-quality/runs/run_1/rules/rule_1/failed-records" in str(rule_row["evidence_path"])
+    assert "/data-quality/trends/rules/rule_1" in str(rule_row["detail_evidence_path"])
 
 
 def test_build_business_term_trend_payload_groups_rows_by_glossary_term() -> None:
@@ -2488,6 +2893,162 @@ def test_build_business_term_trend_payload_groups_rows_by_glossary_term() -> Non
     assert result["summary"]["worsened_business_term_count"] == 1
     assert result["rows"][0]["business_term"] == "Customer"
     assert result["rows"][0]["trend_row_count"] == 2
+    assert "/data-quality/trends/business-terms/records" in str(result["rows"][0]["evidence_path"])
+    assert "/data-quality/trends/business-terms?" in str(result["rows"][0]["detail_evidence_path"])
+
+
+def test_build_business_term_trend_payload_uses_llm_fallback_when_glossary_coverage_is_empty(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_trends,
+        "_infer_business_terms_for_run",
+        lambda *args, **kwargs: [
+            {
+                "term": "Customer",
+                "normalized_term": "customer",
+                "definition": "Customer identity and account ownership domain.",
+                "synonyms": ["customer_id", "email", "phone_number"],
+                "abbreviations": [],
+            }
+        ],
+    )
+
+    result = dq_trends.build_business_term_trend_payload(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        trends=[
+            {
+                "object_type": "rule",
+                "object_key": "rule_1",
+                "object_name": "Customer email is required",
+                "metric_name": "violation_count",
+                "trend_status": "worsened",
+            }
+        ],
+        glossary_terms=[],
+        settings=SimpleNamespace(openai_api_key="key", openai_model="model"),
+    )
+
+    assert result["summary"]["business_term_group_count"] == 1
+    assert result["summary"]["unmatched_trend_row_count"] == 0
+    assert result["rows"][0]["business_term"] == "Customer"
+
+
+def test_build_business_term_record_payload_maps_term_to_rule_and_stage_records(monkeypatch) -> None:
+    rule = {
+        "rule_id": "dqr_1",
+        "run_id": "run_1",
+        "rule_label": "customer_id is required",
+        "rule_type": "not_null",
+        "severity": "high",
+        "table_name": "customer_data",
+        "column_name": "customer_id",
+        "condition_json": {},
+        "source_text": "customer_id should not be null",
+    }
+    stage = {
+        "stage_id": "dqstage_1",
+        "run_id": "run_1",
+        "stage_name": "customer_id presence",
+        "stage_type": "filter",
+        "stage_seq": 2,
+        "summary_json": {"rejected_row_count": 3},
+    }
+    monkeypatch.setattr(dq_trends, "list_quality_rules", lambda *args, **kwargs: [rule])
+    monkeypatch.setattr(dq_trends, "list_quality_dataset_stages", lambda *args, **kwargs: [stage])
+    monkeypatch.setattr(
+        dq_trends,
+        "fetch_rule_records",
+        lambda *args, **kwargs: {
+            "supported": True,
+            "affected_row_count": 2,
+            "rows": [{"__row_ref": "(0,1)", "customer_id": None}],
+        },
+    )
+    monkeypatch.setattr(
+        dq_trends,
+        "fetch_stage_evidence",
+        lambda *args, **kwargs: {
+            "summary": {"rejected_row_count": 3},
+            "rows": [{"__row_ref": "(0,2)", "customer_id": None}],
+        },
+    )
+    monkeypatch.setattr(
+        dq_trends,
+        "fetch_final_dataset_rows",
+        lambda *args, **kwargs: {
+            "final_dataset": {"final_row_count": 10},
+            "basis_stage": {"stage_id": "dqstage_final"},
+            "rows": [{"__row_ref": "(0,3)", "customer_id": "C1"}],
+        },
+    )
+
+    result = dq_trends.build_business_term_record_payload(
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        term="customer id",
+        trends=[
+            {
+                "object_type": "rule",
+                "object_key": dq_trends.rule_logical_key(rule),
+                "object_name": "customer_id is required",
+                "metric_name": "violation_count",
+                "trend_status": "worsened",
+                "current_value_num": 2,
+            },
+            {
+                "object_type": "stage",
+                "object_key": dq_trends.stage_logical_key(stage),
+                "object_name": "customer_id presence",
+                "metric_name": "rejected_row_count",
+                "trend_status": "worsened",
+            },
+        ],
+        glossary_terms=[
+            {
+                "term": "Customer ID",
+                "normalized_term": "customer id",
+                "definition": "Customer identifier.",
+                "synonyms": ["customer_id"],
+                "abbreviations": [],
+            }
+        ],
+        settings=SimpleNamespace(openai_api_key=None),
+    )
+
+    assert result["business_term"] == "Customer ID"
+    assert result["summary"]["record_group_count"] == 2
+    assert "/data-quality/runs/run_1/rules/dqr_1/failed-records" in str(result["record_groups"][0]["evidence_path"])
+    assert any(group["source_type"] == "stage_evidence" for group in result["record_groups"])
+
+
+def test_upsert_glossary_terms_normalizes_and_persists_entries(monkeypatch) -> None:
+    calls: list[list[object]] = []
+    monkeypatch.setattr(dq_glossary, "execute_non_query", lambda settings, sql, params: calls.append(params))
+
+    updated = dq_glossary.upsert_glossary_terms(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        terms=[
+            {
+                "term": "Customer Identifier",
+                "definition": "Primary customer key",
+                "synonyms": ["customer_id", "customer id"],
+                "abbreviations": ["CID"],
+            }
+        ],
+        lifecycle_status="suggested",
+        source_context_id="ctx_1",
+    )
+
+    assert updated == 1
+    assert calls
+    assert calls[0][0] == "tenant__data_quality_observability__customer_identifier"
+    assert calls[0][4] == "customer identifier"
+    assert calls[0][8] == "suggested"
+    assert calls[0][9] == "ctx_1"
 
 
 def test_build_data_quality_dashboard_spec_includes_business_term_trends_when_present() -> None:
@@ -2512,7 +3073,8 @@ def test_build_data_quality_dashboard_spec_includes_business_term_trends_when_pr
                     "improved_metric_count": 0,
                     "affected_object_count": 2,
                     "top_metrics": "trust_score, violation_count",
-                    "evidence_path": "/data-quality/trends/business-terms?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1&term=customer",
+                    "evidence_path": "/data-quality/trends/business-terms/records?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1&term=customer",
+                    "detail_evidence_path": "/data-quality/trends/business-terms?tenant_id=tenant&domain_id=data_quality_observability&run_id=run_1&term=customer",
                 }
             ],
         },
@@ -2521,6 +3083,7 @@ def test_build_data_quality_dashboard_spec_includes_business_term_trends_when_pr
     business_terms = next(item for item in spec["chart_plan"] if item["chart_key"] == "business_term_trends")
     assert business_terms["rows"][0]["business_term"] == "Customer"
     assert business_terms["summary"]["business_term_group_count"] == 1
+    assert "/data-quality/trends/business-terms/records" in str(business_terms["rows"][0]["evidence_path"])
 
 
 def test_derive_data_quality_anomalies_detects_core_regressions() -> None:
@@ -2549,7 +3112,7 @@ def test_derive_data_quality_anomalies_detects_core_regressions() -> None:
                 "metric_name": "row_count",
                 "trend_status": "worsened",
                 "current_value_num": 800.0,
-                "previous_value_num": 1200.0,
+                "previous_value_num": 2000.0,
                 "delta_value": -400.0,
                 "delta_pct": -33.33,
             },
@@ -4152,6 +4715,137 @@ def test_build_data_quality_run_summary_payload_overrides_terminal_workflow_stat
 
     assert response["workflow_status"] == "completed"
     assert response["summary"]["workflow_status"] == "completed"
+
+
+def test_build_data_quality_rule_outcome_payload_adds_passed_counts_and_evidence() -> None:
+    payload = dq_api_payloads.build_data_quality_rule_outcome_payload(
+        row={
+            "rule_id": "rule_1",
+            "quality_run_id": "dqrun_1",
+            "run_id": "run_1",
+            "rule_type": "not_null",
+            "rule_label": "customer.email is required",
+            "severity": "critical",
+            "table_name": "customer",
+            "column_name": "email",
+            "status": "active",
+            "result_id": "res_1",
+            "result_status": "failed",
+            "checked_row_count": 10,
+            "violation_count": 2,
+            "violation_pct": 20.0,
+            "sample_rows_json": [{"email": None}],
+        },
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+    )
+
+    assert payload["dimension"] == "completeness"
+    assert payload["result"]["passed_row_count"] == 8
+    assert payload["result"]["pass_pct"] == 80.0
+    assert payload["result"]["result_status"] == "failed"
+    assert payload["evidence"]["failed_records"].startswith("/data-quality/runs/run_1/rules/rule_1/failed-records")
+    assert payload["result"]["evidence"]["passed_records"].startswith("/data-quality/runs/run_1/rules/rule_1/passed-records")
+
+
+def test_build_filter_predicate_supports_in_like_and_age_between() -> None:
+    predicate, params = dq_stages._build_filter_predicate(
+        {
+            "table_name": "customer_data",
+            "column_name": "account_type",
+            "operator": "IN",
+            "value": ["Savings", "Current", "Business"],
+        }
+    )
+    assert predicate == '"account_type"::text IN (%s, %s, %s)'
+    assert params == ["Savings", "Current", "Business"]
+
+    predicate, params = dq_stages._build_filter_predicate(
+        {
+            "table_name": "customer_data",
+            "column_name": "email",
+            "operator": "LIKE",
+            "value": "%@%.%",
+        }
+    )
+    assert predicate == '"email"::text LIKE %s'
+    assert params == ["%@%.%"]
+
+    predicate, params = dq_stages._build_filter_predicate(
+        {
+            "table_name": "customer_data",
+            "column_name": "dob",
+            "reference_column": "created_date",
+            "operator": "AGE BETWEEN",
+            "value": [18, 80],
+        }
+    )
+    assert "DATE_PART('year', AGE(\"created_date\"::date, \"dob\"::date)) BETWEEN %s AND %s" == predicate
+    assert params == [18, 80]
+
+
+def test_fetch_rule_records_supports_not_null_failed_and_passed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "_get_rule_row",
+        lambda settings, tenant_id, domain_id, rule_id: {
+            "rule_id": rule_id,
+            "run_id": "run_1",
+            "rule_type": "not_null",
+            "table_name": "customer",
+            "column_name": "email",
+            "condition_json": {"source_text": "customer.email is required"},
+        },
+    )
+    monkeypatch.setattr(
+        dq_evidence,
+        "load_quality_run",
+        lambda settings, run_id, tenant_id, domain_id: {
+            "run_id": run_id,
+            "tenant_id": tenant_id,
+            "domain_id": domain_id,
+            "schema_name": "public",
+            "connection_id": "conn_1",
+        },
+    )
+    monkeypatch.setattr(dq_evidence, "resolve_quality_run_scoped_conn", lambda settings, run_row: object())
+
+    calls: list[tuple[str, list[object]]] = []
+
+    def _fake_run_query(settings, sql, params, scoped_conn=None):
+        calls.append((sql, params))
+        if "COUNT(*) AS affected_row_count" in sql:
+            return [{"affected_row_count": 2}]
+        return [{"__row_ref": "(0,1)", "email": None}]
+
+    monkeypatch.setattr(dq_evidence, "run_query", _fake_run_query)
+
+    failed = dq_evidence.fetch_rule_records(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        rule_id="rule_1",
+        outcome="failed",
+        limit=25,
+        offset=0,
+    )
+    passed = dq_evidence.fetch_rule_records(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        rule_id="rule_1",
+        outcome="passed",
+        limit=25,
+        offset=0,
+    )
+
+    assert failed["supported"] is True
+    assert failed["affected_row_count"] == 2
+    assert passed["supported"] is True
+    assert any('WHERE "email" IS NULL' in sql for sql, _ in calls)
+    assert any('WHERE "email" IS NOT NULL' in sql for sql, _ in calls)
 
 
 def test_build_data_quality_run_hydration_payload_includes_pending_cards() -> None:
