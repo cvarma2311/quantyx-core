@@ -99,7 +99,7 @@ def create_chart_request(
 
 def get_chart_request(settings: Settings, chart_id: str) -> dict | None:
     sql = """
-        SELECT chart_id, tenant_id, domain_id, conversation_ids, question, query_payload, sql, params,
+        SELECT chart_id, title, tenant_id, domain_id, conversation_ids, question, query_payload, sql, params,
                rows_json, chart_type, chart_payload, chart_data, status, error_message, timing_ms,
                insight_text, narrative_text, stats_json, interaction_context_json, lineage_json,
                parent_chart_id, root_chart_id, drill_hierarchy_id, drill_level_id,
