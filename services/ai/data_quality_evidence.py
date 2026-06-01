@@ -93,11 +93,32 @@ def fetch_missingness_evidence(
     }
 
 
-def _get_rule_row(settings: Settings, *, tenant_id: str, domain_id: str, rule_id: str) -> dict[str, Any]:
-    rows = list_quality_rules(settings, tenant_id=tenant_id, domain_id=domain_id, limit=1200)
+def _get_rule_row(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    domain_id: str,
+    rule_id: str,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    rows = list_quality_rules(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        limit=1200,
+    )
     for row in rows:
         if str(row.get("rule_id") or "") == str(rule_id):
             return row
+    try:
+        from services.ai.data_quality_trends import rule_logical_key
+
+        for row in rows:
+            if str(rule_logical_key(row) or "") == str(rule_id):
+                return row
+    except Exception:
+        pass
     raise HTTPException(status_code=404, detail="Data quality rule not found")
 
 
@@ -258,7 +279,13 @@ def fetch_rule_records(
 ) -> dict[str, Any]:
     if outcome not in {"failed", "passed"}:
         raise HTTPException(status_code=400, detail="Unsupported rule record outcome")
-    rule = _get_rule_row(settings, tenant_id=tenant_id, domain_id=domain_id, rule_id=rule_id)
+    rule = _get_rule_row(
+        settings,
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        rule_id=rule_id,
+        run_id=run_id,
+    )
     if str(rule.get("run_id") or "") != str(run_id):
         raise HTTPException(status_code=404, detail="Data quality rule not found for run")
     run_row = load_quality_run(settings, run_id=run_id, tenant_id=tenant_id, domain_id=domain_id)
@@ -717,6 +744,16 @@ def fetch_final_dataset_rows(
         limit=limit,
         offset=offset,
     )
+    row_source = "live_query" if rows else "unavailable"
+    if not rows:
+        summary = dict(final_dataset.get("summary_json") or {})
+        persisted_rows = list(summary.get("sample_rows") or [])
+        if persisted_rows:
+            capped_limit = _safe_limit(limit)
+            capped_offset = _safe_offset(offset)
+            rows = persisted_rows[capped_offset:capped_offset + capped_limit]
+            basis_stage = basis_stage or dict(summary.get("basis_stage") or {})
+            row_source = "persisted_sample"
     return {
         "run_id": run_id,
         "final_dataset": final_dataset,
@@ -724,6 +761,7 @@ def fetch_final_dataset_rows(
         "rows": rows,
         "limit": _safe_limit(limit),
         "offset": _safe_offset(offset),
+        "row_source": row_source,
     }
 
 

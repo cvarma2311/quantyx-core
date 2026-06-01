@@ -1250,6 +1250,33 @@ def fetch_final_dataset_rows_tool(
     )
 
 
+def build_final_dataset_snapshot_tool(
+    settings: Any,
+    *,
+    scoped_conn: ScopedConnection | None,
+    schema_name: str,
+    stages: list[dict[str, Any]],
+    final_dataset: dict[str, Any] | None,
+    sample_limit: int = 2000,
+) -> dict[str, Any]:
+    rows, basis_stage = fetch_final_dataset_rows_tool(
+        settings,
+        scoped_conn=scoped_conn,
+        schema_name=schema_name,
+        stages=stages,
+        final_dataset=final_dataset,
+        limit=max(1, min(int(sample_limit or 2000), 2000)),
+        offset=0,
+    )
+    return {
+        "basis_stage": dict(basis_stage or {}),
+        "sample_rows": list(rows or []),
+        "sample_row_count": len(rows or []),
+        "sample_limit": max(1, min(int(sample_limit or 2000), 2000)),
+        "row_source": "live_stage_snapshot" if rows else "unavailable",
+    }
+
+
 def _build_join_row_outcomes(
     *,
     join: dict[str, Any],
@@ -1762,6 +1789,42 @@ def compute_stage_plan_metrics_tool(
         if measured_stage.get("output_row_count") is not None:
             previous_output_row_count = measured_stage.get("output_row_count")
         enriched_stages.append(measured_stage)
+    final_dataset = {
+        "artifact_id": f"dqfinal_{uuid.uuid4().hex[:12]}",
+        "final_stage_name": str((enriched_stages[-1] or {}).get("stage_name") or "") if enriched_stages else "",
+        "final_row_count": previous_output_row_count,
+        "total_rejected_row_count": sum(
+            int(item.get("rejected_row_count") or 0)
+            for item in enriched_stages
+            if item.get("rejected_row_count") is not None
+        ),
+        "readiness_status": "ready" if previous_output_row_count not in (None, 0) else "empty",
+        "summary_json": {
+            "measurement_status": "derived" if previous_output_row_count is not None else "planned_only",
+            "final_row_count": previous_output_row_count,
+            "lineage_enabled": True,
+            "total_rejected_row_count": sum(
+                int(item.get("rejected_row_count") or 0)
+                for item in enriched_stages
+                if item.get("rejected_row_count") is not None
+            ),
+        },
+    }
+    snapshot = build_final_dataset_snapshot_tool(
+        settings,
+        scoped_conn=scoped_conn,
+        schema_name=schema_name,
+        stages=enriched_stages,
+        final_dataset=final_dataset,
+    )
+    final_dataset["summary_json"] = {
+        **dict(final_dataset.get("summary_json") or {}),
+        "basis_stage": dict(snapshot.get("basis_stage") or {}),
+        "sample_rows": list(snapshot.get("sample_rows") or []),
+        "sample_row_count": int(snapshot.get("sample_row_count") or 0),
+        "sample_limit": int(snapshot.get("sample_limit") or 0),
+        "row_source": snapshot.get("row_source"),
+    }
     return {
         **stage_plan,
         "stages": enriched_stages,
@@ -1773,27 +1836,7 @@ def compute_stage_plan_metrics_tool(
             for item in enriched_stages
             if item.get("rejected_row_count") is not None
         ),
-        "final_dataset": {
-            "artifact_id": f"dqfinal_{uuid.uuid4().hex[:12]}",
-            "final_stage_name": str((enriched_stages[-1] or {}).get("stage_name") or "") if enriched_stages else "",
-            "final_row_count": previous_output_row_count,
-            "total_rejected_row_count": sum(
-                int(item.get("rejected_row_count") or 0)
-                for item in enriched_stages
-                if item.get("rejected_row_count") is not None
-            ),
-            "readiness_status": "ready" if previous_output_row_count not in (None, 0) else "empty",
-            "summary_json": {
-                "measurement_status": "derived" if previous_output_row_count is not None else "planned_only",
-                "final_row_count": previous_output_row_count,
-                "lineage_enabled": True,
-                "total_rejected_row_count": sum(
-                    int(item.get("rejected_row_count") or 0)
-                    for item in enriched_stages
-                    if item.get("rejected_row_count") is not None
-                ),
-            },
-        },
+        "final_dataset": final_dataset,
     }
 
 

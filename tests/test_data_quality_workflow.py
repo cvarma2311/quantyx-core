@@ -709,6 +709,9 @@ def test_compute_stage_plan_metrics_tool_measures_source_and_join_counts(monkeyp
     assert plan["stages"][3]["output_row_count"] == 3
     assert plan["final_dataset"]["final_row_count"] == 3
     assert plan["final_dataset"]["summary_json"]["lineage_enabled"] is True
+    assert plan["final_dataset"]["summary_json"]["basis_stage"]["stage_name"] == "filter_1"
+    assert plan["final_dataset"]["summary_json"]["sample_rows"][0]["customer_id"] == "C001"
+    assert plan["final_dataset"]["summary_json"]["row_source"] == "live_stage_snapshot"
 
 
 def test_list_agent_run_events_stage_aware_requests_latest_events(monkeypatch) -> None:
@@ -1403,6 +1406,83 @@ def test_fetch_final_dataset_rows_returns_rows_and_basis_stage(monkeypatch) -> N
     assert result["final_dataset"]["artifact_id"] == "dqfinal_1"
     assert result["basis_stage"]["stage_name"] == "customer_join_region"
     assert result["rows"][0]["left_key_value"] == "C001"
+    assert result["row_source"] == "live_query"
+
+
+def test_fetch_final_dataset_rows_falls_back_to_persisted_sample(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dq_evidence,
+        "load_quality_run",
+        lambda settings, run_id, tenant_id, domain_id: {"schema_name": "public", "connection_id": "conn_1"},
+    )
+    monkeypatch.setattr(dq_evidence, "resolve_quality_run_scoped_conn", lambda settings, run_row: None)
+    monkeypatch.setattr(dq_evidence, "list_quality_dataset_stages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        dq_evidence,
+        "get_quality_final_dataset_artifact",
+        lambda *args, **kwargs: {
+            "artifact_id": "dqfinal_1",
+            "final_stage_name": "final_dataset_projection",
+            "final_row_count": 2,
+            "summary_json": {
+                "basis_stage": {"stage_id": "dqstage_2", "stage_name": "filter_1", "stage_type": "filter"},
+                "sample_rows": [{"__row_ref": "(0,1)", "customer_id": "C001"}, {"__row_ref": "(0,2)", "customer_id": "C002"}],
+            },
+        },
+    )
+    monkeypatch.setattr(dq_evidence, "fetch_final_dataset_rows_tool", lambda *args, **kwargs: ([], None))
+
+    result = dq_evidence.fetch_final_dataset_rows(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        limit=1,
+        offset=1,
+    )
+
+    assert result["rows"] == [{"__row_ref": "(0,2)", "customer_id": "C002"}]
+    assert result["basis_stage"]["stage_name"] == "filter_1"
+    assert result["row_source"] == "persisted_sample"
+
+
+def test_fetch_rule_records_accepts_rule_logical_key(monkeypatch) -> None:
+    rule = {
+        "rule_id": "dqr_1",
+        "run_id": "run_1",
+        "tenant_id": "tenant",
+        "domain_id": "data_quality_observability",
+        "rule_type": "not_null",
+        "table_name": "customer_data",
+        "column_name": "email",
+        "rule_label": "customer_data.email is required",
+    }
+    monkeypatch.setattr(dq_evidence, "list_quality_rules", lambda *args, **kwargs: [rule])
+    monkeypatch.setattr(
+        dq_evidence,
+        "load_quality_run",
+        lambda settings, run_id, tenant_id, domain_id: {"schema_name": "public", "connection_id": "conn_1"},
+    )
+    monkeypatch.setattr(dq_evidence, "resolve_quality_run_scoped_conn", lambda settings, run_row: object())
+    monkeypatch.setattr(
+        dq_evidence,
+        "run_query",
+        lambda *args, **kwargs: [{"__row_ref": "(0,1)", "email": None}],
+    )
+
+    result = dq_evidence.fetch_rule_records(
+        object(),
+        tenant_id="tenant",
+        domain_id="data_quality_observability",
+        run_id="run_1",
+        rule_id=dq_trends.rule_logical_key(rule),
+        outcome="failed",
+        limit=100,
+        offset=0,
+    )
+
+    assert result["rule"]["rule_id"] == "dqr_1"
+    assert result["rows"][0]["__row_ref"] == "(0,1)"
 
 
 def test_fetch_lineage_trace_returns_edges_and_membership(monkeypatch) -> None:
@@ -3084,6 +3164,50 @@ def test_build_data_quality_dashboard_spec_includes_business_term_trends_when_pr
     assert business_terms["rows"][0]["business_term"] == "Customer"
     assert business_terms["summary"]["business_term_group_count"] == 1
     assert "/data-quality/trends/business-terms/records" in str(business_terms["rows"][0]["evidence_path"])
+
+
+def test_build_data_quality_dashboard_spec_uses_persisted_rule_id_for_trend_record_links() -> None:
+    spec = dq_dashboard.build_data_quality_dashboard_spec(
+        run_id="run_1",
+        domain_id="data_quality_observability",
+        profiling={"tables": []},
+        quality_summary={"average_table_trust_score": 72.5, "critical_issue_count": 0, "failed_rule_count": 1},
+        quality_rules=[
+            {
+                "rule_id": "dqr_123",
+                "rule_type": "not_null",
+                "severity": "warning",
+                "table_name": "customer_data",
+                "column_name": "email",
+                "rule_label": "customer_data.email is required",
+            }
+        ],
+        trends=[
+            {
+                "object_type": "rule",
+                "object_key": dq_trends.rule_logical_key(
+                    {
+                        "rule_id": "dqr_123",
+                        "rule_type": "not_null",
+                        "table_name": "customer_data",
+                        "column_name": "email",
+                        "rule_label": "customer_data.email is required",
+                    }
+                ),
+                "object_name": "customer_data.email is required",
+                "metric_name": "violation_count",
+                "current_value_num": 10,
+                "previous_value_num": 0,
+                "current_value_text": None,
+                "trend_status": "worsened",
+            }
+        ],
+    )
+
+    quality_trends = next(item for item in spec["chart_plan"] if item["chart_key"] == "quality_trends")
+    row = quality_trends["rows"][0]
+    assert "/data-quality/runs/run_1/rules/dqr_123/failed-records" in str(row["evidence_path"])
+    assert "/data-quality/runs/run_1/rules/dqr_123/passed-records" in str(row["passed_records_path"])
 
 
 def test_derive_data_quality_anomalies_detects_core_regressions() -> None:

@@ -54,22 +54,42 @@ def _final_dataset_rows_path(*, tenant_id: str, domain_id: str, run_id: str) -> 
 
 
 def _trend_evidence_paths(*, tenant_id: str, domain_id: str, run_id: str, row: dict[str, Any]) -> dict[str, str | None]:
+    return _trend_evidence_paths_with_rules(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        run_id=run_id,
+        row=row,
+        rules_by_logical_key={},
+    )
+
+
+def _trend_evidence_paths_with_rules(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    run_id: str,
+    row: dict[str, Any],
+    rules_by_logical_key: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, str | None]:
     object_type = str(row.get("object_type") or "").strip()
     object_key = str(row.get("object_key") or "").strip()
     metric_name = str(row.get("metric_name") or "").strip()
     current_text = str(row.get("current_value_text") or "").strip().lower()
     current_num = _as_number(row.get("current_value_num"))
+    rules_by_logical_key = dict(rules_by_logical_key or {})
+    rule_row = rules_by_logical_key.get(object_key) if object_type == "rule" else None
+    evidence_rule_id = str((rule_row or {}).get("rule_id") or object_key or "").strip() or None
     failed_records_path = _rule_failed_records_path(
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        rule_id=object_key if object_type == "rule" else None,
+        rule_id=evidence_rule_id if object_type == "rule" else None,
     )
     passed_records_path = _rule_passed_records_path(
         tenant_id=tenant_id,
         domain_id=domain_id,
         run_id=run_id,
-        rule_id=object_key if object_type == "rule" else None,
+        rule_id=evidence_rule_id if object_type == "rule" else None,
     )
     if object_type == "table":
         detail_path = f"/data-quality/trends/tables/{object_key}?tenant_id={tenant_id}&domain_id={domain_id}&run_id={run_id}"
@@ -209,6 +229,15 @@ def build_data_quality_dashboard_spec(
     )
     business_term_rows = [item for item in (business_term_trends.get("rows") or []) if isinstance(item, dict)]
     business_term_summary = dict(business_term_trends.get("summary") or {})
+    try:
+        from services.ai.data_quality_trends import rule_logical_key
+        rules_by_logical_key = {
+            str(rule_logical_key(rule) or "").strip(): rule
+            for rule in quality_rules
+            if str(rule_logical_key(rule) or "").strip()
+        }
+    except Exception:
+        rules_by_logical_key = {}
     open_issue_rows = [
         row
         for row in issue_payload_rows
@@ -791,7 +820,13 @@ def build_data_quality_dashboard_spec(
             "rows": [
                 {
                     **row,
-                    **_trend_evidence_paths(tenant_id=tenant_id, domain_id=domain_id, run_id=run_id, row=row),
+                    **_trend_evidence_paths_with_rules(
+                        tenant_id=tenant_id,
+                        domain_id=domain_id,
+                        run_id=run_id,
+                        row=row,
+                        rules_by_logical_key=rules_by_logical_key,
+                    ),
                 }
                 for row in sorted(
                     trends,
