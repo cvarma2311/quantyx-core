@@ -245,6 +245,7 @@ from services.ai.jobs_store import (
     list_jobs as fetch_jobs,
     update_job_progress,
     update_job_status,
+    purge_job
 )
 from services.ai.chat_store import create_chat_request, get_chat_request, update_chat_request
 from services.ai.chat_events_store import create_chat_event, list_chat_events
@@ -496,6 +497,7 @@ from services.api.schemas import (
     JobListResponse,
     JobResultResponse,
     JobStatusResponse,
+    DeleteJobRequest,
     PackApplyRequest,
     PackApplyResponse,
     PackListResponse,
@@ -2668,6 +2670,39 @@ def cancel_job(job_id: str) -> JobCancelResponse:
         update_job_status(settings, job_id, "canceled", result_payload=None, error_message="Canceled by user request")
         status_value = "canceled"
     return JobCancelResponse(job_id=job_id, status=status_value)
+
+@app.delete(
+    "/jobs/{job_id}",
+    response_model=dict,
+    tags=["jobs"],
+    summary="Delete job",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "deleted": {
+                                "value": {
+                                    "ok": True,
+                                    "tenant_id": "tenant_123",
+                                    "job_id": "job_123"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+)
+def delete_job(job_id: str, request: DeleteJobRequest) -> dict:
+    purge_job(settings, request.tenant_id, job_id)
+    return {
+        "ok": True,
+        "tenant_id": request.tenant_id,
+        "job_id": job_id
+    }
 
 
 @app.post(

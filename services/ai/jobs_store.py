@@ -7,6 +7,7 @@ from decimal import Decimal
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from services.ai.db import execute_non_query
 
 from services.ai.config import Settings
 
@@ -274,6 +275,7 @@ def list_jobs(
             j.scope_id, 
             j.created_at, 
             j.updated_at,
+            j.tenant_id,
             t.display_name AS tenant_name,
             j.domain_id
         FROM public.quantyx_jobs j
@@ -423,3 +425,22 @@ def claim_next_job(settings: Settings) -> dict | None:
         return None
     finally:
         conn.close()
+
+
+def purge_job(settings: Settings, tenant_id: str, job_id: str) -> None:
+    execute_non_query(
+        settings,
+        "DELETE FROM public.quantyx_jobs WHERE job_id = %s",
+        [job_id],
+    )
+    execute_non_query(
+        settings,
+        "DELETE FROM public.quantyx_job_scopes WHERE tenant_id = %s",
+        [tenant_id],
+    )
+
+    execute_non_query(
+        settings,
+        "DELETE FROM public.quantyx_job_events WHERE job_id = %s",
+        [job_id]
+    )
