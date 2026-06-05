@@ -53,6 +53,7 @@ from services.ai.agentic_agents import (
     _enforce_tool_limit,
     _fetch_table_samples,
     _pick_canonical_time_column,
+    _hierarchy_breakdown_bindings,
     TableSample,
 )
 from services.ai.semantic_graph_store import persist_semantic_graph
@@ -78,7 +79,7 @@ from services.ai.correlation_store import create_correlation_run, save_correlati
 from services.ai.correlation_charts import generate_correlation_charts
 from services.ai.views import create_views_from_schema, create_joined_views, extract_schema_table_names
 from services.ai.charts_store import create_chart_request, update_chart_request
-from services.ai.hierarchy_store import ensure_business_hierarchies
+from services.ai.hierarchy_store import ensure_business_hierarchies, list_business_hierarchies
 from services.ai.chart_interactions import build_chart_interaction_context_for_creation
 from services.ai.charts import build_chart_payload, infer_chart_type, build_chart_inference, build_discovery_chart_payload
 from services.ai.dashboard_refresh_store import (
@@ -1508,6 +1509,24 @@ def _llm_narrate_contextual_chart(
     return {"insight_text": insight_text, "narrative_text": narrative_text}
 
 
+def _interaction_source_dimensions(
+    *,
+    dimensions: list[str],
+    time_column: str | None = None,
+    category_column: str | None = None,
+) -> list[str]:
+    source_dims: list[str] = []
+    if time_column:
+        source_dims.append(str(time_column))
+    if category_column and category_column not in source_dims:
+        source_dims.append(str(category_column))
+    for dim in dimensions:
+        dim_text = str(dim or "").strip()
+        if dim_text and dim_text not in source_dims:
+            source_dims.append(dim_text)
+    return source_dims
+
+
 def _llm_extract_text(
     settings,
     *,
@@ -2134,7 +2153,18 @@ def _validate_llm_chart_candidates(
         if time_col and time_col not in valid_cols:
             rejected.append({"candidate": candidate, "reason": "unknown_time_column"})
             continue
-        if cat_col and cat_col not in valid_cols:
+        # Handle hierarchy chart type: LLM may propose type="hierarchy" with a
+        # ">"-separated path like "location_name > equipment_type > device_type".
+        # Convert to a standard bar chart using the first level as the category column.
+        if chart_type == "hierarchy" and cat_col and ">" in cat_col:
+            hierarchy_levels = [lvl.strip() for lvl in cat_col.split(">") if lvl.strip()]
+            first_level = hierarchy_levels[0] if hierarchy_levels else None
+            if not first_level or first_level not in valid_cols:
+                rejected.append({"candidate": candidate, "reason": "unknown_category_column"})
+                continue
+            cat_col = first_level
+            chart_type = "bar"
+        elif cat_col and cat_col not in valid_cols:
             rejected.append({"candidate": candidate, "reason": "unknown_category_column"})
             continue
         normalized = {
@@ -2150,6 +2180,8 @@ def _validate_llm_chart_candidates(
             "time_grain": candidate.get("time_grain"),
             "category_column": cat_col,
             "chart_source": candidate.get("chart_source") or "llm_proposed",
+            "drill_hierarchy_id": candidate.get("drill_hierarchy_id"),
+            "drill_level_id": candidate.get("drill_level_id"),
         }
         key = (
             normalized.get("table"),
@@ -2174,6 +2206,7 @@ def _llm_propose_chart_candidates(
     profiling: dict[str, Any],
     metrics: list[dict[str, Any]],
     context_text: str | None,
+    business_hierarchies: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
     if not _chart_proposal_enabled(settings):
         return None, None
@@ -2209,11 +2242,31 @@ def _llm_propose_chart_candidates(
                 "categorical_columns": usable_categoricals,
             }
         )
+    hierarchy_payload = [
+        {
+            "hierarchy_id": h.get("hierarchy_id"),
+            "name": h.get("name"),
+            "preferred": bool(h.get("preferred")),
+            "levels": [
+                str(lvl.get("column") or lvl.get("level_id") or "")
+                for lvl in (h.get("levels_json") or [])
+                if lvl.get("column") or lvl.get("level_id")
+            ],
+        }
+        for h in (business_hierarchies or [])[:4]
+        if h.get("levels_json")
+    ]
+    hierarchy_instruction = (
+        " Prefer category columns that appear in the provided business_hierarchies levels "
+        "(these support drill-down navigation). Avoid category columns with mostly empty values."
+        if hierarchy_payload else ""
+    )
     system_prompt = (
         "You propose dashboard chart candidates from validated metrics. "
         "Use only the provided metric names, tables, time columns, and category columns. "
-        "Prefer KPI trends by day/month and strong operational breakdowns. "
-        "Return JSON only with keys: charts, rationale. "
+        "Prefer KPI trends by day/month and strong operational breakdowns."
+        + hierarchy_instruction +
+        " Return JSON only with keys: charts, rationale. "
         "Each chart must contain: type, intent, table, metric, time_column, time_grain, category_column, title."
     )
     user_payload = {
@@ -2221,6 +2274,7 @@ def _llm_propose_chart_candidates(
         "context_text": str(context_text or "")[:8000],
         "metrics": metric_payload,
         "tables": table_payload,
+        "business_hierarchies": hierarchy_payload,
     }
     request = urllib.request.Request(
         "https://api.openai.com/v1/chat/completions",
@@ -4936,11 +4990,25 @@ def run_agentic_workflow(
         )
         if min_charts > max_charts:
             min_charts = max_charts
+        # Pre-load persisted hierarchies so select_charts can score hierarchy columns
+        # correctly even on first run (before dashboard_node bootstraps them).
+        if not state.get("business_hierarchies"):
+            try:
+                _pre_hierarchies = list_business_hierarchies(
+                    settings,
+                    str(state.get("tenant_id") or ""),
+                    str(state.get("domain_id") or "") or None,
+                )
+                if _pre_hierarchies:
+                    state["business_hierarchies"] = _pre_hierarchies
+            except Exception:
+                pass
         deterministic_candidates = propose_chart_candidates(
             state.get("profiling_stats", {}),
             state.get("metric_defs", []),
             state.get("join_edges", []),
             domain_id=state.get("domain_id"),
+            business_hierarchies=state.get("business_hierarchies") if isinstance(state.get("business_hierarchies"), list) else None,
         )
         llm_candidates_raw, llm_chart_diag = _llm_propose_chart_candidates(
             settings,
@@ -4948,6 +5016,7 @@ def run_agentic_workflow(
             profiling=state.get("profiling_stats", {}) or {},
             metrics=state.get("metric_defs", []) or [],
             context_text=state.get("context_text"),
+            business_hierarchies=state.get("business_hierarchies") if isinstance(state.get("business_hierarchies"), list) else None,
         )
         llm_candidates, llm_candidate_rejections = _validate_llm_chart_candidates(
             llm_candidates_raw,
@@ -4988,6 +5057,7 @@ def run_agentic_workflow(
             min_charts=min_charts,
             max_charts=max_charts,
             domain_id=state.get("domain_id"),
+            business_hierarchies=state.get("business_hierarchies") if isinstance(state.get("business_hierarchies"), list) else None,
         )
         reranked, rerank_diag = _llm_rerank_chart_candidates(
             settings,
@@ -5040,6 +5110,7 @@ def run_agentic_workflow(
                 min_charts=min_charts,
                 max_charts=max_charts,
                 domain_id=state.get("domain_id"),
+                business_hierarchies=state.get("business_hierarchies") if isinstance(state.get("business_hierarchies"), list) else None,
             )
         rejected = [cand for cand in candidates if cand.get("skipped")] + list(llm_candidate_rejections or [])
         logger.info(
@@ -5214,6 +5285,8 @@ def run_agentic_workflow(
         )
         enriched_charts = []
         runtime_chart_rejections: list[dict[str, Any]] = []
+        _forced_hierarchy_specs: list[dict] = []  # hierarchy-injected charts preserved across charts_spec resets
+        ensured_hierarchies: list[dict] = []  # populated in try block below; declared here for wider scope
         profiling_map = {t.get("name"): t for t in (state.get("profiling_stats", {}).get("tables") or [])}
         join_edges = state.get("join_edges") or []
         logger.info(
@@ -5262,6 +5335,107 @@ def run_agentic_workflow(
                 join_edges=join_edges,
             )
             state["business_hierarchies"] = ensured_hierarchies
+            # Back-fill drill_hierarchy_id on chart_plan items now that hierarchies
+            # are available. chart_planner_node runs before the bootstrap, so any
+            # hierarchy-linked breakdown columns would have been left unbound.
+            if ensured_hierarchies and state.get("chart_plan"):
+                for _cp_item in state["chart_plan"]:
+                    if _cp_item.get("drill_hierarchy_id"):
+                        continue
+                    _cp_cat = str(_cp_item.get("category_column") or "").strip()
+                    if not _cp_cat:
+                        continue
+                    _cp_table = str(_cp_item.get("table") or "").strip()
+                    _cp_profile = profiling_map.get(_cp_table) or {}
+                    _cp_bindings = _hierarchy_breakdown_bindings(_cp_profile, ensured_hierarchies)
+                    for _b in _cp_bindings:
+                        if str(_b.get("column") or "").strip().lower() == _cp_cat.lower():
+                            _cp_item["drill_hierarchy_id"] = _b.get("hierarchy_id")
+                            _cp_item["drill_level_id"] = _b.get("level_id")
+                            break
+            # Guarantee at least one hierarchy-backed breakdown chart in charts_spec.
+            # chart_planner_node runs before hierarchy bootstrap, so it often selects
+            # non-hierarchy columns (e.g. terminal_plant_name) when hierarchy data
+            # is unavailable. Inject top-level hierarchy bar charts here if missing.
+            if ensured_hierarchies and charts_spec is not None:
+                _hierarchy_cols_present = {
+                    str(item.get("category_column") or "").strip().lower()
+                    for item in charts_spec
+                    if item.get("drill_hierarchy_id")
+                }
+                # Build a lookup: base_table → best (executive KPI) metric
+                _metric_by_table: dict[str, dict] = {}
+                _sorted_metrics = sorted(
+                    (state.get("metric_defs") or []),
+                    key=lambda _m: (
+                        0 if _m.get("is_executive_kpi") else 1,
+                        -float(_m.get("metric_priority") or 0),
+                        -float(_m.get("measure_confidence") or 0),
+                    ),
+                )
+                for _m in _sorted_metrics:
+                    _mt = str(_m.get("base_table") or "").strip()
+                    if _mt and _mt not in _metric_by_table:
+                        _metric_by_table[_mt] = _m
+                for _hier in ensured_hierarchies:
+                    if not bool(_hier.get("preferred")):
+                        continue
+                    _levels = _hier.get("levels_json") or []
+                    _base_table = str((_hier.get("base_scope_json") or {}).get("base_table") or "").strip()
+                    _top_metric = _metric_by_table.get(_base_table)
+                    if not _levels or not _base_table or not _top_metric:
+                        continue
+                    _table_profile = profiling_map.get(_base_table) or {}
+                    _cat_cols_lower = {str(c).lower() for c in (_table_profile.get("categorical_columns") or [])}
+                    # Build a blank_pct lookup from column_profiles so we can auto-filter
+                    # sparse hierarchy columns (e.g. equipment_type at 94% blank).
+                    _col_blank_pct: dict[str, float] = {
+                        str(cp.get("name") or "").lower(): float(cp.get("blank_pct") or 0.0)
+                        for cp in (_table_profile.get("column_profiles") or [])
+                        if cp.get("name")
+                    }
+                    _BLANK_FILTER_THRESHOLD = 20.0  # add blank guard when >20% of rows are blank
+                    for _lvl in _levels:
+                        _col = str(_lvl.get("column") or _lvl.get("level_id") or "").strip()
+                        if not _col or _col.lower() in {"bu", "business_unit"}:
+                            continue
+                        if _col.lower() not in _cat_cols_lower:
+                            continue
+                        if _col.lower() in _hierarchy_cols_present:
+                            break  # already have a chart for this hierarchy's top level
+                        # Use metric formula if available; fall back to COUNT(*) so the
+                        # chart is never skipped due to a missing metric expression.
+                        _inj_metric_expr = _top_metric.get("formula") or "COUNT(*)"
+                        _col_is_sparse = _col_blank_pct.get(_col.lower(), 0.0) > _BLANK_FILTER_THRESHOLD
+                        _injected = {
+                            "type": "bar",
+                            "intent": "breakdown",
+                            "title": f"{_top_metric.get('display_name') or _top_metric.get('metric_name', 'Metric')} by {_col.replace('_', ' ').title()}",
+                            "table": _base_table,
+                            "metric": _top_metric.get("metric_name"),
+                            "metric_intent": _top_metric.get("metric_intent"),
+                            "metric_expr": _inj_metric_expr,
+                            "time_column": None,
+                            "time_grain": None,
+                            "category_column": _col,
+                            "drill_hierarchy_id": str(_hier.get("hierarchy_id") or ""),
+                            "drill_level_id": str(_lvl.get("level_id") or _col),
+                            "chart_source": "hierarchy_injected",
+                            # Flag sparse columns so the SQL builder adds blank exclusion guard.
+                            "category_blank_filter": _col_is_sparse,
+                        }
+                        charts_spec.append(_injected)
+                        _forced_hierarchy_specs.append(_injected)
+                        logger.info(
+                            "agentic.hierarchy.chart_injected | run_id=%s hierarchy_id=%s column=%s table=%s metric=%s",
+                            run_id,
+                            _hier.get("hierarchy_id"),
+                            _col,
+                            _base_table,
+                            _top_metric.get("metric_name"),
+                        )
+                        _hierarchy_cols_present.add(_col.lower())
+                        break  # one injection per preferred hierarchy
             _emit(
                 settings,
                 run_id,
@@ -5317,6 +5491,16 @@ def run_agentic_workflow(
                     traceback.format_exc(),
                 )
 
+        # Columns covered by hierarchy drill-down navigation. Discovery charts that use
+        # these as their primary x_axis (standalone breakdowns) are suppressed — the user
+        # navigates them via drill-up/drill-down from the single injected hierarchy chart.
+        _hierarchy_discovery_skip_cols: set[str] = {
+            str(_lvl.get("column") or _lvl.get("level_id") or "").strip().lower()
+            for _h in ensured_hierarchies
+            for _lvl in (_h.get("levels_json") or [])
+            if _lvl.get("column") or _lvl.get("level_id")
+        }
+
         # ── Phase 47: LLM Chart Discovery ──────────────────────────────────
         discovery_chart_ids: list[str] = []
         discovery_titles: list[str] = []
@@ -5354,6 +5538,23 @@ def run_agentic_workflow(
                     scoped_conn=_scoped_conn,
                 )
                 state["chart_discovery_diagnostics"] = discovery_diag
+                # Suppress discovery charts whose primary x_axis is a hierarchy level
+                # column — those dimensions are already navigable via drill-down from the
+                # single injected hierarchy chart. Allow time-series charts (series_by on
+                # a hierarchy column is fine — it adds context without being redundant).
+                if discovery_specs and _hierarchy_discovery_skip_cols:
+                    _before = len(discovery_specs)
+                    discovery_specs = [
+                        s for s in discovery_specs
+                        if str(s.get("x_axis") or "").strip().lower()
+                        not in _hierarchy_discovery_skip_cols
+                    ]
+                    _suppressed = _before - len(discovery_specs)
+                    if _suppressed:
+                        logger.info(
+                            "chart_discovery.hierarchy_suppressed | run_id=%s suppressed=%s skip_cols=%s",
+                            run_id, _suppressed, sorted(_hierarchy_discovery_skip_cols),
+                        )
                 if discovery_specs:
                     # dashboard_id not yet created — pass None, link later
                     discovery_chart_ids, discovery_titles = _execute_discovery_charts(
@@ -5398,6 +5599,14 @@ def run_agentic_workflow(
         if _chart_discovery_only():
             # Skip legacy chart planner entirely — jump past the for loop
             charts_spec = []
+        # Always include hierarchy-injected charts regardless of discovery mode.
+        if _forced_hierarchy_specs:
+            charts_spec.extend(_forced_hierarchy_specs)
+            logger.info(
+                "agentic.hierarchy.forced_specs_restored | run_id=%s count=%s",
+                run_id,
+                len(_forced_hierarchy_specs),
+            )
 
         for chart in charts_spec:
             metric_name = chart.get("metric") or "metric"
@@ -5432,7 +5641,13 @@ def run_agentic_workflow(
             chart["title"] = chart_title
 
             if table_name:
-                fact_table = table_name if table_name.startswith("fact_") else f"fact_{table_name}"
+                if table_name.startswith("fact_") or table_name in profiling_map:
+                    # Use the name as-is: already a fact table or a known profiled table.
+                    fact_table = table_name
+                else:
+                    candidate = f"fact_{table_name}"
+                    # Prefer the profiled name; only add prefix if the prefixed name is known.
+                    fact_table = candidate if candidate in profiling_map else table_name
                 table_ref = f"{schema_name}.{fact_table}"
             else:
                 fact_table = None
@@ -5597,11 +5812,24 @@ def run_agentic_workflow(
                         dim_alias = "category"
                         dim_col_expr = f"{table_alias}.{_qident(dim_col)}"
                         limit = bar_limit if chart_type == "bar" else pie_limit
+                        # For sparse hierarchy columns (blank_pct > threshold), exclude
+                        # blank/null values so the chart isn't dominated by a blank bucket.
+                        _blank_filters: list[str] = []
+                        if chart.get("category_blank_filter"):
+                            _blank_filters = [
+                                f"{dim_col_expr} IS NOT NULL",
+                                f"{dim_col_expr} <> ''",
+                            ]
+                        _bar_all_filters = policy_filters + _blank_filters
+                        _bar_where = (
+                            f" WHERE {' AND '.join(_bar_all_filters)} "
+                            if _bar_all_filters else " "
+                        )
                         sql = (
                             f"SELECT {dim_col_expr} AS {dim_alias}, "
                             f"{metric_expr} AS \"{metric_name}\" "
                             f"FROM {sql_from}"
-                            f"{where_clause}"
+                            f"{_bar_where}"
                             f"GROUP BY {dim_col_expr} "
                             f"ORDER BY \"{metric_name}\" DESC "
                             f"LIMIT {limit}"
@@ -5834,7 +6062,11 @@ def run_agentic_workflow(
                 query_payload={
                     "metrics": [metric_name],
                     "dimensions": dimensions,
-                    "source_dimensions": dimensions,
+                    "source_dimensions": _interaction_source_dimensions(
+                        dimensions=dimensions,
+                        time_column=time_col,
+                        category_column=category_col,
+                    ),
                     "chart": chart_type,
                     "chart_title": chart_title,
                     "dashboard_title": dashboard_title,
@@ -5851,6 +6083,8 @@ def run_agentic_workflow(
                 chart_source="agentic_run",
                 title=chart_title,
                 created_by="DashboardAgent",
+                drill_hierarchy_id=chart.get("drill_hierarchy_id"),
+                drill_level_id=chart.get("drill_level_id"),
             ).get("chart_id")
             logger.info(
                 "dashboard.chart.request_created | run_id=%s title=%s chart_id=%s sql_is_null=%s rows=%s",
@@ -5864,16 +6098,23 @@ def run_agentic_workflow(
                 chart_ids.append(chart_id)
                 payload = build_chart_payload(chart_type, rows, metric_name, dimensions or ["category"])
                 dim_key = dimensions[0] if dimensions else None
+                source_dimensions = _interaction_source_dimensions(
+                    dimensions=dimensions,
+                    time_column=time_col,
+                    category_column=category_col,
+                )
                 interaction_context = build_chart_interaction_context_for_creation(
                     settings,
                     chart_row={
                         "chart_id": chart_id,
+                        "drill_hierarchy_id": chart.get("drill_hierarchy_id"),
+                        "drill_level_id": chart.get("drill_level_id"),
                         "tenant_id": state.get("tenant_id"),
                         "domain_id": state.get("domain_id"),
                         "query_payload": {
                             "metrics": [metric_name],
                             "dimensions": dimensions,
-                            "source_dimensions": dimensions,
+                            "source_dimensions": source_dimensions,
                             "chart": chart_type,
                             "chart_title": chart_title,
                             "dashboard_title": dashboard_title,
@@ -5883,11 +6124,35 @@ def run_agentic_workflow(
                             "time_grain": chart.get("time_grain"),
                             "category_column": category_col,
                         },
+                        "sql": sql,
                         "rows_json": rows,
                     },
                     tenant_id=str(state.get("tenant_id") or ""),
                     domain_id=str(state.get("domain_id") or "").strip() or None,
                     hierarchies=state.get("business_hierarchies") if isinstance(state.get("business_hierarchies"), list) else None,
+                )
+                hierarchy_bindings = interaction_context.get("hierarchy_bindings") or {}
+                drill_hierarchy_id = chart.get("drill_hierarchy_id")
+                drill_level_id = chart.get("drill_level_id")
+                if not drill_hierarchy_id or not drill_level_id:
+                    for value in hierarchy_bindings.values():
+                        if not isinstance(value, dict):
+                            continue
+                        drill_hierarchy_id = drill_hierarchy_id or value.get("hierarchy_id")
+                        drill_level_id = drill_level_id or value.get("current_level_id")
+                        if drill_hierarchy_id and drill_level_id:
+                            break
+                logger.info(
+                    "dashboard.chart.hierarchy_binding | run_id=%s chart_id=%s title=%s category_column=%s supplied_drill_hierarchy_id=%s supplied_drill_level_id=%s derived_bindings=%s final_drill_hierarchy_id=%s final_drill_level_id=%s",
+                    run_id,
+                    chart_id,
+                    chart_title,
+                    category_col,
+                    chart.get("drill_hierarchy_id"),
+                    chart.get("drill_level_id"),
+                    hierarchy_bindings,
+                    drill_hierarchy_id,
+                    drill_level_id,
                 )
                 inference = build_chart_inference(
                     settings,
@@ -5912,6 +6177,8 @@ def run_agentic_workflow(
                     stats_json=inference["stats_json"],
                     interaction_context_json=interaction_context,
                     root_chart_id=chart_id,
+                    drill_hierarchy_id=drill_hierarchy_id,
+                    drill_level_id=drill_level_id,
                 )
                 logger.info(
                     "dashboard.chart.request_updated | run_id=%s chart_id=%s status=ready sql_is_null=%s rows=%s dims=%s",
@@ -7548,6 +7815,11 @@ def run_agentic_workflow(
             chart_type = chart.get("type") or infer_chart_type(dimensions, rows, [metric_name]) or "bar"
             chart_sql = chart.get("sql")
             chart_params = chart.get("params") or []
+            source_dimensions = _interaction_source_dimensions(
+                dimensions=dimensions,
+                time_column=str(chart.get("time_column") or "").strip() or None,
+                category_column=str(chart.get("category_column") or "").strip() or None,
+            )
             chart_id = create_chart_request(
                 settings,
                 state.get("tenant_id") or "",
@@ -7556,7 +7828,7 @@ def run_agentic_workflow(
                 query_payload={
                     "metrics": [metric_name],
                     "dimensions": dimensions,
-                    "source_dimensions": dimensions,
+                    "source_dimensions": source_dimensions,
                     "chart": chart_type,
                     "chart_title": chart.get("title"),
                     "dashboard_title": dashboard_title,
@@ -7584,7 +7856,7 @@ def run_agentic_workflow(
                     "query_payload": {
                         "metrics": [metric_name],
                         "dimensions": dimensions,
-                        "source_dimensions": dimensions,
+                        "source_dimensions": source_dimensions,
                         "chart": chart_type,
                         "chart_title": chart.get("title"),
                         "dashboard_title": dashboard_title,
@@ -7594,6 +7866,7 @@ def run_agentic_workflow(
                         "time_grain": chart.get("time_grain"),
                         "category_column": chart.get("category_column"),
                     },
+                    "sql": chart_sql,
                     "rows_json": rows,
                 },
                 tenant_id=str(state.get("tenant_id") or ""),

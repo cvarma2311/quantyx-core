@@ -387,6 +387,88 @@ def _is_hierarchy_hint_line(line: str | None) -> bool:
     return all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_ /()-]*", part) for part in parts)
 
 
+def _extract_hierarchy_hints(context_text: str | None) -> list[str]:
+    hints: list[str] = []
+    seen: set[str] = set()
+    for raw_line in str(context_text or "").splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        candidates = [stripped]
+        normalized = stripped.lstrip("-").strip()
+        if normalized != stripped:
+            candidates.append(normalized)
+        lowered = normalized.lower()
+        if lowered.startswith("levels:"):
+            rhs = normalized.split(":", 1)[1].strip()
+            if rhs:
+                candidates.append(rhs)
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not _is_hierarchy_hint_line(candidate):
+                continue
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            hints.append(candidate)
+    return hints
+
+
+def _hierarchy_breakdown_bindings(
+    table: dict[str, Any],
+    business_hierarchies: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    table_name = str(table.get("name") or "").strip()
+    if not table_name or not business_hierarchies:
+        return []
+    categorical = {
+        str(col).strip().lower(): str(col).strip()
+        for col in (table.get("categorical_columns") or [])
+        if str(col or "").strip()
+    }
+    if not categorical:
+        return []
+    bindings: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for hierarchy in business_hierarchies:
+        levels = hierarchy.get("levels_json") or []
+        base_scope = hierarchy.get("base_scope_json") or {}
+        base_table = str(base_scope.get("base_table") or "").strip()
+        for idx, level in enumerate(levels):
+            column = str((level or {}).get("column") or (level or {}).get("level_id") or "").strip()
+            level_table = str((level or {}).get("table") or "").strip()
+            if not column:
+                continue
+            if base_table and base_table != table_name and level_table and level_table != table_name:
+                continue
+            normalized = column.lower()
+            if normalized not in categorical:
+                continue
+            if normalized in {"bu", "business_unit"}:
+                continue
+            signature = (str(hierarchy.get("hierarchy_id") or "").strip(), normalized)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            bindings.append(
+                {
+                    "hierarchy_id": str(hierarchy.get("hierarchy_id") or "").strip(),
+                    "level_id": str((level or {}).get("level_id") or column).strip(),
+                    "column": categorical[normalized],
+                    "level_index": idx,
+                    "preferred": bool(hierarchy.get("preferred")),
+                }
+            )
+    bindings.sort(
+        key=lambda item: (
+            0 if item.get("preferred") else 1,
+            int(item.get("level_index") or 999),
+            str(item.get("column") or ""),
+        )
+    )
+    return bindings
+
+
 def _extract_metric_overrides(context_text: str | None, schema_graph: dict[str, Any]) -> list[dict[str, Any]]:
     if not context_text:
         return []
@@ -669,15 +751,76 @@ def _rank_breakdown_columns(table: dict[str, Any], domain_id: str | None = None)
     return [col for _, col in scored]
 
 
+def _column_profile_stats(table: dict[str, Any], column_name: str | None) -> dict[str, Any]:
+    if not column_name:
+        return {}
+    for item in (table.get("column_profiles") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name") or "").strip().lower() == str(column_name).strip().lower():
+            return item
+    return {}
+
+
 def _column_quality_score(table: dict[str, Any], column_name: str | None) -> float:
     if not column_name:
         return 0.0
     sample_values = table.get("sample_values") or {}
     candidate_keys = table.get("candidate_keys") or []
     score = 0.0
+    profile = _column_profile_stats(table, column_name)
     sample_count = len(sample_values.get(column_name) or [])
     if sample_count > 1:
         score += min(10.0, float(sample_count))
+    null_pct = profile.get("null_pct")
+    blank_pct = profile.get("blank_pct")
+    distinct_count = profile.get("distinct_count")
+    distinct_ratio = profile.get("distinct_ratio")
+    completeness_score = profile.get("completeness_score")
+    try:
+        null_pct_value = float(null_pct) if null_pct is not None else None
+    except (TypeError, ValueError):
+        null_pct_value = None
+    try:
+        blank_pct_value = float(blank_pct) if blank_pct is not None else None
+    except (TypeError, ValueError):
+        blank_pct_value = None
+    try:
+        distinct_count_value = float(distinct_count) if distinct_count is not None else None
+    except (TypeError, ValueError):
+        distinct_count_value = None
+    try:
+        distinct_ratio_value = float(distinct_ratio) if distinct_ratio is not None else None
+    except (TypeError, ValueError):
+        distinct_ratio_value = None
+    try:
+        completeness_value = float(completeness_score) if completeness_score is not None else None
+    except (TypeError, ValueError):
+        completeness_value = None
+    if completeness_value is not None:
+        score += max(-8.0, min(8.0, (completeness_value - 70.0) / 5.0))
+    if null_pct_value is not None:
+        if null_pct_value >= 80.0:
+            score -= 12.0
+        elif null_pct_value >= 50.0:
+            score -= 6.0
+    if blank_pct_value is not None:
+        if blank_pct_value >= 80.0:
+            score -= 22.0
+        elif blank_pct_value >= 50.0:
+            score -= 12.0
+        elif blank_pct_value <= 10.0:
+            score += 2.0
+    if distinct_count_value is not None:
+        if distinct_count_value <= 1:
+            score -= 10.0
+        elif 2 <= distinct_count_value <= 30:
+            score += 4.0
+    if distinct_ratio_value is not None:
+        if distinct_ratio_value >= 0.9:
+            score -= 6.0
+        elif 0.001 <= distinct_ratio_value <= 0.2:
+            score += 2.5
     for key in candidate_keys:
         if key.get("column") != column_name:
             continue
@@ -1609,10 +1752,9 @@ def profile_tables(settings: Settings, schema_graph: dict[str, Any], schema_name
 
 def extract_context(settings: Settings, context_text: str | None, schema_graph: dict[str, Any]) -> dict[str, Any]:
     logger = logging.getLogger(__name__)
-    if not context_text:
-        # infer glossary/ontology hints from schema alone
-        glossary_terms = []
-        context_entities = []
+    def _schema_fallback_terms() -> tuple[list[dict[str, Any]], list[str]]:
+        glossary_terms: list[dict[str, Any]] = []
+        context_entities: list[str] = []
         for table in schema_graph.get("tables", []):
             tname = table.get("name")
             if tname:
@@ -1630,6 +1772,10 @@ def extract_context(settings: Settings, context_text: str | None, schema_graph: 
                     {"term": term, "definition": None, "synonyms": [cname], "abbreviations": []}
                 )
                 context_entities.append(term)
+        return glossary_terms, context_entities
+
+    if not context_text:
+        glossary_terms, context_entities = _schema_fallback_terms()
         if not glossary_terms:
             logger.warning("extract_context: no glossary terms inferred from schema")
         return {
@@ -1654,24 +1800,38 @@ def extract_context(settings: Settings, context_text: str | None, schema_graph: 
         getattr(semantic_extraction, "__file__", None),
         "_build_prompt" if hasattr(semantic_extraction, "_build_prompt") else "_render_prompt" if hasattr(semantic_extraction, "_render_prompt") else "missing",
     )
+    hierarchy_hints = _extract_hierarchy_hints(context_text)
+    metric_overrides = _extract_metric_overrides(context_text, schema_graph)
     try:
         contract = extract_semantic_contract(settings, context_text, tables_and_columns=tables_and_columns)
-    except Exception:
+    except Exception as exc:
         logger.exception(
-            "extract_context.semantic_contract_failed | context_chars=%s schema_tables=%s",
+            "extract_context.semantic_contract_failed | context_chars=%s schema_tables=%s fallback=schema_and_context error_type=%s",
             len(context_text or ""),
             len(schema_graph.get("tables", []) or []),
+            exc.__class__.__name__,
         )
-        raise
+        glossary_terms, context_entities = _schema_fallback_terms()
+        if not glossary_terms:
+            logger.warning("extract_context: schema fallback produced no glossary_terms")
+        logger.info(
+            "extract_context.fallback_completed | entities=%s glossary_terms=%s hierarchy_hints=%s metric_overrides=%s",
+            len(context_entities),
+            len(glossary_terms),
+            len(hierarchy_hints),
+            len(metric_overrides),
+        )
+        return {
+            "context_entities": context_entities,
+            "hierarchy_hints": hierarchy_hints,
+            "glossary_terms": glossary_terms,
+            "metric_overrides": metric_overrides,
+        }
     glossary_terms = contract.get("business_terms", [])
     context_entities = [term.get("term") for term in glossary_terms if term.get("term")]
-    hierarchy_hints = []
-    for line in context_text.splitlines():
-        if _is_hierarchy_hint_line(line):
-            hierarchy_hints.append(line.strip())
     if not glossary_terms:
         logger.warning("extract_context: context_text provided but no glossary_terms returned")
-    metric_overrides = _extract_metric_overrides(context_text, schema_graph)
+        glossary_terms, context_entities = _schema_fallback_terms()
     logger.info(
         "extract_context.completed | entities=%s glossary_terms=%s hierarchy_hints=%s metric_overrides=%s",
         len(context_entities),
@@ -2844,6 +3004,7 @@ def propose_chart_candidates(
     metrics: list[dict[str, Any]],
     join_edges: list[dict[str, Any]] | None = None,
     domain_id: str | None = None,
+    business_hierarchies: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     metrics_by_table: dict[str, list[dict[str, Any]]] = {}
@@ -2878,7 +3039,29 @@ def propose_chart_candidates(
             metric_expr = selected_metric.get("formula")
             metric_intent = selected_metric.get("metric_intent") or _derive_metric_intent(metric_name)
             metric_col = None
+            hierarchy_bindings = _hierarchy_breakdown_bindings(table, business_hierarchies)
             breakdown_cols = _pick_chart_breakdowns(table, selected_metric, limit=3, domain_id=domain_id)
+            ordered_breakdown_cols: list[str] = []
+            seen_breakdowns: set[str] = set()
+            for binding in hierarchy_bindings:
+                col = str(binding.get("column") or "").strip()
+                if not col:
+                    continue
+                key = col.lower()
+                if key in seen_breakdowns:
+                    continue
+                seen_breakdowns.add(key)
+                ordered_breakdown_cols.append(col)
+            for col in breakdown_cols:
+                key = str(col or "").strip().lower()
+                if not key or key in seen_breakdowns:
+                    continue
+                seen_breakdowns.add(key)
+                ordered_breakdown_cols.append(col)
+            breakdown_cols = ordered_breakdown_cols[: max(3, len(ordered_breakdown_cols))]
+            hierarchy_binding_map = {
+                str(item.get("column") or "").strip().lower(): item for item in hierarchy_bindings
+            }
             logger = logging.getLogger(__name__)
             logger.info(
                 "agentic.chart.metric_selected | table=%s metric=%s priority=%s time_col=%s breakdowns=%s",
@@ -2913,6 +3096,7 @@ def propose_chart_candidates(
                         }
                     )
             for best_cat in breakdown_cols:
+                binding = hierarchy_binding_map.get(str(best_cat or "").strip().lower())
                 candidates.append(
                     {
                         "type": "bar",
@@ -2931,10 +3115,14 @@ def propose_chart_candidates(
                         "metric_expr": metric_expr,
                         "time_column": None,
                         "category_column": best_cat,
+                        "chart_source": "hierarchy_preferred" if binding else None,
+                        "drill_hierarchy_id": binding.get("hierarchy_id") if binding else None,
+                        "drill_level_id": binding.get("level_id") if binding else None,
                     }
                 )
             for best_cat in breakdown_cols:
                 if len(samples.get(best_cat) or []) <= 10:
+                    binding = hierarchy_binding_map.get(str(best_cat or "").strip().lower())
                     candidates.append(
                         {
                             "type": "pie",
@@ -2953,12 +3141,16 @@ def propose_chart_candidates(
                             "metric_expr": metric_expr,
                             "time_column": None,
                             "category_column": best_cat,
+                            "chart_source": "hierarchy_preferred" if binding else None,
+                            "drill_hierarchy_id": binding.get("hierarchy_id") if binding else None,
+                            "drill_level_id": binding.get("level_id") if binding else None,
                         }
                     )
                     break
             if time_col:
                 for col in breakdown_cols:
                     if len(samples.get(col) or []) <= 6:
+                        binding = hierarchy_binding_map.get(str(col or "").strip().lower())
                         candidates.append(
                             {
                                 "type": "line",
@@ -2979,6 +3171,9 @@ def propose_chart_candidates(
                                 "time_column": time_col,
                                 "time_grain": "month",
                                 "category_column": col,
+                                "chart_source": "hierarchy_preferred" if binding else None,
+                                "drill_hierarchy_id": binding.get("hierarchy_id") if binding else None,
+                                "drill_level_id": binding.get("level_id") if binding else None,
                             }
                         )
                         break
@@ -3189,9 +3384,21 @@ def select_charts(
     min_charts: int = 4,
     max_charts: int = 8,
     domain_id: str | None = None,
+    business_hierarchies: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not candidates:
         return [], {"role_targets": _ROLE_TARGETS, "missing_roles": list(_ROLE_TARGETS), "low_value_chart_count": 0}
+
+    preferred_hierarchy_levels = {
+        str((level or {}).get("level_id") or (level or {}).get("column") or "").strip().lower()
+        for hierarchy in (business_hierarchies or [])
+        for level in (hierarchy.get("levels_json") or [])
+        if str((level or {}).get("level_id") or (level or {}).get("column") or "").strip()
+    }
+    hierarchy_chart_target = min(
+        max(1, sum(1 for cand in candidates if cand.get("drill_hierarchy_id")) // 2),
+        max(0, max_charts // 2),
+    )
 
     def _chart_key(cand: dict[str, Any]) -> tuple[Any, ...]:
         return (
@@ -3236,8 +3443,17 @@ def select_charts(
             score += 1.0
         if cand.get("category_column"):
             score += 0.75
+            category_key = str(cand.get("category_column") or "").strip().lower()
+            if category_key in preferred_hierarchy_levels:
+                score += 2.75
+            elif preferred_hierarchy_levels:
+                score -= 1.25
         if cand.get("chart_source") == "llm_proposed":
             score += 0.5
+        if cand.get("chart_source") == "hierarchy_preferred":
+            score += 2.0
+        if cand.get("drill_hierarchy_id") and cand.get("drill_level_id"):
+            score += 1.5
         if primary_role in {"executive_trends", "target_pace", "benchmark_comparison"}:
             score += 0.5
         score += 0.15 * len(related_roles)
@@ -3325,6 +3541,20 @@ def select_charts(
         if len(selected) >= max_charts:
             break
         _try_add(cand)
+
+    if hierarchy_chart_target > 0 and len(selected) < max_charts:
+        hierarchy_candidates = [
+            cand
+            for cand in pool
+            if cand.get("drill_hierarchy_id")
+            and cand.get("category_column")
+        ]
+        hierarchy_selected_count = sum(1 for cand in selected if cand.get("drill_hierarchy_id"))
+        for cand in hierarchy_candidates:
+            if len(selected) >= max_charts or hierarchy_selected_count >= hierarchy_chart_target:
+                break
+            if _try_add(cand):
+                hierarchy_selected_count += 1
 
     # Role-target selection. Missing roles fall back to remaining roles without failing selection.
     for role, (target_min, _target_max) in _ROLE_TARGETS.items():

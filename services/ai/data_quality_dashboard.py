@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections import Counter
 from typing import Any
+import re
 
 from services.ai.config import Settings
 from services.ai.data_quality_anomalies import build_quality_anomaly_payload, summarize_data_quality_anomalies
 from services.ai.data_quality_enrichment import canonical_column_alias
 from services.ai.data_quality_issues import build_quality_issue_payload, summarize_quality_issues
+from services.ai.data_quality_rules import derive_quality_rule_label
 from services.ai.data_quality_remediation import derive_data_quality_remediation_plan
 from services.ai.data_quality_stages import parse_lineage_id
 from services.ai.data_quality_trends import build_business_term_trend_payload, build_readiness_trend_payload, summarize_trends
@@ -23,6 +25,85 @@ def _as_number(value: Any) -> float | None:
 
 def _display_column(field: str, label: str) -> dict[str, str]:
     return {"field": field, "label": label}
+
+
+def _friendly_identifier(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[_\-.]+", " ", text)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:1].upper() + text[1:]
+
+
+def _friendly_rule_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    required_match = re.search(r"(?:^|\.)([A-Za-z0-9_]+)\s+(?:must be present and not null|is required)\.?\s*$", text, re.IGNORECASE)
+    if required_match:
+        return f"{_friendly_identifier(required_match.group(1))} required"
+    text = re.sub(r"^[A-Za-z0-9_]+\.", "", text)
+    text = _friendly_identifier(text)
+    if len(text) <= 48:
+        return text
+    return f"{text[:45].rstrip()}..."
+
+
+def _friendly_metric_name(value: Any) -> str:
+    metric = str(value or "").strip()
+    metric_map = {
+        "violation_count": "Failed Records",
+        "violation_pct": "Failure Rate %",
+        "result_status": "Validation Result",
+        "trust_score": "Trust Score",
+        "final_row_count": "Final Rows",
+        "final_dataset_row_count": "Final Rows",
+        "readiness_status": "Readiness Status",
+    }
+    return metric_map.get(metric, _friendly_identifier(metric))
+
+
+def _friendly_directionality(value: Any) -> str:
+    directionality = str(value or "").strip().lower()
+    directionality_map = {
+        "higher_is_better": "Higher is better",
+        "lower_better": "Lower is better",
+        "lower_is_better": "Lower is better",
+        "stable_is_better": "Keep stable",
+    }
+    return directionality_map.get(directionality, _friendly_identifier(directionality))
+
+
+def _friendly_trend_row(
+    row: dict[str, Any],
+    *,
+    rules_by_logical_key: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    normalized = dict(row)
+    object_type = str(row.get("object_type") or "").strip().lower()
+    object_key = str(row.get("object_key") or "").strip()
+    rules_by_logical_key = dict(rules_by_logical_key or {})
+    if object_type == "rule":
+        matched_rule = rules_by_logical_key.get(object_key) or {}
+        normalized["object_name"] = (
+            str(matched_rule.get("rule_label") or "").strip()
+            or str(row.get("object_name") or "").strip()
+            or derive_quality_rule_label(matched_rule or row)
+        )
+    else:
+        normalized["object_name"] = str(row.get("object_name") or object_key or "").strip()
+    normalized["object_type"] = _friendly_identifier(object_type)
+    normalized["object_name"] = (
+        _friendly_rule_label(normalized.get("object_name"))
+        if object_type == "rule"
+        else _friendly_identifier(normalized.get("object_name"))
+    )
+    normalized["metric_name"] = _friendly_metric_name(row.get("metric_name"))
+    normalized["trend_status"] = _friendly_identifier(row.get("trend_status"))
+    normalized["directionality"] = _friendly_directionality(row.get("directionality"))
+    return normalized
 
 
 def _rule_failed_records_path(*, tenant_id: str, domain_id: str, run_id: str, rule_id: str | None) -> str | None:
@@ -806,20 +887,20 @@ def build_data_quality_dashboard_spec(
             "chart_type": "table",
             "data_source": "quantyx_data_quality_trends",
             "display_columns": [
-                _display_column("object_type", "Object Type"),
-                _display_column("object_name", "Object"),
-                _display_column("metric_name", "Metric"),
+                _display_column("object_type", "Area"),
+                _display_column("object_name", "Rule or Object"),
+                _display_column("metric_name", "Measure"),
                 _display_column("previous_value_num", "Previous"),
                 _display_column("current_value_num", "Current"),
-                _display_column("delta_value", "Delta"),
-                _display_column("delta_pct", "Delta %"),
+                _display_column("delta_value", "Change"),
+                _display_column("delta_pct", "Change %"),
                 _display_column("trend_status", "Trend"),
-                _display_column("directionality", "Directionality"),
+                _display_column("directionality", "Interpretation"),
                 _display_column("evidence_path", "Evidence Path"),
             ],
             "rows": [
                 {
-                    **row,
+                    **_friendly_trend_row(row, rules_by_logical_key=rules_by_logical_key),
                     **_trend_evidence_paths_with_rules(
                         tenant_id=tenant_id,
                         domain_id=domain_id,
@@ -838,26 +919,6 @@ def build_data_quality_dashboard_spec(
                 )[:20]
             ],
             "summary": trend_summary,
-        },
-    )
-    _append_chart_section(
-        chart_plan,
-        {
-            "chart_key": "business_term_trends",
-            "title": "Business Term Trend Groups",
-            "chart_type": "table",
-            "data_source": "quantyx_glossary_terms + quantyx_data_quality_trends",
-            "display_columns": [
-                _display_column("business_term", "Business Term"),
-                _display_column("trend_row_count", "Trend Rows"),
-                _display_column("worsened_metric_count", "Worsened"),
-                _display_column("improved_metric_count", "Improved"),
-                _display_column("affected_object_count", "Affected Objects"),
-                _display_column("top_metrics", "Top Metrics"),
-                _display_column("evidence_path", "Evidence Path"),
-            ],
-            "rows": business_term_rows[:20],
-            "summary": business_term_summary,
         },
     )
     _append_chart_section(
@@ -1035,35 +1096,6 @@ def build_data_quality_dashboard_spec(
     _append_chart_section(
         chart_plan,
         {
-            "chart_key": "lineage_overview",
-            "title": "Lineage Journey Overview",
-            "chart_type": "table",
-            "data_source": "quantyx_data_quality_lineage_edges",
-            "display_columns": [
-                _display_column("row_lineage_id", "Row Lineage ID"),
-                _display_column("source_table", "Source Table"),
-                _display_column("source_row_ref", "Source Row Ref"),
-                _display_column("decoded_lineage", "Decoded Lineage"),
-                _display_column("transition_count", "Transitions"),
-                _display_column("stage_count", "Stages"),
-                _display_column("rejected_count", "Rejected"),
-                _display_column("join_exception_count", "Join Exceptions"),
-                _display_column("latest_stage_name", "Latest Stage"),
-                _display_column("final_state", "Final State"),
-                _display_column("final_dataset_member", "Final Dataset Member"),
-                _display_column("evidence_path", "Evidence Path"),
-            ],
-            "rows": lineage_rows,
-            "summary": {
-                "lineage_row_count": len(lineage_ids),
-                "lineage_edge_count": len(lineage_edges),
-                "final_dataset_member_count": len([row for row in lineage_rows if row.get("final_dataset_member")]),
-            },
-        },
-    )
-    _append_chart_section(
-        chart_plan,
-        {
             "chart_key": "issue_register",
             "title": "Open Issues by Severity",
             "chart_type": "bar",
@@ -1115,28 +1147,6 @@ def build_data_quality_dashboard_spec(
     _append_chart_section(
         chart_plan,
         {
-            "chart_key": "owner_workload",
-            "title": "Owner Workload",
-            "chart_type": "table",
-            "data_source": "quantyx_data_quality_issues",
-            "display_columns": [
-                _display_column("owner_id", "Owner"),
-                _display_column("open_issue_count", "Open Issues"),
-            ],
-            "rows": [
-                {"owner_id": owner, "open_issue_count": count}
-                for owner, count in sorted(
-                    (issue_summary.get("owner_workload") or {}).items(),
-                    key=lambda item: (-int(item[1] or 0), str(item[0])),
-                )
-                if count
-            ],
-            "summary": {"owner_count": len(issue_summary.get("owner_workload") or {})},
-        },
-    )
-    _append_chart_section(
-        chart_plan,
-        {
             "chart_key": "sla_breaches",
             "title": "Overdue Issues",
             "chart_type": "table",
@@ -1151,33 +1161,6 @@ def build_data_quality_dashboard_spec(
             ],
             "rows": [row for row in open_issue_rows if row.get("overdue")][:20],
             "summary": {"overdue_issue_count": issue_summary.get("overdue_issue_count", 0)},
-        },
-    )
-    _append_chart_section(
-        chart_plan,
-        {
-            "chart_key": "data_trust_scorecard",
-            "title": "Data Trust Score by Table",
-            "chart_type": "horizontal_bar",
-            "data_source": "quantyx_data_quality_table_artifacts",
-            "x_field": "trust_score",
-            "y_field": "table_name",
-            "display_columns": [
-                _display_column("table_name", "Table"),
-                _display_column("trust_score", "Trust Score"),
-                _display_column("completeness_score", "Completeness"),
-                _display_column("validity_score", "Validity"),
-                _display_column("referential_integrity_score", "Referential Integrity"),
-                _display_column("freshness_score", "Freshness"),
-                _display_column("duplicate_risk_score", "Duplicate Risk"),
-                _display_column("row_count", "Row Count"),
-            ],
-            "rows": trust_rows,
-            "summary": {
-                "overall_trust_score": quality_summary.get("average_table_trust_score"),
-                "critical_issue_count": quality_summary.get("critical_issue_count", 0),
-                "warning_issue_count": quality_summary.get("warning_issue_count", 0),
-            },
         },
     )
     _append_chart_section(

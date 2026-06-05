@@ -17348,10 +17348,26 @@ def get_dashboard_endpoint(dashboard_id: str, tenant_id: str | None = None) -> D
 
     d_type = dash.get("dashboard_type", "system")
     name = dash.get("name") or ""
+    hierarchies = []
+    if dash.get("tenant_id"):
+        hierarchies = list_business_hierarchies(
+            settings,
+            str(dash.get("tenant_id") or ""),
+            str(dash.get("domain_id") or "").strip() or None,
+        )
 
     # Build unified charts list
     charts_out = []
     for c in dash.get("charts") or []:
+        chart_row = dict(c)
+        interaction_context = chart_row.get("interaction_context_json") or build_chart_interaction_context(
+            chart_row=chart_row,
+            hierarchies=hierarchies,
+        )
+        interaction_response = build_chart_interaction_response(
+            chart_row=chart_row,
+            interaction_context=interaction_context,
+        )
         charts_out.append({
             "entry_id": c.get("entry_id"),
             "chart_id": c.get("chart_id"),
@@ -17368,6 +17384,18 @@ def get_dashboard_endpoint(dashboard_id: str, tenant_id: str | None = None) -> D
             "chart_data": c.get("chart_data") or c.get("rows_json"),
             "added_by": c.get("added_by"),
             "added_at": c.get("added_at"),
+            "interaction_context": interaction_response.get("interaction_context"),
+            "available_filters": interaction_response.get("available_filters"),
+            "available_drilldowns": interaction_response.get("available_drilldowns"),
+            "available_dimension_navigation": interaction_response.get("available_dimension_navigation"),
+            "suggested_drilldowns": interaction_response.get("suggested_drilldowns"),
+            "available_areas": interaction_response.get("available_areas"),
+            "breadcrumb": interaction_response.get("breadcrumb"),
+            "lineage_summary": interaction_response.get("lineage_summary"),
+            "drill_hierarchy_id": c.get("drill_hierarchy_id"),
+            "drill_level_id": c.get("drill_level_id"),
+            "parent_chart_id": c.get("parent_chart_id"),
+            "root_chart_id": c.get("root_chart_id"),
         })
 
     resolved_title = name

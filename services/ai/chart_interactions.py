@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime
 from decimal import Decimal
@@ -12,6 +13,9 @@ from services.ai.config import Settings
 from services.ai.hierarchy_store import list_business_hierarchies
 from services.ai.db import run_query, ScopedConnection
 from services.ai.charts import build_chart_payload, build_chart_inference
+
+
+_ci_logger = logging.getLogger("quantyx.chart_interactions")
 
 
 def _is_date_like(value: Any) -> bool:
@@ -113,6 +117,15 @@ def _normalized_dimensions(chart_row: dict[str, Any]) -> list[str]:
     source_dims = [str(v) for v in (query_payload.get("source_dimensions") or []) if str(v).strip()]
     if source_dims:
         return source_dims
+    fallback_source_dims: list[str] = []
+    time_col = str(query_payload.get("time_column") or query_payload.get("time_dimension") or "").strip()
+    category_col = str(query_payload.get("category_column") or "").strip()
+    if time_col:
+        fallback_source_dims.append(time_col)
+    if category_col and category_col not in fallback_source_dims:
+        fallback_source_dims.append(category_col)
+    if fallback_source_dims:
+        return fallback_source_dims
     dims = [str(v) for v in (query_payload.get("dimensions") or []) if str(v).strip()]
     if not dims:
         return dims
@@ -311,6 +324,25 @@ def build_chart_interaction_context(
             {**item, "reason": "preferred next level from persisted business hierarchy"}
             for item in available_drilldowns[:2]
         ]
+        _ci_logger.info(
+            "chart_interactions.binding_selected | chart_id=%s title=%s current_level=%s hierarchy_id=%s available_drilldowns=%s suggested_drilldowns=%s",
+            chart_row.get("chart_id"),
+            chart_row.get("title") or chart_row.get("question"),
+            current_level,
+            hierarchy.get("hierarchy_id"),
+            len(available_drilldowns),
+            len(suggested_drilldowns),
+        )
+    else:
+        _ci_logger.info(
+            "chart_interactions.binding_missing | chart_id=%s title=%s current_level=%s candidate_bindings=%s preferred_hierarchy_id=%s hierarchy_count=%s",
+            chart_row.get("chart_id"),
+            chart_row.get("title") or chart_row.get("question"),
+            current_level,
+            len(bindings),
+            preferred_hierarchy_id,
+            len(hierarchies or []),
+        )
     available_filter_fields = [{"field": dim, "kind": "dimension", "label": dim.replace("_", " ").title()} for dim in group_dimensions]
     if time_dimension:
         available_filter_fields.append({"field": time_dimension, "kind": "time", "label": time_dimension.replace("_", " ").title()})

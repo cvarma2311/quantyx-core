@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 import pytest
 import zipfile
 from decimal import Decimal
@@ -30,6 +31,9 @@ from services.ai import data_quality_trends as dq_trends
 from services.ai import data_quality_workspace as dq_workspace
 from services.ai import glossary as dq_glossary
 from services.ai import agentic_store
+from services.ai import agentic_agents
+from services.ai import chart_interactions
+from services.ai import hierarchy_store
 
 
 def test_dashboard_store_json_default_serializes_decimal() -> None:
@@ -45,6 +49,169 @@ def test_dashboard_store_json_default_serializes_decimal() -> None:
     serialized = json.dumps(payload, default=dashboards_store._json_default)
 
     assert '"current_value_num": 82.4' in serialized
+
+
+def test_get_dashboard_endpoint_includes_chart_drilldown_metadata(monkeypatch) -> None:
+    from services.ai import catalog as ai_catalog
+
+    monkeypatch.setattr(ai_catalog, "load_catalog_with_registry", lambda settings, path: {})
+    api_main = importlib.import_module("services.api.main")
+    monkeypatch.setattr(
+        api_main,
+        "_ds_get_with_charts",
+        lambda settings, dashboard_id, tenant_id=None: {
+            "dashboard_id": dashboard_id,
+            "tenant_id": "TAS_DEMO_006",
+            "domain_id": "retail_fuel_monitoring",
+            "name": "TAS Alert Volume and Status Overview",
+            "dashboard_type": "system",
+            "status": "active",
+            "run_id": "run_06ee70bd7780",
+            "latest_refresh_id": None,
+            "quality_score": 0.9,
+            "quality_gate_passed": True,
+            "description": None,
+            "created_by": None,
+            "created_at": None,
+            "updated_at": None,
+            "chart_plan": [],
+            "charts": [
+                {
+                    "entry_id": "dc_1",
+                    "chart_id": "chart_1",
+                    "position": 0,
+                    "title_override": None,
+                    "title": "Total Alert Count by Location",
+                    "chart_type": "bar",
+                    "chart_source": "agentic_run",
+                    "status": "ready",
+                    "sql": "SELECT location_name AS category, COUNT(*) AS value FROM alerts GROUP BY 1",
+                    "question": "Total alerts by location",
+                    "query_payload": {
+                        "table": "alerts",
+                        "dimensions": ["location_name"],
+                        "metrics": ["total_alert_count"],
+                    },
+                    "chart_payload": {"chart": {"type": "XYChart"}},
+                    "chart_data": [{"category": "Plant A", "value": 5}],
+                    "rows_json": [{"category": "Plant A", "value": 5}],
+                    "insight_text": "Test insight",
+                    "narrative_text": "Test narrative",
+                    "interaction_context_json": {
+                        "source_scope": {"schema_name": "public", "base_table": "alerts", "base_view": "fact_alerts"},
+                        "query_shape": {
+                            "metric_expressions": [{"metric_id": "total_alert_count", "expression": None}],
+                            "group_dimensions": ["location_name"],
+                            "time_dimension": None,
+                            "query_grain": None,
+                            "chart_intent": "breakdown",
+                        },
+                        "filters": [],
+                        "current_level": "location_name",
+                        "hierarchy_bindings": {
+                            "location_name": {
+                                "hierarchy_id": "override_retail_fuel_monitoring_tas_operational_hierarchy",
+                                "current_level_id": "location_name",
+                                "next_level_id": "equipment_type",
+                            }
+                        },
+                        "available_filter_fields": [{"field": "location_name", "kind": "dimension", "label": "Location Name"}],
+                        "available_drilldowns": [
+                            {
+                                "hierarchy_id": "override_retail_fuel_monitoring_tas_operational_hierarchy",
+                                "source_level_id": "location_name",
+                                "target_level_id": "equipment_type",
+                                "action_type": "drill_down",
+                                "label": "View by Equipment Type",
+                            }
+                        ],
+                        "available_dimension_navigation": [
+                            {
+                                "hierarchy_id": "override_retail_fuel_monitoring_tas_operational_hierarchy",
+                                "source_level_id": "location_name",
+                                "target_level_id": "equipment_type",
+                                "action_type": "drill_down",
+                                "label": "View by Equipment Type",
+                            }
+                        ],
+                        "suggested_drilldowns": [
+                            {
+                                "hierarchy_id": "override_retail_fuel_monitoring_tas_operational_hierarchy",
+                                "source_level_id": "location_name",
+                                "target_level_id": "equipment_type",
+                                "action_type": "drill_down",
+                                "label": "View by Equipment Type",
+                            }
+                        ],
+                        "lineage": {
+                            "root_chart_id": "chart_1",
+                            "parent_chart_id": None,
+                            "interaction_type": None,
+                        },
+                    },
+                    "drill_hierarchy_id": "override_retail_fuel_monitoring_tas_operational_hierarchy",
+                    "drill_level_id": "location_name",
+                    "parent_chart_id": None,
+                    "root_chart_id": "chart_1",
+                    "added_by": "DashboardAgent",
+                    "added_at": None,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        api_main,
+        "list_business_hierarchies",
+        lambda settings, tenant_id, domain_id=None: [],
+    )
+
+    response = api_main.get_dashboard_endpoint("db_test")
+
+    assert response.charts
+    chart = response.charts[0]
+    assert chart["drill_hierarchy_id"] == "override_retail_fuel_monitoring_tas_operational_hierarchy"
+    assert chart["drill_level_id"] == "location_name"
+    assert chart["available_drilldowns"]
+    assert chart["available_drilldowns"][0]["target_level_id"] == "equipment_type"
+    assert chart["suggested_drilldowns"]
+
+
+def test_build_chart_interaction_context_uses_physical_category_column_for_hierarchy_binding() -> None:
+    hierarchies = [
+        {
+            "hierarchy_id": "override_retail_fuel_monitoring_tas_asset_hierarchy",
+            "preferred": True,
+            "confidence_score": 0.96,
+            "levels_json": [
+                {"level_id": "bu", "column": "bu", "label": "Bu"},
+                {"level_id": "location_name", "column": "location_name", "label": "Location Name"},
+                {"level_id": "equipment_type", "column": "equipment_type", "label": "Equipment Type"},
+                {"level_id": "device_type", "column": "device_type", "label": "Device Type"},
+            ],
+        }
+    ]
+
+    interaction_context = chart_interactions.build_chart_interaction_context(
+        chart_row={
+            "chart_id": "chart_1",
+            "title": "Alert Count by Equipment Type",
+            "query_payload": {
+                "metrics": ["equipment_type_alert_count"],
+                "dimensions": ["category"],
+                "category_column": "equipment_type",
+                "table": "alerts",
+                "chart": "bar",
+            },
+            "sql": 'SELECT t."equipment_type" AS category, COUNT(*) AS "equipment_type_alert_count" FROM "public"."fact_alerts" t GROUP BY t."equipment_type"',
+            "rows_json": [{"category": "BCU", "equipment_type_alert_count": 10}],
+        },
+        hierarchies=hierarchies,
+    )
+
+    assert interaction_context["current_level"] == "equipment_type"
+    assert interaction_context["hierarchy_bindings"]["equipment_type"]["hierarchy_id"] == "override_retail_fuel_monitoring_tas_asset_hierarchy"
+    assert interaction_context["available_drilldowns"]
+    assert interaction_context["available_drilldowns"][0]["target_level_id"] == "device_type"
 
 
 def test_is_data_quality_workflow_by_builtin_pack() -> None:
@@ -217,6 +384,267 @@ def test_extract_quality_rules_from_customer_data_context_covers_nine_rules() ->
     assert rules[4]["column_name"] == "account_number"
     assert rules[6]["column_name"] == "dob"
     assert rules[7]["condition_json"]["allowed_values"] == ["Savings", "Current", "Business"]
+
+
+def test_extract_context_parses_explicit_hierarchy_definition_lines() -> None:
+    schema_graph = {
+        "tables": [
+            {
+                "name": "alerts",
+                "columns": [
+                    {"name": "bu"},
+                    {"name": "location_name"},
+                    {"name": "alert_section"},
+                    {"name": "equipment_type"},
+                    {"name": "device_type"},
+                    {"name": "interlock_name"},
+                ],
+            }
+        ]
+    }
+
+    extracted = agentic_agents.extract_context(
+        SimpleNamespace(openai_api_key=None),
+        (
+            "Hierarchy Definition:\n"
+            "- hierarchy_name: tas_operational_hierarchy\n"
+            "- levels: bu > location_name > alert_section > equipment_type > device_type > interlock_name\n"
+        ),
+        schema_graph,
+    )
+
+    assert extracted["hierarchy_hints"] == [
+        "bu > location_name > alert_section > equipment_type > device_type > interlock_name"
+    ]
+
+
+def test_hierarchy_backed_chart_candidates_prefer_hierarchy_levels() -> None:
+    profiling = {
+        "tables": [
+            {
+                "name": "alerts",
+                "categorical_columns": [
+                    "terminal_plant_name",
+                    "servicing_plant_name",
+                    "location_name",
+                    "equipment_type",
+                    "device_type",
+                    "interlock_name",
+                ],
+                "time_columns": ["created_at"],
+                "sample_values": {
+                    "terminal_plant_name": ["", "A", "B"],
+                    "servicing_plant_name": ["", "X", "Y"],
+                    "location_name": ["LOC1", "LOC2", "LOC3"],
+                    "equipment_type": ["BCU", "Tank", "ESD"],
+                    "device_type": ["Radar", "Valve", "Pump"],
+                    "interlock_name": ["I1", "I2", "I3"],
+                },
+                "column_profiles": [
+                    {"name": "terminal_plant_name", "blank_pct": 95.0, "null_pct": 0.0, "distinct_count": 20, "distinct_ratio": 0.0001, "completeness_score": 100.0},
+                    {"name": "servicing_plant_name", "blank_pct": 94.0, "null_pct": 0.0, "distinct_count": 20, "distinct_ratio": 0.0001, "completeness_score": 100.0},
+                    {"name": "location_name", "blank_pct": 1.0, "null_pct": 0.0, "distinct_count": 15, "distinct_ratio": 0.01, "completeness_score": 100.0},
+                    {"name": "equipment_type", "blank_pct": 2.0, "null_pct": 0.0, "distinct_count": 8, "distinct_ratio": 0.005, "completeness_score": 100.0},
+                    {"name": "device_type", "blank_pct": 3.0, "null_pct": 0.0, "distinct_count": 10, "distinct_ratio": 0.006, "completeness_score": 100.0},
+                    {"name": "interlock_name", "blank_pct": 5.0, "null_pct": 0.0, "distinct_count": 25, "distinct_ratio": 0.02, "completeness_score": 100.0},
+                ],
+                "candidate_keys": [],
+            }
+        ]
+    }
+    metrics = [
+        {
+            "metric_name": "total_alert_count",
+            "base_table": "alerts",
+            "formula": "COUNT(CASE WHEN bu = 'TAS' THEN 1 END)",
+            "metric_intent": "volume",
+            "measure_confidence": 0.95,
+            "metric_source": "context_override",
+            "is_executive_kpi": True,
+        }
+    ]
+    hierarchies = [
+        {
+            "hierarchy_id": "override_retail_fuel_monitoring_tas_operational_hierarchy",
+            "preferred": True,
+            "base_scope_json": {"base_table": "alerts"},
+            "levels_json": [
+                {"level_id": "bu", "column": "bu", "table": "alerts"},
+                {"level_id": "location_name", "column": "location_name", "table": "alerts"},
+                {"level_id": "equipment_type", "column": "equipment_type", "table": "alerts"},
+                {"level_id": "device_type", "column": "device_type", "table": "alerts"},
+                {"level_id": "interlock_name", "column": "interlock_name", "table": "alerts"},
+            ],
+        }
+    ]
+
+    candidates = agentic_agents.propose_chart_candidates(
+        profiling,
+        metrics,
+        [],
+        domain_id="retail_fuel_monitoring",
+        business_hierarchies=hierarchies,
+    )
+    selected, _diag = agentic_agents.select_charts(
+        candidates,
+        min_charts=4,
+        max_charts=8,
+        domain_id="retail_fuel_monitoring",
+        business_hierarchies=hierarchies,
+    )
+
+    hierarchy_selected = [
+        item for item in selected
+        if str(item.get("category_column") or "") in {"location_name", "equipment_type", "device_type", "interlock_name"}
+    ]
+
+    assert hierarchy_selected
+    assert any(item.get("drill_hierarchy_id") == "override_retail_fuel_monitoring_tas_operational_hierarchy" for item in hierarchy_selected)
+    assert not any(str(item.get("category_column") or "") == "servicing_plant_name" for item in hierarchy_selected)
+
+
+def test_rank_breakdown_columns_penalizes_blank_heavy_categories() -> None:
+    table = {
+        "name": "alerts",
+        "categorical_columns": [
+            "servicing_plant_name",
+            "location_name",
+            "equipment_type",
+        ],
+        "sample_values": {
+            "servicing_plant_name": ["", "A", "B"],
+            "location_name": ["LOC1", "LOC2", "LOC3"],
+            "equipment_type": ["BCU", "Tank", "ESD"],
+        },
+        "column_profiles": [
+            {"name": "servicing_plant_name", "blank_pct": 97.0, "null_pct": 0.0, "distinct_count": 25, "distinct_ratio": 0.0001, "completeness_score": 100.0},
+            {"name": "location_name", "blank_pct": 1.0, "null_pct": 0.0, "distinct_count": 12, "distinct_ratio": 0.01, "completeness_score": 100.0},
+            {"name": "equipment_type", "blank_pct": 2.0, "null_pct": 0.0, "distinct_count": 7, "distinct_ratio": 0.004, "completeness_score": 100.0},
+        ],
+        "candidate_keys": [],
+    }
+
+    ranked = agentic_agents._rank_breakdown_columns(table, domain_id="retail_fuel_monitoring")
+
+    assert ranked.index("servicing_plant_name") > ranked.index("location_name")
+    assert ranked.index("servicing_plant_name") > ranked.index("equipment_type")
+
+
+def test_derive_business_hierarchies_uses_explicit_context_hierarchy_levels(monkeypatch) -> None:
+    profiling = {
+        "tables": [
+            {
+                "name": "alerts",
+                "categorical_columns": [
+                    "bu",
+                    "location_name",
+                    "alert_section",
+                    "equipment_type",
+                    "device_type",
+                    "interlock_name",
+                ],
+                "columns": [
+                    {"name": "bu"},
+                    {"name": "location_name"},
+                    {"name": "alert_section"},
+                    {"name": "equipment_type"},
+                    {"name": "device_type"},
+                    {"name": "interlock_name"},
+                ],
+            }
+        ]
+    }
+    monkeypatch.setattr(hierarchy_store, "load_hierarchy_overrides_all", lambda settings, tenant_id, domain_id: [])
+
+    hierarchies = hierarchy_store.derive_business_hierarchies(
+        SimpleNamespace(openai_api_key=None),
+        tenant_id="TAS_DEMO_TEST",
+        domain_id="retail_fuel_monitoring",
+        profiling_stats=profiling,
+        context_text=(
+            "Hierarchy Definition:\n"
+            "- hierarchy_name: tas_operational_hierarchy\n"
+            "- levels: bu > location_name > alert_section > equipment_type > device_type > interlock_name\n"
+        ),
+        join_edges=[],
+    )
+
+    target = next(
+        item for item in hierarchies
+        if str(item.get("hierarchy_id") or "") == "override_retail_fuel_monitoring_tas_operational_hierarchy"
+    )
+    assert [level["level_id"] for level in target["levels_json"]] == [
+        "bu",
+        "location_name",
+        "alert_section",
+        "equipment_type",
+        "device_type",
+        "interlock_name",
+    ]
+    assert target["preferred"] is True
+
+
+def test_ensure_business_hierarchies_merges_existing_and_derived(monkeypatch) -> None:
+    existing = [
+        {
+            "hierarchy_id": "override_retail_fuel_monitoring_bu",
+            "tenant_id": "TAS_DEMO_TEST",
+            "domain_id": "retail_fuel_monitoring",
+            "name": "BU Override",
+            "base_scope_json": {"base_table": "alerts"},
+            "levels_json": [
+                {"level_id": "bu", "column": "bu", "table": "alerts"},
+                {"level_id": "location_name", "column": "location_name", "table": "alerts"},
+            ],
+            "preferred": True,
+        }
+    ]
+    derived = [
+        {
+            "hierarchy_id": "override_retail_fuel_monitoring_tas_operational_hierarchy",
+            "tenant_id": "TAS_DEMO_TEST",
+            "domain_id": "retail_fuel_monitoring",
+            "name": "tas_operational_hierarchy",
+            "base_scope_json": {"base_table": "alerts"},
+            "levels_json": [
+                {"level_id": "location_name", "column": "location_name", "table": "alerts"},
+                {"level_id": "equipment_type", "column": "equipment_type", "table": "alerts"},
+                {"level_id": "device_type", "column": "device_type", "table": "alerts"},
+            ],
+            "preferred": False,
+        }
+    ]
+    persisted: list[dict] = []
+    call_count = {"list": 0}
+
+    def fake_list(_settings, _tenant_id, _domain_id):
+        call_count["list"] += 1
+        if call_count["list"] == 1:
+            return list(existing)
+        return list(persisted)
+
+    monkeypatch.setattr(hierarchy_store, "list_business_hierarchies", fake_list)
+    monkeypatch.setattr(hierarchy_store, "derive_business_hierarchies", lambda *args, **kwargs: list(derived))
+    monkeypatch.setattr(hierarchy_store, "_llm_rank_hierarchies", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hierarchy_store, "_apply_hierarchy_ranking", lambda items, ranking: items)
+    monkeypatch.setattr(
+        hierarchy_store,
+        "upsert_business_hierarchies",
+        lambda _settings, items: persisted.extend(items),
+    )
+
+    result = hierarchy_store.ensure_business_hierarchies(
+        SimpleNamespace(openai_api_key=None),
+        tenant_id="TAS_DEMO_TEST",
+        domain_id="retail_fuel_monitoring",
+        profiling_stats={"tables": []},
+        context_text="",
+        join_edges=[],
+    )
+
+    ids = {str(item.get("hierarchy_id") or "") for item in result}
+    assert "override_retail_fuel_monitoring_bu" in ids
+    assert "override_retail_fuel_monitoring_tas_operational_hierarchy" in ids
 
 
 def test_plan_quality_rules_discards_context_blob_llm_rules_and_keeps_deterministic_controls(monkeypatch) -> None:
@@ -2473,14 +2901,16 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         assert "Duplicates" in sheet_names
         assert "Stage Waterfall" in sheet_names
         assert "Join Health" in sheet_names
-        assert "Lineage Overview" in sheet_names
         assert "Filter Impact" in sheet_names
+        assert "Validation Rules" in sheet_names
+        assert "Validation by Severity" in sheet_names
+        assert "Validation by Area" in sheet_names
+        assert "Rule Summary" in sheet_names
+        assert "Top Risks" in sheet_names
         assert "Quality Trends" in sheet_names
-        assert "Business Term Trends" in sheet_names
         assert "Anomaly Summary" in sheet_names
         assert "Anomalies" in sheet_names
         assert "Issue Register" in sheet_names
-        assert "Steward Work Queue" in sheet_names
         assert "SLA Breaches" in sheet_names
         assert "Rule Trends" in sheet_names
         assert "Stage Trends" in sheet_names
@@ -2488,7 +2918,7 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         assert "Rejected Records" in sheet_names
         assert "Final Dataset" in sheet_names
         assert "Join Exceptions" in sheet_names
-        assert "Rule 01 Invalid customer email" in sheet_names
+        assert "Validation 01 Invalid customer" in sheet_names
         assert "Stage 1 source_profile_customer" in sheet_names
         assert "Stage 2 customer_join_region" in sheet_names
         assert "Stage 3 filter_1" in sheet_names
@@ -2499,29 +2929,32 @@ def test_build_data_quality_excel_report_reads_persisted_artifacts(monkeypatch) 
         assert "Published customer" in sheet_names
         assert any("Validation Failure" in text and "light orange" in text for text in sheet_texts)
         assert any("Karnataka" in text and ('s=\"3\"' in text or 's=\"4\"' in text) for text in sheet_texts)
-        assert any("join_matched" in text and "Lineage Overview" not in text for text in sheet_texts)
         assert any("560001" in text and "India" in text and "Karnataka" in text for text in sheet_texts)
         assert any("bad@example" in text and 's=\"6\"' in text for text in sheet_texts)
         assert any("Invalid customer email" in text and "bad@example" in text and "Pass / Fail" in text for text in sheet_texts)
         assert any("good@example.com" in text and "Pass" in text for text in sheet_texts)
+        assert any("Join exceptions detected in customer_join_region" in text for text in sheet_texts)
+        assert any("Invalid customer email" in text for text in sheet_texts)
         assert any("postal_code" in text for text in sheet_texts)
         assert any("customer_join_region" in text and "C001" in text for text in sheet_texts)
         assert any("dqlin_final_c001" in text for text in sheet_texts)
-        assert any("/data-quality/runs/run_1/rules/rule_1/failed-records" in text for text in sheet_texts)
-        assert any("/data-quality/runs/run_1/rules/rule_1/passed-records" in text for text in sheet_texts)
-        assert any("Rule Label" in text and "Passed Rows" in text for text in sheet_texts)
+        assert all("Failed Records API" not in text for text in sheet_texts)
+        assert all("Passed Records API" not in text for text in sheet_texts)
+        assert all("Review Detail API" not in text for text in sheet_texts)
+        assert any("Rule" in text and "Rows Passed" in text for text in sheet_texts)
     with zipfile.ZipFile(BytesIO(csv_archive)) as archive:
         names = set(archive.namelist())
-        assert "01_Legend.csv" in names
-        assert "02_Executive_Summary.csv" in names
+        assert "01_Report_Highlights.csv" in names
+        assert "02_Legend.csv" in names
+        assert "03_Executive_Summary.csv" in names
         assert any(name.endswith("Quality_Trends.csv") for name in names)
         assert any(name.endswith("Published_customer.csv") for name in names)
-        legend_csv = archive.read("01_Legend.csv").decode("utf-8")
+        legend_csv = archive.read("02_Legend.csv").decode("utf-8")
         assert "Validation Failure" in legend_csv
         assert "light orange" in legend_csv
         assert any("Invalid customer email" in archive.read(name).decode("utf-8") for name in names)
         assert any("560001" in archive.read(name).decode("utf-8") for name in names)
-        assert any("/data-quality/runs/run_1/rules/rule_1/failed-records" in archive.read(name).decode("utf-8") for name in names)
+        assert all("Failed Records API" not in archive.read(name).decode("utf-8") for name in names)
 
 
 def test_build_data_quality_excel_report_flattens_source_json_values(monkeypatch) -> None:
@@ -2682,10 +3115,11 @@ def test_build_data_quality_excel_report_adds_rule_sheets_from_validation_contro
 
     with zipfile.ZipFile(BytesIO(workbook)) as archive:
         workbook_xml = archive.read("xl/workbook.xml").decode("utf-8")
+        assert "Report Highlights" in workbook_xml
         assert "Rule Summary" in workbook_xml
-        assert "Rule 01 customer_data.customer_" in workbook_xml
-        assert "Rule 02 customer_data.email is " in workbook_xml
-        assert "Rule 03 customer_data.phone_num" in workbook_xml
+        assert "Validation 01 Customer id req" in workbook_xml
+        assert "Validation 02 Email required" in workbook_xml
+        assert "Validation 03 Phone number re" in workbook_xml
 
 
 def test_build_data_quality_dashboard_spec_shapes_quality_views() -> None:
@@ -2830,16 +3264,14 @@ def test_build_data_quality_dashboard_spec_shapes_quality_views() -> None:
     )
 
     assert spec["title"] == "Data Quality Observability Data Quality Dashboard"
-    assert len(spec["chart_plan"]) == 14
+    assert len(spec["chart_plan"]) == 12
     assert spec["summary_view"]["title"] == "Executive Summary"
     assert spec["summary_view"]["rows"][0]["metric_key"] == "quality_score"
     chart_by_key = {item["chart_key"]: item for item in spec["chart_plan"]}
     assert chart_by_key["executive_summary"]["rows"][0]["metric_key"] == "quality_score"
     assert chart_by_key["filter_impact"]["rows"][0]["rejected_row_count"] == 2
-    assert chart_by_key["lineage_overview"]["rows"][0]["final_state"] == "join_matched"
     assert chart_by_key["missingness_heatmap"]["display_columns"][1] == {"field": "column_name", "label": "Physical Column"}
     assert chart_by_key["missingness_heatmap"]["display_columns"][2] == {"field": "column_alias", "label": "Semantic Alias"}
-    assert chart_by_key["data_trust_scorecard"]["rows"][0]["trust_score"] == 68.0
     assert chart_by_key["missingness_heatmap"]["rows"][0]["column_alias"] == "email"
     assert "/data-quality/evidence/missingness" in str(chart_by_key["missingness_heatmap"]["rows"][0]["evidence_path"])
     assert chart_by_key["referential_integrity"]["rows"][0]["reference_table"] == "customer"
@@ -2849,6 +3281,10 @@ def test_build_data_quality_dashboard_spec_shapes_quality_views() -> None:
     assert chart_by_key["duplicate_risk"]["rows"][0]["duplicate_candidate_count"] == 1
     assert "/data-quality/evidence/duplicates/" in str(chart_by_key["duplicate_risk"]["rows"][0]["evidence_path"])
     assert "recommended_actions" in chart_by_key
+    assert "business_term_trends" not in chart_by_key
+    assert "lineage_overview" not in chart_by_key
+    assert "owner_workload" not in chart_by_key
+    assert "data_trust_scorecard" not in chart_by_key
     final_dataset_quality = chart_by_key["final_dataset_quality"]
     assert "/data-quality/final-dataset/rows" in str(final_dataset_quality["rows"][0]["evidence_path"])
     assert "/data-quality/final-dataset?tenant_id=tenant" in str(final_dataset_quality["rows"][0]["detail_evidence_path"])
@@ -2894,7 +3330,7 @@ def test_build_data_quality_dashboard_spec_skips_empty_sections() -> None:
     )
 
     chart_keys = [item["chart_key"] for item in spec["chart_plan"]]
-    assert chart_keys == ["executive_summary", "data_trust_scorecard"]
+    assert chart_keys == ["executive_summary", "publish_readiness"]
 
 
 def test_build_data_quality_dashboard_spec_includes_quality_trends_when_present() -> None:
@@ -2929,10 +3365,11 @@ def test_build_data_quality_dashboard_spec_includes_quality_trends_when_present(
     )
 
     quality_trends = next(item for item in spec["chart_plan"] if item["chart_key"] == "quality_trends")
-    rule_row = next(row for row in quality_trends["rows"] if row["object_type"] == "rule")
-    table_row = next(row for row in quality_trends["rows"] if row["object_type"] == "table")
+    rule_row = next(row for row in quality_trends["rows"] if row["object_type"] == "Rule")
+    table_row = next(row for row in quality_trends["rows"] if row["object_type"] == "Table")
     assert table_row["object_key"] == "customer"
     assert quality_trends["summary"]["worsened_metric_count"] == 2
+    assert rule_row["metric_name"] == "Failed Records"
     assert "/data-quality/runs/run_1/rules/rule_1/failed-records" in str(rule_row["evidence_path"])
     assert "/data-quality/trends/rules/rule_1" in str(rule_row["detail_evidence_path"])
 
@@ -3160,10 +3597,8 @@ def test_build_data_quality_dashboard_spec_includes_business_term_trends_when_pr
         },
     )
 
-    business_terms = next(item for item in spec["chart_plan"] if item["chart_key"] == "business_term_trends")
-    assert business_terms["rows"][0]["business_term"] == "Customer"
-    assert business_terms["summary"]["business_term_group_count"] == 1
-    assert "/data-quality/trends/business-terms/records" in str(business_terms["rows"][0]["evidence_path"])
+    chart_keys = [item["chart_key"] for item in spec["chart_plan"]]
+    assert "business_term_trends" not in chart_keys
 
 
 def test_build_data_quality_dashboard_spec_uses_persisted_rule_id_for_trend_record_links() -> None:
@@ -3467,7 +3902,6 @@ def test_build_data_quality_dashboard_spec_includes_issue_sections_when_present(
     chart_keys = [item["chart_key"] for item in spec["chart_plan"]]
     assert "issue_register" in chart_keys
     assert "issue_aging" in chart_keys
-    assert "owner_workload" in chart_keys
     assert "sla_breaches" in chart_keys
 
 

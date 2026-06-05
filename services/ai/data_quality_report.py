@@ -256,6 +256,202 @@ def _header_row(headers: list[Any]) -> list[dict[str, Any]]:
     return [_cell(item, STYLE_HEADER) for item in headers]
 
 
+def _friendly_identifier(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[_\-.]+", " ", text)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:1].upper() + text[1:]
+
+
+def _friendly_metric_name(value: Any) -> str:
+    metric = str(value or "").strip()
+    metric_map = {
+        "violation_count": "Failed Records",
+        "violation_pct": "Failure Rate %",
+        "result_status": "Validation Result",
+        "trust_score": "Trust Score",
+        "final_row_count": "Final Rows",
+        "final_dataset_row_count": "Final Rows",
+        "readiness_status": "Readiness Status",
+    }
+    return metric_map.get(metric, _friendly_identifier(metric))
+
+
+def _friendly_directionality(value: Any) -> str:
+    directionality = str(value or "").strip().lower()
+    directionality_map = {
+        "higher_is_better": "Higher is better",
+        "lower_better": "Lower is better",
+        "lower_is_better": "Lower is better",
+        "stable_is_better": "Keep stable",
+    }
+    return directionality_map.get(directionality, _friendly_identifier(directionality))
+
+
+def _friendly_rule_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    required_match = re.search(r"(?:^|\.)([A-Za-z0-9_]+)\s+(?:must be present and not null|is required)\.?\s*$", text, re.IGNORECASE)
+    if required_match:
+        return f"{_friendly_identifier(required_match.group(1))} required"
+    text = re.sub(r"^[A-Za-z0-9_]+\.", "", text)
+    text = _friendly_identifier(text)
+    if len(text) <= 48:
+        return text
+    shortened = text[:45].rstrip()
+    return f"{shortened}..."
+
+
+def _friendly_object_name(row: dict[str, Any], rules_by_key: dict[str, dict[str, Any]]) -> str:
+    object_type = str(row.get("object_type") or "").strip().lower()
+    object_key = str(row.get("object_key") or "").strip()
+    if object_type == "rule":
+        matched_rule = rules_by_key.get(object_key) or {}
+        label = str(matched_rule.get("rule_label") or row.get("object_name") or "").strip()
+        if not label:
+            label = derive_quality_rule_label(matched_rule or row)
+        return _friendly_rule_label(label)
+    return _friendly_identifier(row.get("object_name") or object_key)
+
+
+def _friendly_reference(table_name: Any, column_name: Any) -> str:
+    table_text = str(table_name or "").strip()
+    column_text = str(column_name or "").strip()
+    if table_text and column_text:
+        return f"{table_text}.{column_text}"
+    return table_text or column_text
+
+
+def _severity_rank(value: Any) -> int:
+    order = {
+        "critical": 0,
+        "high": 1,
+        "warning": 2,
+        "medium": 3,
+        "low": 4,
+        "info": 5,
+    }
+    return order.get(str(value or "").strip().lower(), 6)
+
+
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _build_grouped_rule_rows(
+    rule_outcomes: list[dict[str, Any]],
+    *,
+    group_label: str,
+    group_value_fn,
+) -> list[list[Any]]:
+    grouped_rows: list[list[Any]] = []
+    current_group: str | None = None
+    sorted_rows = sorted(
+        rule_outcomes,
+        key=lambda row: (
+            _severity_rank(row.get("severity")),
+            str(group_value_fn(row) or ""),
+            _friendly_rule_label(row.get("rule_label")),
+        ),
+    )
+    for row in sorted_rows:
+        group_value = str(group_value_fn(row) or "Other").strip() or "Other"
+        if group_value != current_group:
+            if current_group is not None:
+                grouped_rows.append([])
+            grouped_rows.append(_header_row([group_label, "Rule", "Data Object", "Field", "Validation Result", "Rows Failed", "Failure Rate %"]))
+            current_group = group_value
+        grouped_rows.append(
+            [
+                group_value,
+                _friendly_rule_label(row.get("rule_label")),
+                _friendly_identifier(row.get("table_name")),
+                _friendly_identifier(row.get("column_name")),
+                _friendly_identifier((row.get("result") or {}).get("status")),
+                (row.get("result") or {}).get("failed_row_count"),
+                (row.get("result") or {}).get("violation_pct"),
+            ]
+        )
+    return grouped_rows
+
+
+def _risk_priority_score(
+    *,
+    risk_type: str,
+    severity: Any,
+    metric_value: Any = None,
+    failure_rate_pct: Any = None,
+    age_days: Any = None,
+    critical_action_count: Any = None,
+    blocker_count: Any = None,
+) -> float:
+    severity_weight = {
+        "critical": 100.0,
+        "high": 75.0,
+        "warning": 55.0,
+        "medium": 45.0,
+        "low": 25.0,
+        "info": 10.0,
+    }.get(str(severity or "").strip().lower(), 0.0)
+    type_weight = {
+        "validation_rule": 28.0,
+        "open_issue": 24.0,
+        "anomaly": 22.0,
+        "certification_blocker": 35.0,
+    }.get(risk_type, 0.0)
+    score = severity_weight + type_weight
+    score += min(abs(_as_float(metric_value)) * 0.08, 25.0)
+    score += min(abs(_as_float(failure_rate_pct)) * 0.5, 25.0)
+    score += min(abs(_as_float(age_days)) * 1.2, 20.0)
+    score += min(abs(_as_float(critical_action_count)) * 8.0, 24.0)
+    score += min(abs(_as_float(blocker_count)) * 10.0, 30.0)
+    return round(score, 2)
+
+
+def _sheet_has_meaningful_content(rows: list[list[Any]] | None) -> bool:
+    if not rows:
+        return False
+    for row in rows:
+        if not row:
+            continue
+        values = [_cell_parts(value)[0] for value in row]
+        if any(str(value or "").strip() for value in values):
+            non_empty_values = [str(value or "").strip() for value in values if str(value or "").strip()]
+            if len(non_empty_values) > 1:
+                return True
+    return False
+
+
+def _prune_report_sheets(sheets: list[tuple[str, list[list[Any]]]]) -> list[tuple[str, list[list[Any]]]]:
+    always_keep = {
+        "Report Highlights",
+        "Legend",
+        "Executive Summary",
+        "Certification Summary",
+        "Publish Readiness",
+        "Validation Rules",
+        "Validation by Severity",
+        "Validation by Area",
+        "Rule Summary",
+        "Top Risks",
+    }
+    pruned: list[tuple[str, list[list[Any]]]] = []
+    for name, rows in sheets:
+        if name in always_keep:
+            pruned.append((name, rows))
+            continue
+        if _sheet_has_meaningful_content(rows):
+            pruned.append((name, rows))
+    return pruned
+
+
 def _list_staged_overlay_artifacts(settings: Settings, run_id: str) -> list[dict[str, Any]]:
     try:
         return run_query(
@@ -935,29 +1131,23 @@ def _rule_detail_sheets(
         sheet_rows: list[list[Any]] = [
             _header_row(["Rule Field", "Value"]),
             ["Rule ID", rule_id],
-            ["Rule Label", rule_label],
-            ["Rule Source", rule.get("source")],
-            ["Rule Type", rule.get("rule_type")],
-            ["Severity", rule.get("severity")],
-            ["Dimension", outcome_payload.get("dimension")],
-            ["Table", rule.get("table_name")],
-            ["Column", rule.get("column_name")],
-            ["Reference Table", rule.get("reference_table")],
-            ["Reference Column", rule.get("reference_column")],
+            ["Rule", _friendly_rule_label(rule_label)],
+            ["Rule Source", _friendly_identifier(rule.get("source"))],
+            ["Type", _friendly_identifier(rule.get("rule_type"))],
+            ["Severity", _friendly_identifier(rule.get("severity"))],
+            ["Quality Dimension", _friendly_identifier(outcome_payload.get("dimension"))],
+            ["Data Object", _friendly_identifier(rule.get("table_name"))],
+            ["Field", _friendly_identifier(rule.get("column_name"))],
+            ["Reference", _friendly_reference(rule.get("reference_table"), rule.get("reference_column"))],
             ["Checked Rows", ((outcome_payload.get("result") or {}).get("checked_row_count"))],
             ["Passed Rows", ((outcome_payload.get("result") or {}).get("passed_row_count"))],
             ["Failed Rows", ((outcome_payload.get("result") or {}).get("failed_row_count"))],
             ["Pass %", ((outcome_payload.get("result") or {}).get("pass_pct"))],
-            ["Result Status", (((outcome_payload.get("result") or {}).get("result_status")) or ((outcome_payload.get("result") or {}).get("status")))],
-            ["Failed Records API", (((outcome_payload.get("evidence") or {}).get("failed_records")) or ((outcome_payload.get("evidence") or {}).get("failed_records_path")))],
-            ["Passed Records API", (((outcome_payload.get("evidence") or {}).get("passed_records")) or ((outcome_payload.get("evidence") or {}).get("passed_records_path")))],
-            ["Review Detail API", (((outcome_payload.get("evidence") or {}).get("review_detail")) or ((outcome_payload.get("evidence") or {}).get("review_path")))],
-            ["Failed Records Supported", failed_payload.get("supported")],
-            ["Passed Records Supported", passed_payload.get("supported")],
-            ["Failed Records Note", failed_payload.get("unsupported_reason")],
-            ["Passed Records Note", passed_payload.get("unsupported_reason")],
-            ["Source Text", rule.get("source_text")],
-            ["Rule Detail", _flatten_mapping(rule.get("condition_json") or {})],
+            ["Validation Result", _friendly_identifier((((outcome_payload.get("result") or {}).get("result_status")) or ((outcome_payload.get("result") or {}).get("status"))))],
+            ["Evidence Available", "Yes" if failed_rows or passed_rows else "No"],
+            ["Evidence Note", failed_payload.get("unsupported_reason") or passed_payload.get("unsupported_reason")],
+            ["Business Rule", rule.get("source_text")],
+            ["Rule Logic", _flatten_mapping(rule.get("condition_json") or {})],
             [],
         ]
         if record_columns:
@@ -985,11 +1175,11 @@ def _rule_detail_sheets(
             sheet_rows.append(
                 [
                     "",
-                    "No row-level records available for this rule in the workbook. Use the evidence APIs above.",
+                    "No row-level evidence is available for this rule in the workbook.",
                     _cell("Fail", STYLE_VALIDATION_FAILED) if int((outcome_payload.get("result") or {}).get("failed_row_count") or 0) > 0 else _cell("Pass", STYLE_ENRICH_APPROVED_DETERMINISTIC),
                 ]
             )
-        sheets.append((f"Rule {index:02d} {rule_label}", sheet_rows))
+        sheets.append((f"Validation {index:02d} {_friendly_rule_label(rule_label)}", sheet_rows))
     return sheets
 
 
@@ -1432,6 +1622,11 @@ def _build_data_quality_report_sheet_bundle(
     anomaly_rows = [build_quality_anomaly_payload(row) for row in anomalies]
     issue_summary = summarize_quality_issues(issues)
     issue_rows = [build_quality_issue_payload(row) for row in issues]
+    rules_by_key = {
+        str(rule.get("rule_id") or "").strip(): rule
+        for rule in rules
+        if str(rule.get("rule_id") or "").strip()
+    }
     readiness_summary = build_readiness_trend_payload(
         run_id=run_id,
         baseline_run_id=str(run.get("baseline_run_id") or (run.get("summary_json") or {}).get("baseline_run_id") or "").strip() or None,
@@ -1452,6 +1647,77 @@ def _build_data_quality_report_sheet_bundle(
         )
     )
     overdue_issue_rows = [row for row in steward_queue_rows if row.get("overdue")]
+    top_risk_candidates: list[dict[str, Any]] = []
+    for row in [item for item in rule_outcomes if str((item.get("result") or {}).get("status") or "").strip().lower() in {"failed", "error"}]:
+        top_risk_candidates.append(
+            {
+                "risk_type": "validation_rule",
+                "risk_label": "Validation Rule",
+                "severity": _friendly_identifier(row.get("severity")),
+                "headline": _friendly_rule_label(row.get("rule_label")),
+                "area": _friendly_identifier(row.get("table_name")),
+                "metric": (row.get("result") or {}).get("failed_row_count"),
+                "why_it_matters": "Rule is failing validation",
+                "priority_score": _risk_priority_score(
+                    risk_type="validation_rule",
+                    severity=row.get("severity"),
+                    metric_value=(row.get("result") or {}).get("failed_row_count"),
+                    failure_rate_pct=(row.get("result") or {}).get("violation_pct"),
+                    critical_action_count=(remediation_plan.get("summary") or {}).get("critical_action_count"),
+                ),
+            }
+        )
+    for row in overdue_issue_rows:
+        top_risk_candidates.append(
+            {
+                "risk_type": "open_issue",
+                "risk_label": "Open Issue",
+                "severity": _friendly_identifier(row.get("severity")),
+                "headline": row.get("title"),
+                "area": _friendly_identifier(row.get("table_name") or row.get("stage_id")),
+                "metric": row.get("age_days"),
+                "why_it_matters": "Issue is overdue",
+                "priority_score": _risk_priority_score(
+                    risk_type="open_issue",
+                    severity=row.get("severity"),
+                    age_days=row.get("age_days"),
+                    critical_action_count=(remediation_plan.get("summary") or {}).get("critical_action_count"),
+                ),
+            }
+        )
+    blocker_titles = readiness_summary.get("blocker_titles") or []
+    for blocker_title in blocker_titles[:5]:
+        top_risk_candidates.append(
+            {
+                "risk_type": "certification_blocker",
+                "risk_label": "Certification Blocker",
+                "severity": "Critical",
+                "headline": blocker_title,
+                "area": "Publish readiness",
+                "metric": readiness_summary.get("certification_blocker_count", 0),
+                "why_it_matters": "Blocks release readiness",
+                "priority_score": _risk_priority_score(
+                    risk_type="certification_blocker",
+                    severity="critical",
+                    blocker_count=readiness_summary.get("certification_blocker_count", 0),
+                    critical_action_count=(remediation_plan.get("summary") or {}).get("critical_action_count"),
+                ),
+            }
+        )
+    top_risk_rows = [
+        [
+            item.get("risk_label"),
+            item.get("severity"),
+            item.get("headline"),
+            item.get("area"),
+            item.get("metric"),
+            item.get("why_it_matters"),
+        ]
+        for item in sorted(
+            top_risk_candidates,
+            key=lambda item: (-_as_float(item.get("priority_score")), _severity_rank(item.get("severity")), str(item.get("headline") or "")),
+        )[:12]
+    ]
     freshness_rows = []
     for row in tables:
         summary_json = row.get("summary_json") or {}
@@ -1530,8 +1796,6 @@ def _build_data_quality_report_sheet_bundle(
         "trend_row_count": trend_summary.get("trend_row_count", 0),
         "improved_metric_count": trend_summary.get("improved_metric_count", 0),
         "worsened_metric_count": trend_summary.get("worsened_metric_count", 0),
-        "business_term_group_count": (business_term_trends.get("summary") or {}).get("business_term_group_count", 0),
-        "worsened_business_term_count": (business_term_trends.get("summary") or {}).get("worsened_business_term_count", 0),
         "anomaly_count": anomaly_summary.get("anomaly_count", 0),
         "critical_anomaly_count": anomaly_summary.get("critical_anomaly_count", 0),
         "certification_blocker_count": readiness_summary.get("certification_blocker_count", 0),
@@ -1543,6 +1807,30 @@ def _build_data_quality_report_sheet_bundle(
         "overdue_issue_count": issue_summary.get("overdue_issue_count", 0),
     }
     sheets = [
+        (
+            "Report Highlights",
+            [
+                _header_row(["Data Quality Report", "Value", "Notes"]),
+                ["Run ID", run_id, None],
+                ["Tenant", tenant_id, None],
+                ["Domain", domain_id, None],
+                ["Status", _friendly_identifier(run.get("status")), None],
+                [],
+                _header_row(["Headline", "Value", "Why it matters"]),
+                ["Overall Trust Score", run.get("overall_trust_score"), "Current trust position for this run"],
+                ["Final Dataset Readiness", final_dataset.get("readiness_status"), "Release readiness for the final dataset"],
+                ["Validation Rules Failing", len(failed_rules), "Rules currently failing validation"],
+                ["Open Issues", issue_summary.get("open_issue_count", 0), "Issues still requiring action"],
+                ["Critical Anomalies", anomaly_summary.get("critical_anomaly_count", 0), "Highest-priority anomalies detected"],
+                ["Rejected Records", len(rejected_records), "Rows removed during validation or filtering"],
+                [],
+                _header_row(["Immediate Attention", "Value", "Context"]),
+                ["Certification Blockers", readiness_summary.get("certification_blocker_count", 0), _flatten_sequence(readiness_summary.get("blocker_titles") or [])],
+                ["Overdue Issues", issue_summary.get("overdue_issue_count", 0), "Items already past due"],
+                ["Trend Direction", _friendly_identifier(readiness_summary.get("readiness_trend_status")), "Compared with the baseline run"],
+                ["Critical Recommended Actions", (remediation_plan.get("summary") or {}).get("critical_action_count", 0), "Actions that should be prioritized first"],
+            ],
+        ),
         (
             "Legend",
             [
@@ -1592,8 +1880,6 @@ def _build_data_quality_report_sheet_bundle(
                 ["Trend Rows", trend_summary.get("trend_row_count", 0)],
                 ["Improved Metrics", trend_summary.get("improved_metric_count", 0)],
                 ["Worsened Metrics", trend_summary.get("worsened_metric_count", 0)],
-                ["Business Term Groups", (business_term_trends.get("summary") or {}).get("business_term_group_count", 0)],
-                ["Worsened Business Terms", (business_term_trends.get("summary") or {}).get("worsened_business_term_count", 0)],
                 ["Anomalies", anomaly_summary.get("anomaly_count", 0)],
                 ["Critical Anomalies", anomaly_summary.get("critical_anomaly_count", 0)],
                 ["Open Issues", issue_summary.get("open_issue_count", 0)],
@@ -1631,62 +1917,129 @@ def _build_data_quality_report_sheet_bundle(
             ],
         ),
         (
-            "Quality Trends",
+            "Top Risks",
+            [
+                _header_row(["Risk Type", "Severity", "Headline", "Area", "Metric", "Why it matters"]),
+                *top_risk_rows,
+            ],
+        ),
+        (
+            "Validation Rules",
             [
                 _header_row([
-                    "Object Type",
-                    "Object Key",
-                    "Object Name",
-                    "Metric",
-                    "Previous Value",
-                    "Current Value",
-                    "Delta",
-                    "Delta %",
-                    "Trend Status",
-                    "Directionality",
+                    "Rule",
+                    "Quality Dimension",
+                    "Type",
+                    "Severity",
+                    "Data Object",
+                    "Field",
+                    "Reference",
+                    "Rule Status",
+                    "Validation Result",
+                    "Rows Checked",
+                    "Rows Passed",
+                    "Rows Failed",
+                    "Pass Rate %",
+                    "Failure Rate %",
+                    "Error",
+                    "Business Rule",
                 ]),
                 *[
                     [
-                        row.get("object_type"),
-                        row.get("object_key"),
-                        row.get("object_name"),
-                        row.get("metric_name"),
-                        row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
-                        row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
-                        row.get("delta_value"),
-                        row.get("delta_pct"),
-                        row.get("trend_status"),
-                        row.get("directionality"),
+                        _friendly_rule_label(row.get("rule_label")),
+                        _friendly_identifier(row.get("dimension")),
+                        _friendly_identifier(row.get("rule_type")),
+                        _friendly_identifier(row.get("severity")),
+                        _friendly_identifier(row.get("table_name")),
+                        _friendly_identifier(row.get("column_name")),
+                        _friendly_reference(row.get("reference_table"), row.get("reference_column")),
+                        _friendly_identifier(row.get("status")),
+                        _friendly_identifier((row.get("result") or {}).get("status")),
+                        (row.get("result") or {}).get("checked_row_count"),
+                        (row.get("result") or {}).get("passed_row_count"),
+                        (row.get("result") or {}).get("failed_row_count"),
+                        (row.get("result") or {}).get("pass_pct"),
+                        (row.get("result") or {}).get("violation_pct"),
+                        (row.get("result") or {}).get("error_message"),
+                        row.get("source_text"),
                     ]
-                    for row in trends
+                    for row in rule_outcomes
                 ],
             ],
         ),
         (
-            "Business Term Trends",
+            "Validation by Severity",
+            _build_grouped_rule_rows(
+                rule_outcomes,
+                group_label="Severity",
+                group_value_fn=lambda row: _friendly_identifier(row.get("severity")) or "Other",
+            ),
+        ),
+        (
+            "Validation by Area",
+            _build_grouped_rule_rows(
+                rule_outcomes,
+                group_label="Quality Dimension",
+                group_value_fn=lambda row: _friendly_identifier(row.get("dimension")) or "Other",
+            ),
+        ),
+        (
+            "Rule Summary",
             [
                 _header_row([
-                    "Business Term",
-                    "Definition",
-                    "Trend Rows",
-                    "Worsened",
-                    "Improved",
-                    "Affected Objects",
-                    "Top Metrics",
-                    "Evidence Path",
+                    "Rule",
+                    "Quality Dimension",
+                    "Severity",
+                    "Data Object",
+                    "Field",
+                    "Validation Result",
+                    "Rows Failed",
+                    "Failure Rate %",
+                    "Business Rule",
                 ]),
                 *[
                     [
-                        row.get("business_term"),
-                        row.get("definition"),
-                        row.get("trend_row_count"),
-                        row.get("worsened_metric_count"),
-                        row.get("improved_metric_count"),
-                        row.get("affected_objects"),
-                        row.get("top_metrics"),
-                        row.get("evidence_path"),
+                        _friendly_rule_label(row.get("rule_label")),
+                        _friendly_identifier(row.get("dimension")),
+                        _friendly_identifier(row.get("severity")),
+                        _friendly_identifier(row.get("table_name")),
+                        _friendly_identifier(row.get("column_name")),
+                        _friendly_identifier((row.get("result") or {}).get("status")),
+                        (row.get("result") or {}).get("failed_row_count"),
+                        (row.get("result") or {}).get("violation_pct"),
+                        row.get("source_text"),
                     ]
-                    for row in (business_term_trends.get("rows") or [])
+                    for row in rule_outcomes
+                ],
+            ],
+        ),
+        (
+            "Quality Trends",
+            [
+                _header_row([
+                    "Area",
+                    "Rule or Object",
+                    "Measure",
+                    "Previous",
+                    "Current",
+                    "Change",
+                    "Change %",
+                    "Trend",
+                    "Interpretation",
+                ]),
+                *[
+                    [
+                        _friendly_identifier(row.get("object_type")),
+                        _friendly_object_name(row, rules_by_key),
+                        _friendly_metric_name(row.get("metric_name")),
+                        row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
+                        row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
+                        row.get("delta_value"),
+                        row.get("delta_pct"),
+                        _friendly_identifier(row.get("trend_status")),
+                        _friendly_directionality(row.get("directionality")),
+                    ]
+                    for row in trends
                 ],
             ],
         ),
@@ -1694,25 +2047,23 @@ def _build_data_quality_report_sheet_bundle(
             "Rule Trends",
             [
                 _header_row([
-                    "Rule Key",
-                    "Rule Name",
-                    "Metric",
-                    "Previous Value",
-                    "Current Value",
-                    "Delta",
-                    "Delta %",
-                    "Trend Status",
+                    "Rule",
+                    "Measure",
+                    "Previous",
+                    "Current",
+                    "Change",
+                    "Change %",
+                    "Trend",
                 ]),
                 *[
                     [
-                        row.get("object_key"),
-                        row.get("object_name"),
-                        row.get("metric_name"),
+                        _friendly_object_name(row, rules_by_key),
+                        _friendly_metric_name(row.get("metric_name")),
                         row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
                         row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
                         row.get("delta_value"),
                         row.get("delta_pct"),
-                        row.get("trend_status"),
+                        _friendly_identifier(row.get("trend_status")),
                     ]
                     for row in trends
                     if str(row.get("object_type") or "") == "rule"
@@ -1723,25 +2074,23 @@ def _build_data_quality_report_sheet_bundle(
             "Stage Trends",
             [
                 _header_row([
-                    "Stage Key",
-                    "Stage Name",
-                    "Metric",
-                    "Previous Value",
-                    "Current Value",
-                    "Delta",
-                    "Delta %",
-                    "Trend Status",
+                    "Stage",
+                    "Measure",
+                    "Previous",
+                    "Current",
+                    "Change",
+                    "Change %",
+                    "Trend",
                 ]),
                 *[
                     [
-                        row.get("object_key"),
-                        row.get("object_name"),
-                        row.get("metric_name"),
+                        _friendly_object_name(row, rules_by_key),
+                        _friendly_metric_name(row.get("metric_name")),
                         row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
                         row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
                         row.get("delta_value"),
                         row.get("delta_pct"),
-                        row.get("trend_status"),
+                        _friendly_identifier(row.get("trend_status")),
                     ]
                     for row in trends
                     if str(row.get("object_type") or "") == "stage"
@@ -1752,21 +2101,21 @@ def _build_data_quality_report_sheet_bundle(
             "Final Dataset Trends",
             [
                 _header_row([
-                    "Metric",
-                    "Previous Value",
-                    "Current Value",
-                    "Delta",
-                    "Delta %",
-                    "Trend Status",
+                    "Measure",
+                    "Previous",
+                    "Current",
+                    "Change",
+                    "Change %",
+                    "Trend",
                 ]),
                 *[
                     [
-                        row.get("metric_name"),
+                        _friendly_metric_name(row.get("metric_name")),
                         row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
                         row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
                         row.get("delta_value"),
                         row.get("delta_pct"),
-                        row.get("trend_status"),
+                        _friendly_identifier(row.get("trend_status")),
                     ]
                     for row in trends
                     if str(row.get("object_type") or "") == "final_dataset"
@@ -1787,35 +2136,29 @@ def _build_data_quality_report_sheet_bundle(
             "Anomalies",
             [
                 _header_row([
-                    "Anomaly ID",
-                    "Anomaly Type",
+                    "Anomaly",
                     "Title",
                     "Severity",
-                    "Object Type",
-                    "Object Key",
-                    "Object Name",
+                    "Area",
+                    "Rule or Object",
                     "Baseline Run ID",
-                    "Previous Value",
-                    "Current Value",
-                    "Delta",
-                    "Delta %",
-                    "Evidence Path",
+                    "Previous",
+                    "Current",
+                    "Change",
+                    "Change %",
                 ]),
                 *[
                     [
-                        row.get("anomaly_id"),
-                        row.get("anomaly_type"),
+                        _friendly_identifier(row.get("anomaly_type")),
                         row.get("title"),
-                        row.get("severity"),
-                        row.get("object_type"),
-                        row.get("object_key"),
-                        row.get("object_name"),
+                        _friendly_identifier(row.get("severity")),
+                        _friendly_identifier(row.get("object_type")),
+                        _friendly_identifier(row.get("object_name") or row.get("object_key")),
                         row.get("baseline_run_id"),
                         row.get("previous_value_num") if row.get("previous_value_num") is not None else row.get("previous_value_text"),
                         row.get("current_value_num") if row.get("current_value_num") is not None else row.get("current_value_text"),
                         row.get("delta_value"),
                         row.get("delta_pct"),
-                        row.get("evidence_path"),
                     ]
                     for row in anomaly_rows
                 ],
@@ -1838,54 +2181,24 @@ def _build_data_quality_report_sheet_bundle(
                     "Column",
                     "Stage ID",
                     "Recommendation",
-                    "Evidence Path",
                 ]),
                 *[
                     [
                         row.get("issue_id"),
-                        row.get("issue_type"),
+                        _friendly_identifier(row.get("issue_type")),
                         row.get("title"),
-                        row.get("severity"),
-                        row.get("status"),
+                        _friendly_identifier(row.get("severity")),
+                        _friendly_identifier(row.get("status")),
                         row.get("owner_id"),
                         row.get("age_days"),
                         row.get("due_at"),
                         row.get("overdue"),
-                        row.get("table_name"),
-                        row.get("column_name"),
+                        _friendly_identifier(row.get("table_name")),
+                        _friendly_identifier(row.get("column_name")),
                         row.get("stage_id"),
                         row.get("recommendation"),
-                        row.get("evidence_path"),
                     ]
                     for row in issue_rows
-                ],
-            ],
-        ),
-        (
-            "Steward Work Queue",
-            [
-                _header_row([
-                    "Owner",
-                    "Severity",
-                    "Issue",
-                    "Status",
-                    "Age Days",
-                    "Due At",
-                    "Overdue",
-                    "Evidence Path",
-                ]),
-                *[
-                    [
-                        row.get("owner_id"),
-                        row.get("severity"),
-                        row.get("title"),
-                        row.get("status"),
-                        row.get("age_days"),
-                        row.get("due_at"),
-                        row.get("overdue"),
-                        row.get("evidence_path"),
-                    ]
-                    for row in steward_queue_rows
                 ],
             ],
         ),
@@ -1898,16 +2211,14 @@ def _build_data_quality_report_sheet_bundle(
                     "Issue",
                     "Age Days",
                     "Due At",
-                    "Evidence Path",
                 ]),
                 *[
                     [
                         row.get("owner_id"),
-                        row.get("severity"),
+                        _friendly_identifier(row.get("severity")),
                         row.get("title"),
                         row.get("age_days"),
                         row.get("due_at"),
-                        row.get("evidence_path"),
                     ]
                     for row in overdue_issue_rows
                 ],
@@ -1964,51 +2275,9 @@ def _build_data_quality_report_sheet_bundle(
             ],
         ),
         (
-            "Lineage Overview",
-            [
-                _header_row([
-                    "Row Lineage ID",
-                    "Source Table",
-                    "Source Row Ref",
-                    "Decoded Lineage",
-                    "Transitions",
-                    "Rejected",
-                    "Join Exceptions",
-                    "Latest Stage",
-                    "Final State",
-                    "Final Dataset Member",
-                    "Evidence Path",
-                ]),
-                *[
-                    [
-                        row.get("row_lineage_id"),
-                        row.get("source_table"),
-                        row.get("source_row_ref"),
-                        row.get("decoded_lineage"),
-                        row.get("transition_count"),
-                        row.get("rejected_count"),
-                        row.get("join_exception_count"),
-                        row.get("latest_stage_name"),
-                        row.get("final_state"),
-                        row.get("final_dataset_member"),
-                        row.get("evidence_path"),
-                    ]
-                    for row in _lineage_overview_rows(
-                        run_id=run_id,
-                        tenant_id=tenant_id,
-                        domain_id=domain_id,
-                        dataset_stages=dataset_stages,
-                        final_dataset=final_dataset,
-                        lineage_edges=lineage_edges,
-                        row_outcomes=stage_row_outcomes,
-                    )
-                ],
-            ],
-        ),
-        (
             "Filter Impact",
             [
-                _header_row(["Stage Seq", "Stage Name", "Table", "Expression", "Input Rows", "Output Rows", "Rejected Rows", "Rejected %", "Evidence Path"]),
+                _header_row(["Stage Seq", "Stage Name", "Table", "Expression", "Input Rows", "Output Rows", "Rejected Rows", "Rejected %"]),
                 *[
                     [
                         row.get("stage_seq"),
@@ -2023,46 +2292,9 @@ def _build_data_quality_report_sheet_bundle(
                             if row.get("input_row_count") not in (None, 0) and row.get("rejected_row_count") is not None
                             else None
                         ),
-                        (row.get("summary_json") or {}).get("evidence_path"),
                     ]
                     for row in dataset_stages
                     if str(row.get("stage_type") or "").strip() == "filter"
-                ],
-            ],
-        ),
-        (
-            "Trust Scorecard",
-            [
-                _header_row([
-                    "Table",
-                    "Trust Score",
-                    "Completeness",
-                    "Validity",
-                    "Uniqueness",
-                    "Referential Integrity",
-                    "Freshness",
-                    "Duplicate Risk",
-                    "Severity",
-                    "Stability",
-                    "Enrichment Readiness",
-                    "Explanations",
-                ]),
-                *[
-                    [
-                        row.get("table_name"),
-                        row.get("trust_score"),
-                        row.get("completeness_score"),
-                        row.get("validity_score"),
-                        row.get("uniqueness_score"),
-                        row.get("referential_integrity_score"),
-                        row.get("freshness_score"),
-                        row.get("duplicate_risk_score"),
-                        row.get("severity"),
-                        ((row.get("summary_json") or {}).get("trust_components") or {}).get("stability"),
-                        ((row.get("summary_json") or {}).get("trust_components") or {}).get("enrichment_readiness"),
-                        _flatten_mapping((row.get("summary_json") or {}).get("trust_component_explanations") or {}),
-                    ]
-                    for row in tables
                 ],
             ],
         ),
@@ -2111,124 +2343,19 @@ def _build_data_quality_report_sheet_bundle(
             ],
         ),
         (
-            "Rule Summary",
-            [
-                _header_row([
-                    "Rule ID",
-                    "Rule Label",
-                    "Dimension",
-                    "Type",
-                    "Severity",
-                    "Table",
-                    "Column",
-                    "Rule Status",
-                    "Result Status",
-                    "Checked Rows",
-                    "Passed Rows",
-                    "Failed Rows",
-                    "Pass %",
-                    "Violation %",
-                    "Failed Records API",
-                    "Passed Records API",
-                    "Review Detail API",
-                ]),
-                *[
-                    [
-                        row.get("rule_id"),
-                        row.get("rule_label"),
-                        row.get("dimension"),
-                        row.get("rule_type"),
-                        row.get("severity"),
-                        row.get("table_name"),
-                        row.get("column_name"),
-                        row.get("rule_status"),
-                        (row.get("result") or {}).get("status"),
-                        (row.get("result") or {}).get("checked_row_count"),
-                        (row.get("result") or {}).get("passed_row_count"),
-                        (row.get("result") or {}).get("failed_row_count"),
-                        (row.get("result") or {}).get("pass_pct"),
-                        (row.get("result") or {}).get("violation_pct"),
-                        (row.get("evidence") or {}).get("failed_records"),
-                        (row.get("evidence") or {}).get("passed_records"),
-                        (row.get("evidence") or {}).get("review_detail"),
-                    ]
-                    for row in rule_outcomes
-                ],
-            ],
-        ),
-        (
-            "Validation Rules",
-            [
-                _header_row([
-                    "Rule ID",
-                    "Rule Label",
-                    "Dimension",
-                    "Type",
-                    "Severity",
-                    "Table",
-                    "Column",
-                    "Reference Table",
-                    "Reference Column",
-                    "Rule Status",
-                    "Result Status",
-                    "Checked Rows",
-                    "Passed Rows",
-                    "Failed Rows",
-                    "Pass %",
-                    "Violation %",
-                    "Failed Records API",
-                    "Passed Records API",
-                    "Review Detail API",
-                    "Error",
-                    "Source Text",
-                    "Rule Detail",
-                ]),
-                *[
-                    [
-                        row.get("rule_id"),
-                        row.get("rule_label"),
-                        row.get("dimension"),
-                        row.get("rule_type"),
-                        row.get("severity"),
-                        row.get("table_name"),
-                        row.get("column_name"),
-                        row.get("reference_table"),
-                        row.get("reference_column"),
-                        row.get("status"),
-                        (row.get("result") or {}).get("status"),
-                        (row.get("result") or {}).get("checked_row_count"),
-                        (row.get("result") or {}).get("passed_row_count"),
-                        (row.get("result") or {}).get("failed_row_count"),
-                        (row.get("result") or {}).get("pass_pct"),
-                        (row.get("result") or {}).get("violation_pct"),
-                        (row.get("evidence") or {}).get("failed_records"),
-                        (row.get("evidence") or {}).get("passed_records"),
-                        (row.get("evidence") or {}).get("review_detail"),
-                        (row.get("result") or {}).get("error_message"),
-                        row.get("source_text"),
-                        _flatten_mapping(row.get("condition_json") or {}),
-                    ]
-                    for row in rule_outcomes
-                ],
-            ],
-        ),
-        (
             "Rule Violations",
             [
-                _header_row(["Rule ID", "Rule Label", "Dimension", "Severity", "Table", "Column", "Failed Rows", "Passed Rows", "Violation %", "Failed Records API", "Passed Records API", "Sample Evidence"]),
+                _header_row(["Rule", "Quality Dimension", "Severity", "Data Object", "Field", "Rows Failed", "Rows Passed", "Failure Rate %", "Sample Evidence"]),
                 *[
                     [
-                        row.get("rule_id"),
-                        row.get("rule_label"),
-                        row.get("dimension"),
-                        row.get("severity"),
-                        row.get("table_name"),
-                        row.get("column_name"),
+                        _friendly_rule_label(row.get("rule_label")),
+                        _friendly_identifier(row.get("dimension")),
+                        _friendly_identifier(row.get("severity")),
+                        _friendly_identifier(row.get("table_name")),
+                        _friendly_identifier(row.get("column_name")),
                         (row.get("result") or {}).get("failed_row_count"),
                         (row.get("result") or {}).get("passed_row_count"),
                         (row.get("result") or {}).get("violation_pct"),
-                        (row.get("evidence") or {}).get("failed_records"),
-                        (row.get("evidence") or {}).get("passed_records"),
                         _sample_rows_summary((row.get("result") or {}).get("sample_rows_json") or []),
                     ]
                     for row in rule_outcomes
@@ -2439,6 +2566,12 @@ def _build_data_quality_report_sheet_bundle(
         *all_data_sheets,
         *published_sheets,
     ]
+    sheets = _prune_report_sheets(sheets)
+    included_sheet_names = [name for name, _ in sheets]
+    summary["published_enrichment_sheet_count"] = len([name for name in included_sheet_names if name.startswith("Published ")])
+    summary["stage_snapshot_sheet_count"] = len([name for name in included_sheet_names if re.match(r"^Stage \d+", name)])
+    summary["all_data_sheet_count"] = len([name for name in included_sheet_names if name.startswith("All Data ")])
+    summary["rule_detail_sheet_count"] = len([name for name in included_sheet_names if name.startswith("Validation ") and name not in {"Validation Rules", "Validation by Severity", "Validation by Area"}])
     return sheets, summary
 
 

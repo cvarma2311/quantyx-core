@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import traceback
 import urllib.request
 from typing import Any
@@ -128,6 +129,7 @@ def _normalized_level_token(value: str) -> str:
 
 def _level_aliases() -> dict[str, list[str]]:
     return {
+        "bu": ["bu", "business_unit", "business unit"],
         "zone": ["zone"],
         "region": ["region"],
         "sales_area": ["sales_area", "salesarea", "sales_area_name", "sales_area_code"],
@@ -135,6 +137,14 @@ def _level_aliases() -> dict[str, list[str]]:
         "sap_id": ["sap_id", "sap", "outlet_id", "outlet_code"],
         "site_id": ["site_id", "site"],
         "product_grp": ["product_grp", "product_group", "product", "product_type", "fuel_type", "product_name"],
+        "alert_section": ["alert_section", "section"],
+        "alert_category": ["alert_category", "category"],
+        "alert_status": ["alert_status", "status"],
+        "severity": ["severity", "priority"],
+        "equipment_type": ["equipment_type", "equipment family", "equipment"],
+        "device_type": ["device_type", "device"],
+        "equipment_name": ["equipment_name", "equipment"],
+        "interlock_name": ["interlock_name", "interlock"],
     }
 
 
@@ -408,6 +418,126 @@ def _hierarchies_from_overrides(
     return out
 
 
+def _extract_context_hierarchy_blocks(context_text: str | None) -> list[dict[str, Any]]:
+    text = str(context_text or "")
+    if not text.strip():
+        return []
+    blocks: list[dict[str, Any]] = []
+    current_name: str | None = None
+    current_description: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        normalized = line.lstrip("-").strip()
+        lowered = normalized.lower()
+        if lowered.startswith("hierarchy_name:"):
+            current_name = normalized.split(":", 1)[1].strip() or None
+            continue
+        if lowered.startswith("description:"):
+            current_description = normalized.split(":", 1)[1].strip() or None
+            continue
+        if lowered.startswith("levels:"):
+            rhs = normalized.split(":", 1)[1].strip()
+            parts = [part.strip() for part in rhs.split(">") if part.strip()]
+            if len(parts) < 2:
+                continue
+            blocks.append(
+                {
+                    "hierarchy_name": current_name or f"context_hierarchy_{len(blocks) + 1}",
+                    "description": current_description,
+                    "levels": parts,
+                }
+            )
+            current_name = None
+            current_description = None
+            continue
+        if ">" in normalized and re.fullmatch(r"[A-Za-z][A-Za-z0-9_ /()\-]*(\s*>\s*[A-Za-z][A-Za-z0-9_ /()\-]*)+", normalized):
+            parts = [part.strip() for part in normalized.split(">") if part.strip()]
+            if len(parts) >= 2:
+                blocks.append(
+                    {
+                        "hierarchy_name": current_name or f"context_hierarchy_{len(blocks) + 1}",
+                        "description": current_description,
+                        "levels": parts,
+                    }
+                )
+                current_name = None
+                current_description = None
+    return blocks
+
+
+def _hierarchies_from_context_text(
+    *,
+    tenant_id: str,
+    domain_id: str,
+    profiling_stats: dict[str, Any] | None,
+    context_text: str | None,
+) -> list[dict[str, Any]]:
+    table_map = _profiling_table_map(profiling_stats)
+    blocks = _extract_context_hierarchy_blocks(context_text)
+    out: list[dict[str, Any]] = []
+    for idx, block in enumerate(blocks, start=1):
+        levels = [str(v).strip() for v in (block.get("levels") or []) if str(v).strip()]
+        if len(levels) < 2:
+            continue
+        level_rows = []
+        unresolved_levels: list[str] = []
+        base_table: str | None = None
+        for level in levels:
+            matched_table, matched_column, matched_level_id = _find_profiled_column_match(level, table_map)
+            if not matched_column:
+                unresolved_levels.append(level)
+                continue
+            if not base_table:
+                base_table = matched_table
+            level_rows.append(
+                {
+                    "level_id": matched_level_id,
+                    "column": matched_column,
+                    "label": level.replace("_", " ").title(),
+                    "table": matched_table,
+                }
+            )
+        deduped_rows = []
+        seen_level_ids = set()
+        for level_row in level_rows:
+            level_id = str(level_row.get("level_id") or "").strip()
+            if not level_id or level_id in seen_level_ids:
+                continue
+            seen_level_ids.add(level_id)
+            deduped_rows.append(level_row)
+        level_rows = deduped_rows
+        if len(level_rows) < 2:
+            continue
+        hierarchy_name = str(block.get("hierarchy_name") or f"context_hierarchy_{idx}").strip() or f"context_hierarchy_{idx}"
+        all_resolved = not unresolved_levels
+        out.append(
+            {
+                "hierarchy_id": f"override_{domain_id}_{hierarchy_name}",
+                "tenant_id": tenant_id,
+                "domain_id": domain_id,
+                "name": hierarchy_name,
+                "description": block.get("description") or "Context-defined hierarchy",
+                "base_scope_json": {
+                    "schema_name": "public",
+                    "base_table": base_table,
+                },
+                "levels_json": level_rows,
+                "join_path_json": [],
+                "preferred": idx == 1 and all_resolved,
+                "confidence_score": 0.96 if all_resolved else 0.78,
+                "provenance_json": {
+                    "source": "context_hierarchy",
+                    "raw_levels": levels,
+                    "unresolved_levels": unresolved_levels,
+                },
+                "validation_status": "approved",
+            }
+        )
+    return out
+
+
 def _llm_enabled(settings: Settings) -> bool:
     return bool(getattr(settings, "openai_api_key", None))
 
@@ -526,6 +656,14 @@ def derive_business_hierarchies(
     tables = (profiling_stats or {}).get("tables") or []
     hierarchies: list[dict[str, Any]] = []
     lower_context = str(context_text or "").lower()
+    _hs_logger.info(
+        "hierarchy_store.derive.start | tenant_id=%s domain_id=%s profiled_tables=%s join_edges=%s context_len=%s",
+        tenant_id,
+        domain_id,
+        len(tables),
+        len(join_edges or []),
+        len(str(context_text or "")),
+    )
     override_hierarchies = _hierarchies_from_overrides(
         settings,
         tenant_id=tenant_id,
@@ -533,29 +671,46 @@ def derive_business_hierarchies(
         profiling_stats=profiling_stats,
     )
     hierarchies.extend(override_hierarchies)
+    context_hierarchies = _hierarchies_from_context_text(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        profiling_stats=profiling_stats,
+        context_text=context_text,
+    )
+    hierarchies.extend(context_hierarchies)
+    table_candidate_count = 0
     for table in tables:
         table_name = str(table.get("name") or "").strip()
         if not table_name:
             continue
         dedup_cols = _collect_dimension_columns(table)
-        hierarchies.extend(
-            _hierarchy_candidates_for_table(
-                tenant_id=tenant_id,
-                domain_id=domain_id,
-                table_name=table_name,
-                dedup_cols=dedup_cols,
-                lower_context=lower_context,
-            )
-        )
-    hierarchies.extend(
-        _join_hierarchy_candidates(
+        table_candidates = _hierarchy_candidates_for_table(
             tenant_id=tenant_id,
             domain_id=domain_id,
-            profiling_stats=profiling_stats,
-            join_edges=join_edges,
+            table_name=table_name,
+            dedup_cols=dedup_cols,
             lower_context=lower_context,
         )
+        hierarchies.extend(table_candidates)
+        table_candidate_count += len(table_candidates)
+        if table_candidates:
+            _hs_logger.info(
+                "hierarchy_store.derive.table_candidates | tenant_id=%s domain_id=%s table=%s column_count=%s candidate_count=%s candidate_ids=%s",
+                tenant_id,
+                domain_id,
+                table_name,
+                len(dedup_cols),
+                len(table_candidates),
+                [str(item.get("hierarchy_id") or "") for item in table_candidates[:10]],
+            )
+    join_candidates = _join_hierarchy_candidates(
+        tenant_id=tenant_id,
+        domain_id=domain_id,
+        profiling_stats=profiling_stats,
+        join_edges=join_edges,
+        lower_context=lower_context,
     )
+    hierarchies.extend(join_candidates)
     deduped: list[dict[str, Any]] = []
     seen_ids = set()
     seen_level_signatures = set()
@@ -570,7 +725,25 @@ def derive_business_hierarchies(
         deduped.append(item)
     if deduped and not any(bool(item.get("preferred")) for item in deduped):
         deduped[0]["preferred"] = True
-    return _annotate_hierarchy_navigation(deduped)
+    annotated = _annotate_hierarchy_navigation(deduped)
+    _hs_logger.info(
+        "hierarchy_store.derive.complete | tenant_id=%s domain_id=%s override_count=%s table_candidate_count=%s join_candidate_count=%s deduped_count=%s preferred_ids=%s hierarchy_levels=%s",
+        tenant_id,
+        domain_id,
+        len(override_hierarchies) + len(context_hierarchies),
+        table_candidate_count,
+        len(join_candidates),
+        len(annotated),
+        [str(item.get("hierarchy_id") or "") for item in annotated if item.get("preferred")][:5],
+        {
+            str(item.get("hierarchy_id") or ""): [
+                str((level or {}).get("level_id") or "")
+                for level in (item.get("levels_json") or [])[:8]
+            ]
+            for item in annotated[:10]
+        },
+    )
+    return annotated
 
 
 def upsert_business_hierarchies(settings: Settings, hierarchies: list[dict[str, Any]]) -> None:
@@ -682,12 +855,6 @@ def ensure_business_hierarchies(
         "hierarchy_store.ensure.existing_check | tenant_id=%s domain_id=%s existing_count=%s",
         tenant_id, domain_id, len(existing),
     )
-    if existing:
-        _hs_logger.info(
-            "hierarchy_store.ensure.returning_existing | tenant_id=%s domain_id=%s count=%s",
-            tenant_id, domain_id, len(existing),
-        )
-        return existing
     try:
         derived = derive_business_hierarchies(
             settings,
@@ -707,46 +874,91 @@ def ensure_business_hierarchies(
         "hierarchy_store.ensure.derived | tenant_id=%s domain_id=%s derived_count=%s",
         tenant_id, domain_id, len(derived),
     )
+    if not derived and existing:
+        _hs_logger.info(
+            "hierarchy_store.ensure.returning_existing_only | tenant_id=%s domain_id=%s count=%s hierarchy_ids=%s preferred_ids=%s",
+            tenant_id,
+            domain_id,
+            len(existing),
+            [str(item.get("hierarchy_id") or "") for item in existing[:10]],
+            [str(item.get("hierarchy_id") or "") for item in existing if item.get("preferred")][:5],
+        )
+        return existing
     if not derived:
         _hs_logger.warning(
             "hierarchy_store.ensure.no_candidates | tenant_id=%s domain_id=%s — skipping upsert",
             tenant_id, domain_id,
         )
         return []
+    merged = list(existing)
+    existing_signatures = {
+        (
+            str((item.get("base_scope_json") or {}).get("base_table") or ""),
+            tuple(str((level or {}).get("level_id") or "") for level in (item.get("levels_json") or [])),
+        )
+        for item in existing
+    }
+    existing_ids = {str(item.get("hierarchy_id") or "") for item in existing}
+    added_count = 0
+    for item in derived:
+        hierarchy_id = str(item.get("hierarchy_id") or "")
+        signature = (
+            str((item.get("base_scope_json") or {}).get("base_table") or ""),
+            tuple(str((level or {}).get("level_id") or "") for level in (item.get("levels_json") or [])),
+        )
+        if hierarchy_id in existing_ids or signature in existing_signatures:
+            continue
+        merged.append(item)
+        existing_ids.add(hierarchy_id)
+        existing_signatures.add(signature)
+        added_count += 1
+    _hs_logger.info(
+        "hierarchy_store.ensure.merge | tenant_id=%s domain_id=%s existing_count=%s derived_count=%s added_count=%s merged_count=%s",
+        tenant_id,
+        domain_id,
+        len(existing),
+        len(derived),
+        added_count,
+        len(merged),
+    )
     try:
         ranking = _llm_rank_hierarchies(
             settings,
             tenant_id=tenant_id,
             domain_id=domain_id,
             context_text=context_text,
-            candidates=derived,
+            candidates=merged,
         )
         _hs_logger.info(
             "hierarchy_store.ensure.ranking_done | tenant_id=%s domain_id=%s ranking_count=%s",
             tenant_id, domain_id, len(ranking or []),
         )
-        derived = _apply_hierarchy_ranking(derived, ranking)
+        merged = _apply_hierarchy_ranking(merged, ranking)
     except Exception:
         _hs_logger.warning(
             "hierarchy_store.ensure.ranking_failed | tenant_id=%s domain_id=%s traceback=%s — proceeding without ranking",
             tenant_id, domain_id, traceback.format_exc(),
         )
     try:
-        upsert_business_hierarchies(settings, derived)
+        upsert_business_hierarchies(settings, merged)
         _hs_logger.info(
             "hierarchy_store.ensure.upsert_done | tenant_id=%s domain_id=%s upserted_count=%s",
-            tenant_id, domain_id, len(derived),
+            tenant_id, domain_id, len(merged),
         )
     except Exception:
         _hs_logger.error(
             "hierarchy_store.ensure.upsert_failed | tenant_id=%s domain_id=%s traceback=%s",
             tenant_id, domain_id, traceback.format_exc(),
         )
-        return derived
+        return merged
     final = list_business_hierarchies(settings, tenant_id, domain_id)
     _hs_logger.info(
-        "hierarchy_store.ensure.complete | tenant_id=%s domain_id=%s final_count=%s",
-        tenant_id, domain_id, len(final),
+        "hierarchy_store.ensure.complete | tenant_id=%s domain_id=%s final_count=%s hierarchy_ids=%s preferred_ids=%s",
+        tenant_id,
+        domain_id,
+        len(final),
+        [str(item.get("hierarchy_id") or "") for item in final[:10]],
+        [str(item.get("hierarchy_id") or "") for item in final if item.get("preferred")][:5],
     )
     if final:
         return final
@@ -755,7 +967,7 @@ def ensure_business_hierarchies(
             "hierarchy_store.ensure.final_empty_after_upsert | tenant_id=%s domain_id=%s derived_count=%s — using in-memory derived hierarchies for current run",
             tenant_id,
             domain_id,
-            len(derived),
+            len(merged),
         )
-        return derived
+        return merged
     return final
