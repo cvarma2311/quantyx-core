@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import urllib.request
 
 from services.ai.catalog import MetricCatalog
 from services.ai.config import Settings
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +69,7 @@ def resolve_question(
         method="POST",
     )
 
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with urllib.request.urlopen(request, timeout=30, context=context) as response:
         body = json.loads(response.read().decode("utf-8"))
 
     content = body["choices"][0]["message"]["content"]

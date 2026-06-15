@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.request
 
 from services.ai.config import Settings
@@ -15,6 +16,8 @@ from services.ai.db import run_query
 from services.ai import semantic_extraction
 from services.ai.semantic_extraction import extract_semantic_contract
 from services.ai.semantic_layer.pack_loader import load_pack
+
+context = ssl._create_unverified_context()
 
 NUMERIC_TYPES = {
     "integer",
@@ -1468,7 +1471,7 @@ def _generate_table_descriptions(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=context) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         content = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         result = json.loads(content)

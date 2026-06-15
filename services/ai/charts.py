@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 import urllib.request
 from datetime import datetime
 from typing import Any
 
 from services.ai.config import Settings
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +353,7 @@ def infer_chart_type_with_llm(
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=20, context=context) as response:
         body = json.loads(response.read().decode("utf-8"))
     content = body["choices"][0]["message"]["content"]
     try:
@@ -557,7 +560,7 @@ def _llm_chart_inference(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         result = json.loads(body["choices"][0]["message"]["content"])
         insight = str(result.get("insight_text") or "").strip()

@@ -4,12 +4,15 @@ import json
 import logging
 import os
 import time
+import ssl
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from services.ai.config import Settings
 from services.ai.onboarding.entity_mapping_agents import persist_entity_mapping_agent
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +162,7 @@ def llm_map_entities(
                     len(chunk),
                     attempt + 1,
                 )
-                with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+                with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
                     body = json.loads(response.read().decode("utf-8"))
                 content = body["choices"][0]["message"]["content"]
                 parsed = json.loads(content)

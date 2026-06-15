@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import time
 import traceback
+import ssl
 import urllib.request
 import uuid
 
@@ -26,6 +27,8 @@ from services.ai.agentic_store import (
     upsert_agent_event_artifact,
 )
 import logging
+
+context = ssl._create_unverified_context()
 
 AGENTIC_CORRELATION_FLOW_VERSION = "2026-04-03-correlation-debug-v1"
 AGENTIC_ANOMALY_FLOW_VERSION = "2026-04-03-anomaly-fallback-debug-v1"
@@ -367,7 +370,7 @@ def _llm_json_response(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         return json.loads(body["choices"][0]["message"]["content"])
     except Exception:
@@ -639,7 +642,7 @@ def _llm_chart_discovery(
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=remaining) as resp:
+            with urllib.request.urlopen(request, timeout=remaining, context=context) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             logger.warning("chart_discovery.llm_request_failed | err=%s", exc)
@@ -697,7 +700,7 @@ def _llm_chart_discovery(
                     method="POST",
                 )
                 try:
-                    with urllib.request.urlopen(final_request, timeout=remaining) as resp:
+                    with urllib.request.urlopen(final_request, timeout=remaining, context=context) as resp:
                         final_body = json.loads(resp.read().decode("utf-8"))
                     content = str(final_body["choices"][0]["message"].get("content") or "")
                 except Exception as exc:
@@ -1574,7 +1577,7 @@ def _llm_extract_text(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = body["choices"][0]["message"]["content"]
         parsed = json.loads(content)
@@ -2297,7 +2300,7 @@ def _llm_propose_chart_candidates(
     )
     logger = logging.getLogger(__name__)
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         parsed = json.loads(body["choices"][0]["message"]["content"])
         charts = [item for item in (parsed.get("charts") or []) if isinstance(item, dict)]
@@ -2374,7 +2377,7 @@ def _llm_compose_dashboard(
     )
     logger = logging.getLogger(__name__)
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         parsed = json.loads(body["choices"][0]["message"]["content"])
         ordered: list[dict[str, Any]] = []
@@ -2470,7 +2473,7 @@ def _llm_rerank_chart_candidates(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = body["choices"][0]["message"]["content"]
         parsed = json.loads(content)
@@ -2610,7 +2613,7 @@ def _llm_propose_context_metrics(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = body["choices"][0]["message"]["content"]
         parsed = json.loads(content)
@@ -2705,7 +2708,7 @@ def _llm_rerank_metric_candidates(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = body["choices"][0]["message"]["content"]
         parsed = json.loads(content)
@@ -3494,6 +3497,7 @@ def _persist_agentic_registry_outputs(
             metric_name = str(metric.get("metric_name") or "").strip()
             base_table = str(metric.get("base_table") or "").strip()
             formula = str(metric.get("formula") or "").strip()
+            fact_model = f"fact_{base_table}"
             if not metric_name or not base_table:
                 continue
             # Use the raw table name directly — no dbt "fact_" prefix.

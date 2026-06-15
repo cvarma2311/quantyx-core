@@ -6,11 +6,14 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.request
 
 from services.ai.config import Settings
 from services.ai.data_quality_store import insert_quality_rule_result
 from services.ai.db import ScopedConnection, run_query
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -677,7 +680,7 @@ def business_context_validation_planner_tool(
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=_rule_planner_timeout_sec()) as response:
+            with urllib.request.urlopen(request, timeout=_rule_planner_timeout_sec(), context=context) as response:
                 parsed = json.loads(response.read().decode("utf-8"))
             content = ((parsed.get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
             payload = json.loads(content)
@@ -820,7 +823,7 @@ def _build_quality_rule_sql_preview_with_llm(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             parsed = json.loads(response.read().decode("utf-8"))
         content = ((parsed.get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
         preview = json.loads(content)
@@ -926,7 +929,7 @@ def _extract_quality_rules_with_llm(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             parsed = json.loads(response.read().decode("utf-8"))
         content = ((parsed.get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
         raw_rules = (json.loads(content).get("rules") or [])

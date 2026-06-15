@@ -20,12 +20,15 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.request
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from services.ai.config import Settings
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -464,7 +467,7 @@ def llm_direct_sql(
 
     logger.info("[llm_sql] calling LLM model=%s timeout=%ds", model, timeout_sec)
     try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec, context=context) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         content = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         logger.info("[llm_sql] LLM RESPONSE (raw):\n%s", content)

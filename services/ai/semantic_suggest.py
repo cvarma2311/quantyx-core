@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 from services.ai.config import Settings
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +58,7 @@ def _call_llm(
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=45) as response:
+    with urllib.request.urlopen(request, timeout=45, context=context) as response:
         body = json.loads(response.read().decode("utf-8"))
     content = body["choices"][0]["message"]["content"]
     logger.debug("llm.semantic_suggest: response | chars=%s", len(content or ""))

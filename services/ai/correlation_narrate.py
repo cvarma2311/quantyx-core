@@ -14,11 +14,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 import urllib.request
 from html import escape
 from typing import Any
 
 from services.ai.config import Settings
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +94,7 @@ def _llm_call(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as resp:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
         result = json.loads(raw["choices"][0]["message"]["content"])
         usage = raw.get("usage") or {}

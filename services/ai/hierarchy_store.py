@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import traceback
+import ssl
 import urllib.request
 from typing import Any
 
@@ -13,6 +14,8 @@ from psycopg2.extras import RealDictCursor
 
 from services.ai.config import Settings
 from services.ai.semantic_layer.overrides_loader import load_hierarchy_overrides_all
+
+context = ssl._create_unverified_context()
 
 _hs_logger = logging.getLogger("quantyx.hierarchy_store")
 
@@ -601,7 +604,7 @@ def _llm_rank_hierarchies(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec, context=context) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         content = (((body.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
         parsed = json.loads(content) if content else {}

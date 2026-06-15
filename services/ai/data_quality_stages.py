@@ -6,12 +6,16 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.request
 import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 
 from services.ai.config import Settings
 from services.ai.db import ScopedConnection, run_query
+
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +52,7 @@ def _planner_llm_json(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
+        with urllib.request.urlopen(request, timeout=45, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         return json.loads(body["choices"][0]["message"]["content"])
     except Exception as exc:

@@ -5,9 +5,12 @@ import logging
 from pathlib import Path
 from typing import Any
 import urllib.error
+import ssl
 import urllib.request
 
 from services.ai.config import Settings
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +59,7 @@ def _call_llm(settings: Settings, system_prompt: str, user_prompt: str) -> dict[
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
+        with urllib.request.urlopen(request, timeout=45, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         response_body = ""

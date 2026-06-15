@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import urllib.request
 from html import escape
 import os
@@ -9,6 +10,8 @@ from typing import Any
 
 from services.ai.config import Settings
 
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +182,7 @@ def llm_rewrite_text(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=25) as resp:
+        with urllib.request.urlopen(req, timeout=25, context=context) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         parsed = json.loads(body["choices"][0]["message"]["content"])
         text = parsed.get("text")

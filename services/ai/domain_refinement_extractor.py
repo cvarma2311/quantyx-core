@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.request
 from typing import Any
 
@@ -14,6 +15,8 @@ from services.ai.domain_refinement_store import (
     list_refinement_artifacts,
     update_refinement_input_status,
 )
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -585,7 +588,7 @@ def _llm_extract_refinement_artifacts(settings: Settings, refinement_input: dict
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             parsed = json.loads(response.read().decode("utf-8"))
         content = ((parsed.get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
         result = json.loads(content)

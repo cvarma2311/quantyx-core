@@ -261,7 +261,8 @@ def add_chart(
         with c.cursor(cursor_factory=RealDictCursor) as cur:
             if position is None:
                 cur.execute(pos_sql, [dashboard_id])
-                position = cur.fetchone()[0]
+                # position = cur.fetchone()[0]
+                position = cur.fetchone()["coalesce"]
             cur.execute(insert_sql, [entry_id, dashboard_id, chart_id, position, title_override, added_by])
             row = cur.fetchone()
         c.commit()

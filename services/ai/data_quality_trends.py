@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import urllib.request
 from urllib.parse import quote
 
@@ -26,6 +27,8 @@ from services.ai.data_quality_store import (
 from services.ai.glossary import upsert_glossary_terms
 from services.ai.workspace_store import get_deployment_run, list_runs_by_trend_scope
 
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +115,7 @@ def _trend_scope_llm_json(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
+        with urllib.request.urlopen(request, timeout=45, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         return json.loads(body["choices"][0]["message"]["content"])
     except Exception as exc:
@@ -156,7 +159,7 @@ def _business_term_llm_json(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=_business_term_llm_timeout_sec()) as response:
+        with urllib.request.urlopen(request, timeout=_business_term_llm_timeout_sec(), context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         return json.loads(body["choices"][0]["message"]["content"])
     except Exception as exc:

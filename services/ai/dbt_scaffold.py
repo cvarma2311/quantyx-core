@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 import urllib.request
 import time
 import re
@@ -12,6 +13,8 @@ from uuid import uuid4
 
 from services.ai.config import Settings
 from services.ai.db import execute_non_query, run_query
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +133,7 @@ def _llm_generate_scaffold(
     attempt = 0
     while True:
         try:
-            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
                 body = json.loads(response.read().decode("utf-8"))
             break
         except Exception:

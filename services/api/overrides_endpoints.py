@@ -68,7 +68,7 @@ def upsert_entity_override(
            source_table, source_column, confidence,
            supersedes_version_no, created_by, updated_by, is_current, created_at, updated_at)
         VALUES
-          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
+          (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), now())
         """,
         [
             tenant_id,

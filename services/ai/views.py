@@ -172,7 +172,12 @@ def list_views(
     )
 
 
-def get_view_schema(settings: Settings, schema_name: str, view_name: str) -> list[dict[str, Any]]:
+def get_view_schema(
+    settings: Settings,
+    schema_name: str,
+    view_name: str,
+    scoped_conn: ScopedConnection | None = None,
+) -> list[dict[str, Any]]:
     return run_query(
         settings,
         """
@@ -183,6 +188,7 @@ def get_view_schema(settings: Settings, schema_name: str, view_name: str) -> lis
          ORDER BY ordinal_position
         """,
         [schema_name, view_name],
+        scoped_conn=scoped_conn,
     )
 
 

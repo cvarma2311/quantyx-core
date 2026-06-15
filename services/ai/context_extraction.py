@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import urllib.request
 from typing import Any
 
 from services.ai.config import Settings
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +74,7 @@ def extract_context(
     )
 
     for attempt in range(2):
-        with urllib.request.urlopen(request, timeout=45) as response:
+        with urllib.request.urlopen(request, timeout=45, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = body["choices"][0]["message"]["content"]
         try:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import ssl
 import urllib.request
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -13,6 +14,8 @@ from services.ai.config import Settings
 if TYPE_CHECKING:
     from services.ai.catalog import MetricCatalog
 
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 _MONTH_NAME_TO_NUMBER = {
@@ -559,7 +562,7 @@ def interpret_workspace_query(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=settings.workspace_query_plan_timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=settings.workspace_query_plan_timeout_sec, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         raw_plan = json.loads(body["choices"][0]["message"]["content"])
         raw_plan["fallback_plan"] = fallback_plan

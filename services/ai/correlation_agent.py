@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import re
+import ssl
 import urllib.request
 import uuid
 from collections import defaultdict
@@ -28,6 +29,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from services.ai.config import Settings
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +384,7 @@ def _llm_json_call(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as resp:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
         return json.loads(raw["choices"][0]["message"]["content"])
     except Exception:

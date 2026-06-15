@@ -6,11 +6,14 @@ from collections import Counter
 import json
 import logging
 import os
+import ssl
 import urllib.request
 import uuid
 
 from services.ai.config import Settings
 from services.ai.db import ScopedConnection, run_query
+
+context = ssl._create_unverified_context()
 
 logger = logging.getLogger(__name__)
 
@@ -685,7 +688,7 @@ def _llm_enrichment_proposals(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             parsed = json.loads(response.read().decode("utf-8"))
         content = ((parsed.get("choices") or [{}])[0].get("message") or {}).get("content") or "{}"
         raw = json.loads(content).get("proposals") or []

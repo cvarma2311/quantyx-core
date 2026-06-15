@@ -606,8 +606,8 @@ class DashboardResponse(BaseModel):
     created_by: Optional[str] = None
     chart_plan: Optional[List[dict]] = None
     charts: Optional[List[dict]] = None     # populated by GET /dashboards/{id}
-    created_at: Optional[Any] = None
-    updated_at: Optional[Any] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 
 class DashboardUpdateRequest(BaseModel):
@@ -2074,6 +2074,7 @@ class JobListItem(BaseModel):
     job_id: str
     job_type: str
     status: JobStatusEnum
+    tenant_id: str | None = None
     tenant_name: str | None = None
     domain_id: str | None = None
     created_at: datetime | None = None
@@ -2085,6 +2086,10 @@ class JobListResponse(BaseModel):
     limit: int
     cursor: str | None = None
     next_cursor: str | None = None
+
+
+class DeleteJobRequest(BaseModel):
+    tenant_id: str
 
 
 class JobCancelResponse(BaseModel):

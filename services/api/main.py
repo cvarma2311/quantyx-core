@@ -15,12 +15,16 @@ import traceback
 import uuid
 import zipfile
 import xml.etree.ElementTree as ElementTree
+import ssl
 import urllib.request
 from pathlib import Path
+
+context = ssl._create_unverified_context()
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from services.ai.catalog import Dimension, Metric, MetricCatalog, load_catalog_with_registry, resolve_ref
 from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
@@ -347,6 +351,7 @@ from services.ai.jobs_store import (
     list_jobs as fetch_jobs,
     update_job_progress,
     update_job_status,
+    purge_job
 )
 from services.ai.chat_store import create_chat_request, get_chat_request, update_chat_request
 from services.ai.chat_events_store import create_chat_event, list_chat_events
@@ -620,6 +625,7 @@ from services.api.schemas import (
     JobListResponse,
     JobResultResponse,
     JobStatusResponse,
+    DeleteJobRequest,
     PackApplyRequest,
     PackApplyResponse,
     PackListResponse,
@@ -2799,7 +2805,7 @@ def get_job_result(job_id: str, response: Response) -> JobResultResponse:
     },
 )
 def list_jobs(
-    tenant_id: str,
+    tenant_id: str | None = None,
     job_type: str | None = None,
     status: str | None = None,
     limit: int = 50,
@@ -2846,6 +2852,39 @@ def cancel_job(job_id: str) -> JobCancelResponse:
         update_job_status(settings, job_id, "canceled", result_payload=None, error_message="Canceled by user request")
         status_value = "canceled"
     return JobCancelResponse(job_id=job_id, status=status_value)
+
+@app.delete(
+    "/jobs/{job_id}",
+    response_model=dict,
+    tags=["jobs"],
+    summary="Delete job",
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "examples": {
+                            "deleted": {
+                                "value": {
+                                    "ok": True,
+                                    "tenant_id": "tenant_123",
+                                    "job_id": "job_123"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+)
+def delete_job(job_id: str, request: DeleteJobRequest) -> dict:
+    purge_job(settings, request.tenant_id, job_id)
+    return {
+        "ok": True,
+        "tenant_id": request.tenant_id,
+        "job_id": job_id
+    }
 
 
 @app.post(
@@ -7703,7 +7742,7 @@ def _workspace_llm_json_response(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        with urllib.request.urlopen(request, timeout=timeout_sec, context=context) as response:
             body = json.loads(response.read().decode("utf-8"))
         return json.loads(body["choices"][0]["message"]["content"])
     except Exception:
@@ -8406,7 +8445,7 @@ def _stream_openai_tokens(system_prompt: str, user_prompt: str) -> Iterator[str]
         method="POST",
     )
     def _iter() -> Iterator[str]:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=60, context=context) as resp:
             while True:
                 line = resp.readline()
                 if not line:
@@ -16409,7 +16448,13 @@ def view_schema_endpoint(
                 schema_name = row.get("schema_name")
                 break
     schema_name = schema_name or settings.db_schema
-    columns = load_view_schema(settings, schema_name, view_name)
+    scoped_conn = _resolve_scoped_conn(tenant_id, resolved_domain_id)
+    if scoped_conn is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to resolve selected connection credentials",
+        )
+    columns = load_view_schema(settings, schema_name, view_name, scoped_conn=scoped_conn)
     return ViewSchemaResponse(view_name=view_name, schema_name=schema_name, columns=columns)
 
 
@@ -16521,7 +16566,7 @@ def _call_openai_json(system_prompt: str, user_payload: dict, *, timeout_sec: in
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_sec, context=context) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     content = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content")
     if not content:
@@ -16552,7 +16597,7 @@ def _call_openai_text(system_prompt: str, user_payload: dict, *, timeout_sec: in
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_sec, context=context) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     text = ((payload.get("choices") or [{}])[0].get("message") or {}).get("content")
     return str(text).strip() if text else None
@@ -17378,6 +17423,7 @@ def get_dashboard_endpoint(dashboard_id: str, tenant_id: str | None = None) -> D
             "chart_source": c.get("chart_source"),
             "status": c.get("status"),
             "sql": c.get("sql"),
+            "conversation_ids": c.get("conversation_ids") or [],
             "narrative_text": c.get("narrative_text"),
             "insight_text": c.get("insight_text"),
             "chart_payload": c.get("chart_payload"),
@@ -19661,7 +19707,7 @@ def _run_scan_connection(
         connection_payload = {"connection_id": connection.connection_id, "databases": databases_payload}
         connections_payload.append(connection_payload)
         payload_by_connection[connection.connection_id] = databases_payload
-        register_connection(settings, connection.connection_id)
+        register_connection(settings, connection.connection_id, tenant_id, domain_id)
         if scopes:
             register_connection_scopes(settings, connection.connection_id, scopes)
         _log_scan_step(
